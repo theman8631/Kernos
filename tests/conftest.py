@@ -1,0 +1,7 @@
+import os
+
+# Set required environment variables before any kernos.* module is imported.
+# load_dotenv() in app.py does not override existing env vars, so these take priority.
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ.setdefault("OWNER_PHONE_NUMBER", "+15555550100")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+12345678901")
