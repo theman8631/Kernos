@@ -1,12 +1,16 @@
 """KERNOS CLI — inspect the kernel's event stream and state store.
 
-Usage:
-  python -m kernos.cli events <tenant_id> [--type message.received] [--limit 10] [--after 2026-03-01]
-  python -m kernos.cli profile <tenant_id>
-  python -m kernos.cli knowledge <tenant_id> [--subject "John"] [--category entity]
-  python -m kernos.cli contract <tenant_id> [--capability calendar]
-  python -m kernos.cli costs <tenant_id> [--after 2026-03-01] [--before 2026-03-02]
-  python -m kernos.cli tenants
+Run via the wrapper (recommended — no venv activation needed):
+  ./kernos-cli tenants
+  ./kernos-cli costs <tenant_id>
+  ./kernos-cli events <tenant_id> [--type message.received] [--limit 10] [--after 2026-03-01]
+  ./kernos-cli profile <tenant_id>
+  ./kernos-cli knowledge <tenant_id> [--subject "John"] [--category entity]
+  ./kernos-cli contract <tenant_id> [--capability calendar]
+
+Or manually with the venv active:
+  source .venv/bin/activate
+  python -m kernos.cli <command>
 """
 import argparse
 import asyncio
