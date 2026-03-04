@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B.4 — Task Engine (minimal)
+**Status:** Phase 1B.5 — Agent templates + CLI
 **Owner:** Founder / Architect
-**Action:** Produce SPEC-1B4 (formalize handler as task executor; task metadata and lifecycle)
+**Action:** Produce SPEC-1B5 (define template structure; seed/hatch for conversational agent; kernel CLI for state inspection)
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -35,7 +35,7 @@ Building the kernel layer that transforms a chatbot-with-tools into an intellige
 | 1B.1 | Event Stream + State Store | COMPLETE | 2026-03-03 | 79 events captured, cost tracking live, 7 default contract rules, CLI inspection tools |
 | 1B.2 | Reasoning Service abstraction | COMPLETE | 2026-03-03 | Provider ABC, AnthropicProvider, ReasoningService owns tool-use loop. Handler imports zero SDK code. |
 | 1B.3 | Capability Graph formalization | COMPLETE | 2026-03-03 | Three-tier registry, known.py catalog, build_capability_prompt(), CLI capabilities command. |
-| 1B.4 | Task Engine (minimal) | NOT STARTED | — | Formalize handler as task executor. Task metadata and lifecycle. Zero-cost pass-through for simple messages. |
+| 1B.4 | Task Engine (minimal) | COMPLETE | 2026-03-03 | Task dataclass + lifecycle, TaskEngine wraps reasoning, task.created/completed/failed events, handler delegates via engine. |
 | 1B.5 | Agent templates + CLI | NOT STARTED | — | Define template structure. Seed/hatch for conversational agent. Kernel CLI for state inspection. |
 | 1B.6 | Tenant isolation verification + test suite | NOT STARTED | — | Prove two tenants can't see each other's data across all structures |
 
@@ -71,11 +71,21 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-*No active spec. 1B.4 (Task Engine) is next. Architect is producing it.*
+*No active spec. 1B.5 (Agent templates + CLI) is next. Architect is producing it.*
 
 ---
 
 ## Decisions Made
+
+### 2026-03-03: Phase 1B.4 — Task Engine (minimal) complete
+
+- **What:** Every piece of work in the system now flows through a `Task`. The `TaskEngine` wraps `ReasoningService`, emitting `task.created` and `task.completed`/`task.failed` lifecycle events. Handler creates a `Task` dataclass for every inbound message and delegates to `engine.execute(task, request)`, reading `task.result_text` as the response. Engine re-raises reasoning errors; handler still catches them for user-facing friendly messages.
+- **Key structures:** `Task` dataclass (id, type, tenant_id, conversation_id, status, priority, lifecycle timestamps, input_text, result_text, error_message, metrics). `TaskType` (REACTIVE_SIMPLE). `TaskStatus` (PENDING/RUNNING/COMPLETED/FAILED). `TaskPriority` constants (integer levels). `generate_task_id()` produces `task_{ts_us}_{rand4}` — lexicographically sortable.
+- **Task ID format:** `task_{microseconds_since_epoch}_{4_random_hex_chars}` — sortable and collision-resistant.
+- **Event types added:** `task.created`, `task.completed`, `task.failed`.
+- **CLI:** `./kernos-cli tasks <tenant_id>` shows task lifecycle from events. `capabilities` command now loads `.env` so CONFIGURED shows correctly.
+- **Zero-cost path:** For reactive-simple tasks (100% of current traffic), engine is one function call wrapping existing reasoning flow. No routing, no decomposition overhead.
+- **Full spec:** `specs/completed/SPEC-1B4-TASK-ENGINE.md`
 
 ### 2026-03-03: Phase 1B.3 — Capability Graph formalization complete
 
@@ -200,4 +210,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-03 (1B.3 complete)*
+*Last updated: 2026-03-03 (1B.4 complete)*

@@ -7,6 +7,7 @@ import pytest
 from kernos.capability.client import MCPClientManager
 from kernos.capability.known import KNOWN_CAPABILITIES
 from kernos.capability.registry import CapabilityRegistry
+from kernos.kernel.engine import TaskEngine
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, JsonEventStream
 from kernos.kernel.exceptions import ReasoningTimeoutError
@@ -99,7 +100,8 @@ def _make_mock_handler(tools: list[dict] | None = None):
     registry.build_capability_prompt.return_value = "CURRENT CAPABILITIES — conversation only."
     registry.get_all.return_value = []
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
-    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry)
+    engine = TaskEngine(reasoning=reasoning, events=events)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
     return handler, mock_provider
 
 
@@ -133,7 +135,8 @@ def _make_real_handler(tmp_path):
 
     mock_provider = AsyncMock(spec=Provider)
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
-    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry)
+    engine = TaskEngine(reasoning=reasoning, events=events)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
     return handler, mock_provider, events, state
 
 

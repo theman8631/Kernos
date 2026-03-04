@@ -18,6 +18,10 @@ import json
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _data_dir() -> str:
     return os.getenv("KERNOS_DATA_DIR", "./data")
@@ -187,6 +191,51 @@ async def cmd_costs(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# tasks
+# ---------------------------------------------------------------------------
+
+
+async def cmd_tasks(args) -> None:
+    from kernos.kernel.events import JsonEventStream
+
+    stream = JsonEventStream(_data_dir())
+    completed = await stream.query(
+        tenant_id=args.tenant_id,
+        event_types=["task.completed"],
+        limit=args.limit,
+    )
+    failed = await stream.query(
+        tenant_id=args.tenant_id,
+        event_types=["task.failed"],
+        limit=args.limit,
+    )
+
+    # Merge and sort by timestamp descending
+    all_events = sorted(completed + failed, key=lambda e: e.timestamp, reverse=True)
+    all_events = all_events[: args.limit]
+
+    if not all_events:
+        print(f"No task events found for tenant '{args.tenant_id}'.")
+        return
+
+    print(f"{'─' * 60}")
+    print(f"  Tasks for {args.tenant_id}  ({len(all_events)} shown)")
+    print(f"{'─' * 60}")
+    for e in all_events:
+        p = e.payload
+        ts = e.timestamp[:19].replace("T", " ")
+        task_id = p.get("task_id", "?")[:20]
+        task_type = p.get("task_type", "?")
+        if e.type == "task.completed":
+            dur = p.get("duration_ms", 0)
+            cost = p.get("estimated_cost_usd", 0.0)
+            print(f"[{ts}] {task_id}... {task_type} COMPLETED ({dur}ms, ${cost:.3f})")
+        else:
+            err = p.get("error_type", "?")
+            print(f"[{ts}] {task_id}... {task_type} FAILED ({err})")
+
+
+# ---------------------------------------------------------------------------
 # capabilities
 # ---------------------------------------------------------------------------
 
@@ -273,6 +322,8 @@ async def _dispatch(args) -> None:
         await cmd_costs(args)
     elif args.command == "tenants":
         await cmd_tenants(args)
+    elif args.command == "tasks":
+        await cmd_tasks(args)
     elif args.command == "capabilities":
         cmd_capabilities(args)
     else:
@@ -318,6 +369,11 @@ def main() -> None:
 
     # tenants
     subparsers.add_parser("tenants", help="List all tenants")
+
+    # tasks
+    p = subparsers.add_parser("tasks", help="View recent task lifecycle events for a tenant")
+    p.add_argument("tenant_id")
+    p.add_argument("--limit", type=int, default=20)
 
     # capabilities
     subparsers.add_parser("capabilities", help="Show capability registry")

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from kernos.capability.client import MCPClientManager
 from kernos.capability.registry import CapabilityRegistry
+from kernos.kernel.engine import TaskEngine
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
 from kernos.kernel.exceptions import (
@@ -12,6 +13,7 @@ from kernos.kernel.exceptions import (
     ReasoningTimeoutError,
 )
 from kernos.kernel.reasoning import ReasoningRequest, ReasoningService
+from kernos.kernel.task import Task, TaskType, generate_task_id
 from kernos.kernel.state import (
     ConversationSummary,
     StateStore,
@@ -103,6 +105,7 @@ class MessageHandler:
         state: StateStore,
         reasoning: ReasoningService,
         registry: CapabilityRegistry,
+        engine: TaskEngine,
     ) -> None:
         self.mcp = mcp
         self.conversations = conversations
@@ -112,6 +115,7 @@ class MessageHandler:
         self.state = state
         self.reasoning = reasoning
         self.registry = registry
+        self.engine = engine
 
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
@@ -234,7 +238,17 @@ class MessageHandler:
         }
         await self.conversations.append(tenant_id, conversation_id, user_entry)
 
-        # Build and execute reasoning request
+        # Build and execute task
+        task = Task(
+            id=generate_task_id(),
+            type=TaskType.REACTIVE_SIMPLE,
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            source="user_message",
+            input_text=message.content,
+            created_at=_now_iso(),
+        )
+
         tools = self.registry.get_connected_tools()
         capability_prompt = self.registry.build_capability_prompt()
         system_prompt = _build_system_prompt(message, capability_prompt)
@@ -251,8 +265,8 @@ class MessageHandler:
         )
 
         try:
-            result = await self.reasoning.reason(request)
-            response_text = result.text
+            task = await self.engine.execute(task, request)
+            response_text = task.result_text
 
         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
             logger.error(

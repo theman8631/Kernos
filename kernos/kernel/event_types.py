@@ -27,6 +27,11 @@ class EventType(str, Enum):
     CAPABILITY_DISCONNECTED = "capability.disconnected"
     CAPABILITY_ERROR = "capability.error"
 
+    # Task lifecycle
+    TASK_CREATED = "task.created"
+    TASK_COMPLETED = "task.completed"
+    TASK_FAILED = "task.failed"
+
     # System
     SYSTEM_STARTED = "system.started"
     SYSTEM_STOPPED = "system.stopped"

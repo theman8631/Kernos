@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kernos.capability.registry import CapabilityRegistry
+from kernos.kernel.engine import TaskEngine
 from kernos.kernel.exceptions import (
     ReasoningConnectionError,
     ReasoningProviderError,
@@ -16,6 +17,7 @@ from kernos.kernel.reasoning import (
     ProviderResponse,
     ReasoningService,
 )
+from kernos.kernel.task import TaskStatus, TaskType
 from kernos.messages.handler import MessageHandler, _build_system_prompt
 from kernos.messages.models import AuthLevel, NormalizedMessage
 from kernos.capability.client import MCPClientManager
@@ -104,7 +106,8 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry(tools)
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
-    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry)
+    engine = TaskEngine(reasoning=reasoning, events=events)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
     return handler, mock_provider
 
 
@@ -349,3 +352,93 @@ async def test_handler_calls_get_or_create_for_every_message():
 
     await handler.process(_make_message())
     handler.tenants.get_or_create.assert_awaited_once()
+
+
+# --- Task creation ---
+
+
+async def test_handler_creates_task_via_engine():
+    """Handler delegates to TaskEngine — mock engine to verify task fields."""
+    mcp = MagicMock(spec=MCPClientManager)
+    conversations = AsyncMock(spec=ConversationStore)
+    conversations.get_recent.return_value = []
+    conversations.append.return_value = None
+    tenants = AsyncMock(spec=TenantStore)
+    tenants.get_or_create.return_value = {"tenant_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
+    audit = AsyncMock(spec=AuditStore)
+    events = AsyncMock(spec=EventStream)
+    events.emit.return_value = None
+    state = AsyncMock(spec=StateStore)
+    from kernos.kernel.state import TenantProfile
+    state.get_tenant_profile.return_value = TenantProfile(tenant_id="sms:+15555550100", status="active", created_at="2026-03-01T00:00:00Z")
+    state.get_conversation_summary.return_value = None
+    state.save_conversation_summary.return_value = None
+    state.save_tenant_profile.return_value = None
+
+    mock_provider = AsyncMock(spec=Provider)
+    registry = _make_mock_registry()
+    reasoning = ReasoningService(mock_provider, events, mcp, audit)
+
+    # Use a mock engine to capture what task was passed
+    mock_engine = AsyncMock(spec=TaskEngine)
+    from kernos.kernel.task import Task, TaskStatus
+    captured_task = Task(
+        id="task_captured",
+        type=TaskType.REACTIVE_SIMPLE,
+        tenant_id="sms:+15555550100",
+        conversation_id="+15555550100",
+        status=TaskStatus.COMPLETED,
+        result_text="Mock response",
+    )
+    mock_engine.execute.return_value = captured_task
+
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, mock_engine)
+
+    await handler.process(_make_message("Hello from handler"))
+
+    mock_engine.execute.assert_awaited_once()
+    call_args = mock_engine.execute.call_args
+    task_arg = call_args[0][0]  # first positional arg
+    assert task_arg.type == TaskType.REACTIVE_SIMPLE
+    assert task_arg.tenant_id == "sms:+15555550100"
+    assert task_arg.source == "user_message"
+    assert task_arg.input_text == "Hello from handler"
+
+
+async def test_handler_uses_task_result_text_as_response():
+    """Handler reads task.result_text, not result.text."""
+    mcp = MagicMock(spec=MCPClientManager)
+    conversations = AsyncMock(spec=ConversationStore)
+    conversations.get_recent.return_value = []
+    conversations.append.return_value = None
+    tenants = AsyncMock(spec=TenantStore)
+    tenants.get_or_create.return_value = {"tenant_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
+    audit = AsyncMock(spec=AuditStore)
+    events = AsyncMock(spec=EventStream)
+    events.emit.return_value = None
+    state = AsyncMock(spec=StateStore)
+    from kernos.kernel.state import TenantProfile
+    state.get_tenant_profile.return_value = TenantProfile(tenant_id="sms:+15555550100", status="active", created_at="2026-03-01T00:00:00Z")
+    state.get_conversation_summary.return_value = None
+    state.save_conversation_summary.return_value = None
+    state.save_tenant_profile.return_value = None
+
+    mock_provider = AsyncMock(spec=Provider)
+    registry = _make_mock_registry()
+    reasoning = ReasoningService(mock_provider, events, mcp, audit)
+
+    mock_engine = AsyncMock(spec=TaskEngine)
+    from kernos.kernel.task import Task, TaskStatus
+    mock_engine.execute.return_value = Task(
+        id="task_x",
+        type=TaskType.REACTIVE_SIMPLE,
+        tenant_id="sms:+15555550100",
+        conversation_id="+15555550100",
+        status=TaskStatus.COMPLETED,
+        result_text="The answer from the task",
+    )
+
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, mock_engine)
+
+    response = await handler.process(_make_message())
+    assert response == "The answer from the task"

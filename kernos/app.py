@@ -18,6 +18,7 @@ from kernos.capability.known import KNOWN_CAPABILITIES
 from kernos.capability.registry import CapabilityRegistry, CapabilityStatus
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import JsonEventStream, emit_event
+from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
 from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
@@ -80,8 +81,9 @@ async def lifespan(app: FastAPI):
 
     provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
     reasoning = ReasoningService(provider, events, mcp_manager, audit)
+    engine = TaskEngine(reasoning=reasoning, events=events)
     app.state.handler = MessageHandler(
-        mcp_manager, conversations, tenants, audit, events, state, reasoning, registry
+        mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine
     )
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 
