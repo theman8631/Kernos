@@ -7,25 +7,46 @@
 ## Architecture
 
 ```
-[Twilio SMS webhook]
+[Twilio SMS / Discord]
         │
         ▼
- TwilioSMSAdapter.inbound()
-        │  translates form payload → NormalizedMessage
+  Platform Adapter
+  (twilio_sms.py / discord_bot.py)
+        │  translates platform payload → NormalizedMessage
         ▼
-  handle_message()           ← only sees NormalizedMessage, never Twilio
-        │  calls Claude API, returns plain string
+  MessageHandler (handler.py)
+        │  calls Claude API, no platform knowledge
+        │
+        ├──► Kernel: EventStream  ──► data/{tenant}/events/{date}.json
+        │    (append, replay, audit)
+        │
+        ├──► Kernel: StateStore   ──► data/{tenant}/state/*.json
+        │    (tenant profile, knowledge, behavioral contract)
+        │
+        └──► MCP Tools
+             (Google Calendar, future capabilities)
+        │
         ▼
- TwilioSMSAdapter.outbound()
-        │  translates string → TwiML
+  Platform Adapter outbound()
+        │  translates string → platform response
         ▼
-[Twilio delivers SMS]
+[Twilio delivers SMS / Discord reply]
 ```
 
 **Critical constraint:** The handler (`kernos/messages/handler.py`) has zero imports
 from adapters. The adapters have zero imports from the handler. They share only
-`NormalizedMessage`. This is what makes adding Discord, Telegram, or voice a
-matter of writing one new adapter file — not refactoring the kernel.
+`NormalizedMessage`. This is what makes adding new platforms a matter of writing
+one new adapter file — not refactoring the kernel.
+
+---
+
+## Current Status
+
+**Phase 1B in progress.** The kernel event stream and state store are live.
+All messages are persisted, tenant profiles are tracked, and cost/token usage
+is logged per reasoning call.
+
+See `DECISIONS.md` for the full phase tracker and active spec.
 
 ---
 
@@ -98,13 +119,67 @@ Send any SMS to your Twilio number. You'll get a Claude response back.
 
 ```
 kernos/
-├── app.py                          # FastAPI app, webhook wiring
-└── messages/
-    ├── models.py                   # NormalizedMessage dataclass + AuthLevel enum
-    ├── handler.py                  # Claude API call — no platform knowledge
-    └── adapters/
-        ├── base.py                 # Abstract adapter interface
-        └── twilio_sms.py           # Twilio-specific translation layer
+├── app.py                          # FastAPI app, lifespan, webhook wiring
+├── cli.py                          # CLI for inspecting event stream + state store
+├── discord_bot.py                  # Discord adapter (on_ready, on_message)
+├── capability/
+│   └── client.py                   # MCPClientManager (connect_all / call_tool)
+├── kernel/
+│   ├── events.py                   # Event dataclass, EventStream ABC, JsonEventStream
+│   ├── event_types.py              # EventType enum (all event type strings)
+│   ├── state.py                    # StateStore ABC, TenantProfile, KnowledgeEntry, ContractRule
+│   └── state_json.py               # JsonStateStore implementation
+├── messages/
+│   ├── models.py                   # NormalizedMessage dataclass + AuthLevel enum
+│   ├── handler.py                  # Claude API call — no platform knowledge
+│   └── adapters/
+│       ├── base.py                 # Abstract adapter interface
+│       └── twilio_sms.py           # Twilio-specific translation layer
+├── mcp/                            # MCP server configs
+└── persistence/                    # Storage utilities
+specs/
+├── KERNEL-ARCHITECTURE-OUTLINE-v2.md   # Kernel design vision for Phase 1B
+└── completed/
+    ├── SPEC-1A4-persistence.md
+    └── SPEC-1B1-EVENT-STREAM-STATE-STORE.md
+```
+
+---
+
+## CLI Usage
+
+The `./kernos-cli` wrapper runs CLI commands without needing to activate the venv.
+
+```bash
+# List all known tenants
+./kernos-cli tenants
+
+# View recent events for a tenant
+./kernos-cli events <tenant_id>
+./kernos-cli events <tenant_id> --type message.received
+./kernos-cli events <tenant_id> --limit 10 --after 2026-03-01
+
+# View tenant profile
+./kernos-cli profile <tenant_id>
+
+# View knowledge entries
+./kernos-cli knowledge <tenant_id>
+./kernos-cli knowledge <tenant_id> --subject "John" --category entity
+
+# View behavioral contract rules
+./kernos-cli contract <tenant_id>
+./kernos-cli contract <tenant_id> --capability calendar
+
+# View cost/token summary
+./kernos-cli costs <tenant_id>
+./kernos-cli costs <tenant_id> --after 2026-03-01 --before 2026-04-01
+```
+
+Each subcommand also supports `--help`:
+
+```bash
+./kernos-cli events --help
+./kernos-cli costs --help
 ```
 
 ---
@@ -118,7 +193,7 @@ curl http://localhost:8000/health
 
 ---
 
-## Google Calendar Setup (Phase 1A.3)
+## Google Calendar Setup
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (or select existing).
@@ -133,12 +208,3 @@ curl http://localhost:8000/health
    ```
 9. A browser opens — authorize with your Google account. Tokens are saved locally.
 10. The MCP server now uses saved tokens automatically on future starts.
-
----
-
-## What's next (Phase 1A.4)
-
-- Connect Google Calendar via MCP
-- "What's on my schedule today?" works over SMS with real calendar data
-
-See `KERNOS-BLUEPRINT.md` for the full implementation plan.

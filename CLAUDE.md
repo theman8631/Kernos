@@ -10,6 +10,16 @@ A personal agentic operating system. Full vision and architecture: `KERNOS-BLUEP
 2. **Read `KERNOS-BLUEPRINT.md`** for full architectural context — the six pillars, four design principles, and phase structure.
 3. **Execute only the Active Spec** in DECISIONS.md. Don't jump ahead to future phases. Don't build things not in the current spec.
 
+## Kernel Architecture Context
+
+For Phase 1B work, read `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
+
+- **Event emission is best-effort.** Every `emit()` call is wrapped in try/except. Event logging failures never break the user's message flow.
+- **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.
+- **Concurrency:** JSON-on-disk uses `filelock` for single-process safety. Not safe for multi-worker. The abstract interfaces allow swapping backends.
+- **Shadow archive:** No method permanently deletes data. "Removal" sets `active: false`.
+- **Cost logging:** Every reasoning call logs model, tokens, estimated cost, duration via events.
+
 ## Architectural Constraints (Always Enforced)
 
 These are non-negotiable. Violating any of these is a build failure regardless of what the Active Spec says:
