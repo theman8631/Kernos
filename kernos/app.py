@@ -14,6 +14,7 @@ from kernos.messages.handler import MessageHandler
 from kernos.capability.client import MCPClientManager
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import JsonEventStream, emit_event
+from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
 from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
 
@@ -61,8 +62,10 @@ async def lifespan(app: FastAPI):
     tenants = JsonTenantStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
+    provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+    reasoning = ReasoningService(provider, events, mcp_manager, audit)
     app.state.handler = MessageHandler(
-        mcp_manager, conversations, tenants, audit, events, state
+        mcp_manager, conversations, tenants, audit, events, state, reasoning
     )
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 

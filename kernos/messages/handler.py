@@ -1,13 +1,16 @@
 import logging
-import os
-import time
 from datetime import datetime, timezone
-
-import anthropic
 
 from kernos.capability.client import MCPClientManager
 from kernos.kernel.event_types import EventType
-from kernos.kernel.events import EventStream, emit_event, estimate_cost
+from kernos.kernel.events import EventStream, emit_event
+from kernos.kernel.exceptions import (
+    ReasoningConnectionError,
+    ReasoningProviderError,
+    ReasoningRateLimitError,
+    ReasoningTimeoutError,
+)
+from kernos.kernel.reasoning import ReasoningRequest, ReasoningService
 from kernos.kernel.state import (
     ConversationSummary,
     StateStore,
@@ -18,7 +21,7 @@ from kernos.messages.models import NormalizedMessage
 from kernos.persistence import AuditStore, ConversationStore, TenantStore, derive_tenant_id
 
 # Handler knows about NormalizedMessage, MCPClientManager, persistence stores,
-# EventStream, and StateStore. It knows nothing about platform adapters.
+# EventStream, StateStore, and ReasoningService. It knows nothing about platform adapters.
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +122,11 @@ def _build_system_prompt(
 
 
 class MessageHandler:
-    """Receives NormalizedMessages, brokers tool calls via MCP, returns response strings.
+    """Receives NormalizedMessages, delegates reasoning to ReasoningService, returns response strings.
 
-    The handler reasons about the current moment. The kernel (stores + event stream)
-    captures everything that happens.
+    The handler manages message flow: provisioning, history, event bookends (received/sent),
+    and persistence. Reasoning — including the tool-use loop — lives in ReasoningService.
     """
-
-    MAX_TOOL_ITERATIONS = 10
 
     def __init__(
         self,
@@ -135,6 +136,7 @@ class MessageHandler:
         audit: AuditStore,
         events: EventStream,
         state: StateStore,
+        reasoning: ReasoningService,
     ) -> None:
         self.mcp = mcp
         self.conversations = conversations
@@ -142,7 +144,7 @@ class MessageHandler:
         self.audit = audit
         self.events = events
         self.state = state
-        self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.reasoning = reasoning
 
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
@@ -213,10 +215,9 @@ class MessageHandler:
         1. Derive tenant_id and provision if new (TenantStore + StateStore)
         2. Load recent conversation history
         3. Emit message.received
-        4. Store user message (before API call)
-        5. Emit reasoning.request; call Claude; emit reasoning.response
-        6. Tool-use loop: emit tool.called/tool.result alongside existing audit.log
-        7. Store assistant response; emit message.sent; update conversation summary
+        4. Store user message (before reasoning call)
+        5. Build ReasoningRequest, delegate to ReasoningService
+        6. On success: store assistant response, emit message.sent, update conversation summary
         """
         tenant_id = derive_tenant_id(message)
         conversation_id = message.conversation_id
@@ -246,7 +247,7 @@ class MessageHandler:
         except Exception as exc:
             logger.warning("Failed to emit message.received: %s", exc)
 
-        # Store user message before the API call (the event happened even if Claude fails)
+        # Store user message before the reasoning call
         user_entry = {
             "role": "user",
             "content": message.content,
@@ -257,232 +258,26 @@ class MessageHandler:
         }
         await self.conversations.append(tenant_id, conversation_id, user_entry)
 
-        # Build messages array: history + current user message
+        # Build and execute reasoning request
         tools = self.mcp.get_tools()
         system_prompt = _build_system_prompt(message, tools)
         messages: list[dict] = history + [{"role": "user", "content": message.content}]
 
+        request = ReasoningRequest(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            model=_MODEL,
+            trigger="user_message",
+        )
+
         try:
-            # Emit reasoning.request
-            await emit_event(
-                self.events,
-                EventType.REASONING_REQUEST,
-                tenant_id,
-                "handler",
-                payload={
-                    "model": _MODEL,
-                    "provider": _PROVIDER,
-                    "conversation_id": conversation_id,
-                    "message_count": len(messages),
-                    "tool_count": len(tools),
-                    "system_prompt_length": len(system_prompt),
-                    "trigger": "user_message",
-                },
-            )
+            result = await self.reasoning.reason(request)
+            response_text = result.text
 
-            t0 = time.monotonic()
-            response = self.client.messages.create(
-                model=_MODEL,
-                max_tokens=1024,
-                system=system_prompt,
-                messages=messages,
-                tools=tools if tools else anthropic.NOT_GIVEN,
-            )
-            duration_ms = int((time.monotonic() - t0) * 1000)
-
-            # Emit reasoning.response with token counts and cost
-            rr_event = await emit_event(
-                self.events,
-                EventType.REASONING_RESPONSE,
-                tenant_id,
-                "handler",
-                payload={
-                    "model": _MODEL,
-                    "provider": _PROVIDER,
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "estimated_cost_usd": estimate_cost(
-                        _MODEL, response.usage.input_tokens, response.usage.output_tokens
-                    ),
-                    "stop_reason": response.stop_reason,
-                    "duration_ms": duration_ms,
-                    "conversation_id": conversation_id,
-                },
-            )
-
-            # Tool-use loop
-            iterations = 0
-            while (
-                response.stop_reason == "tool_use"
-                and iterations < self.MAX_TOOL_ITERATIONS
-            ):
-                iterations += 1
-                assistant_content = response.content
-                tool_results = []
-
-                for block in assistant_content:
-                    if block.type == "tool_use":
-                        # Emit tool.called
-                        await emit_event(
-                            self.events,
-                            EventType.TOOL_CALLED,
-                            tenant_id,
-                            "handler",
-                            payload={
-                                "tool_name": block.name,
-                                "tool_input": block.input,
-                                "conversation_id": conversation_id,
-                                "reasoning_event_id": rr_event.id,
-                            },
-                        )
-                        # Existing audit log
-                        await self.audit.log(
-                            tenant_id,
-                            {
-                                "type": "tool_call",
-                                "timestamp": _now_iso(),
-                                "tenant_id": tenant_id,
-                                "conversation_id": conversation_id,
-                                "tool_name": block.name,
-                                "tool_input": block.input,
-                            },
-                        )
-
-                        t_tool = time.monotonic()
-                        result = await self.mcp.call_tool(block.name, block.input)
-                        tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
-
-                        is_error = result.startswith("Tool error:") or result.startswith(
-                            "Calendar tool error:"
-                        )
-                        # Emit tool.result
-                        await emit_event(
-                            self.events,
-                            EventType.TOOL_RESULT,
-                            tenant_id,
-                            "handler",
-                            payload={
-                                "tool_name": block.name,
-                                "success": not is_error,
-                                "result_length": len(result),
-                                "duration_ms": tool_duration_ms,
-                                "conversation_id": conversation_id,
-                                "error": result if is_error else None,
-                            },
-                        )
-                        # Existing audit log
-                        await self.audit.log(
-                            tenant_id,
-                            {
-                                "type": "tool_result",
-                                "timestamp": _now_iso(),
-                                "tenant_id": tenant_id,
-                                "conversation_id": conversation_id,
-                                "tool_name": block.name,
-                                "tool_output": str(result)[:2000],
-                            },
-                        )
-                        tool_results.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": result,
-                            }
-                        )
-
-                messages.append({"role": "assistant", "content": assistant_content})
-                messages.append({"role": "user", "content": tool_results})
-
-                # Emit reasoning.request for tool continuation
-                await emit_event(
-                    self.events,
-                    EventType.REASONING_REQUEST,
-                    tenant_id,
-                    "handler",
-                    payload={
-                        "model": _MODEL,
-                        "provider": _PROVIDER,
-                        "conversation_id": conversation_id,
-                        "message_count": len(messages),
-                        "tool_count": len(tools),
-                        "system_prompt_length": len(system_prompt),
-                        "trigger": "tool_continuation",
-                    },
-                )
-
-                t0 = time.monotonic()
-                response = self.client.messages.create(
-                    model=_MODEL,
-                    max_tokens=1024,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                )
-                duration_ms = int((time.monotonic() - t0) * 1000)
-
-                rr_event = await emit_event(
-                    self.events,
-                    EventType.REASONING_RESPONSE,
-                    tenant_id,
-                    "handler",
-                    payload={
-                        "model": _MODEL,
-                        "provider": _PROVIDER,
-                        "input_tokens": response.usage.input_tokens,
-                        "output_tokens": response.usage.output_tokens,
-                        "estimated_cost_usd": estimate_cost(
-                            _MODEL,
-                            response.usage.input_tokens,
-                            response.usage.output_tokens,
-                        ),
-                        "stop_reason": response.stop_reason,
-                        "duration_ms": duration_ms,
-                        "conversation_id": conversation_id,
-                    },
-                )
-
-            if iterations >= self.MAX_TOOL_ITERATIONS:
-                return "I'm having trouble completing that request. Try asking in a simpler way."
-
-            text_parts = [
-                block.text for block in response.content if block.type == "text"
-            ]
-            response_text = (
-                "".join(text_parts)
-                if text_parts
-                else "I processed your request but don't have a text response. Try rephrasing?"
-            )
-
-            # Store assistant response
-            assistant_entry = {
-                "role": "assistant",
-                "content": response_text,
-                "timestamp": _now_iso(),
-                "platform": message.platform,
-                "tenant_id": tenant_id,
-                "conversation_id": conversation_id,
-            }
-            await self.conversations.append(tenant_id, conversation_id, assistant_entry)
-
-            # Emit message.sent
-            await emit_event(
-                self.events,
-                EventType.MESSAGE_SENT,
-                tenant_id,
-                "handler",
-                payload={
-                    "content": response_text,
-                    "conversation_id": conversation_id,
-                    "platform": message.platform,
-                    "reasoning_event_id": rr_event.id,
-                },
-            )
-
-            await self._update_conversation_summary(tenant_id, conversation_id, message.platform)
-
-            return response_text
-
-        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
+        except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
             logger.error(
                 "Claude API connection/timeout error for sender=%s: %s",
                 message.sender,
@@ -506,7 +301,7 @@ class MessageHandler:
                 pass
             return "Something went wrong on my end — try again in a moment."
 
-        except anthropic.RateLimitError as exc:
+        except ReasoningRateLimitError as exc:
             logger.error(
                 "Claude API rate limit hit for sender=%s: %s",
                 message.sender,
@@ -530,10 +325,9 @@ class MessageHandler:
                 pass
             return "I'm a bit overloaded right now. Try again in a minute."
 
-        except anthropic.APIStatusError as exc:
+        except ReasoningProviderError as exc:
             logger.error(
-                "Claude API status error %s for sender=%s: %s",
-                exc.status_code,
+                "Claude API provider error for sender=%s: %s",
                 message.sender,
                 exc,
                 exc_info=True,
@@ -578,3 +372,34 @@ class MessageHandler:
             except Exception:
                 pass
             return "Something unexpected happened. Try again, and if it keeps happening, let me know."
+
+        # Store assistant response
+        assistant_entry = {
+            "role": "assistant",
+            "content": response_text,
+            "timestamp": _now_iso(),
+            "platform": message.platform,
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+        }
+        await self.conversations.append(tenant_id, conversation_id, assistant_entry)
+
+        # Emit message.sent
+        try:
+            await emit_event(
+                self.events,
+                EventType.MESSAGE_SENT,
+                tenant_id,
+                "handler",
+                payload={
+                    "content": response_text,
+                    "conversation_id": conversation_id,
+                    "platform": message.platform,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to emit message.sent: %s", exc)
+
+        await self._update_conversation_summary(tenant_id, conversation_id, message.platform)
+
+        return response_text

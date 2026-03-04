@@ -1,13 +1,19 @@
 """Tests for event emission in MessageHandler.process()."""
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import anthropic
 import pytest
 
 from kernos.capability.client import MCPClientManager
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, JsonEventStream
+from kernos.kernel.exceptions import ReasoningTimeoutError
+from kernos.kernel.reasoning import (
+    ContentBlock,
+    Provider,
+    ProviderResponse,
+    ReasoningService,
+)
 from kernos.kernel.state import StateStore, TenantProfile
 from kernos.kernel.state_json import JsonStateStore
 from kernos.messages.handler import MessageHandler
@@ -33,32 +39,22 @@ def _make_message(content: str = "Hello", platform: str = "sms") -> NormalizedMe
     )
 
 
-def _mock_text_response(text: str) -> MagicMock:
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
-    response = MagicMock()
-    response.content = [block]
-    response.stop_reason = "end_turn"
-    response.usage.input_tokens = 10
-    response.usage.output_tokens = 20
-    return response
+def _mock_provider_response(text: str) -> ProviderResponse:
+    return ProviderResponse(
+        content=[ContentBlock(type="text", text=text)],
+        stop_reason="end_turn",
+        input_tokens=10,
+        output_tokens=20,
+    )
 
 
-def _mock_tool_use_response(
-    tool_name: str, tool_id: str, tool_input: dict
-) -> MagicMock:
-    block = MagicMock()
-    block.type = "tool_use"
-    block.name = tool_name
-    block.id = tool_id
-    block.input = tool_input
-    response = MagicMock()
-    response.content = [block]
-    response.stop_reason = "tool_use"
-    response.usage.input_tokens = 15
-    response.usage.output_tokens = 5
-    return response
+def _mock_provider_tool_response(name: str, id: str, input: dict) -> ProviderResponse:
+    return ProviderResponse(
+        content=[ContentBlock(type="tool_use", name=name, id=id, input=input)],
+        stop_reason="tool_use",
+        input_tokens=15,
+        output_tokens=5,
+    )
 
 
 def _make_mock_handler(tools: list[dict] | None = None):
@@ -93,10 +89,11 @@ def _make_mock_handler(tools: list[dict] | None = None):
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
 
-    mock_client = MagicMock()
-    with patch("kernos.messages.handler.anthropic.Anthropic", return_value=mock_client):
-        handler = MessageHandler(mcp, conversations, tenants, audit, events, state)
-    return handler, mock_client
+    # Same events and audit mocks shared between handler and ReasoningService
+    mock_provider = AsyncMock(spec=Provider)
+    reasoning = ReasoningService(mock_provider, events, mcp, audit)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning)
+    return handler, mock_provider
 
 
 def _make_real_handler(tmp_path):
@@ -122,14 +119,18 @@ def _make_real_handler(tmp_path):
     events = JsonEventStream(tmp_path)
     state = JsonStateStore(tmp_path)
 
-    mock_client = MagicMock()
-    with patch("kernos.messages.handler.anthropic.Anthropic", return_value=mock_client):
-        handler = MessageHandler(mcp, conversations, tenants, audit, events, state)
-    return handler, mock_client, events, state
+    mock_provider = AsyncMock(spec=Provider)
+    reasoning = ReasoningService(mock_provider, events, mcp, audit)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning)
+    return handler, mock_provider, events, state
 
 
 def _emitted_types(handler: MessageHandler) -> list[str]:
-    """Return event types emitted via the mock EventStream."""
+    """Return event types emitted via the mock EventStream.
+
+    Because handler and ReasoningService share the same events mock, this captures
+    all events from both.
+    """
     return [c.args[0].type for c in handler.events.emit.call_args_list]
 
 
@@ -139,8 +140,8 @@ def _emitted_types(handler: MessageHandler) -> list[str]:
 
 
 async def test_handler_emits_message_received():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
@@ -148,8 +149,8 @@ async def test_handler_emits_message_received():
 
 
 async def test_handler_emits_reasoning_request_and_response():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
@@ -159,8 +160,8 @@ async def test_handler_emits_reasoning_request_and_response():
 
 
 async def test_handler_emits_message_sent():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
@@ -168,8 +169,8 @@ async def test_handler_emits_message_sent():
 
 
 async def test_reasoning_response_has_token_counts():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
@@ -182,8 +183,8 @@ async def test_reasoning_response_has_token_counts():
 
 
 async def test_message_received_has_content_and_platform():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message("Hello there"))
 
@@ -194,8 +195,8 @@ async def test_message_received_has_content_and_platform():
 
 
 async def test_message_sent_has_content():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("I'm good!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("I'm good!")
 
     await handler.process(_make_message())
 
@@ -205,8 +206,8 @@ async def test_message_sent_has_content():
 
 
 async def test_all_events_have_tenant_id():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
@@ -222,12 +223,12 @@ async def test_all_events_have_tenant_id():
 
 async def test_handler_emits_tool_called_and_result():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_mock_handler(tools=tools)
+    handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_text_response("You have a meeting at 10am."),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
+        _mock_provider_response("You have a meeting at 10am."),
     ]
 
     await handler.process(_make_message("What's on my schedule?"))
@@ -239,12 +240,12 @@ async def test_handler_emits_tool_called_and_result():
 
 async def test_tool_called_event_has_tool_name_and_input():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_mock_handler(tools=tools)
+    handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Event data")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_text_response("Done"),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
+        _mock_provider_response("Done"),
     ]
 
     await handler.process(_make_message())
@@ -257,12 +258,12 @@ async def test_tool_called_event_has_tool_name_and_input():
 
 async def test_tool_result_success_flag_on_success():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_mock_handler(tools=tools)
+    handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {}),
-        _mock_text_response("Done"),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {}),
+        _mock_provider_response("Done"),
     ]
 
     await handler.process(_make_message())
@@ -275,12 +276,12 @@ async def test_tool_result_success_flag_on_success():
 
 async def test_tool_result_error_flag_on_tool_error():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_mock_handler(tools=tools)
+    handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Tool error: connection failed")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {}),
-        _mock_text_response("I had trouble with that."),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {}),
+        _mock_provider_response("I had trouble with that."),
     ]
 
     await handler.process(_make_message())
@@ -297,10 +298,8 @@ async def test_tool_result_error_flag_on_tool_error():
 
 
 async def test_handler_emits_handler_error_on_timeout():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.side_effect = anthropic.APITimeoutError(
-        request=MagicMock()
-    )
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.side_effect = ReasoningTimeoutError("timeout")
 
     await handler.process(_make_message())
 
@@ -308,10 +307,9 @@ async def test_handler_emits_handler_error_on_timeout():
 
 
 async def test_handler_emits_handler_error_on_connection_error():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.side_effect = anthropic.APIConnectionError(
-        request=MagicMock()
-    )
+    from kernos.kernel.exceptions import ReasoningConnectionError
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.side_effect = ReasoningConnectionError("connection failed")
 
     await handler.process(_make_message())
 
@@ -319,8 +317,8 @@ async def test_handler_emits_handler_error_on_connection_error():
 
 
 async def test_handler_emits_handler_error_on_unexpected():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.side_effect = RuntimeError("boom")
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.side_effect = RuntimeError("boom")
 
     await handler.process(_make_message())
 
@@ -328,16 +326,14 @@ async def test_handler_emits_handler_error_on_unexpected():
 
 
 async def test_handler_error_event_has_error_type():
-    handler, mock_client = _make_mock_handler()
-    mock_client.messages.create.side_effect = anthropic.APITimeoutError(
-        request=MagicMock()
-    )
+    handler, mock_provider = _make_mock_handler()
+    mock_provider.complete.side_effect = ReasoningTimeoutError("timeout")
 
     await handler.process(_make_message())
 
     emitted = [c.args[0] for c in handler.events.emit.call_args_list]
     he = next(e for e in emitted if e.type == EventType.HANDLER_ERROR)
-    assert he.payload["error_type"] == "APITimeoutError"
+    assert he.payload["error_type"] == "ReasoningTimeoutError"
     assert "stage" in he.payload
 
 
@@ -347,8 +343,8 @@ async def test_handler_error_event_has_error_type():
 
 
 async def test_new_tenant_gets_profile_and_7_contracts(tmp_path):
-    handler, mock_client, events, state = _make_real_handler(tmp_path)
-    mock_client.messages.create.return_value = _mock_text_response("Hello!")
+    handler, mock_provider, events, state = _make_real_handler(tmp_path)
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     await handler.process(_make_message())
 
@@ -362,8 +358,8 @@ async def test_new_tenant_gets_profile_and_7_contracts(tmp_path):
 
 
 async def test_new_tenant_emits_provisioned_event(tmp_path):
-    handler, mock_client, events, state = _make_real_handler(tmp_path)
-    mock_client.messages.create.return_value = _mock_text_response("Hello!")
+    handler, mock_provider, events, state = _make_real_handler(tmp_path)
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     await handler.process(_make_message())
 
@@ -374,8 +370,8 @@ async def test_new_tenant_emits_provisioned_event(tmp_path):
 
 
 async def test_existing_tenant_skips_provisioning(tmp_path):
-    handler, mock_client, events, state = _make_real_handler(tmp_path)
-    mock_client.messages.create.return_value = _mock_text_response("Hello!")
+    handler, mock_provider, events, state = _make_real_handler(tmp_path)
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     # First call provisions the tenant
     await handler.process(_make_message())
@@ -389,8 +385,8 @@ async def test_existing_tenant_skips_provisioning(tmp_path):
 
 
 async def test_handler_updates_conversation_summary(tmp_path):
-    handler, mock_client, events, state = _make_real_handler(tmp_path)
-    mock_client.messages.create.return_value = _mock_text_response("Hello!")
+    handler, mock_provider, events, state = _make_real_handler(tmp_path)
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     await handler.process(_make_message())
 
@@ -403,8 +399,8 @@ async def test_handler_updates_conversation_summary(tmp_path):
 
 async def test_full_event_sequence_written_to_disk(tmp_path):
     """End-to-end: events emitted in process() are queryable from disk."""
-    handler, mock_client, events, state = _make_real_handler(tmp_path)
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider, events, state = _make_real_handler(tmp_path)
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
@@ -419,8 +415,8 @@ async def test_full_event_sequence_written_to_disk(tmp_path):
 
 
 async def test_disk_events_all_have_correct_tenant_id(tmp_path):
-    handler, mock_client, events, state = _make_real_handler(tmp_path)
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider, events, state = _make_real_handler(tmp_path)
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 

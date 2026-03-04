@@ -1,9 +1,20 @@
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import anthropic
 import pytest
 
+from kernos.kernel.exceptions import (
+    ReasoningConnectionError,
+    ReasoningProviderError,
+    ReasoningRateLimitError,
+    ReasoningTimeoutError,
+)
+from kernos.kernel.reasoning import (
+    ContentBlock,
+    Provider,
+    ProviderResponse,
+    ReasoningService,
+)
 from kernos.messages.handler import MessageHandler, _build_system_prompt
 from kernos.messages.models import AuthLevel, NormalizedMessage
 from kernos.capability.client import MCPClientManager
@@ -25,8 +36,26 @@ def _make_message(content: str = "Hello", platform: str = "sms") -> NormalizedMe
     )
 
 
-def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, MagicMock]:
-    """Return a (handler, mock_anthropic_client) with mock MCP, stores, events, and state."""
+def _mock_provider_response(text: str) -> ProviderResponse:
+    return ProviderResponse(
+        content=[ContentBlock(type="text", text=text)],
+        stop_reason="end_turn",
+        input_tokens=10,
+        output_tokens=20,
+    )
+
+
+def _mock_provider_tool_response(name: str, id: str, input: dict) -> ProviderResponse:
+    return ProviderResponse(
+        content=[ContentBlock(type="tool_use", name=name, id=id, input=input)],
+        stop_reason="tool_use",
+        input_tokens=15,
+        output_tokens=5,
+    )
+
+
+def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, AsyncMock]:
+    """Return a (handler, mock_provider) with mock MCP, stores, events, and state."""
     mcp = MagicMock(spec=MCPClientManager)
     mcp.get_tools.return_value = tools or []
 
@@ -58,46 +87,18 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Magi
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
 
-    mock_client = MagicMock()
-    with patch("kernos.messages.handler.anthropic.Anthropic", return_value=mock_client):
-        handler = MessageHandler(mcp, conversations, tenants, audit, events, state)
-    return handler, mock_client
-
-
-def _mock_text_response(text: str) -> MagicMock:
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
-    response = MagicMock()
-    response.content = [block]
-    response.stop_reason = "end_turn"
-    response.usage.input_tokens = 10
-    response.usage.output_tokens = 20
-    return response
-
-
-def _mock_tool_use_response(
-    tool_name: str, tool_id: str, tool_input: dict
-) -> MagicMock:
-    block = MagicMock()
-    block.type = "tool_use"
-    block.name = tool_name
-    block.id = tool_id
-    block.input = tool_input
-    response = MagicMock()
-    response.content = [block]
-    response.stop_reason = "tool_use"
-    response.usage.input_tokens = 15
-    response.usage.output_tokens = 5
-    return response
+    mock_provider = AsyncMock(spec=Provider)
+    reasoning = ReasoningService(mock_provider, events, mcp, audit)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning)
+    return handler, mock_provider
 
 
 # --- Happy path ---
 
 
 async def test_process_returns_string():
-    handler, mock_client = _make_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hi!")
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     result = await handler.process(_make_message())
     assert isinstance(result, str)
@@ -108,10 +109,8 @@ async def test_process_returns_string():
 
 
 async def test_timeout_returns_friendly_string():
-    handler, mock_client = _make_handler()
-    mock_client.messages.create.side_effect = anthropic.APITimeoutError(
-        request=MagicMock()
-    )
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.side_effect = ReasoningTimeoutError("timeout")
 
     result = await handler.process(_make_message())
     assert isinstance(result, str)
@@ -119,10 +118,8 @@ async def test_timeout_returns_friendly_string():
 
 
 async def test_connection_error_returns_friendly_string():
-    handler, mock_client = _make_handler()
-    mock_client.messages.create.side_effect = anthropic.APIConnectionError(
-        request=MagicMock()
-    )
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.side_effect = ReasoningConnectionError("connection failed")
 
     result = await handler.process(_make_message())
     assert isinstance(result, str)
@@ -130,13 +127,8 @@ async def test_connection_error_returns_friendly_string():
 
 
 async def test_rate_limit_returns_friendly_string():
-    handler, mock_client = _make_handler()
-    mock_response = MagicMock()
-    mock_response.status_code = 429
-    mock_response.headers = {}
-    mock_client.messages.create.side_effect = anthropic.RateLimitError(
-        message="rate limited", response=mock_response, body=None
-    )
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.side_effect = ReasoningRateLimitError("rate limited")
 
     result = await handler.process(_make_message())
     assert isinstance(result, str)
@@ -144,13 +136,8 @@ async def test_rate_limit_returns_friendly_string():
 
 
 async def test_api_status_error_returns_friendly_string():
-    handler, mock_client = _make_handler()
-    mock_response = MagicMock()
-    mock_response.status_code = 500
-    mock_response.headers = {}
-    mock_client.messages.create.side_effect = anthropic.APIStatusError(
-        message="Internal Server Error", response=mock_response, body=None
-    )
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.side_effect = ReasoningProviderError("API status 500: Internal Server Error")
 
     result = await handler.process(_make_message())
     assert isinstance(result, str)
@@ -158,8 +145,8 @@ async def test_api_status_error_returns_friendly_string():
 
 
 async def test_unexpected_error_returns_friendly_string():
-    handler, mock_client = _make_handler()
-    mock_client.messages.create.side_effect = RuntimeError("something broke")
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.side_effect = RuntimeError("something broke")
 
     result = await handler.process(_make_message())
     assert isinstance(result, str)
@@ -219,12 +206,12 @@ def test_system_prompt_does_not_claim_cannot_remember():
 
 async def test_handler_with_tool_use_brokers_call_and_returns_text():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_handler(tools=tools)
+    handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_text_response("You have a meeting at 10am."),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
+        _mock_provider_response("You have a meeting at 10am."),
     ]
 
     result = await handler.process(_make_message("What's on my schedule?"))
@@ -234,10 +221,10 @@ async def test_handler_with_tool_use_brokers_call_and_returns_text():
 
 async def test_handler_safety_valve_returns_graceful_message():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_handler(tools=tools)
+    handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="some result")
 
-    mock_client.messages.create.return_value = _mock_tool_use_response(
+    mock_provider.complete.return_value = _mock_provider_tool_response(
         "list_events", "tu_001", {}
     )
 
@@ -248,12 +235,12 @@ async def test_handler_safety_valve_returns_graceful_message():
 
 async def test_handler_tool_failure_results_in_graceful_response():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_handler(tools=tools)
+    handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Calendar tool error: connection failed")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {}),
-        _mock_text_response("I had trouble checking your calendar."),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {}),
+        _mock_provider_response("I had trouble checking your calendar."),
     ]
 
     result = await handler.process(_make_message("What's on my schedule?"))
@@ -262,20 +249,20 @@ async def test_handler_tool_failure_results_in_graceful_response():
 
 
 async def test_handler_no_tools_works_identically_to_1a2():
-    handler, mock_client = _make_handler(tools=[])
-    mock_client.messages.create.return_value = _mock_text_response("Hello!")
+    handler, mock_provider = _make_handler(tools=[])
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     result = await handler.process(_make_message())
     assert result == "Hello!"
-    assert mock_client.messages.create.call_count == 1
+    assert mock_provider.complete.call_count == 1
 
 
 # --- Persistence (AC19) ---
 
 
 async def test_handler_stores_user_and_assistant_messages():
-    handler, mock_client = _make_handler()
-    mock_client.messages.create.return_value = _mock_text_response("I'm good, thanks!")
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("I'm good, thanks!")
 
     await handler.process(_make_message("How are you?"))
 
@@ -295,12 +282,12 @@ async def test_handler_stores_user_and_assistant_messages():
 
 async def test_handler_tool_calls_go_to_audit_not_conversation():
     tools = [{"name": "list_events", "description": "List events", "input_schema": {}}]
-    handler, mock_client = _make_handler(tools=tools)
+    handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_client.messages.create.side_effect = [
-        _mock_tool_use_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_text_response("You have a meeting at 10am."),
+    mock_provider.complete.side_effect = [
+        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
+        _mock_provider_response("You have a meeting at 10am."),
     ]
 
     await handler.process(_make_message("What's on my schedule?"))
@@ -314,17 +301,17 @@ async def test_handler_tool_calls_go_to_audit_not_conversation():
 
 
 async def test_handler_loads_history_into_messages():
-    handler, mock_client = _make_handler()
+    handler, mock_provider = _make_handler()
     handler.conversations.get_recent.return_value = [
         {"role": "user", "content": "My name is Alice"},
         {"role": "assistant", "content": "Nice to meet you, Alice!"},
     ]
-    mock_client.messages.create.return_value = _mock_text_response("Your name is Alice.")
+    mock_provider.complete.return_value = _mock_provider_response("Your name is Alice.")
 
     await handler.process(_make_message("What's my name?"))
 
-    create_call = mock_client.messages.create.call_args
-    messages_arg = create_call.kwargs.get("messages") or create_call[1].get("messages")
+    complete_call = mock_provider.complete.call_args
+    messages_arg = complete_call.kwargs.get("messages") or complete_call[1].get("messages")
     assert messages_arg is not None
     assert len(messages_arg) == 3
     assert messages_arg[0]["content"] == "My name is Alice"
@@ -332,8 +319,8 @@ async def test_handler_loads_history_into_messages():
 
 
 async def test_handler_calls_get_or_create_for_every_message():
-    handler, mock_client = _make_handler()
-    mock_client.messages.create.return_value = _mock_text_response("Hello!")
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     await handler.process(_make_message())
     handler.tenants.get_or_create.assert_awaited_once()
