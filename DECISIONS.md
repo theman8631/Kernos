@@ -1,8 +1,6 @@
 ## NOW
 
-**Status:** Phase 1A COMPLETE — All deliverables live-verified
-**Owner:** Architect
-**Action:** Phase 1B planning. Architect will produce specs for kernel implementation.
+**Status:** Phase 1B1 COMPLETE — All deliverables live-verified
 
 ### Phase 1A Final Status (all live-verified)
 - **1A.1** AIOS evaluation: Complete — decision: reference-only, not fork
