@@ -1,9 +1,12 @@
-from unittest.mock import AsyncMock, MagicMock
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from mcp import StdioServerParameters
 
 from kernos.capability.client import MCPClientManager
+from kernos.kernel.event_types import EventType
+from kernos.kernel.events import JsonEventStream
 
 
 def test_register_server_stores_config():
@@ -57,3 +60,76 @@ async def test_call_tool_when_mcp_errors_returns_error_string():
     assert isinstance(result, str)
     assert "error" in result.lower()
     # Must not raise — graceful string return is the contract
+
+
+# ---------------------------------------------------------------------------
+# connect_all() — capability event emission (AC6, AC15)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_tool(name: str) -> MagicMock:
+    t = MagicMock()
+    t.name = name
+    t.description = f"Tool {name}"
+    t.inputSchema = {}
+    return t
+
+
+async def test_connect_all_emits_capability_connected(tmp_path):
+    """AC6: successful connect emits capability.connected with tool_count and tool_names."""
+    events = JsonEventStream(tmp_path)
+    mcp = MCPClientManager(events=events)
+    mcp.register_server(
+        "test-server", StdioServerParameters(command="npx", args=["srv"], env={})
+    )
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.tools = [_make_mock_tool("tool_a"), _make_mock_tool("tool_b")]
+    mock_session.list_tools.return_value = mock_result
+
+    @asynccontextmanager
+    async def _mock_stdio(params):
+        yield AsyncMock(), AsyncMock()
+
+    @asynccontextmanager
+    async def _mock_client_session(read, write):
+        yield mock_session
+
+    with patch("kernos.capability.client.stdio_client", side_effect=_mock_stdio), patch(
+        "kernos.capability.client.ClientSession", side_effect=_mock_client_session
+    ):
+        await mcp.connect_all()
+
+    emitted = await events.query("system")
+    assert len(emitted) == 1
+    ev = emitted[0]
+    assert ev.type == EventType.CAPABILITY_CONNECTED
+    assert ev.payload["server_name"] == "test-server"
+    assert ev.payload["tool_count"] == 2
+    assert "tool_a" in ev.payload["tool_names"]
+    assert "tool_b" in ev.payload["tool_names"]
+    assert ev.metadata == {}
+
+
+async def test_connect_all_emits_capability_error_on_failure(tmp_path):
+    """AC6: failed connect emits capability.error with the error message."""
+    events = JsonEventStream(tmp_path)
+    mcp = MCPClientManager(events=events)
+    mcp.register_server(
+        "bad-server", StdioServerParameters(command="npx", args=["srv"], env={})
+    )
+
+    with patch(
+        "kernos.capability.client.stdio_client",
+        side_effect=RuntimeError("connection refused"),
+    ):
+        await mcp.connect_all()
+
+    emitted = await events.query("system")
+    assert len(emitted) == 1
+    ev = emitted[0]
+    assert ev.type == EventType.CAPABILITY_ERROR
+    assert ev.payload["server_name"] == "bad-server"
+    assert "connection refused" in ev.payload["error"]
+    assert ev.metadata == {}

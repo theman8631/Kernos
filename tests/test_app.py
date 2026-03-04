@@ -7,6 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kernos.app import app
+from kernos.kernel.event_types import EventType
+from kernos.kernel.events import JsonEventStream
 
 OWNER_PHONE = "+15555550100"
 
@@ -83,6 +85,18 @@ def test_sms_inbound_error_returns_friendly_twiml(tc):
     assert response.status_code == 200
     assert "application/xml" in response.headers["content-type"]
     assert "<Response>" in response.text
+
+
+async def test_startup_emits_system_started(tmp_path):
+    """AC15: app startup writes a system.started event under tenant 'system'."""
+    with patch("kernos.messages.handler.anthropic.Anthropic"):
+        with patch.dict(os.environ, {"KERNOS_DATA_DIR": str(tmp_path)}):
+            with TestClient(app):
+                pass  # lifespan runs fully on enter/exit
+
+    stream = JsonEventStream(tmp_path)
+    events = await stream.query("system")
+    assert any(e.type == EventType.SYSTEM_STARTED for e in events)
 
 
 def test_sms_inbound_with_tool_use_returns_calendar_response(tc):

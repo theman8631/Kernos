@@ -242,7 +242,6 @@ class MessageHandler:
                     "platform": message.platform,
                     "conversation_id": conversation_id,
                 },
-                metadata={"conversation_id": conversation_id, "platform": message.platform},
             )
         except Exception as exc:
             logger.warning("Failed to emit message.received: %s", exc)
@@ -279,7 +278,6 @@ class MessageHandler:
                     "system_prompt_length": len(system_prompt),
                     "trigger": "user_message",
                 },
-                metadata={"conversation_id": conversation_id},
             )
 
             t0 = time.monotonic()
@@ -310,7 +308,6 @@ class MessageHandler:
                     "duration_ms": duration_ms,
                     "conversation_id": conversation_id,
                 },
-                metadata={"conversation_id": conversation_id},
             )
 
             # Tool-use loop
@@ -337,7 +334,6 @@ class MessageHandler:
                                 "conversation_id": conversation_id,
                                 "reasoning_event_id": rr_event.id,
                             },
-                            metadata={"conversation_id": conversation_id},
                         )
                         # Existing audit log
                         await self.audit.log(
@@ -373,7 +369,6 @@ class MessageHandler:
                                 "conversation_id": conversation_id,
                                 "error": result if is_error else None,
                             },
-                            metadata={"conversation_id": conversation_id},
                         )
                         # Existing audit log
                         await self.audit.log(
@@ -413,7 +408,6 @@ class MessageHandler:
                         "system_prompt_length": len(system_prompt),
                         "trigger": "tool_continuation",
                     },
-                    metadata={"conversation_id": conversation_id},
                 )
 
                 t0 = time.monotonic()
@@ -445,7 +439,6 @@ class MessageHandler:
                         "duration_ms": duration_ms,
                         "conversation_id": conversation_id,
                     },
-                    metadata={"conversation_id": conversation_id},
                 )
 
             if iterations >= self.MAX_TOOL_ITERATIONS:
@@ -483,7 +476,6 @@ class MessageHandler:
                     "platform": message.platform,
                     "reasoning_event_id": rr_event.id,
                 },
-                metadata={"conversation_id": conversation_id, "platform": message.platform},
             )
 
             await self._update_conversation_summary(tenant_id, conversation_id, message.platform)
