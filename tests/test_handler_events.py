@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from kernos.capability.client import MCPClientManager
+from kernos.capability.known import KNOWN_CAPABILITIES
+from kernos.capability.registry import CapabilityRegistry
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, JsonEventStream
 from kernos.kernel.exceptions import ReasoningTimeoutError
@@ -88,11 +90,16 @@ def _make_mock_handler(tools: list[dict] | None = None):
     )
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
+    state.save_tenant_profile.return_value = None
 
     # Same events and audit mocks shared between handler and ReasoningService
     mock_provider = AsyncMock(spec=Provider)
+    registry = MagicMock(spec=CapabilityRegistry)
+    registry.get_connected_tools.return_value = tools or []
+    registry.build_capability_prompt.return_value = "CURRENT CAPABILITIES — conversation only."
+    registry.get_all.return_value = []
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
-    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry)
     return handler, mock_provider
 
 
@@ -119,9 +126,14 @@ def _make_real_handler(tmp_path):
     events = JsonEventStream(tmp_path)
     state = JsonStateStore(tmp_path)
 
+    import dataclasses
+    registry = CapabilityRegistry(mcp=mcp)
+    for cap in KNOWN_CAPABILITIES:
+        registry.register(dataclasses.replace(cap))
+
     mock_provider = AsyncMock(spec=Provider)
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
-    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry)
     return handler, mock_provider, events, state
 
 

@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from kernos.capability.registry import CapabilityRegistry
 from kernos.kernel.exceptions import (
     ReasoningConnectionError,
     ReasoningProviderError,
@@ -54,8 +55,20 @@ def _mock_provider_tool_response(name: str, id: str, input: dict) -> ProviderRes
     )
 
 
+def _make_mock_registry(tools: list[dict] | None = None) -> MagicMock:
+    """Return a mock CapabilityRegistry."""
+    registry = MagicMock(spec=CapabilityRegistry)
+    registry.get_connected_tools.return_value = tools or []
+    registry.build_capability_prompt.return_value = (
+        "CURRENT CAPABILITIES — conversation only." if not tools
+        else "CONNECTED CAPABILITIES — you can use these:\n- Calendar tools available."
+    )
+    registry.get_all.return_value = []
+    return registry
+
+
 def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, AsyncMock]:
-    """Return a (handler, mock_provider) with mock MCP, stores, events, and state."""
+    """Return a (handler, mock_provider) with mock MCP, stores, events, state, and registry."""
     mcp = MagicMock(spec=MCPClientManager)
     mcp.get_tools.return_value = tools or []
 
@@ -86,10 +99,12 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     )
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
+    state.save_tenant_profile.return_value = None
 
     mock_provider = AsyncMock(spec=Provider)
+    registry = _make_mock_registry(tools)
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
-    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning)
+    handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry)
     return handler, mock_provider
 
 
@@ -167,38 +182,48 @@ def test_system_prompt_includes_platform():
         tenant_id="+15555550100",
     )
 
+    cap_prompt = "CURRENT CAPABILITIES — conversation only."
+
     discord_msg = NormalizedMessage(**base, platform="discord")
-    assert "Discord" in _build_system_prompt(discord_msg)
-    assert "SMS" not in _build_system_prompt(discord_msg)
+    assert "Discord" in _build_system_prompt(discord_msg, cap_prompt)
+    assert "SMS" not in _build_system_prompt(discord_msg, cap_prompt)
 
     sms_msg = NormalizedMessage(**base, platform="sms")
-    assert "SMS" in _build_system_prompt(sms_msg)
-    assert "Discord" not in _build_system_prompt(sms_msg)
+    assert "SMS" in _build_system_prompt(sms_msg, cap_prompt)
+    assert "Discord" not in _build_system_prompt(sms_msg, cap_prompt)
 
 
-def test_system_prompt_no_tools_is_conversation_only():
+def test_system_prompt_includes_capability_prompt():
     msg = _make_message()
-    prompt = _build_system_prompt(msg, tools=[])
-    assert "Google Calendar:" not in prompt
-    assert "conversation" in prompt.lower()
+    cap_prompt = "CONNECTED CAPABILITIES — you can use these:\n- Google Calendar."
+    prompt = _build_system_prompt(msg, cap_prompt)
+    assert "CONNECTED CAPABILITIES" in prompt
+    assert "Google Calendar" in prompt
 
 
-def test_system_prompt_with_calendar_tools_claims_calendar():
+def test_system_prompt_includes_conversation_only_when_no_caps():
     msg = _make_message()
-    tools = [{"name": "list_events", "description": "List calendar events", "input_schema": {}}]
-    prompt = _build_system_prompt(msg, tools=tools)
-    assert "calendar" in prompt.lower() or "Calendar" in prompt
+    cap_prompt = "CURRENT CAPABILITIES — conversation only."
+    prompt = _build_system_prompt(msg, cap_prompt)
+    assert "conversation only" in prompt.lower()
 
 
 def test_system_prompt_does_not_claim_cannot_remember():
     msg = _make_message()
-    prompt_no_tools = _build_system_prompt(msg, tools=[])
-    prompt_with_tools = _build_system_prompt(
-        msg,
-        tools=[{"name": "list_events", "description": "List events", "input_schema": {}}],
-    )
-    assert "cannot remember previous conversations" not in prompt_no_tools
-    assert "cannot remember previous conversations" not in prompt_with_tools
+    prompt = _build_system_prompt(msg, "CURRENT CAPABILITIES — conversation only.")
+    assert "cannot remember previous conversations" not in prompt
+
+
+def test_handler_uses_registry_for_capability_prompt():
+    """Verify handler calls registry.build_capability_prompt() not hardcoded logic."""
+    handler, mock_provider = _make_handler()
+    handler.registry.build_capability_prompt.return_value = "CUSTOM PROMPT FROM REGISTRY"
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
+
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(handler.process(_make_message()))
+
+    handler.registry.build_capability_prompt.assert_called()
 
 
 # --- MCP tool-use loop ---

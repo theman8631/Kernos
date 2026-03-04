@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B.3 — Capability Graph formalization
-**Owner:** Claude Code
-**Action:** Execute SPEC-1B3-CAPABILITY-GRAPH.md in specs/
+**Status:** Phase 1B.4 — Task Engine (minimal)
+**Owner:** Founder / Architect
+**Action:** Produce SPEC-1B4 (formalize handler as task executor; task metadata and lifecycle)
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -33,8 +33,8 @@ Building the kernel layer that transforms a chatbot-with-tools into an intellige
 | ID | Deliverable | Status | Verified | Notes |
 |---|---|---|---|---|
 | 1B.1 | Event Stream + State Store | COMPLETE | 2026-03-03 | 79 events captured, cost tracking live, 7 default contract rules, CLI inspection tools |
-| 1B.2 | Reasoning Service abstraction | NOT STARTED | — | Extract LLM calls from handler into kernel service. Model as parameter, provider interface, cost logging. |
-| 1B.3 | Capability Graph formalization | NOT STARTED | — | Extend MCPClientManager into three-tier registry (connected/available/discoverable) |
+| 1B.2 | Reasoning Service abstraction | COMPLETE | 2026-03-03 | Provider ABC, AnthropicProvider, ReasoningService owns tool-use loop. Handler imports zero SDK code. |
+| 1B.3 | Capability Graph formalization | COMPLETE | 2026-03-03 | Three-tier registry, known.py catalog, build_capability_prompt(), CLI capabilities command. |
 | 1B.4 | Task Engine (minimal) | NOT STARTED | — | Formalize handler as task executor. Task metadata and lifecycle. Zero-cost pass-through for simple messages. |
 | 1B.5 | Agent templates + CLI | NOT STARTED | — | Define template structure. Seed/hatch for conversational agent. Kernel CLI for state inspection. |
 | 1B.6 | Tenant isolation verification + test suite | NOT STARTED | — | Prove two tenants can't see each other's data across all structures |
@@ -71,11 +71,21 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-*No active spec. 1B.2 (Reasoning Service abstraction) is next. Architect is producing it.*
+*No active spec. 1B.4 (Task Engine) is next. Architect is producing it.*
 
 ---
 
 ## Decisions Made
+
+### 2026-03-03: Phase 1B.3 — Capability Graph formalization complete
+
+- **What:** Transformed the flat tool list into a three-tier capability registry (connected/available/discoverable). Handler's hardcoded `"calendar" in n.lower()` detection replaced by structured metadata from `CapabilityRegistry.build_capability_prompt()`.
+- **Key structures:** `CapabilityInfo` (name, display_name, description, category, status, tools, setup_hint, setup_requires, server_name). `CapabilityRegistry` with `get_connected()`, `get_available()`, `get_by_category()`, `get_connected_tools()`, `build_capability_prompt()`. `KNOWN_CAPABILITIES` catalog in `known.py` — three entries (google-calendar, gmail, web-search).
+- **System prompt:** Now includes AVAILABLE capabilities so the agent can offer to set them up. Agent says "I have email available — want me to help connect it?" instead of "I can't do that."
+- **Adding a new capability:** One entry in `known.py` + MCP server registration. No handler changes, no prompt changes.
+- **CLI:** `./kernos-cli capabilities` shows full registry with status, description, setup info.
+- **State Store:** Tenant profiles now sync capability status on every message (`capabilities: {"google-calendar": "connected", "gmail": "available", ...}`).
+- **Full spec:** `specs/completed/SPEC-1B3-CAPABILITY-GRAPH.md`
 
 ### 2026-03-03: Phase 1B.1 — Event Stream and State Store live-verified
 
@@ -190,4 +200,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-03*
+*Last updated: 2026-03-03 (1B.3 complete)*

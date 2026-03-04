@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 
 from kernos.capability.client import MCPClientManager
+from kernos.capability.registry import CapabilityRegistry
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
 from kernos.kernel.exceptions import (
@@ -21,7 +22,8 @@ from kernos.messages.models import NormalizedMessage
 from kernos.persistence import AuditStore, ConversationStore, TenantStore, derive_tenant_id
 
 # Handler knows about NormalizedMessage, MCPClientManager, persistence stores,
-# EventStream, StateStore, and ReasoningService. It knows nothing about platform adapters.
+# EventStream, StateStore, ReasoningService, and CapabilityRegistry.
+# It knows nothing about platform adapters.
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +59,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _build_system_prompt(
-    message: NormalizedMessage, tools: list[dict] | None = None
-) -> str:
-    """Build a platform-aware, capability-honest system prompt.
+def _build_system_prompt(message: NormalizedMessage, capability_prompt: str) -> str:
+    """Build a platform-aware system prompt.
 
-    The CURRENT CAPABILITIES section is built dynamically from the tool list
-    so the agent never claims a capability that isn't backed by a real tool.
+    The capability section is provided by CapabilityRegistry.build_capability_prompt()
+    so the agent never claims a capability that isn't backed by registered metadata.
     """
     platform_line = _PLATFORM_CONTEXT.get(
         message.platform,
@@ -74,42 +74,6 @@ def _build_system_prompt(
         f"Sender auth level: {message.sender_auth_level.value}.",
     )
 
-    tools = tools or []
-    if tools:
-        tool_names = [t["name"] for t in tools]
-        has_calendar = any(
-            "calendar" in n.lower() or "event" in n.lower() for n in tool_names
-        )
-        if has_calendar:
-            capabilities = (
-                "CURRENT CAPABILITIES — only claim these:\n"
-                "- Conversation: answer questions, discuss topics, help think through problems.\n"
-                "- Google Calendar: check your schedule, list events, find availability. "
-                "Always use calendar tools when asked about schedule, events, or appointments — "
-                "never guess from memory.\n"
-                "You cannot set reminders, send emails, do web research, manage files, "
-                "or take other actions. "
-                "Be honest about limits — more capabilities are coming."
-            )
-        else:
-            tool_list = ", ".join(tool_names)
-            capabilities = (
-                "CURRENT CAPABILITIES — only claim these:\n"
-                "- Conversation: answer questions, discuss topics, help think through problems.\n"
-                f"- Tools available: {tool_list}.\n"
-                "You cannot do anything beyond what the available tools provide. "
-                "Be honest about limits."
-            )
-    else:
-        capabilities = (
-            "CURRENT CAPABILITIES — only claim these:\n"
-            "- Conversation: answer questions, discuss topics, help think through problems, brainstorm ideas.\n"
-            "That is ALL you can do right now. You cannot check calendars, set reminders, send emails, "
-            "do web research, manage files, or take any actions. "
-            "If asked about these, be honest that you don't have those capabilities yet — "
-            "don't pretend or make things up. It's fine to mention that more capabilities are coming."
-        )
-
     return (
         "You are Kernos, a personal intelligence assistant. "
         "You are in early development. Be honest about what you can and cannot do.\n\n"
@@ -117,7 +81,7 @@ def _build_system_prompt(
         "even across restarts. You don't have memory across different conversations or channels yet.\n\n"
         f"{platform_line}\n\n"
         f"{auth_line}\n\n"
-        f"{capabilities}"
+        f"{capability_prompt}"
     )
 
 
@@ -126,6 +90,7 @@ class MessageHandler:
 
     The handler manages message flow: provisioning, history, event bookends (received/sent),
     and persistence. Reasoning — including the tool-use loop — lives in ReasoningService.
+    Capability context comes from CapabilityRegistry.
     """
 
     def __init__(
@@ -137,6 +102,7 @@ class MessageHandler:
         events: EventStream,
         state: StateStore,
         reasoning: ReasoningService,
+        registry: CapabilityRegistry,
     ) -> None:
         self.mcp = mcp
         self.conversations = conversations
@@ -145,13 +111,23 @@ class MessageHandler:
         self.events = events
         self.state = state
         self.reasoning = reasoning
+        self.registry = registry
 
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
     ) -> None:
-        """Create StateStore profile and seed default contracts for new tenants."""
+        """Create or update StateStore profile for this tenant.
+
+        New tenants: create full profile, seed default contract rules.
+        Existing tenants: update capabilities field to reflect current registry state.
+        """
         profile = await self.state.get_tenant_profile(tenant_id)
+        cap_map = {cap.name: cap.status.value for cap in self.registry.get_all()}
+
         if profile is not None:
+            # Always sync capabilities so the profile reflects current registry state
+            profile.capabilities = cap_map
+            await self.state.save_tenant_profile(tenant_id, profile)
             return
 
         now = _now_iso()
@@ -163,7 +139,7 @@ class MessageHandler:
                 message.platform: {"connected_at": now, "sender": message.sender}
             },
             preferences={},
-            capabilities={},
+            capabilities=cap_map,
             model_config={"default_provider": _PROVIDER, "quality_tier": 3},
         )
         await self.state.save_tenant_profile(tenant_id, new_profile)
@@ -216,7 +192,7 @@ class MessageHandler:
         2. Load recent conversation history
         3. Emit message.received
         4. Store user message (before reasoning call)
-        5. Build ReasoningRequest, delegate to ReasoningService
+        5. Build ReasoningRequest from registry, delegate to ReasoningService
         6. On success: store assistant response, emit message.sent, update conversation summary
         """
         tenant_id = derive_tenant_id(message)
@@ -259,8 +235,9 @@ class MessageHandler:
         await self.conversations.append(tenant_id, conversation_id, user_entry)
 
         # Build and execute reasoning request
-        tools = self.mcp.get_tools()
-        system_prompt = _build_system_prompt(message, tools)
+        tools = self.registry.get_connected_tools()
+        capability_prompt = self.registry.build_capability_prompt()
+        system_prompt = _build_system_prompt(message, capability_prompt)
         messages: list[dict] = history + [{"role": "user", "content": message.content}]
 
         request = ReasoningRequest(

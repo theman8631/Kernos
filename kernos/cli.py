@@ -187,6 +187,37 @@ async def cmd_costs(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# capabilities
+# ---------------------------------------------------------------------------
+
+
+def cmd_capabilities(args) -> None:
+    from kernos.capability.known import KNOWN_CAPABILITIES
+    from kernos.capability.registry import CapabilityStatus
+
+    print(f"{'─' * 60}")
+    print("  Capability Registry")
+    print(f"{'─' * 60}")
+
+    for cap in KNOWN_CAPABILITIES:
+        # Infer configured status: check if required env vars are set
+        if cap.status == CapabilityStatus.AVAILABLE and cap.setup_requires:
+            all_set = all(os.getenv(v, "") for v in cap.setup_requires)
+            status_label = "CONFIGURED" if all_set else "AVAILABLE"
+        else:
+            status_label = cap.status.value.upper()
+
+        print(f"\n  [{status_label}] {cap.display_name}")
+        print(f"      {cap.description}")
+        if cap.setup_hint:
+            print(f'      Setup: "{cap.setup_hint}"')
+        if cap.setup_requires:
+            print(f"      Requires: {', '.join(cap.setup_requires)}")
+        if cap.server_name:
+            print(f"      Server: {cap.server_name}")
+
+
+# ---------------------------------------------------------------------------
 # tenants
 # ---------------------------------------------------------------------------
 
@@ -242,6 +273,8 @@ async def _dispatch(args) -> None:
         await cmd_costs(args)
     elif args.command == "tenants":
         await cmd_tenants(args)
+    elif args.command == "capabilities":
+        cmd_capabilities(args)
     else:
         print("Unknown command. Run with --help for usage.")
 
@@ -285,6 +318,9 @@ def main() -> None:
 
     # tenants
     subparsers.add_parser("tenants", help="List all tenants")
+
+    # capabilities
+    subparsers.add_parser("capabilities", help="Show capability registry")
 
     args = parser.parse_args()
     if not args.command:

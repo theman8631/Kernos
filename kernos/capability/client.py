@@ -143,6 +143,17 @@ class MCPClientManager:
         """Return all available tools in Anthropic API format."""
         return list(self._tools)
 
+    def get_tool_definitions(self) -> dict[str, list[dict]]:
+        """Return tool definitions grouped by server name.
+
+        Returns: {"google-calendar": [{"name": "get-events", ...}, ...]}
+        """
+        result: dict[str, list[dict]] = {}
+        for tool in self._tools:
+            server = self._tool_to_session.get(tool["name"], "unknown")
+            result.setdefault(server, []).append(tool)
+        return result
+
     async def call_tool(self, tool_name: str, tool_args: dict) -> str:
         """Call an MCP tool by name. Returns result text or an error string.
 
