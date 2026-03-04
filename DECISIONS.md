@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B.1 COMPLETE — Event Stream and State Store live-verified
-**Owner:** Architect
-**Action:** Produce 1B.2 spec (Reasoning Service abstraction). Founder commits updated DECISIONS.md and triggers Claude Code for repo cleanup first.
+**Status:** Phase 1B.2 — Reasoning Service abstraction
+**Owner:** Claude Code
+**Action:** Execute SPEC-1B2-REASONING-SERVICE.md in specs/
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
