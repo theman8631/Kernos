@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B.2 COMPLETE — Reasoning Service live-verified
-**Owner:** Architect
-**Action:** Produce 1B.3 spec (Capability Graph formalization)
+**Status:** Phase 1B.3 — Capability Graph formalization
+**Owner:** Claude Code
+**Action:** Execute SPEC-1B3-CAPABILITY-GRAPH.md in specs/
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
