@@ -32,6 +32,10 @@ class EventType(str, Enum):
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
 
+    # Agent lifecycle
+    AGENT_HATCHED = "agent.hatched"
+    AGENT_BOOTSTRAP_GRADUATED = "agent.bootstrap_graduated"
+
     # System
     SYSTEM_STARTED = "system.started"
     SYSTEM_STOPPED = "system.stopped"

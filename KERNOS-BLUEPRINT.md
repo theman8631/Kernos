@@ -79,29 +79,67 @@ The bidirectional rules governing how humans express intent and how the system p
 
 ## PART 3: ARCHITECTURAL DECISIONS
 
-### Kernel: Fork AIOS (Rutgers University)
+### Kernel: Built from First Principles
 
-- **Repository:** github.com/agiresearch/AIOS
-- **License:** MIT
-- **Why:** Most rigorous OS-analog architecture. LLMs as cores (like CPU cores), system call interface, modular kernel (scheduler, context manager, memory manager, storage manager, tool manager, access manager). Academic foundation with COLM 2025 acceptance. Python for faster iteration.
-- **What to take:** Scheduling, context management, system call interface, agent lifecycle management, SDK structure (Cerebrum).
-- **What to strip:** Academic demo scaffolding, evaluation frameworks, benchmark infrastructure not needed for production.
+The KERNOS kernel architecture was derived from first-principles analysis of what traditional operating system concepts (process scheduling, memory management, resource abstraction, access control) look like when applied to LLM-based agents serving non-technical users.
 
-### Memory Layer: Integrate MemOS (MemTensor)
+- **Origin:** A February 26, 2026 conversation between the founder and Claude, deriving agentic OS pillars from traditional OS theory. Refined through architectural brainstorming and a structured interview with OSBuilder (OpenClaw's primary agent), whose real-world experience running a production agent system validated key design decisions and revealed critical failure modes.
+- **Architecture:** Five primitives (Event Stream, State Store, Capability Graph, Reasoning Service, Task Engine) composing into three operational modes (reactive, proactive, generative). See `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md` for the full design.
+- **Core inversion:** "The agent thinks, the kernel remembers." Unlike existing systems where agents manage their own memory, tool discovery, and safety enforcement, KERNOS separates reasoning (agent) from infrastructure (kernel). The agent receives pre-assembled context, reasons about the current moment, and returns a response. Everything else is kernel responsibility.
+- **Language:** Python for faster iteration in the kernel. No external kernel codebase is forked or integrated — the kernel is KERNOS-native.
 
-- **Repository:** github.com/MemTensor/MemOS
-- **License:** MIT
-- **Why:** MemCube abstraction — portable, versionable, composable memory units with metadata and provenance. 159% improvement over OpenAI memory on temporal reasoning. MCP integration already exists. Treats memory as a first-class system resource with lifecycle management.
-- **What to take:** MemCube data model, memory scheduling, plaintext + activation + parameter memory unification, MCP integration, provenance tracking.
-- **Integration point:** Replace AIOS’s simpler persistence with MemOS as the storage/memory manager backend.
+**Prior art acknowledged:** The AIOS project (Rutgers University, COLM 2025) independently validated the OS-as-metaphor approach for LLM agent systems. Their work on treating LLMs as cores and building scheduling abstractions was useful early validation that the conceptual direction was sound. However, AIOS solves a fundamentally different problem — efficient GPU resource scheduling for concurrent agent workloads — and shares no architectural DNA with KERNOS. KERNOS is an application-layer kernel mediating between user intent and AI capabilities, not a hardware resource scheduler.
 
-### Security Patterns: Learn from OpenFang (RightNow-AI)
+### Memory Architecture: Open Design Problem
 
-- **Repository:** github.com/RightNow-AI/openfang
-- **License:** MIT
-- **Why:** Most production-grade security model in any agent OS. Built in response to real agent failures (OpenClaw incident).
-- **What to study and port conceptually:** WASM sandboxing for tool execution, graduated approval gates, Merkle audit trails, taint tracking for secrets, Ed25519 manifest signing, RBAC for agent capabilities, kill/pause/resume mechanisms.
-- **Note:** OpenFang is Rust, AIOS is Python. Don’t port code — port concepts and security architecture patterns.
+Long-term memory is the hardest unsolved architectural problem in KERNOS and the foundation of the project’s competitive moat (Pillar 3: "Memory as the Moat"). The current implementation provides persistence infrastructure (event stream for raw history, State Store for structured facts), but the memory architecture — how the system retrieves, consolidates, decays, and composes knowledge over months and years of use — is not yet designed.
+
+**What we have today:**
+
+- An append-only Event Stream that captures everything that happens (messages, tool calls, agent actions, capability changes). This is a transaction log, not a query surface.
+- A State Store that holds structured, queryable state (user facts, behavioral contracts, capability state). Currently implemented as simple file-based storage with tenant isolation.
+- Memory projectors (designed, not yet built) that will extract facts from the event stream and write them to the State Store.
+
+**What we need and don’t yet have:**
+
+- **Semantic retrieval** — finding relevant knowledge across thousands of accumulated facts, not just keyword lookup. "What did we discuss about the Portland project?" requires understanding, not string matching.
+- **Memory consolidation** — compressing and strengthening frequently-accessed knowledge while gracefully decaying unused information. Without this, the State Store grows without bound and relevance degrades.
+- **Temporal reasoning** — understanding when things happened and how knowledge has changed. "What did I tell you last March?" is a time-scoped query against accumulated knowledge.
+- **Composable context assembly** — assembling the right subset of knowledge for a specific agent, task, and moment. The inline annotation pattern (placing relevant context exactly where it’s relevant in the user’s message) requires sophisticated retrieval and relevance scoring.
+- **Provenance and versioning** — tracking where knowledge came from and how it’s changed. "User’s name is Greg" (stated directly) vs. "User prefers afternoon meetings" (inferred from 12 interactions) have different confidence levels and different update semantics.
+
+**Research inputs for this design:**
+
+| Project | What’s relevant to us | Status |
+|---|---|---|
+| MemOS (MemTensor) | MemCube abstraction — portable, versionable, composable memory units with metadata and provenance. MCP integration. 159% improvement over OpenAI memory on temporal reasoning. | Evaluate for State Store implementation. The MemCube model (self-contained memory units with provenance) aligns well with our needs. |
+| Mem0 | Production-grade memory layer with graph-based retrieval. Apache 2.0. Simpler than MemOS but battle-tested. | Evaluate as practical alternative or complement. |
+| MemoryOS (BAI-LAB) | Hierarchical memory management (short-term, mid-term, long-term with distinct retrieval strategies). EMNLP 2025 Oral. | Study for hierarchical design patterns. |
+| A-MEM (AIOS team) | Agentic memory research — how agents interact with structured memory. | Study for agent-memory interaction patterns. |
+
+**Design principle:** The "agent thinks, kernel remembers" inversion means the kernel owns memory entirely. Agents don’t manage, query, or maintain their own memory — they receive pre-assembled context from the kernel and return observations the kernel persists. Whatever memory architecture we adopt must support this inversion, not fight it.
+
+**Timeline:** Memory architecture design begins after Phase 1B kernel foundation is complete. The current State Store abstraction is deliberately simple — it needs to be replaced with a real memory system, not incrementally extended. This is a design-first problem: get the architecture right before building.
+
+### Security Model: Built for Our Threat Surface
+
+KERNOS security is built around behavioral contracts as the primary safety mechanism, not access restriction (see "The Trust Model: Access vs. Contract" section). The system’s actual threat surface differs significantly from local-execution agent systems:
+
+**Our threat surface:**
+
+- **Prompt injection** — malicious content in user messages, emails, or retrieved documents that attempts to override agent instructions
+- **Credential exposure** — API keys, OAuth tokens, and user secrets must be isolated per tenant and never leaked through agent responses
+- **Unauthorized MCP tool calls** — agents calling tools they shouldn’t, or calling tools with parameters that violate behavioral contracts
+- **Channel spoofing** — SMS/caller ID is trivially spoofable (see Sender Authentication section); unauthenticated channels get restricted capabilities
+- **Cross-tenant data leakage** — one tenant’s data appearing in another tenant’s context (the most critical multi-tenancy concern)
+
+**What we don’t need to solve (yet):**
+
+- WASM sandboxing for local code execution (we call cloud APIs, not running untrusted binaries)
+- Merkle audit trails (our append-only event stream provides audit capability natively)
+- Ed25519 manifest signing (no agent package distribution in Phase 1-2)
+
+**Prior art acknowledged:** OpenFang (RightNow-AI) provided the conceptual insight that safety lives in behavioral specification, not in access restriction — a lesson learned from the OpenClaw incident. Their specific technical patterns (WASM sandboxing, taint tracking, manifest signing) are designed for a Rust-based local execution environment and are not directly applicable to KERNOS. However, their graduated approval gates and kill/pause/resume mechanisms informed our behavioral contract design. If KERNOS later supports local code execution or untrusted plugin installation, OpenFang’s sandboxing patterns become directly relevant.
 
 ### Non-Destructive Deletion: Shadow Archive Architecture
 
@@ -230,17 +268,19 @@ Everyone can reach their agent via SMS. But the agent adapts its security postur
 - **2:** Platform account verification for Discord/Telegram adapters. Channel-aware sensitivity routing fully operational.
 - **3:** App with full session auth becomes the primary secure channel. SMS remains the universal fallback and notification layer.
 
-### Protocol Stack: Adopt Standards
+### Protocol Stack
 
-|Protocol                               |Purpose                                      |Status                         |
-|---------------------------------------|---------------------------------------------|-------------------------------|
-|MCP (Model Context Protocol)           |Capability abstraction — tool and data access|Universal standard, adopt fully|
-|A2A (Agent-to-Agent Protocol)          |Inter-agent communication (enterprise/local) |Google-backed, v0.3, adopt     |
-|ANP (Agent Network Protocol)           |Inter-agent communication (open internet)    |Emerging, monitor for Phase 4+ |
-|AG-UI (Agent-User Interaction Protocol)|Agent-to-frontend event streaming            |CopilotKit, adopt for app layer|
-|A2UI (Agent-to-UI)                     |Agent-generated interface widgets            |Google, adopt for dynamic UI   |
-|OAuth 2.1                              |Authorization and tool access                |Industry standard, adopt       |
-|W3C DID                                |Agent identity (future phases)               |Emerging, adopt in Phase 3+    |
+| Protocol | Purpose | Status |
+|---|---|---|
+| MCP (Model Context Protocol) | Capability abstraction — tool and data access | **Adopted.** In production. Core to Capability Graph. |
+| OAuth 2.1 | Authorization and tool access | **Adopted.** Industry standard for capability connections. |
+| A2A (Agent-to-Agent Protocol) | Inter-agent communication (enterprise/local) | **Monitor.** Google-backed, relevant when we build inter-user agent communication (Phase 4+). Not adopted yet — no current use case. |
+| ANP (Agent Network Protocol) | Inter-agent communication (open internet) | **Monitor.** Emerging. Relevant for Phase 4+ marketplace and open agent ecosystem. |
+| AG-UI (Agent-User Interaction Protocol) | Agent-to-frontend event streaming | **Evaluate for Phase 3.** Relevant when building the mobile app. Not adopted yet. |
+| A2UI (Agent-to-UI) | Agent-generated interface widgets | **Evaluate for Phase 3.** Google-backed. Relevant for dynamic UI in the app layer. |
+| W3C DID | Decentralized agent identity | **Monitor.** Speculative. Relevant if the ecosystem moves toward decentralized identity. No current use case. |
+
+**Principle:** Adopt protocols when we have a production use case, not speculatively. MCP and OAuth earned their place through implementation. Everything else earns its place when its phase arrives.
 
 ### Primary Interface: Platform-Agnostic Messaging Layer
 
@@ -396,7 +436,7 @@ The first text is the product moment. It should feel like meeting someone, not c
 
 #### Deliverables:
 
-- [ ] **1A.1** Evaluate AIOS codebase (read, don’t fork yet — go/no-go on fork vs. reference-only)
+- [x] **1A.1** Evaluate AIOS codebase — COMPLETE. Decision: reference-only, later determined architecturally unrelated. Kernel designed from first principles.
 - [ ] **1A.2** Twilio SMS gateway with normalized message format
   - Normalized message dataclass (content, sender, platform, capabilities, conversation_id, timestamp)
   - Twilio adapter (translates inbound SMS → normalized format, normalized response → SMS)
@@ -683,13 +723,17 @@ Mark deliverables as:
 - Docker (containerized kernel deployment)
 - Git (version control, this document lives in the repo)
 
-### Key Repositories to Fork/Clone
+### Reference Projects
 
-- github.com/agiresearch/AIOS (kernel foundation)
-- github.com/agiresearch/Cerebrum (agent SDK)
-- github.com/MemTensor/MemOS (memory layer)
-- Study: github.com/RightNow-AI/openfang (security patterns)
-- Study: github.com/mem0ai/mem0 (practical memory patterns)
+The KERNOS kernel is built from first principles, not forked from any existing project. The following projects are reference material — studied for concepts and lessons, not integrated as dependencies.
+
+| Project | What we learned | Current relevance |
+|---|---|---|
+| MemOS (MemTensor) | MemCube abstraction, memory provenance, temporal reasoning | **High.** Primary candidate for memory architecture design. Evaluate when designing the long-term memory system. |
+| Mem0 | Production memory patterns, graph-based retrieval | **High.** Practical alternative or complement to MemOS for memory architecture. |
+| OpenFang (RightNow-AI) | Behavioral contracts as safety mechanism, graduated trust | **Medium.** Conceptual lessons absorbed. Specific patterns relevant if we add local code execution. |
+| AIOS (Rutgers) | Validated OS-as-metaphor for agent systems | **Low.** Architecturally unrelated. Solves GPU resource scheduling, not user-facing intelligence. |
+| MemoryOS (BAI-LAB) | Hierarchical memory tiers | **Medium.** Study for memory architecture design. |
 
 -----
 
@@ -716,7 +760,7 @@ The single biggest risk is that this dies here. So the first steps are designed 
 1. [x] Create a GitHub repository called `kernos`
 1. [ ] Commit this document as `BLUEPRINT.md` in the repo root
 1. [ ] Commit the brainstorm checklist as `CHECKLIST.md`
-1. [ ] Spend a few hours reading AIOS source — make a go/no-go decision on forking vs. reference-only
+1. ~~Spend a few hours reading AIOS source~~ — **COMPLETE.** Evaluated, determined reference-only, later determined architecturally unrelated. KERNOS kernel designed from first principles. See kernel architecture outline.
 1. [ ] Create a Twilio account, get a phone number
 1. [ ] Build the SMS echo-bot with the normalized messaging architecture:
 - Normalized message dataclass (content, sender, platform, capabilities, conversation_id, timestamp)
@@ -772,14 +816,14 @@ Steps 6 and 7 give you something you’ll actually use yourself daily. That’s 
 
 ## APPENDIX B: Pillar-to-Implementation Mapping
 
-|Pillar                         |Primary Implementation                |Protocols                 |Phase|
-|-------------------------------|--------------------------------------|--------------------------|-----|
-|1. Capability Abstraction      |Tool Manager + MCP                    |MCP                       |1A-1B|
-|2. Lifecycle & Resources       |Scheduler + Access Manager            |—                         |1B   |
-|3. Persistent Context          |MemOS MemCubes                        |MCP (for MemOS)           |1B   |
-|4. Identity, Trust & Boundaries|Security framework (OpenFang-inspired)|OAuth 2.1, W3C DID (later)|1B-3 |
-|5. Inter-Agent Communication   |Internal bus + A2A                    |A2A, ANP (later)          |2-4  |
-|6. User-System Interface       |Messaging Gateway → AG-UI app         |AG-UI, A2UI               |1A-3 |
+| Pillar | Primary Implementation | Protocols | Phase |
+|---|---|---|---|
+| 1. Capability Abstraction | Capability Graph + MCP | MCP | 1A-1B |
+| 2. Lifecycle & Resources | Task Engine + Reasoning Service | — | 1B |
+| 3. Persistent Context | Event Stream + State Store + Memory Architecture (TBD) | MCP (for tool-based memory access) | 1B-2 |
+| 4. Identity, Trust & Boundaries | Behavioral Contracts + Channel Trust | OAuth 2.1 | 1B-3 |
+| 5. Inter-Agent Communication | Shared State Store (coordination) + structured deliberation | A2A (evaluate Phase 4) | 2-4 |
+| 6. User-System Interface | Message Gateway → App (Phase 3) | AG-UI (evaluate Phase 3) | 1A-3 |
 
 -----
 

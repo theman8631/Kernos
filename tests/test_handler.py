@@ -18,6 +18,8 @@ from kernos.kernel.reasoning import (
     ReasoningService,
 )
 from kernos.kernel.task import TaskStatus, TaskType
+from kernos.kernel.soul import Soul
+from kernos.kernel.template import PRIMARY_TEMPLATE
 from kernos.messages.handler import MessageHandler, _build_system_prompt
 from kernos.messages.models import AuthLevel, NormalizedMessage
 from kernos.capability.client import MCPClientManager
@@ -102,6 +104,9 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.save_tenant_profile.return_value = None
+    state.get_soul.return_value = None
+    state.save_soul.return_value = None
+    state.get_contract_rules.return_value = []
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry(tools)
@@ -186,34 +191,38 @@ def test_system_prompt_includes_platform():
     )
 
     cap_prompt = "CURRENT CAPABILITIES — conversation only."
+    soul = Soul(tenant_id="t1")
 
     discord_msg = NormalizedMessage(**base, platform="discord")
-    assert "Discord" in _build_system_prompt(discord_msg, cap_prompt)
-    assert "SMS" not in _build_system_prompt(discord_msg, cap_prompt)
+    assert "Discord" in _build_system_prompt(discord_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
+    assert "SMS" not in _build_system_prompt(discord_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
 
     sms_msg = NormalizedMessage(**base, platform="sms")
-    assert "SMS" in _build_system_prompt(sms_msg, cap_prompt)
-    assert "Discord" not in _build_system_prompt(sms_msg, cap_prompt)
+    assert "SMS" in _build_system_prompt(sms_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
+    assert "Discord" not in _build_system_prompt(sms_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
 
 
 def test_system_prompt_includes_capability_prompt():
     msg = _make_message()
+    soul = Soul(tenant_id="t1")
     cap_prompt = "CONNECTED CAPABILITIES — you can use these:\n- Google Calendar."
-    prompt = _build_system_prompt(msg, cap_prompt)
+    prompt = _build_system_prompt(msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
     assert "CONNECTED CAPABILITIES" in prompt
     assert "Google Calendar" in prompt
 
 
 def test_system_prompt_includes_conversation_only_when_no_caps():
     msg = _make_message()
+    soul = Soul(tenant_id="t1")
     cap_prompt = "CURRENT CAPABILITIES — conversation only."
-    prompt = _build_system_prompt(msg, cap_prompt)
+    prompt = _build_system_prompt(msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
     assert "conversation only" in prompt.lower()
 
 
 def test_system_prompt_does_not_claim_cannot_remember():
     msg = _make_message()
-    prompt = _build_system_prompt(msg, "CURRENT CAPABILITIES — conversation only.")
+    soul = Soul(tenant_id="t1")
+    prompt = _build_system_prompt(msg, "CURRENT CAPABILITIES — conversation only.", soul, PRIMARY_TEMPLATE, [])
     assert "cannot remember previous conversations" not in prompt
 
 
@@ -374,6 +383,9 @@ async def test_handler_creates_task_via_engine():
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.save_tenant_profile.return_value = None
+    state.get_soul.return_value = None
+    state.save_soul.return_value = None
+    state.get_contract_rules.return_value = []
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry()
@@ -422,6 +434,9 @@ async def test_handler_uses_task_result_text_as_response():
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.save_tenant_profile.return_value = None
+    state.get_soul.return_value = None
+    state.save_soul.return_value = None
+    state.get_contract_rules.return_value = []
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry()

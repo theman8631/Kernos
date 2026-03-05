@@ -16,6 +16,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
+from kernos.kernel.soul import Soul
 from kernos.kernel.state import (
     ConversationSummary,
     ContractRule,
@@ -56,6 +57,21 @@ class JsonStateStore(StateStore):
         with FileLock(lock_path):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # -----------------------------------------------------------------------
+    # Soul
+    # -----------------------------------------------------------------------
+
+    async def get_soul(self, tenant_id: str) -> Soul | None:
+        path = self._state_dir(tenant_id) / "soul.json"
+        data = self._read_json(path, None)
+        if data is None:
+            return None
+        return Soul(**data)
+
+    async def save_soul(self, soul: Soul) -> None:
+        path = self._state_dir(soul.tenant_id) / "soul.json"
+        self._write_json(path, asdict(soul))
 
     # -----------------------------------------------------------------------
     # Tenant Profile

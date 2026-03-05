@@ -92,6 +92,9 @@ def _make_mock_handler(tools: list[dict] | None = None):
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.save_tenant_profile.return_value = None
+    state.get_soul.return_value = None
+    state.save_soul.return_value = None
+    state.get_contract_rules.return_value = []
 
     # Same events and audit mocks shared between handler and ReasoningService
     mock_provider = AsyncMock(spec=Provider)

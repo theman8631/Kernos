@@ -9,6 +9,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from kernos.kernel.soul import Soul
+
 
 # ---------------------------------------------------------------------------
 # ID generators
@@ -83,6 +85,7 @@ class ContractRule:
     source_event_id: str | None # Links to event if user_stated or evolved
     created_at: str
     updated_at: str
+    context_space: str | None = None  # Reserved for Phase 2: None = applies globally
 
 
 def default_contract_rules(tenant_id: str, now: str) -> list[ContractRule]:
@@ -139,6 +142,13 @@ class ConversationSummary:
 
 class StateStore(ABC):
     """The kernel's knowledge model. Current understanding of user and world."""
+
+    # Soul
+    @abstractmethod
+    async def get_soul(self, tenant_id: str) -> Soul | None: ...
+
+    @abstractmethod
+    async def save_soul(self, soul: Soul) -> None: ...
 
     # Tenant Profile
     @abstractmethod

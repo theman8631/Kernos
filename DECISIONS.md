@@ -1,8 +1,8 @@
 ## NOW
 
 **Status:** Phase 1B.5 — Agent templates + CLI
-**Owner:** Founder / Architect
-**Action:** Produce SPEC-1B5 (define template structure; seed/hatch for conversational agent; kernel CLI for state inspection)
+**Owner:** Founder
+**Action:** Live verification — run the test table in `specs/completed/SPEC-1B5-AGENT-TEMPLATES.md`. Delete existing soul.json for your tenant (or use a fresh Discord account) and walk through steps 0–9.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -36,7 +36,7 @@ Building the kernel layer that transforms a chatbot-with-tools into an intellige
 | 1B.2 | Reasoning Service abstraction | COMPLETE | 2026-03-03 | Provider ABC, AnthropicProvider, ReasoningService owns tool-use loop. Handler imports zero SDK code. |
 | 1B.3 | Capability Graph formalization | COMPLETE | 2026-03-03 | Three-tier registry, known.py catalog, build_capability_prompt(), CLI capabilities command. |
 | 1B.4 | Task Engine (minimal) | COMPLETE | 2026-03-03 | Task dataclass + lifecycle, TaskEngine wraps reasoning, task.created/completed/failed events, handler delegates via engine. |
-| 1B.5 | Agent templates + CLI | NOT STARTED | — | Define template structure. Seed/hatch for conversational agent. Kernel CLI for state inspection. |
+| 1B.5 | Agent templates + CLI | CODE COMPLETE | — | Template + Soul datamodels, hatch process, template-driven prompt assembly, CLI soul/contracts/capabilities fixes. Live verification pending. |
 | 1B.6 | Tenant isolation verification + test suite | NOT STARTED | — | Prove two tenants can't see each other's data across all structures |
 
 ### Phase 1B Completion Criteria (from Blueprint + outline)
@@ -71,11 +71,24 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-*No active spec. 1B.5 (Agent templates + CLI) is next. Architect is producing it.*
+**SPEC-1B5-AGENT-TEMPLATES.md** — code complete, pending live verification.
+Full spec at `specs/completed/SPEC-1B5-AGENT-TEMPLATES.md`.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-04: Phase 1B.5 — Agent Templates + CLI code complete
+
+- **What:** The hardcoded "You are Kernos, a personal intelligence assistant" prompt is replaced by a template-driven, soul-aware system. Every tenant's first interaction creates a `Soul` (unhatched); after the first successful response the soul is marked `hatched=True` and an `agent.hatched` event is emitted. Subsequent interactions load the persisted soul and include the bootstrap prompt until `bootstrap_graduated` is set (triggered when all four maturity signals are present: user_name, user_context, communication_style, and interaction_count ≥ 10).
+- **Key new files:** `kernos/kernel/soul.py` (Soul dataclass), `kernos/kernel/template.py` (AgentTemplate + PRIMARY_TEMPLATE with operating principles, default personality, bootstrap prompt). Both are reachable via `kernos.kernel.*` — no import isolation violations.
+- **State Store additions:** `get_soul` / `save_soul` abstract methods added to StateStore ABC; implemented in `JsonStateStore` as `{data_dir}/{tenant_id}/state/soul.json`. `ContractRule` gains `context_space: str | None = None` (reserved for Phase 2 scoped contracts).
+- **Handler changes:** `process()` now calls `_get_or_init_soul()` before reasoning, loads contract rules from State Store, passes all five args to `_build_system_prompt()`. `_post_response_soul_update()` handles hatch marking, interaction counting, and maturity-gated bootstrap graduation (no consolidation reasoning call in 1B.5 — maturity gate only, as specified).
+- **CLI additions:** `soul <tenant_id>` — inspect hatched soul; `contracts <tenant_id>` — grouped display by type (MUST/MUST NOT/PREFERENCE/ESCALATION); `contract` kept for backwards compatibility. `capabilities` fixed: removed env-var inference, removed invented "CONFIGURED" label, uses CapabilityStatus vocabulary only; optional `--tenant` arg reads from persisted profile for accurate runtime status.
+- **Events added:** `agent.hatched`, `agent.bootstrap_graduated` added to EventType enum.
+- **Known gap (documented in spec):** `user_name` auto-extraction from conversation not implemented — memory projector work (Phase 2). Bootstrap will remain active until user_name is manually set or memory projectors are built.
+- **Tests:** 27 new tests in `tests/test_soul.py`. 232 total passing.
+- **Full spec:** `specs/completed/SPEC-1B5-AGENT-TEMPLATES.md`
 
 ### 2026-03-03: Phase 1B.4 — Task Engine (minimal) complete
 
@@ -210,4 +223,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-03 (1B.4 complete)*
+*Last updated: 2026-03-04 (1B.5 code complete, live verification pending)*

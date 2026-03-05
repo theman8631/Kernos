@@ -7,6 +7,9 @@ Run via the wrapper (recommended — no venv activation needed):
   ./kernos-cli profile <tenant_id>
   ./kernos-cli knowledge <tenant_id> [--subject "John"] [--category entity]
   ./kernos-cli contract <tenant_id> [--capability calendar]
+  ./kernos-cli contracts <tenant_id>
+  ./kernos-cli soul <tenant_id>
+  ./kernos-cli capabilities [--tenant <tenant_id>]
 
 Or manually with the venv active:
   source .venv/bin/activate
@@ -113,7 +116,7 @@ async def cmd_knowledge(args) -> None:
 
 
 # ---------------------------------------------------------------------------
-# contract
+# contract (backwards-compatible) + contracts (new grouped display)
 # ---------------------------------------------------------------------------
 
 
@@ -137,6 +140,74 @@ async def cmd_contract(args) -> None:
         print(f"\n  [{status}] {r.rule_type.upper()} ({r.capability})")
         print(f"      {r.description}")
         print(f"      source: {r.source} | id: {r.id}")
+
+
+async def cmd_contracts(args) -> None:
+    """Display behavioral contract rules grouped by type."""
+    from kernos.kernel.state_json import JsonStateStore
+
+    state = JsonStateStore(_data_dir())
+    rules = await state.get_contract_rules(tenant_id=args.tenant_id, active_only=True)
+    if not rules:
+        print(f"No contract rules found for '{args.tenant_id}'.")
+        return
+
+    print(f"{'─' * 60}")
+    print(f"  Contracts for {args.tenant_id}")
+    print(f"{'─' * 60}")
+
+    order = ["must", "must_not", "preference", "escalation"]
+    labels = {
+        "must": "MUST",
+        "must_not": "MUST NOT",
+        "preference": "PREFERENCE",
+        "escalation": "ESCALATION",
+    }
+    grouped: dict[str, list] = {k: [] for k in order}
+    for r in rules:
+        if r.rule_type in grouped:
+            grouped[r.rule_type].append(r)
+
+    for key in order:
+        group_rules = grouped[key]
+        if not group_rules:
+            continue
+        print(f"\n  {labels[key]}:")
+        for r in group_rules:
+            source_label = f"[{r.source}]"
+            print(f"    - {r.description} {source_label}")
+
+
+# ---------------------------------------------------------------------------
+# soul
+# ---------------------------------------------------------------------------
+
+
+async def cmd_soul(args) -> None:
+    """Display the hatched soul for a tenant."""
+    from kernos.kernel.state_json import JsonStateStore
+
+    state = JsonStateStore(_data_dir())
+    soul = await state.get_soul(args.tenant_id)
+    if soul is None:
+        print(f"No soul found for tenant '{args.tenant_id}'. (Not yet hatched.)")
+        return
+
+    print(f"{'─' * 60}")
+    print(f"  Soul for {args.tenant_id}")
+    print(f"{'─' * 60}")
+    print(f"  Hatched:          {soul.hatched_at if soul.hatched else 'not yet'}")
+    print(f"  Bootstrap:        {'graduated' if soul.bootstrap_graduated else 'active'}")
+    print(f"  Interactions:     {soul.interaction_count}")
+    print(f"  User:             {soul.user_name if soul.user_name else '(not yet known)'}")
+    print(f"  Agent name:       {soul.agent_name if soul.agent_name else '(default)'}")
+    print(f"  Style:            {soul.communication_style if soul.communication_style else '(not yet determined)'}")
+    if soul.personality_notes:
+        trunc = soul.personality_notes[:120] + "…" if len(soul.personality_notes) > 120 else soul.personality_notes
+        print(f"  Personality:      {trunc}")
+    if soul.user_context:
+        trunc = soul.user_context[:120] + "…" if len(soul.user_context) > 120 else soul.user_context
+        print(f"  User context:     {trunc}")
 
 
 # ---------------------------------------------------------------------------
@@ -240,19 +311,36 @@ async def cmd_tasks(args) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cmd_capabilities(args) -> None:
+async def cmd_capabilities(args) -> None:
+    """Display capability registry.
+
+    If --tenant is provided, reads from the tenant's persisted profile for
+    accurate runtime status. Otherwise shows the static catalog with honest
+    status values — no env-var inference, no invented labels.
+    """
     from kernos.capability.known import KNOWN_CAPABILITIES
     from kernos.capability.registry import CapabilityStatus
 
+    # Optionally load tenant-specific status from persisted state
+    tenant_cap_map: dict[str, str] = {}
+    if args.tenant:
+        from kernos.kernel.state_json import JsonStateStore
+        state = JsonStateStore(_data_dir())
+        profile = await state.get_tenant_profile(args.tenant)
+        if profile and profile.capabilities:
+            tenant_cap_map = profile.capabilities
+
     print(f"{'─' * 60}")
     print("  Capability Registry")
+    if args.tenant:
+        print(f"  Tenant: {args.tenant}")
     print(f"{'─' * 60}")
 
     for cap in KNOWN_CAPABILITIES:
-        # Infer configured status: check if required env vars are set
-        if cap.status == CapabilityStatus.AVAILABLE and cap.setup_requires:
-            all_set = all(os.getenv(v, "") for v in cap.setup_requires)
-            status_label = "CONFIGURED" if all_set else "AVAILABLE"
+        # Use persisted tenant state if available; otherwise use catalog status directly.
+        # Never infer status from env vars — use CapabilityStatus vocabulary only.
+        if tenant_cap_map and cap.name in tenant_cap_map:
+            status_label = tenant_cap_map[cap.name].upper()
         else:
             status_label = cap.status.value.upper()
 
@@ -260,8 +348,6 @@ def cmd_capabilities(args) -> None:
         print(f"      {cap.description}")
         if cap.setup_hint:
             print(f'      Setup: "{cap.setup_hint}"')
-        if cap.setup_requires:
-            print(f"      Requires: {', '.join(cap.setup_requires)}")
         if cap.server_name:
             print(f"      Server: {cap.server_name}")
 
@@ -318,6 +404,10 @@ async def _dispatch(args) -> None:
         await cmd_knowledge(args)
     elif args.command == "contract":
         await cmd_contract(args)
+    elif args.command == "contracts":
+        await cmd_contracts(args)
+    elif args.command == "soul":
+        await cmd_soul(args)
     elif args.command == "costs":
         await cmd_costs(args)
     elif args.command == "tenants":
@@ -325,7 +415,7 @@ async def _dispatch(args) -> None:
     elif args.command == "tasks":
         await cmd_tasks(args)
     elif args.command == "capabilities":
-        cmd_capabilities(args)
+        await cmd_capabilities(args)
     else:
         print("Unknown command. Run with --help for usage.")
 
@@ -355,11 +445,19 @@ def main() -> None:
     p.add_argument("--category", help="Filter by category (entity/fact/preference/pattern)")
     p.add_argument("--include-archived", action="store_true")
 
-    # contract
+    # contract (backwards-compatible)
     p = subparsers.add_parser("contract", help="View behavioral contract rules")
     p.add_argument("tenant_id")
     p.add_argument("--capability", help="Filter by capability (calendar/email/general)")
     p.add_argument("--include-inactive", action="store_true")
+
+    # contracts (new — grouped by type)
+    p = subparsers.add_parser("contracts", help="View behavioral contracts grouped by type")
+    p.add_argument("tenant_id")
+
+    # soul
+    p = subparsers.add_parser("soul", help="View hatched soul for a tenant")
+    p.add_argument("tenant_id")
 
     # costs
     p = subparsers.add_parser("costs", help="View cost summary from reasoning events")
@@ -376,7 +474,8 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=20)
 
     # capabilities
-    subparsers.add_parser("capabilities", help="Show capability registry")
+    p = subparsers.add_parser("capabilities", help="Show capability registry")
+    p.add_argument("--tenant", dest="tenant", help="Tenant ID for persisted runtime status")
 
     args = parser.parse_args()
     if not args.command:

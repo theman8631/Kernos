@@ -8,6 +8,9 @@
 #   ./kernos-cli profile <tenant_id>
 #   ./kernos-cli knowledge <tenant_id> [--subject "Alice"] [--category entity]
 #   ./kernos-cli contract <tenant_id>
+#   ./kernos-cli contracts <tenant_id>
+#   ./kernos-cli soul <tenant_id>
+#   ./kernos-cli capabilities [--tenant <tenant_id>]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$SCRIPT_DIR/.venv/bin/python"

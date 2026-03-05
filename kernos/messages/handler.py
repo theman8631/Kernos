@@ -13,8 +13,11 @@ from kernos.kernel.exceptions import (
     ReasoningTimeoutError,
 )
 from kernos.kernel.reasoning import ReasoningRequest, ReasoningService
+from kernos.kernel.soul import Soul
 from kernos.kernel.task import Task, TaskType, generate_task_id
+from kernos.kernel.template import AgentTemplate, PRIMARY_TEMPLATE
 from kernos.kernel.state import (
+    ContractRule,
     ConversationSummary,
     StateStore,
     TenantProfile,
@@ -31,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
 _PROVIDER = "anthropic"
+
+# Minimum interaction count before bootstrap graduation is even evaluated.
+_BOOTSTRAP_MIN_INTERACTIONS = 10
 
 _PLATFORM_CONTEXT: dict[str, str] = {
     "sms": (
@@ -61,30 +67,99 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _build_system_prompt(message: NormalizedMessage, capability_prompt: str) -> str:
-    """Build a platform-aware system prompt.
+def _format_contracts(rules: list[ContractRule]) -> str:
+    """Format behavioral contract rules into natural language for the system prompt."""
+    if not rules:
+        return ""
+    lines = ["BEHAVIORAL CONTRACTS — follow these strictly:"]
+    for rule in rules:
+        label = rule.rule_type.replace("_", " ").upper()
+        lines.append(f"{label}: {rule.description}")
+    return "\n".join(lines)
 
-    The capability section is provided by CapabilityRegistry.build_capability_prompt()
-    so the agent never claims a capability that isn't backed by registered metadata.
+
+def _is_soul_mature(soul: Soul) -> bool:
+    """Check whether the soul has enough substance for bootstrap graduation.
+
+    All four signals must be present — interaction count alone is never sufficient.
     """
+    return (
+        bool(soul.user_name)
+        and bool(soul.user_context)
+        and bool(soul.communication_style)
+        and soul.interaction_count >= _BOOTSTRAP_MIN_INTERACTIONS
+    )
+
+
+def _build_system_prompt(
+    message: NormalizedMessage,
+    capability_prompt: str,
+    soul: Soul,
+    template: AgentTemplate,
+    contract_rules: list[ContractRule],
+) -> str:
+    """Build a template-driven, soul-aware system prompt.
+
+    Layers (in injection order):
+    1. Operating principles — universal KERNOS values
+    2. Agent identity / personality — who the agent is for this user
+    3. User knowledge — what the agent knows about this person
+    4. Platform context — communication channel constraints
+    5. Auth context — sender trust level
+    6. Behavioral contracts — what the agent must/must-not do
+    7. Capabilities — what tools are available
+    8. Bootstrap prompt — ONLY if soul has not graduated (bootstrap_graduated == False)
+    """
+    parts: list[str] = []
+
+    # 1. Operating principles
+    parts.append(template.operating_principles)
+
+    # 2. Agent identity / personality
+    agent_name = soul.agent_name or "Kernos"
+    personality = soul.personality_notes if soul.personality_notes else template.default_personality
+    parts.append(
+        f"YOUR IDENTITY:\nYou are {agent_name}.\n{personality}"
+    )
+
+    # 3. User knowledge (only if the soul has accumulated something)
+    user_knowledge_parts: list[str] = []
+    if soul.user_name:
+        user_knowledge_parts.append(f"User's name: {soul.user_name}")
+    if soul.user_context:
+        user_knowledge_parts.append(soul.user_context)
+    if soul.communication_style:
+        user_knowledge_parts.append(f"Communication style: {soul.communication_style}")
+    if user_knowledge_parts:
+        parts.append("USER CONTEXT:\n" + "\n".join(user_knowledge_parts))
+
+    # 4. Platform context
     platform_line = _PLATFORM_CONTEXT.get(
         message.platform,
         f"You are communicating via {message.platform}. Keep responses concise.",
     )
+    parts.append(platform_line)
+
+    # 5. Auth context
     auth_line = _AUTH_CONTEXT.get(
         message.sender_auth_level.value,
         f"Sender auth level: {message.sender_auth_level.value}.",
     )
+    parts.append(auth_line)
 
-    return (
-        "You are Kernos, a personal intelligence assistant. "
-        "You are in early development. Be honest about what you can and cannot do.\n\n"
-        "You have conversation memory — you can see recent messages from this conversation, "
-        "even across restarts. You don't have memory across different conversations or channels yet.\n\n"
-        f"{platform_line}\n\n"
-        f"{auth_line}\n\n"
-        f"{capability_prompt}"
-    )
+    # 6. Behavioral contracts
+    contracts_text = _format_contracts(contract_rules)
+    if contracts_text:
+        parts.append(contracts_text)
+
+    # 7. Capabilities
+    parts.append(capability_prompt)
+
+    # 8. Bootstrap prompt — only while the soul hasn't graduated
+    if not soul.bootstrap_graduated:
+        parts.append(template.bootstrap_prompt)
+
+    return "\n\n".join(parts)
 
 
 class MessageHandler:
@@ -92,7 +167,7 @@ class MessageHandler:
 
     The handler manages message flow: provisioning, history, event bookends (received/sent),
     and persistence. Reasoning — including the tool-use loop — lives in ReasoningService.
-    Capability context comes from CapabilityRegistry.
+    Capability context comes from CapabilityRegistry. Identity comes from the Soul + Template.
     """
 
     def __init__(
@@ -164,6 +239,75 @@ class MessageHandler:
 
         logger.info("Provisioned state for new tenant: %s", tenant_id)
 
+    async def _get_or_init_soul(self, tenant_id: str) -> Soul:
+        """Load the soul for this tenant, or initialize a new unhatched one.
+
+        The soul is saved immediately on creation so it persists even if
+        the subsequent reasoning call fails.
+        """
+        soul = await self.state.get_soul(tenant_id)
+        if soul is None:
+            soul = Soul(tenant_id=tenant_id)
+            await self.state.save_soul(soul)
+            logger.info("Initialized new soul for tenant: %s", tenant_id)
+        return soul
+
+    async def _post_response_soul_update(self, soul: Soul) -> None:
+        """Update the soul after a successful response.
+
+        - If not yet hatched: mark hatched, emit agent.hatched
+        - Increment interaction_count
+        - Check bootstrap graduation maturity
+        - Save
+        """
+        now = _now_iso()
+
+        if not soul.hatched:
+            soul.hatched = True
+            soul.hatched_at = now
+            try:
+                await emit_event(
+                    self.events,
+                    EventType.AGENT_HATCHED,
+                    soul.tenant_id,
+                    "handler",
+                    payload={
+                        "tenant_id": soul.tenant_id,
+                        "hatched_at": now,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit agent.hatched: %s", exc)
+            logger.info("Soul hatched for tenant: %s", soul.tenant_id)
+
+        soul.interaction_count += 1
+
+        # Check bootstrap graduation (maturity gate — no consolidation call in 1B.5)
+        if not soul.bootstrap_graduated and _is_soul_mature(soul):
+            soul.bootstrap_graduated = True
+            soul.bootstrap_graduated_at = now
+            try:
+                await emit_event(
+                    self.events,
+                    EventType.AGENT_BOOTSTRAP_GRADUATED,
+                    soul.tenant_id,
+                    "handler",
+                    payload={
+                        "tenant_id": soul.tenant_id,
+                        "interaction_count": soul.interaction_count,
+                        "graduated_at": now,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit agent.bootstrap_graduated: %s", exc)
+            logger.info(
+                "Soul bootstrap graduated for tenant: %s (interactions: %d)",
+                soul.tenant_id,
+                soul.interaction_count,
+            )
+
+        await self.state.save_soul(soul)
+
     async def _update_conversation_summary(
         self, tenant_id: str, conversation_id: str, platform: str
     ) -> None:
@@ -193,18 +337,21 @@ class MessageHandler:
 
         Flow:
         1. Derive tenant_id and provision if new (TenantStore + StateStore)
-        2. Load recent conversation history
-        3. Emit message.received
-        4. Store user message (before reasoning call)
-        5. Build ReasoningRequest from registry, delegate to ReasoningService
-        6. On success: store assistant response, emit message.sent, update conversation summary
+        2. Load soul (initialize if new tenant's first message)
+        3. Load recent conversation history
+        4. Emit message.received
+        5. Store user message (before reasoning call)
+        6. Build ReasoningRequest from template + soul + contracts + registry
+        7. Delegate to TaskEngine
+        8. On success: update soul, store response, emit message.sent, update summary
         """
         tenant_id = derive_tenant_id(message)
         conversation_id = message.conversation_id
 
-        # Steps 1–2: provision and load history
+        # Steps 1–3: provision, load soul, load history
         await self.tenants.get_or_create(tenant_id)
         await self._ensure_tenant_state(tenant_id, message)
+        soul = await self._get_or_init_soul(tenant_id)
         history = await self.conversations.get_recent(
             tenant_id, conversation_id, limit=20
         )
@@ -251,7 +398,10 @@ class MessageHandler:
 
         tools = self.registry.get_connected_tools()
         capability_prompt = self.registry.build_capability_prompt()
-        system_prompt = _build_system_prompt(message, capability_prompt)
+        contract_rules = await self.state.get_contract_rules(tenant_id, active_only=True)
+        system_prompt = _build_system_prompt(
+            message, capability_prompt, soul, PRIMARY_TEMPLATE, contract_rules
+        )
         messages: list[dict] = history + [{"role": "user", "content": message.content}]
 
         request = ReasoningRequest(
@@ -363,6 +513,9 @@ class MessageHandler:
             except Exception:
                 pass
             return "Something unexpected happened. Try again, and if it keeps happening, let me know."
+
+        # Update soul after successful response
+        await self._post_response_soul_update(soul)
 
         # Store assistant response
         assistant_entry = {
