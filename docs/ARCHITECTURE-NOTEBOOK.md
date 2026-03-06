@@ -1,12 +1,12 @@
 # KERNOS Architecture Notebook
 
-> **What this is:** A curated capture of architectural thinking, design rationale, and deferred decisions from brainstorming sessions across Phase 1A and 1B development. This is NOT a spec, NOT a decision log, and NOT meant for the repo. It lives in the Claude Project files so the architect always has this context when working on future phases.
+> **What this is:** A curated capture of architectural thinking, design rationale, and deferred decisions from brainstorming sessions across Phase 1A and 1B development. This is NOT a spec and NOT a decision log. It lives in the repo and in the Claude Project files so the architect always has this context when working on future phases.
 >
 > **Why it exists:** Rich architectural discussions produced insights that are too speculative for the Blueprint, too early for specs, and would clutter DECISIONS.md — but they'll be exactly what's needed when speccing later phases. Without this document, that knowledge lives only in human memory, the assistant's memory system (which has recency bias), and scattered transcripts that are hard to search.
 >
 > **How to use it:** Organized by *when it becomes relevant*, not when it was discussed. When starting work on a new phase or component, read the corresponding section. Each topic captures: the core insight, design options explored, what we leaned toward and why, deferred questions, and warnings.
 >
-> **Last updated:** 2026-03-04
+> **Last updated:** 2026-03-06
 
 ---
 
@@ -22,7 +22,8 @@
 8. [Phase 3-4: Agent Lifecycle](#8-phase-3-4-agent-lifecycle) — seed/hatch/refine/evaluate, soul vs. contract, prompt evolution
 9. [Real Scenarios That Shaped Design](#9-real-scenarios-that-shaped-design) — the plumber, the stained glass artist, the TTRPG project
 10. [Lessons from OSBuilder (OpenClaw)](#10-lessons-from-osbuilder-openclaw) — practical insights from a live agentic system
-11. [Open Questions — No Answer Yet](#11-open-questions--no-answer-yet)
+11. [Phase 2 Preparation — Research Leads](#11-phase-2-preparation--research-leads) — Kit's research threads for memory architecture and behavioral contracts
+12. [Open Questions — No Answer Yet](#12-open-questions--no-answer-yet)
 
 ---
 
@@ -82,7 +83,7 @@ KERNOS inverts this. The agent receives pre-assembled context, reasons about the
 
 **Origin:** Synthesized from the full 1B brainstorm plus OSBuilder's answers.
 
-The kernel has five core primitives that compose into three modes of operation. This was distilled into the Kernel Architecture Outline v2 (now in the repo at `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md`). Here I capture the *reasoning* behind the choices that the outline encodes but doesn't explain.
+The kernel has five core primitives that compose into three modes of operation. This was distilled into the Kernel Architecture Outline v2 (now in the repo at `docs/KERNEL-ARCHITECTURE-OUTLINE.md`). Here I capture the *reasoning* behind the choices that the outline encodes but doesn't explain.
 
 **1. Event Stream** — Chosen as Primitive 1 because OSBuilder's answer to "what do you wish you'd built from day one?" was unequivocal: a unified event bus. We had already built event-sourcing into 1A.4's persistence layer. The key decision was: generalize the three stores (ConversationStore, AuditStore, TenantStore) into a single typed event stream that multiple consumers can read. Conversation entries and audit entries are both events in the same stream, separated by type rather than by store.
 
@@ -499,7 +500,73 @@ Every one of these pain points influenced our architecture: kernel-managed persi
 
 ---
 
-## 11. OPEN QUESTIONS — NO ANSWER YET
+## 11. PHASE 2 PREPARATION — RESEARCH LEADS
+
+Research threads identified by Kit (OSBuilder/OpenClaw) during SPEC-1B7 review. These are pre-reads before writing Phase 2 specs — not implementation tasks, but architectural homework.
+
+### Structured Outputs for LLM Extraction Calls
+
+**Source:** Kit's review of SPEC-1B7.
+
+The Tier 2 extraction prompt says "Return JSON only" and includes a parsing step that handles markdown code fences when the model wraps output anyway. This is a known fragility. Both Anthropic and OpenAI now support native structured output — pass a JSON schema and the API guarantees schema-compliant output.
+
+The Python `instructor` library wraps both providers and lets you define extraction schemas as Pydantic models. The extraction call becomes a typed function call with no `json.loads()`, no code fence stripping, no try/except around parse errors.
+
+**Action:** Before Phase 2 extends the extraction schema, evaluate whether `complete_simple()` should use native structured outputs. The pattern holds for every structured LLM call in the system, not just extraction. If adopted, the ExtractionResult dataclass becomes a Pydantic model and the entire parsing layer disappears.
+
+**Timing:** Could be retrofitted into 1B.7 if the change to `complete_simple()` is small. Otherwise, Phase 2 when the extraction schema gets richer.
+
+### Entity Resolution Before the Knowledge Graph Gets Deep
+
+**Source:** Kit's review of SPEC-1B7.
+
+The 1B.7 spec writes KnowledgeEntry records for entities as they're mentioned. "Mrs. Henderson (person, client)" today, "Henderson" next week, "my client Linda Henderson" next month. The system has no way to know these are the same entity. By month three of a real user's data, the State Store has multiple entries for the same person with slight variation in how they were mentioned.
+
+**Mem0's approach:** On each extraction, run a lightweight graph lookup to see if the entity name is close to an existing node (fuzzy match + embedding similarity). If it matches, same entity; if not, new entity. Open-sourced under Apache 2.0.
+
+**Action:** Before writing Phase 2 memory architecture specs, do a one-session deep read of Mem0's entity resolution implementation (not just their docs — the code). The decision of "integrate their approach vs. build our own" is one of the first Phase 2 architectural calls.
+
+**What we need that's different from Mem0:** Kernel-assembled (agent doesn't query its own memory), tenant-isolated, durability-aware. Pure adoption probably doesn't work. But the retrieval mechanisms themselves — embedding similarity, graph traversal, recency weighting — are solved problems that shouldn't be rebuilt from scratch.
+
+### Temporal Knowledge Graphs for Fact TTL
+
+**Source:** Kit's review of SPEC-1B7.
+
+The `durability` field added in 1B.7 is correct but coarse: "permanent", "session", "expires_at:\<ISO\>". The research community has a more sophisticated model: every fact has a validity interval [t_start, t_end] and a confidence decay function. "John works at Portland Plumbing Co." starts at full confidence and decays over months without reinforcement. If never mentioned again, the system should eventually treat it as possibly stale, not permanently authoritative.
+
+**The research vocabulary:** Temporal Knowledge Graphs (T-KGs). The papers aren't directly implementable but the schema ideas are relevant.
+
+**Practical extension for Phase 2:** Add `valid_from` and `valid_until` to KnowledgeEntry (open-ended = None). Track `last_reinforced` separately from `last_referenced`. A fact that gets mentioned again resets its decay clock. A fact that hasn't been reinforced in 6 months gets flagged as potentially stale during context assembly.
+
+**Why this matters:** The current schema doesn't need to be torn out — just extended. Knowing the vocabulary and tradeoffs now means Phase 2 memory architecture can design the decay model correctly the first time.
+
+### Eclipse LMOS Behavioral Contract Format
+
+**Source:** Kit's review of SPEC-1B7.
+
+The Blueprint references OpenFang for behavioral contract design (now reframed as "conceptual lessons absorbed"). There's a more recent and production-tested implementation: Eclipse LMOS, running at Deutsche Telekom at scale. Their contract format has been stress-tested against real enterprise edge cases — specifically:
+
+- User's stated preference conflicts with a later instruction
+- Two agents share a user and have conflicting contracts
+- Contract rules that are context-dependent (exactly our per-context-space behavioral contracts problem)
+
+**Action:** Read LMOS's contract specification on GitHub before Kernos's behavioral contracts get battle-tested by real users. Not suggesting adopting LMOS (enterprise Java, architecturally different), but their spec would surface failure modes worth designing against — especially the shared-agent scenarios (household, plumber's clients) we identified in 1B.5 discussions.
+
+**Timing:** Before Phase 2 behavioral contract evolution spec.
+
+### The Build vs. Borrow Split
+
+**Source:** Kit's closing observation on the SPEC-1B7 review.
+
+The architectural inversion — kernel owns memory, agent just reasons — is genuinely novel in how KERNOS applies it. Most systems that claim this either break it immediately (agents that cache their own context) or don't actually implement the kernel side. That's worth owning and building custom.
+
+The retrieval layer is where reinvention risk is highest. "Given everything the kernel knows, what subset is relevant to assemble for this agent at this moment?" is a hard, well-studied problem. The specific answer KERNOS needs (kernel-assembled, tenant-isolated, durability-aware) is different enough from off-the-shelf solutions that pure adoption probably doesn't work. But the retrieval mechanisms — embedding similarity, graph traversal, recency weighting — are solved problems.
+
+**The practical split for Phase 2:** Own the assembly architecture (context spaces, inline annotation, posture-aware retrieval). Borrow the retrieval mechanisms (entity resolution, embedding search, graph traversal). This means studying Mem0 and MemOS implementations before writing specs, not after.
+
+---
+
+## 12. OPEN QUESTIONS — NO ANSWER YET
 
 These are genuinely unresolved. Not deferred because of prioritization — deferred because we don't have an answer.
 
