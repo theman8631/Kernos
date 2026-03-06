@@ -24,6 +24,7 @@ from kernos.kernel.exceptions import (
 logger = logging.getLogger(__name__)
 
 _PROVIDER = "anthropic"
+_SIMPLE_MODEL = "claude-sonnet-4-6"  # Used by complete_simple(); cheap routing is Phase 2
 
 
 def _now_iso() -> str:
@@ -213,6 +214,28 @@ class ReasoningService:
         self._events = events
         self._mcp = mcp
         self._audit = audit
+
+    async def complete_simple(
+        self,
+        system_prompt: str,
+        user_content: str,
+        max_tokens: int = 512,
+        prefer_cheap: bool = False,
+    ) -> str:
+        """Single stateless completion. No tools, no history, no task events.
+
+        Used by kernel infrastructure (extraction, consolidation) not by agents.
+        Returns raw text response. prefer_cheap is reserved for Phase 2 routing.
+        """
+        response = await self._provider.complete(
+            model=_SIMPLE_MODEL,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+            tools=[],
+            max_tokens=max_tokens,
+        )
+        text_parts = [b.text for b in response.content if b.type == "text"]
+        return "".join(text_parts)
 
     async def reason(self, request: ReasoningRequest) -> ReasoningResult:
         """Run a full reasoning turn, including tool-use loop.

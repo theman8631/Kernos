@@ -36,6 +36,9 @@ class EventType(str, Enum):
     AGENT_HATCHED = "agent.hatched"
     AGENT_BOOTSTRAP_GRADUATED = "agent.bootstrap_graduated"
 
+    # Knowledge
+    KNOWLEDGE_EXTRACTED = "knowledge.extracted"
+
     # System
     SYSTEM_STARTED = "system.started"
     SYSTEM_STOPPED = "system.stopped"

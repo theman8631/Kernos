@@ -95,6 +95,8 @@ def _make_mock_handler(tools: list[dict] | None = None):
     state.get_soul.return_value = None
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
+    state.get_knowledge_hashes.return_value = set()
+    state.query_knowledge.return_value = []
 
     # Same events and audit mocks shared between handler and ReasoningService
     mock_provider = AsyncMock(spec=Provider)
@@ -220,7 +222,8 @@ async def test_message_sent_has_content():
 
     emitted = [c.args[0] for c in handler.events.emit.call_args_list]
     ms = next(e for e in emitted if e.type == EventType.MESSAGE_SENT)
-    assert ms.payload["content"] == "I'm good!"
+    # Name ask may be appended on first interaction (soul has no user_name)
+    assert ms.payload["content"].startswith("I'm good!")
 
 
 async def test_all_events_have_tenant_id():

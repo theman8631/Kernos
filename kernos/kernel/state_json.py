@@ -122,6 +122,39 @@ class JsonStateStore(StateStore):
             results.append(entry)
         return results[:limit]
 
+    async def save_knowledge_entry(self, entry: KnowledgeEntry) -> None:
+        """Upsert a KnowledgeEntry by ID."""
+        path = self._state_dir(entry.tenant_id) / "knowledge.json"
+        raw = self._read_json(path, [])
+        for i, d in enumerate(raw):
+            if d.get("id") == entry.id:
+                raw[i] = asdict(entry)
+                self._write_json(path, raw)
+                return
+        raw.append(asdict(entry))
+        self._write_json(path, raw)
+
+    async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
+        """Return content_hash values for all active entries."""
+        path = self._state_dir(tenant_id) / "knowledge.json"
+        raw = self._read_json(path, [])
+        return {
+            d["content_hash"]
+            for d in raw
+            if d.get("active", True) and d.get("content_hash")
+        }
+
+    async def get_knowledge_by_hash(
+        self, tenant_id: str, content_hash: str
+    ) -> KnowledgeEntry | None:
+        """Find an active entry by content_hash."""
+        path = self._state_dir(tenant_id) / "knowledge.json"
+        raw = self._read_json(path, [])
+        for d in raw:
+            if d.get("content_hash") == content_hash and d.get("active", True):
+                return KnowledgeEntry(**d)
+        return None
+
     async def update_knowledge(self, tenant_id: str, entry_id: str, updates: dict) -> None:
         """Find and update a knowledge entry by ID, scoped to the given tenant."""
         path = self._state_dir(tenant_id) / "knowledge.json"

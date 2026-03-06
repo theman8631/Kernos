@@ -4,10 +4,17 @@ Current understanding of the user and their world. The query surface for
 context assembly. Four domains: tenant profile, user knowledge, behavioral
 contracts, conversation summaries.
 """
+import hashlib
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _content_hash(tenant_id: str, subject: str, content: str) -> str:
+    """SHA256[:16] of (tenant_id|subject|content) for deduplication."""
+    raw = f"{tenant_id}|{subject.lower().strip()}|{content.lower().strip()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 from kernos.kernel.soul import Soul
 
@@ -64,6 +71,9 @@ class KnowledgeEntry:
     last_referenced: str
     tags: list[str]
     active: bool = True         # False = archived (never deleted)
+    supersedes: str = ""        # ID of the entry this one replaces (provenance chain)
+    durability: str = "permanent"  # "permanent" | "session" | "expires_at:<ISO>"
+    content_hash: str = ""      # SHA256[:16] of (tenant_id|subject|content) for dedup
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +184,23 @@ class StateStore(ABC):
 
     @abstractmethod
     async def update_knowledge(self, tenant_id: str, entry_id: str, updates: dict) -> None: ...
+
+    @abstractmethod
+    async def save_knowledge_entry(self, entry: KnowledgeEntry) -> None:
+        """Upsert a KnowledgeEntry by ID (write or overwrite)."""
+        ...
+
+    @abstractmethod
+    async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
+        """Return set of content_hash values for all active entries. O(1) dedup check."""
+        ...
+
+    @abstractmethod
+    async def get_knowledge_by_hash(
+        self, tenant_id: str, content_hash: str
+    ) -> "KnowledgeEntry | None":
+        """Find an active entry by content_hash. Returns None if not found."""
+        ...
 
     # Behavioral Contracts
     @abstractmethod

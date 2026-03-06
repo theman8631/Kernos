@@ -108,11 +108,13 @@ async def cmd_knowledge(args) -> None:
     print(f"  Knowledge: {args.tenant_id}  ({len(entries)} entries)")
     print(f"{'─' * 60}")
     for e in entries:
-        print(f"\n[{e.id}] {e.category} — {e.subject}")
-        print(f"  {e.content}")
-        print(f"  confidence: {e.confidence} | source: {e.source_description}")
-        if e.tags:
-            print(f"  tags: {', '.join(e.tags)}")
+        status = "" if e.active else "[archived] "
+        print(f"\n  {status}[{e.confidence}] {e.category}: \"{e.content}\" ({e.created_at[:10]})")
+        print(f"    subject: {e.subject} | durability: {e.durability}")
+        if e.supersedes:
+            print(f"    supersedes: {e.supersedes}")
+        if not e.active:
+            print(f"    (inactive)")
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from kernos.kernel.exceptions import (
     ReasoningTimeoutError,
 )
 from kernos.kernel.reasoning import ReasoningRequest, ReasoningService
+from kernos.kernel.projectors.coordinator import run_projectors
 from kernos.kernel.soul import Soul
 from kernos.kernel.task import Task, TaskType, generate_task_id
 from kernos.kernel.template import AgentTemplate, PRIMARY_TEMPLATE
@@ -76,6 +77,21 @@ def _format_contracts(rules: list[ContractRule]) -> str:
         label = rule.rule_type.replace("_", " ").upper()
         lines.append(f"{label}: {rule.description}")
     return "\n".join(lines)
+
+
+def _maybe_append_name_ask(response_text: str, soul: Soul) -> str:
+    """On the first interaction, if name still unknown, append a natural name question.
+
+    Only fires on the very first message (interaction_count == 0, before the post-
+    response increment). Only if Tier 1 didn't catch a name. Only if the response
+    doesn't already contain a name question.
+    """
+    if soul.interaction_count != 0 or soul.user_name:
+        return response_text
+    name_question_signals = ["your name", "call you", "who am i talking", "what should i call"]
+    if any(signal in response_text.lower() for signal in name_question_signals):
+        return response_text
+    return response_text.rstrip() + "\n\nBy the way — what should I call you?"
 
 
 def _is_soul_mature(soul: Soul) -> bool:
@@ -252,6 +268,44 @@ class MessageHandler:
             logger.info("Initialized new soul for tenant: %s", tenant_id)
         return soul
 
+    async def _consolidate_bootstrap(self, soul: Soul) -> None:
+        """One-time consolidation: bootstrap wisdom → soul personality notes.
+
+        Uses complete_simple() — stateless, no tools, no task events.
+        Graduation is unconditional: if this call fails, soul still graduates.
+        """
+        from kernos.kernel.template import PRIMARY_TEMPLATE
+
+        prompt = (
+            "You are reflecting on your first interactions with a user.\n\n"
+            f"Bootstrap intent:\n{PRIMARY_TEMPLATE.bootstrap_prompt}\n\n"
+            f"What you've learned:\n"
+            f"- Name: {soul.user_name or 'unknown'}\n"
+            f"- Context: {soul.user_context or 'unknown'}\n"
+            f"- Style: {soul.communication_style or 'unknown'}\n"
+            f"- Interactions: {soul.interaction_count}\n\n"
+            "Write 2-3 sentences of personality notes — how you'll approach "
+            "this person, what matters to them, what tone fits. Be specific. "
+            "Don't repeat facts already captured above. Write for the agent, "
+            "not the user."
+        )
+        try:
+            notes = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "You are writing internal notes for an AI agent about their "
+                    "relationship with a specific user."
+                ),
+                user_content=prompt,
+                max_tokens=200,
+            )
+            soul.personality_notes = notes.strip()
+        except Exception as exc:
+            logger.warning(
+                "Bootstrap consolidation failed for %s: %s — graduating without consolidation",
+                soul.tenant_id,
+                exc,
+            )
+
     async def _post_response_soul_update(self, soul: Soul) -> None:
         """Update the soul after a successful response.
 
@@ -282,8 +336,9 @@ class MessageHandler:
 
         soul.interaction_count += 1
 
-        # Check bootstrap graduation (maturity gate — no consolidation call in 1B.5)
+        # Check bootstrap graduation: consolidate, then graduate
         if not soul.bootstrap_graduated and _is_soul_mature(soul):
+            await self._consolidate_bootstrap(soul)
             soul.bootstrap_graduated = True
             soul.bootstrap_graduated_at = now
             try:
@@ -417,6 +472,21 @@ class MessageHandler:
         try:
             task = await self.engine.execute(task, request)
             response_text = task.result_text
+
+            # Tier 1 runs sync (updates soul.user_name / communication_style if found).
+            # Tier 2 fires as a background task (does not block the response).
+            await run_projectors(
+                user_message=message.content,
+                recent_turns=history[-4:],
+                soul=soul,
+                state=self.state,
+                events=self.events,
+                reasoning_service=self.reasoning,
+                tenant_id=tenant_id,
+            )
+
+            # Append name ask on first interaction if name still unknown after Tier 1
+            response_text = _maybe_append_name_ask(response_text, soul)
 
         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
             logger.error(

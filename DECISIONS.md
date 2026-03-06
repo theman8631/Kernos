@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B.5 — Agent templates + CLI
+**Status:** Phase 1B.7 — Memory Projectors
 **Owner:** Founder
-**Action:** Live verification — run the test table in `specs/completed/SPEC-1B5-AGENT-TEMPLATES.md`. Delete existing soul.json for your tenant (or use a fresh Discord account) and walk through steps 0–9.
+**Action:** Live verification — run the test table in `specs/completed/SPEC-1B7-MEMORY-PROJECTORS.md`. Send a few messages introducing yourself, stating your name and occupation, then run `./kernos-cli soul <tenant_id>` and `./kernos-cli knowledge <tenant_id>` to confirm Tier 1 name extraction and Tier 2 knowledge entries persisted.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -38,6 +38,7 @@ Building the kernel layer that transforms a chatbot-with-tools into an intellige
 | 1B.4 | Task Engine (minimal) | COMPLETE | 2026-03-03 | Task dataclass + lifecycle, TaskEngine wraps reasoning, task.created/completed/failed events, handler delegates via engine. |
 | 1B.5 | Agent templates + CLI | CODE COMPLETE | — | Template + Soul datamodels, hatch process, template-driven prompt assembly, CLI soul/contracts/capabilities fixes. Live verification pending. |
 | 1B.6 | Tenant isolation verification + test suite | CODE COMPLETE | — | 65 new tests across test_isolation.py + test_kernel_integrity.py; _safe_name hardened + consolidated; update_knowledge/update_contract_rule tenant-scoped |
+| 1B.7 | Memory Projectors | CODE COMPLETE | — | Two-tier extraction: Tier 1 rule-based (sync, zero cost), Tier 2 LLM (async background). Dedup, confidence precedence, corrections/supersedes chain. 70 new tests in test_projectors.py. |
 
 ### Phase 1B Completion Criteria (from Blueprint + outline)
 
@@ -71,12 +72,25 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-**SPEC-1B6-TENANT-ISOLATION.md** — code complete. Live verification: N/A (test infrastructure deliverable).
-Full spec at `specs/completed/SPEC-1B6-TENANT-ISOLATION.md`.
+**SPEC-1B7-MEMORY-PROJECTORS.md** — code complete. Live verification required.
+Full spec at `specs/completed/SPEC-1B7-MEMORY-PROJECTORS.md`.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-05: Phase 1B.7 — Memory Projectors code complete
+
+- **What:** Two-tier memory extraction pipeline that transforms raw conversation into structured soul and knowledge store entries — zero extra latency for the user.
+- **Tier 1 (synchronous, zero LLM cost):** Rule-based extraction of `user_name` and `communication_style` from user messages. Fires before the response is returned. Conservative: only writes to empty soul fields; corrections require Tier 2's contextual understanding. False-positive name protection (`_FALSE_POSITIVE_NAMES` blocklist). Emits `knowledge.extracted` event when fields are updated.
+- **Tier 2 (async background, LLM):** `asyncio.create_task` fires `run_tier2_extraction()` after response is assembled. LLM extracts entities, facts, preferences, and corrections. Deduplication via SHA256[:16] content hash (O(1) lookup). Confidence precedence: stated entries displace inferred; inferred entries are silently discarded if a stated entry for the same subject already exists. Corrections create supersedes chains — old entry marked `active=False`, new entry references old ID. Permanent user-subject facts appended to `soul.user_context`.
+- **Bootstrap consolidation:** `_consolidate_bootstrap()` called on soul maturity (user_name + user_context + communication_style + interaction_count ≥ 10). Uses `complete_simple()` to summarize personality into `soul.personality_notes`, then sets `bootstrap_graduated=True`.
+- **complete_simple():** New `ReasoningService` method for kernel infrastructure calls — no tools, no history, no task events. Stateless single-shot LLM call used by Tier 2 and consolidation.
+- **Name ask:** `_maybe_append_name_ask()` appends "By the way — what should I call you?" to the first response if the soul has no `user_name` and the response doesn't already ask.
+- **Soul field added:** `emoji: str = ""` — self-chosen identity marker that emerges from conversation.
+- **New files:** `kernos/kernel/projectors/__init__.py`, `rules.py`, `llm_extractor.py`, `coordinator.py`.
+- **Tests:** 70 new tests in `tests/test_projectors.py`. Total: 367 passing.
+- **Full spec:** `specs/completed/SPEC-1B7-MEMORY-PROJECTORS.md`
 
 ### 2026-03-05: Phase 1B.6 — Tenant Isolation Verification + Test Suite code complete
 
@@ -232,4 +246,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-05 (1B.6 code complete — tenant isolation verified, Phase 1B kernel complete pending 1B.5 live verification)*
+*Last updated: 2026-03-05 (1B.7 code complete — memory projectors, Tier 1 + Tier 2 extraction, 367 tests passing)*

@@ -104,9 +104,18 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.save_tenant_profile.return_value = None
-    state.get_soul.return_value = None
+    # Return a hatched soul with user_name set so name-ask doesn't fire.
+    # Tests that specifically test first-interaction behavior use their own setup.
+    state.get_soul.return_value = Soul(
+        tenant_id="sms:+15555550100",
+        user_name="TestUser",
+        hatched=True,
+        interaction_count=5,
+    )
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
+    state.get_knowledge_hashes.return_value = set()
+    state.query_knowledge.return_value = []
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry(tools)
@@ -434,9 +443,13 @@ async def test_handler_uses_task_result_text_as_response():
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.save_tenant_profile.return_value = None
-    state.get_soul.return_value = None
+    state.get_soul.return_value = Soul(
+        tenant_id="sms:+15555550100", user_name="TestUser", hatched=True, interaction_count=5
+    )
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
+    state.get_knowledge_hashes.return_value = set()
+    state.query_knowledge.return_value = []
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry()

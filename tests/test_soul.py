@@ -318,6 +318,8 @@ def _make_handler_with_state():
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
     state.get_contract_rules.return_value = default_contract_rules("t1", _now())
+    state.get_knowledge_hashes.return_value = set()
+    state.query_knowledge.return_value = []
 
     registry = MagicMock(spec=CapabilityRegistry)
     registry.get_connected_tools.return_value = []
@@ -339,7 +341,8 @@ async def test_hatch_creates_and_marks_soul():
 
     result = await handler.process(_make_normalized_message())
 
-    assert result == "Hello! Nice to meet you."
+    # Name ask is appended on first interaction (soul starts with no user_name)
+    assert result.startswith("Hello! Nice to meet you.")
     # Soul was initialized (get_soul returned None, so save_soul was called)
     assert state.save_soul.call_count >= 1
     # The soul passed to the second save (post-response) should be hatched
