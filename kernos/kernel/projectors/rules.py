@@ -97,8 +97,10 @@ def _extract_name(message: str) -> str:
             candidate = match.group(1).strip().lower()
             if candidate in _FALSE_POSITIVE_NAMES or len(candidate) < 2:
                 continue
-            # Return capitalized form
-            return match.group(1).strip().capitalize()
+            # Preserve user's original casing (keeps "JT" as "JT"),
+            # just ensure the first character is uppercase.
+            original = match.group(1).strip()
+            return original[0].upper() + original[1:]
     return ""
 
 
