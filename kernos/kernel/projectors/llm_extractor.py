@@ -308,7 +308,7 @@ async def _apply_correction(
 
     # Update soul fields if the correction maps to one
     field_lower = field.lower()
-    if field_lower in ("user_name", "name") and new_value:
+    if field_lower in ("user_name", "name", "user.name", "username") and new_value:
         soul.user_name = new_value
         await state.save_soul(soul)
 

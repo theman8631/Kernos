@@ -431,6 +431,22 @@ async def test_apply_correction_updates_soul_name():
     state.save_soul.assert_called_once_with(soul)
 
 
+async def test_apply_correction_updates_soul_name_dot_notation():
+    state = _mock_state()
+    events = _mock_events()
+    state.query_knowledge.return_value = []
+    soul = _soul(user_name="Alice")
+
+    await _apply_correction(
+        state=state, events=events, soul=soul, tenant_id="t1",
+        field="user.name", old_value="Alice", new_value="JT",
+        now="2026-01-01T00:00:00+00:00",
+    )
+
+    assert soul.user_name == "JT"
+    state.save_soul.assert_called_once_with(soul)
+
+
 async def test_apply_correction_no_old_entry_still_creates_new():
     state = _mock_state()
     events = _mock_events()
