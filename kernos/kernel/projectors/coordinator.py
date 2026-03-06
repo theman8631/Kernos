@@ -37,7 +37,7 @@ async def run_projectors(
     soul_updated = False
     updated_fields = []
 
-    if t1_result.user_name and not soul.user_name:
+    if t1_result.user_name and t1_result.user_name != soul.user_name:
         soul.user_name = t1_result.user_name
         soul_updated = True
         updated_fields.append("user_name")

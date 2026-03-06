@@ -138,9 +138,10 @@ def test_tier1_false_positive_new():
     assert result.user_name == ""
 
 
-def test_tier1_skips_name_if_already_set():
+def test_tier1_extracts_name_even_if_already_set():
+    # Name is always authoritative — "my name is Alice" overwrites previous value
     result = tier1_extract("my name is Alice", current_name="Bob")
-    assert result.user_name == ""
+    assert result.user_name == "Alice"
 
 
 def test_tier1_rejects_single_char_name():
@@ -706,7 +707,8 @@ async def test_coordinator_tier1_emits_event_on_update():
     assert "user_name" in event.payload["fields_updated"]
 
 
-async def test_coordinator_tier1_does_not_overwrite_existing_name():
+async def test_coordinator_tier1_overwrites_existing_name():
+    # Stated name is always authoritative — coordinator updates even if already set
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
@@ -720,7 +722,26 @@ async def test_coordinator_tier1_does_not_overwrite_existing_name():
             reasoning_service=reasoning, tenant_id="t1",
         )
 
-    assert soul.user_name == "Bob"
+    assert soul.user_name == "Alice"
+    state.save_soul.assert_called_with(soul)
+
+
+async def test_coordinator_tier1_no_save_when_name_unchanged():
+    # Same name → no unnecessary write
+    state = _mock_state()
+    events = _mock_events()
+    reasoning = MagicMock()
+    soul = _soul(user_name="Alice")
+
+    with patch("kernos.kernel.projectors.coordinator.asyncio.create_task"):
+        await run_projectors(
+            user_message="my name is Alice",
+            recent_turns=[],
+            soul=soul, state=state, events=events,
+            reasoning_service=reasoning, tenant_id="t1",
+        )
+
+    assert soul.user_name == "Alice"
     state.save_soul.assert_not_called()
 
 

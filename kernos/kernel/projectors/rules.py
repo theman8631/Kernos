@@ -72,12 +72,15 @@ def tier1_extract(
 ) -> Tier1Result:
     """Extract user_name and communication_style from the user's message.
 
-    Only extracts if the corresponding soul field is currently empty.
+    user_name: always extracted when a pattern matches — the user's stated name
+    is always authoritative, regardless of what was previously stored.
+
+    communication_style: only extracted if currently empty — style preferences
+    are less likely to be corrected mid-conversation via simple patterns.
     """
     result = Tier1Result()
 
-    if not current_name:
-        result.user_name = _extract_name(user_message)
+    result.user_name = _extract_name(user_message)
 
     if not current_style:
         result.communication_style = _extract_style(user_message.lower())
