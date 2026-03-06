@@ -20,6 +20,7 @@ class Soul:
 
     # Identity
     agent_name: str = ""          # May be empty initially; can emerge from conversation
+    emoji: str = ""               # Self-chosen identity marker, emerges from conversation
     personality_notes: str = ""   # Free-text personality profile, updated over time
 
     # User relationship
