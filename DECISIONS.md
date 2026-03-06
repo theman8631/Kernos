@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B.7 — Memory Projectors
-**Owner:** Founder
-**Action:** Live verification — run the test table in `specs/completed/SPEC-1B7-MEMORY-PROJECTORS.md`. Send a few messages introducing yourself, stating your name and occupation, then run `./kernos-cli soul <tenant_id>` and `./kernos-cli knowledge <tenant_id>` to confirm Tier 1 name extraction and Tier 2 knowledge entries persisted.
+**Status:** Phase 1B COMPLETE — Housekeeping before Phase 2
+**Owner:** Architect
+**Action:** Produce Technical Architecture Document and organize project documentation
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -26,7 +26,7 @@ All deliverables live-verified. Full pipeline working: message in via Discord, C
 | 1A.3 | Google Calendar via MCP | COMPLETE | 2026-02-28 | Real calendar data via Discord |
 | 1A.4 | Basic persistence | COMPLETE | 2026-03-01 | Three-store separation, shadow archive, auto-provisioning |
 
-### Phase 1B: The Kernel — IN PROGRESS
+### Phase 1B: The Kernel — COMPLETE
 
 Building the kernel layer that transforms a chatbot-with-tools into an intelligent operating system. See `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md` for the full design.
 
@@ -36,9 +36,9 @@ Building the kernel layer that transforms a chatbot-with-tools into an intellige
 | 1B.2 | Reasoning Service abstraction | COMPLETE | 2026-03-03 | Provider ABC, AnthropicProvider, ReasoningService owns tool-use loop. Handler imports zero SDK code. |
 | 1B.3 | Capability Graph formalization | COMPLETE | 2026-03-03 | Three-tier registry, known.py catalog, build_capability_prompt(), CLI capabilities command. |
 | 1B.4 | Task Engine (minimal) | COMPLETE | 2026-03-03 | Task dataclass + lifecycle, TaskEngine wraps reasoning, task.created/completed/failed events, handler delegates via engine. |
-| 1B.5 | Agent templates + CLI | CODE COMPLETE | — | Template + Soul datamodels, hatch process, template-driven prompt assembly, CLI soul/contracts/capabilities fixes. Live verification pending. |
-| 1B.6 | Tenant isolation verification + test suite | CODE COMPLETE | — | 65 new tests across test_isolation.py + test_kernel_integrity.py; _safe_name hardened + consolidated; update_knowledge/update_contract_rule tenant-scoped |
-| 1B.7 | Memory Projectors | CODE COMPLETE | — | Two-tier extraction: Tier 1 rule-based (sync, zero cost), Tier 2 LLM (async background). Dedup, confidence precedence, corrections/supersedes chain. 70 new tests in test_projectors.py. |
+| 1B.5 | Agent templates + CLI | COMPLETE | 2026-03-05 | Template + Soul datamodels, hatch process, template-driven prompt assembly, CLI soul/contracts/capabilities fixes. |
+| 1B.6 | Tenant isolation verification + test suite | COMPLETE | 2026-03-05 | 65 new tests across test_isolation.py + test_kernel_integrity.py; _safe_name hardened + consolidated; update_knowledge/update_contract_rule tenant-scoped |
+| 1B.7 | Memory Projectors | COMPLETE | 2026-03-06 | Two-tier extraction: Tier 1 rule-based (sync, zero cost), Tier 2 LLM (async background). Dedup, confidence precedence, corrections/supersedes chain. 70 new tests in test_projectors.py. |
 
 ### Phase 1B Completion Criteria (from Blueprint + outline)
 
@@ -72,12 +72,19 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-**SPEC-1B7-MEMORY-PROJECTORS.md** — code complete. Live verification required.
-Full spec at `specs/completed/SPEC-1B7-MEMORY-PROJECTORS.md`.
+Phase 1B complete. No active spec. Next: Phase 2 planning after housekeeping.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-06: Phase 1B — The Kernel — COMPLETE
+
+- **What:** All 7 deliverables verified. 369+ tests passing. Kernel has: event stream, state store, reasoning service abstraction, capability graph, task engine, agent soul with personality and identity, behavioral contracts, tenant isolation, and memory projectors. The agent hatches, learns, remembers, and will graduate its bootstrap. Standard met: functional value of OpenClaw or better on the kernel layer, with architectural elements (kernel-owned memory, behavioral contracts, multi-tenancy, shadow archive) that exceed it.
+
+### 2026-03-06: Phase 1B.7 — Basic Memory Projectors complete
+
+- **What:** Two-tier extraction pipeline: Tier 1 rule-based (name + style, sync, zero cost), Tier 2 LLM-based (entities, facts, preferences, corrections, async). Soul learns from conversations. Bootstrap graduation enabled via soul maturity signals. KnowledgeEntry gains durability, content_hash, supersedes fields. ReasoningService gains `complete_simple()` for kernel infrastructure calls. Name correction verified live (John → JT).
 
 ### 2026-03-05: Phase 1B.7 — Memory Projectors code complete
 
@@ -174,6 +181,15 @@ Full spec at `specs/completed/SPEC-1B7-MEMORY-PROJECTORS.md`.
 
 ---
 
+## Phase 2 Preparation
+
+- **Research produced:** Four research papers in `Development Research/` covering structured outputs, entity resolution, memory staleness, and behavioral contract enforcement.
+- **Technical Architecture Document:** Needed before Phase 2 spec writing — captures the as-built kernel architecture, interfaces, data flows, and extension points.
+- **Pre-Phase-2 improvement:** Structured output retrofit for `complete_simple()` — replace JSON-in-prompt with native structured output support for more reliable Tier 2 extraction.
+- **Research lead:** Kit (OSBuilder) established as research lead for Phase 2 inputs.
+
+---
+
 ## Open Questions
 
 - **Twilio A2P registration:** Submitted, pending approval. Doesn't block development. When approved, SMS adapter lights up with zero code changes.
@@ -246,4 +262,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-05 (1B.7 code complete — memory projectors, Tier 1 + Tier 2 extraction, 367 tests passing)*
+*Last updated: 2026-03-06 (Phase 1B COMPLETE — all 7 deliverables verified, 369 tests passing)*
