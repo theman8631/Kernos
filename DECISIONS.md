@@ -6,7 +6,7 @@
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
-> **What this file is:** The bridge between planning and execution. The founder and Claude (architect) plan here. Claude Code executes against the Active Spec section. Read `KERNOS-BLUEPRINT.md` for full vision and architecture. Read `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md` for the kernel design that governs Phase 1B. If something in this file conflicts with those documents, this file wins (it represents more recent decisions).
+> **What this file is:** The bridge between planning and execution. The founder and Claude (architect) plan here. Claude Code executes against the Active Spec section. Read `docs/BLUEPRINT.md` for full vision and architecture. Read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel design that governs Phase 1B. If something in this file conflicts with those documents, this file wins (it represents more recent decisions).
 >
 > **Rule:** Claude Code reads this file first, then executes the Active Spec. Don't jump ahead to future phases. Don't build things not in the current spec.
 
@@ -28,7 +28,7 @@ All deliverables live-verified. Full pipeline working: message in via Discord, C
 
 ### Phase 1B: The Kernel — COMPLETE
 
-Building the kernel layer that transforms a chatbot-with-tools into an intelligent operating system. See `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md` for the full design.
+Building the kernel layer that transforms a chatbot-with-tools into an intelligent operating system. See `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the full design.
 
 | ID | Deliverable | Status | Verified | Notes |
 |---|---|---|---|---|
@@ -183,7 +183,7 @@ Phase 1B complete. No active spec. Next: Phase 2 planning after housekeeping.
 
 ## Phase 2 Preparation
 
-- **Research produced:** Four research papers in `Development Research/` covering structured outputs, entity resolution, memory staleness, and behavioral contract enforcement.
+- **Research produced:** Four research papers in `research/` covering structured outputs, entity resolution, memory staleness, and behavioral contract enforcement.
 - **Technical Architecture Document:** Needed before Phase 2 spec writing — captures the as-built kernel architecture, interfaces, data flows, and extension points.
 - **Pre-Phase-2 improvement:** Structured output retrofit for `complete_simple()` — replace JSON-in-prompt with native structured output support for more reliable Tier 2 extraction.
 - **Research lead:** Kit (OSBuilder) established as research lead for Phase 2 inputs.

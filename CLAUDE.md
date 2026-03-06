@@ -2,17 +2,17 @@
 
 ## Project: KERNOS
 
-A personal agentic operating system. Full vision and architecture: `KERNOS-BLUEPRINT.md`.
+A personal agentic operating system. Full vision and architecture: `docs/BLUEPRINT.md`.
 
 ## Before You Do Anything
 
 1. **Read `DECISIONS.md` first.** It contains the Active Spec you should execute, recent architectural decisions, and open questions. If something in DECISIONS.md conflicts with the Blueprint, DECISIONS.md wins (it's more recent).
-2. **Read `KERNOS-BLUEPRINT.md`** for full architectural context — the six pillars, four design principles, and phase structure.
+2. **Read `docs/BLUEPRINT.md`** for full architectural context — the six pillars, four design principles, and phase structure.
 3. **Execute only the Active Spec** in DECISIONS.md. Don't jump ahead to future phases. Don't build things not in the current spec.
 
 ## Kernel Architecture Context
 
-For Phase 1B work, read `specs/KERNEL-ARCHITECTURE-OUTLINE-v2.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
+For Phase 1B work, read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
 
 - **Event emission is best-effort.** Every `emit()` call is wrapped in try/except. Event logging failures never break the user's message flow.
 - **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.
