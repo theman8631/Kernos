@@ -131,7 +131,7 @@ async def test_query_knowledge_active_only(tmp_path):
     store = JsonStateStore(tmp_path)
     entry = _make_knowledge()
     await store.add_knowledge(entry)
-    await store.update_knowledge(entry.id, {"active": False})
+    await store.update_knowledge("t1", entry.id, {"active": False})
 
     active = await store.query_knowledge("t1", active_only=True)
     all_entries = await store.query_knowledge("t1", active_only=False)
@@ -181,7 +181,7 @@ async def test_update_knowledge(tmp_path):
     entry = _make_knowledge()
     await store.add_knowledge(entry)
     await store.update_knowledge(
-        entry.id, {"content": "Alice is a developer", "confidence": "observed"}
+        "t1", entry.id, {"content": "Alice is a developer", "confidence": "observed"}
     )
     results = await store.query_knowledge("t1")
     assert results[0].content == "Alice is a developer"
@@ -193,7 +193,7 @@ async def test_update_knowledge_shadow_archive(tmp_path):
     store = JsonStateStore(tmp_path)
     entry = _make_knowledge()
     await store.add_knowledge(entry)
-    await store.update_knowledge(entry.id, {"active": False})
+    await store.update_knowledge("t1", entry.id, {"active": False})
 
     active = await store.query_knowledge("t1", active_only=True)
     archived = await store.query_knowledge("t1", active_only=False)
@@ -264,7 +264,7 @@ async def test_get_contract_rules_active_only(tmp_path):
     for rule in rules:
         await store.add_contract_rule(rule)
 
-    await store.update_contract_rule(rules[0].id, {"active": False})
+    await store.update_contract_rule("t1", rules[0].id, {"active": False})
 
     active = await store.get_contract_rules("t1", active_only=True)
     all_r = await store.get_contract_rules("t1", active_only=False)
@@ -288,7 +288,7 @@ async def test_update_contract_rule(tmp_path):
         updated_at=now,
     )
     await store.add_contract_rule(rule)
-    await store.update_contract_rule("rule_test", {"description": "Updated description"})
+    await store.update_contract_rule("t1", "rule_test", {"description": "Updated description"})
 
     rules = await store.get_contract_rules("t1", active_only=False)
     assert rules[0].description == "Updated description"

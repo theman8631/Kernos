@@ -56,8 +56,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _safe_name(s: str) -> str:
-    return s.replace(":", "_").replace("/", "_").replace("\\", "_")
+from kernos.utils import _safe_name
 
 
 # ---------------------------------------------------------------------------

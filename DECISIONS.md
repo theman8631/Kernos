@@ -37,7 +37,7 @@ Building the kernel layer that transforms a chatbot-with-tools into an intellige
 | 1B.3 | Capability Graph formalization | COMPLETE | 2026-03-03 | Three-tier registry, known.py catalog, build_capability_prompt(), CLI capabilities command. |
 | 1B.4 | Task Engine (minimal) | COMPLETE | 2026-03-03 | Task dataclass + lifecycle, TaskEngine wraps reasoning, task.created/completed/failed events, handler delegates via engine. |
 | 1B.5 | Agent templates + CLI | CODE COMPLETE | — | Template + Soul datamodels, hatch process, template-driven prompt assembly, CLI soul/contracts/capabilities fixes. Live verification pending. |
-| 1B.6 | Tenant isolation verification + test suite | NOT STARTED | — | Prove two tenants can't see each other's data across all structures |
+| 1B.6 | Tenant isolation verification + test suite | CODE COMPLETE | — | 65 new tests across test_isolation.py + test_kernel_integrity.py; _safe_name hardened + consolidated; update_knowledge/update_contract_rule tenant-scoped |
 
 ### Phase 1B Completion Criteria (from Blueprint + outline)
 
@@ -71,12 +71,21 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-**SPEC-1B5-AGENT-TEMPLATES.md** — code complete, pending live verification.
-Full spec at `specs/completed/SPEC-1B5-AGENT-TEMPLATES.md`.
+**SPEC-1B6-TENANT-ISOLATION.md** — code complete. Live verification: N/A (test infrastructure deliverable).
+Full spec at `specs/completed/SPEC-1B6-TENANT-ISOLATION.md`.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-05: Phase 1B.6 — Tenant Isolation Verification + Test Suite code complete
+
+- **What:** Exhaustive proof that multi-tenancy isolation holds across every data structure. No new features — verification and two security fixes.
+- **Security fixes:** `update_knowledge` and `update_contract_rule` previously scanned all tenant directories to find an entry by ID — a cross-tenant data mutation vulnerability. Both now require `tenant_id` and scope exclusively to that tenant's directory.
+- **_safe_name hardening:** Three duplicate `_safe_name` implementations consolidated into one shared `kernos/utils.py`. Hardened to strip `..` (path traversal), null bytes, and handle empty strings. All three callers (`events.py`, `persistence/json_file.py`, `state_json.py`) now import from there.
+- **New tests:** `tests/test_isolation.py` (43 tests) — cross-tenant isolation for conversations, events, state store (profile, soul, knowledge, contracts, summaries), tenant store, audit store, path traversal attempts, malformed inputs, _safe_name coverage. `tests/test_kernel_integrity.py` (22 tests) — restart survival (soul, profile, contracts, events, summaries, knowledge), event completeness and ordering, cost tracking accuracy, shadow archive, behavioral contract defaults.
+- **Total tests:** 297 passing (up from 232).
+- **Full spec:** `specs/completed/SPEC-1B6-TENANT-ISOLATION.md`
 
 ### 2026-03-04: Phase 1B.5 — Agent Templates + CLI code complete
 
@@ -223,4 +232,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-04 (1B.5 code complete, live verification pending)*
+*Last updated: 2026-03-05 (1B.6 code complete — tenant isolation verified, Phase 1B kernel complete pending 1B.5 live verification)*

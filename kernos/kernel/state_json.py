@@ -28,8 +28,7 @@ from kernos.kernel.state import (
 logger = logging.getLogger(__name__)
 
 
-def _safe_name(s: str) -> str:
-    return s.replace(":", "_").replace("/", "_").replace("\\", "_")
+from kernos.utils import _safe_name
 
 
 class JsonStateStore(StateStore):
@@ -123,21 +122,19 @@ class JsonStateStore(StateStore):
             results.append(entry)
         return results[:limit]
 
-    async def update_knowledge(self, entry_id: str, updates: dict) -> None:
-        """Find and update a knowledge entry by ID, scanning all tenant dirs."""
-        for tenant_dir in self._data_dir.iterdir():
-            if not tenant_dir.is_dir():
-                continue
-            path = tenant_dir / "state" / "knowledge.json"
-            if not path.exists():
-                continue
-            raw = self._read_json(path, [])
-            for i, d in enumerate(raw):
-                if d.get("id") == entry_id:
-                    raw[i].update(updates)
-                    self._write_json(path, raw)
-                    return
-        logger.warning("update_knowledge: entry_id %s not found", entry_id)
+    async def update_knowledge(self, tenant_id: str, entry_id: str, updates: dict) -> None:
+        """Find and update a knowledge entry by ID, scoped to the given tenant."""
+        path = self._state_dir(tenant_id) / "knowledge.json"
+        if not path.exists():
+            logger.warning("update_knowledge: no knowledge file for tenant %s", tenant_id)
+            return
+        raw = self._read_json(path, [])
+        for i, d in enumerate(raw):
+            if d.get("id") == entry_id:
+                raw[i].update(updates)
+                self._write_json(path, raw)
+                return
+        logger.warning("update_knowledge: entry_id %s not found for tenant %s", entry_id, tenant_id)
 
     # -----------------------------------------------------------------------
     # Behavioral Contracts
@@ -170,21 +167,19 @@ class JsonStateStore(StateStore):
         rules.append(asdict(rule))
         self._write_json(path, rules)
 
-    async def update_contract_rule(self, rule_id: str, updates: dict) -> None:
-        """Find and update a contract rule by ID, scanning all tenant dirs."""
-        for tenant_dir in self._data_dir.iterdir():
-            if not tenant_dir.is_dir():
-                continue
-            path = tenant_dir / "state" / "contracts.json"
-            if not path.exists():
-                continue
-            raw = self._read_json(path, [])
-            for i, d in enumerate(raw):
-                if d.get("id") == rule_id:
-                    raw[i].update(updates)
-                    self._write_json(path, raw)
-                    return
-        logger.warning("update_contract_rule: rule_id %s not found", rule_id)
+    async def update_contract_rule(self, tenant_id: str, rule_id: str, updates: dict) -> None:
+        """Find and update a contract rule by ID, scoped to the given tenant."""
+        path = self._state_dir(tenant_id) / "contracts.json"
+        if not path.exists():
+            logger.warning("update_contract_rule: no contracts file for tenant %s", tenant_id)
+            return
+        raw = self._read_json(path, [])
+        for i, d in enumerate(raw):
+            if d.get("id") == rule_id:
+                raw[i].update(updates)
+                self._write_json(path, raw)
+                return
+        logger.warning("update_contract_rule: rule_id %s not found for tenant %s", rule_id, tenant_id)
 
     # -----------------------------------------------------------------------
     # Conversation Summaries

@@ -29,13 +29,7 @@ _ARCHIVE_SUBDIRS = [
 ]
 
 
-def _safe_name(s: str) -> str:
-    """Convert a string to a safe filesystem name.
-
-    Replaces characters that may cause issues in file paths.
-    ':' is valid on Linux but we replace it for cross-platform safety and readability.
-    """
-    return s.replace(":", "_").replace("/", "_").replace("\\", "_")
+from kernos.utils import _safe_name
 
 
 def _now_iso() -> str:
