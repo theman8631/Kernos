@@ -9,6 +9,7 @@ Run via the wrapper (recommended — no venv activation needed):
   ./kernos-cli contract <tenant_id> [--capability calendar]
   ./kernos-cli contracts <tenant_id>
   ./kernos-cli soul <tenant_id>
+  ./kernos-cli spaces <tenant_id>
   ./kernos-cli capabilities [--tenant <tenant_id>]
 
 Or manually with the venv active:
@@ -92,6 +93,8 @@ async def cmd_profile(args) -> None:
 
 
 async def cmd_knowledge(args) -> None:
+    from datetime import datetime, timezone
+    from kernos.kernel.state import compute_retrieval_strength
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
@@ -107,10 +110,16 @@ async def cmd_knowledge(args) -> None:
     print(f"{'─' * 60}")
     print(f"  Knowledge: {args.tenant_id}  ({len(entries)} entries)")
     print(f"{'─' * 60}")
+    now_iso = datetime.now(timezone.utc).isoformat()
     for e in entries:
         status = "" if e.active else "[archived] "
+        r = compute_retrieval_strength(e, now_iso)
+        r_str = f"{r:.2f}"
         print(f"\n  {status}[{e.confidence}] {e.category}: \"{e.content}\" ({e.created_at[:10]})")
-        print(f"    subject: {e.subject} | durability: {e.durability}")
+        print(f"    subject: {e.subject} | archetype: {e.lifecycle_archetype} | R: {r_str} | salience: {e.salience:.2f}")
+        if e.foresight_signal:
+            expires = f" (expires {e.foresight_expires[:10]})" if e.foresight_expires else ""
+            print(f"    foresight: {e.foresight_signal}{expires}")
         if e.supersedes:
             print(f"    supersedes: {e.supersedes}")
         if not e.active:
@@ -155,7 +164,7 @@ async def cmd_contracts(args) -> None:
         return
 
     print(f"{'─' * 60}")
-    print(f"  Contracts for {args.tenant_id}")
+    print(f"  Covenant Rules for {args.tenant_id}")
     print(f"{'─' * 60}")
 
     order = ["must", "must_not", "preference", "escalation"]
@@ -177,7 +186,11 @@ async def cmd_contracts(args) -> None:
         print(f"\n  {labels[key]}:")
         for r in group_rules:
             source_label = f"[{r.source}]"
-            print(f"    - {r.description} {source_label}")
+            layer_label = f"[{r.layer}]"
+            tier_label = f"tier:{r.enforcement_tier}"
+            print(f"    - {r.description} {source_label} {layer_label} {tier_label}")
+            if r.graduation_eligible:
+                print(f"      graduation eligible ({r.graduation_positive_signals}/{r.graduation_threshold} signals)")
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +223,38 @@ async def cmd_soul(args) -> None:
     if soul.user_context:
         trunc = soul.user_context[:120] + "…" if len(soul.user_context) > 120 else soul.user_context
         print(f"  User context:     {trunc}")
+
+
+# ---------------------------------------------------------------------------
+# spaces
+# ---------------------------------------------------------------------------
+
+
+async def cmd_spaces(args) -> None:
+    """Display context spaces for a tenant."""
+    from kernos.kernel.state_json import JsonStateStore
+
+    state = JsonStateStore(_data_dir())
+    spaces = await state.list_context_spaces(args.tenant_id)
+    if not spaces:
+        print(f"No context spaces found for '{args.tenant_id}'.")
+        return
+
+    print(f"{'─' * 60}")
+    print(f"  Context Spaces: {args.tenant_id}  ({len(spaces)} spaces)")
+    print(f"{'─' * 60}")
+    for s in spaces:
+        default_label = " [default]" if s.is_default else ""
+        print(f"\n  [{s.status.upper()}] {s.name}{default_label}  ({s.space_type})")
+        print(f"    id: {s.id}")
+        if s.description:
+            print(f"    {s.description}")
+        if s.routing_keywords:
+            print(f"    keywords: {', '.join(s.routing_keywords)}")
+        if s.posture:
+            print(f"    posture: {s.posture}")
+        if s.last_active_at:
+            print(f"    last active: {s.last_active_at[:10]}")
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +455,8 @@ async def _dispatch(args) -> None:
         await cmd_contracts(args)
     elif args.command == "soul":
         await cmd_soul(args)
+    elif args.command == "spaces":
+        await cmd_spaces(args)
     elif args.command == "costs":
         await cmd_costs(args)
     elif args.command == "tenants":
@@ -459,6 +506,10 @@ def main() -> None:
 
     # soul
     p = subparsers.add_parser("soul", help="View hatched soul for a tenant")
+    p.add_argument("tenant_id")
+
+    # spaces
+    p = subparsers.add_parser("spaces", help="View context spaces for a tenant")
     p.add_argument("tenant_id")
 
     # costs

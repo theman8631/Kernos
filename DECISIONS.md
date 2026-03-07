@@ -72,7 +72,7 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-Phase 1B complete. No active spec. Next: Phase 2 planning after housekeeping.
+SPEC-2.0 complete. No active spec. Next: Phase 2A (Entity Resolution) or Phase 2B (Dispatch Interceptor) — founder to decide.
 
 ---
 
@@ -183,9 +183,9 @@ Phase 1B complete. No active spec. Next: Phase 2 planning after housekeeping.
 
 ## Phase 2 Preparation
 
+- **SPEC-2.0 complete + ContextSpace addition:** Schema Foundation Sprint done. All Phase 2 data models planted including ContextSpace (daily space auto-created on soul init). See `specs/completed/SPEC-2.0-SCHEMA-FOUNDATION.md`.
 - **Research produced:** Four research papers in `research/` covering structured outputs, entity resolution, memory staleness, and behavioral contract enforcement.
 - **Technical Architecture Document:** Needed before Phase 2 spec writing — captures the as-built kernel architecture, interfaces, data flows, and extension points.
-- **Pre-Phase-2 improvement:** Structured output retrofit for `complete_simple()` — replace JSON-in-prompt with native structured output support for more reliable Tier 2 extraction.
 - **Research lead:** Kit (OSBuilder) established as research lead for Phase 2 inputs.
 
 ---

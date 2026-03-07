@@ -73,6 +73,7 @@ class Provider(ABC):
         messages: list[dict],
         tools: list[dict],
         max_tokens: int,
+        output_schema: dict | None = None,
     ) -> ProviderResponse:
         """Send a completion request and return a KERNOS-native response."""
         ...
@@ -96,6 +97,7 @@ class AnthropicProvider(Provider):
         messages: list[dict],
         tools: list[dict],
         max_tokens: int,
+        output_schema: dict | None = None,
     ) -> ProviderResponse:
         create_kwargs: dict[str, Any] = {
             "model": model,
@@ -105,6 +107,10 @@ class AnthropicProvider(Provider):
         }
         if tools:
             create_kwargs["tools"] = tools
+        if output_schema:
+            create_kwargs["output_config"] = {
+                "format": {"type": "json_schema", "schema": output_schema}
+            }
 
         try:
             response = self._client.messages.create(**create_kwargs)
@@ -221,11 +227,16 @@ class ReasoningService:
         user_content: str,
         max_tokens: int = 512,
         prefer_cheap: bool = False,
+        output_schema: dict | None = None,
     ) -> str:
         """Single stateless completion. No tools, no history, no task events.
 
         Used by kernel infrastructure (extraction, consolidation) not by agents.
         Returns raw text response. prefer_cheap is reserved for Phase 2 routing.
+
+        When output_schema is provided, uses Anthropic's native structured outputs
+        (constrained decoding). Schema compliance is guaranteed by the API — no
+        json.loads() retry logic needed. Returns "{}" on truncation or refusal.
         """
         response = await self._provider.complete(
             model=_SIMPLE_MODEL,
@@ -233,7 +244,14 @@ class ReasoningService:
             messages=[{"role": "user", "content": user_content}],
             tools=[],
             max_tokens=max_tokens,
+            output_schema=output_schema,
         )
+        if response.stop_reason == "max_tokens":
+            logger.warning("complete_simple: response truncated (max_tokens reached)")
+            return "{}"
+        if response.stop_reason == "refusal":
+            logger.warning("complete_simple: response refused by model")
+            return "{}"
         text_parts = [b.text for b in response.content if b.type == "text"]
         return "".join(text_parts)
 

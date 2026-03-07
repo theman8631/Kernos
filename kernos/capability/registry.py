@@ -34,6 +34,9 @@ class CapabilityInfo:
     setup_requires: list[str] = field(default_factory=list) # Required env vars / credentials
     server_name: str = ""                                    # MCP server name (for connected)
     error_message: str = ""                                  # If status is ERROR, what went wrong
+    tool_effects: dict[str, str] = field(default_factory=dict)
+    # Maps tool_name → effect level: "read" | "soft_write" | "hard_write" | "unknown"
+    # Tools not in this dict default to "unknown" (treated as hard_write by Dispatch Interceptor)
 
 
 class CapabilityRegistry:

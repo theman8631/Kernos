@@ -5,6 +5,7 @@ context assembly. Four domains: tenant profile, user knowledge, behavioral
 contracts, conversation summaries.
 """
 import hashlib
+import math
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ def _content_hash(tenant_id: str, subject: str, content: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 from kernos.kernel.soul import Soul
+from kernos.kernel.entities import EntityNode, IdentityEdge
+from kernos.kernel.spaces import ContextSpace
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +33,14 @@ def _knowledge_id() -> str:
 
 def _rule_id() -> str:
     return f"rule_{uuid.uuid4().hex[:8]}"
+
+
+def _entity_id() -> str:
+    return f"ent_{uuid.uuid4().hex[:8]}"
+
+
+def _pending_id() -> str:
+    return f"pending_{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -59,46 +70,160 @@ class TenantProfile:
 class KnowledgeEntry:
     """A piece of knowledge about the user or their world."""
 
-    id: str                     # "know_{uuid8}"
+    # --- Identity ---
+    id: str                          # "know_{uuid8}"
     tenant_id: str
-    category: str               # "entity", "fact", "preference", "pattern"
-    subject: str                # "John", "gym membership", "meeting preferences"
-    content: str                # The knowledge text
-    confidence: str             # "stated", "inferred", "observed"
-    source_event_id: str        # Provenance — links to the event that created this
-    source_description: str     # Human-readable provenance
+    category: str                    # "entity", "fact", "preference", "pattern"
+    subject: str                     # What this is about
+    content: str                     # The knowledge text
+    confidence: str                  # "stated", "inferred", "observed"
+    source_event_id: str             # Provenance — links to the event that created this
+    source_description: str          # Human-readable provenance
     created_at: str
     last_referenced: str
     tags: list[str]
-    active: bool = True         # False = archived (never deleted)
-    supersedes: str = ""        # ID of the entry this one replaces (provenance chain)
-    durability: str = "permanent"  # "permanent" | "session" | "expires_at:<ISO>"
-    content_hash: str = ""      # SHA256[:16] of (tenant_id|subject|content) for dedup
+
+    # --- Status ---
+    active: bool = True              # False = archived (never deleted)
+
+    # --- Provenance (extended) ---
+    supersedes: str = ""             # ID of the entry this one replaces (provenance chain)
+    content_hash: str = ""           # SHA256[:16] of (tenant_id|subject|content) for dedup
+    entity_node_id: str = ""         # Link to EntityNode (populated by entity resolution)
+
+    # --- Legacy compat: durability is retired, kept for reading old JSON ---
+    # New entries leave this empty. lifecycle_archetype is the authoritative field.
+    durability: str = ""             # deprecated — "permanent"|"session"|"expires_at:<ISO>"
+
+    # --- Content lifecycle ---
+    lifecycle_archetype: str = "structural"
+    # "identity" | "structural" | "habitual" | "contextual" | "ephemeral"
+
+    # --- Temporal (bitemporal from Graphiti) ---
+    expired_at: str = ""             # When the kernel invalidated this (transaction time)
+    valid_at: str = ""               # When this became true in reality (valid time)
+    invalid_at: str = ""             # When this stopped being true (valid time)
+
+    # --- Strength (dual-strength from Bjork/FSRS) ---
+    storage_strength: float = 1.0    # How well-established. Monotonically increasing.
+    last_reinforced_at: str = ""     # When user last mentioned/confirmed (not last_referenced)
+    reinforcement_count: int = 1     # How many times confirmed across conversations
+
+    # --- Foresight (from EverMemOS) ---
+    foresight_signal: str = ""       # Forward-looking implication, if any
+    foresight_expires: str = ""      # When the foresight signal becomes irrelevant
+
+    # --- Classification ---
+    context_space: str = ""          # Reserved for context spaces (empty = global)
+    salience: float = 0.5            # Initial importance weight (0.0-1.0)
 
 
 # ---------------------------------------------------------------------------
-# Domain 3: Behavioral Contracts
+# Retrieval strength — computed at read time, never stored
+# ---------------------------------------------------------------------------
+
+ARCHETYPE_STABILITY: dict[str, int] = {
+    "identity": 730,      # ~2 years
+    "structural": 120,    # ~4 months
+    "habitual": 45,       # ~6 weeks
+    "contextual": 14,     # ~2 weeks
+    "ephemeral": 1,       # ~1 day
+}
+
+# FSRS-6 parameter (default — tunable from usage data in Phase 3)
+W20 = 0.5
+
+
+def compute_retrieval_strength(entry: KnowledgeEntry, now_iso: str) -> float:
+    """Compute current retrieval strength using FSRS-6 power-law decay.
+
+    Called at read time, not stored. Keeps write path clean.
+    Returns 0.0-1.0 where 1.0 = fully accessible, 0.0 = effectively forgotten.
+    """
+    if not entry.last_reinforced_at:
+        return 1.0  # New entry, no decay yet
+
+    from datetime import datetime, timezone
+    last = datetime.fromisoformat(entry.last_reinforced_at)
+    now = datetime.fromisoformat(now_iso)
+    days_since = max((now - last).total_seconds() / 86400, 0)
+
+    if days_since == 0:
+        return 1.0
+
+    base_stability = ARCHETYPE_STABILITY.get(entry.lifecycle_archetype, 120)
+    effective_stability = base_stability * (1 + 0.1 * math.log1p(entry.storage_strength))
+
+    factor = 0.9 ** (-1 / W20) - 1
+    return (1 + factor * days_since / effective_stability) ** (-W20)
+
+
+# ---------------------------------------------------------------------------
+# Domain 3: Behavioral Contracts → Covenant
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class ContractRule:
-    """A behavioral rule governing what the agent may or must do."""
+class CovenantRule:
+    """A behavioral rule in the Covenant — the living contract between agent and user."""
 
-    id: str                     # "rule_{uuid8}"
+    # --- Preserved from ContractRule (backwards compatible) ---
+    id: str                          # "rule_{uuid8}"
     tenant_id: str
-    capability: str             # "calendar", "email", "general"
-    rule_type: str              # "must", "must_not", "preference", "escalation"
-    description: str            # Human-readable — what the agent reads
+    capability: str                  # "calendar", "email", "general"
+    rule_type: str                   # "must", "must_not", "preference", "escalation"
+    description: str                 # Human-readable — what the agent reads and user sees
     active: bool
-    source: str                 # "default", "user_stated", "evolved"
-    source_event_id: str | None # Links to event if user_stated or evolved
-    created_at: str
-    updated_at: str
-    context_space: str | None = None  # Reserved for Phase 2: None = applies globally
+    source: str                      # "default", "user_stated", "evolved"
+    source_event_id: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    context_space: str | None = None  # None = global
+
+    # --- Covenant layer ---
+    layer: str = "principle"         # "principle" | "practice"
+
+    # --- Action class targeting ---
+    action_class: str = ""           # "email.delete.spam", "calendar.schedule.business_hours"
+    trigger_tool: str = ""           # MCP tool name. Empty = all tools in capability.
+
+    # --- Enforcement ---
+    enforcement_tier: str = "confirm"   # "silent" | "notify" | "confirm" | "block"
+    fallback_action: str = "ask_user"   # "ask_user" | "stage_as_draft" | "log_and_proceed" | "block_with_explanation"
+    escalation_message: str = ""        # "Sending to {recipient} — confirm?"
+
+    # --- Graduation state (meaningful for Practices only) ---
+    graduation_positive_signals: int = 0
+    graduation_last_rejection: str = ""     # ISO timestamp, empty = never rejected
+    graduation_eligible: bool = False
+    graduation_threshold: int = 25
+    graduation_tier_locked_until: str = ""  # Rate limit
+
+    # --- Versioning ---
+    supersedes: str = ""
+    version: int = 1
+
+    # --- Reserved for future phases ---
+    agent_id: str = ""
+    precondition: str = ""
+    workspace_id: str = ""
 
 
-def default_contract_rules(tenant_id: str, now: str) -> list[ContractRule]:
+# Backwards-compatibility alias — ContractRule is CovenantRule
+ContractRule = CovenantRule
+
+
+def _enforcement_tier_for(rule_type: str) -> str:
+    """Map legacy rule_type to enforcement_tier for new default rules."""
+    return {
+        "must_not": "confirm",
+        "must": "confirm",
+        "preference": "silent",
+        "escalation": "confirm",
+    }.get(rule_type, "confirm")
+
+
+def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
     """The conservative-by-default rules every new tenant starts with."""
     rules = [
         ("must_not", "general", "Never send messages to external contacts without owner approval"),
@@ -110,7 +235,7 @@ def default_contract_rules(tenant_id: str, now: str) -> list[ContractRule]:
         ("escalation", "general", "Escalate to owner when request is ambiguous and stakes are non-trivial"),
     ]
     return [
-        ContractRule(
+        CovenantRule(
             id=_rule_id(),
             tenant_id=tenant_id,
             capability=cap,
@@ -121,9 +246,36 @@ def default_contract_rules(tenant_id: str, now: str) -> list[ContractRule]:
             source_event_id=None,
             created_at=now,
             updated_at=now,
+            enforcement_tier=_enforcement_tier_for(rt),
         )
         for rt, cap, desc in rules
     ]
+
+
+# Backwards-compatibility alias
+default_contract_rules = default_covenant_rules
+
+
+# ---------------------------------------------------------------------------
+# Domain 3b: Pending Actions (for Dispatch Interceptor, Phase 2B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PendingAction:
+    """A tool call staged for user confirmation by the Dispatch Interceptor."""
+
+    id: str                     # "pending_{uuid8}"
+    tenant_id: str
+    rule_id: str                # Which CovenantRule triggered this
+    tool_name: str
+    tool_arguments: dict = field(default_factory=dict)
+    context: dict = field(default_factory=dict)  # Enough state to resume
+    created_at: str = ""
+    expires_at: str = ""        # Default: 1 hour from creation
+    status: str = "pending"     # "pending" | "approved" | "rejected" | "expired"
+    conversation_id: str = ""
+    batch_id: str = ""          # Groups tool calls from the same reasoning turn
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +354,7 @@ class StateStore(ABC):
         """Find an active entry by content_hash. Returns None if not found."""
         ...
 
-    # Behavioral Contracts
+    # Behavioral Contracts (method names preserved for backwards compatibility)
     @abstractmethod
     async def get_contract_rules(
         self,
@@ -210,13 +362,64 @@ class StateStore(ABC):
         capability: str | None = None,
         rule_type: str | None = None,
         active_only: bool = True,
-    ) -> list[ContractRule]: ...
+    ) -> list[CovenantRule]: ...
 
     @abstractmethod
-    async def add_contract_rule(self, rule: ContractRule) -> None: ...
+    async def add_contract_rule(self, rule: CovenantRule) -> None: ...
 
     @abstractmethod
     async def update_contract_rule(self, tenant_id: str, rule_id: str, updates: dict) -> None: ...
+
+    # Entity Resolution (Phase 2A will implement real logic)
+    @abstractmethod
+    async def save_entity_node(self, node: EntityNode) -> None: ...
+
+    @abstractmethod
+    async def get_entity_node(self, tenant_id: str, entity_id: str) -> EntityNode | None: ...
+
+    @abstractmethod
+    async def query_entity_nodes(
+        self, tenant_id: str, name: str | None = None, entity_type: str | None = None
+    ) -> list[EntityNode]: ...
+
+    @abstractmethod
+    async def save_identity_edge(self, edge: IdentityEdge) -> None: ...
+
+    @abstractmethod
+    async def query_identity_edges(
+        self, tenant_id: str, entity_id: str
+    ) -> list[IdentityEdge]: ...
+
+    # Pending Actions (Phase 2B Dispatch Interceptor)
+    @abstractmethod
+    async def save_pending_action(self, action: PendingAction) -> None: ...
+
+    @abstractmethod
+    async def get_pending_actions(
+        self, tenant_id: str, status: str = "pending"
+    ) -> list[PendingAction]: ...
+
+    @abstractmethod
+    async def update_pending_action(
+        self, tenant_id: str, action_id: str, updates: dict
+    ) -> None: ...
+
+    # Context Spaces (Phase 2A routing builds on top of this)
+    @abstractmethod
+    async def save_context_space(self, space: ContextSpace) -> None: ...
+
+    @abstractmethod
+    async def get_context_space(
+        self, tenant_id: str, space_id: str
+    ) -> ContextSpace | None: ...
+
+    @abstractmethod
+    async def list_context_spaces(self, tenant_id: str) -> list[ContextSpace]: ...
+
+    @abstractmethod
+    async def update_context_space(
+        self, tenant_id: str, space_id: str, updates: dict
+    ) -> None: ...
 
     # Conversation Summaries
     @abstractmethod

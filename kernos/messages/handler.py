@@ -17,13 +17,17 @@ from kernos.kernel.projectors.coordinator import run_projectors
 from kernos.kernel.soul import Soul
 from kernos.kernel.task import Task, TaskType, generate_task_id
 from kernos.kernel.template import AgentTemplate, PRIMARY_TEMPLATE
+from kernos.kernel.spaces import ContextSpace
 from kernos.kernel.state import (
-    ContractRule,
+    CovenantRule,
     ConversationSummary,
     StateStore,
     TenantProfile,
-    default_contract_rules,
+    default_covenant_rules,
 )
+# Backwards-compat aliases used elsewhere in this module
+ContractRule = CovenantRule
+default_contract_rules = default_covenant_rules
 from kernos.messages.models import NormalizedMessage
 from kernos.persistence import AuditStore, ConversationStore, TenantStore, derive_tenant_id
 
@@ -68,7 +72,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _format_contracts(rules: list[ContractRule]) -> str:
+def _format_contracts(rules: list[CovenantRule]) -> str:
     """Format behavioral contract rules into natural language for the system prompt."""
     if not rules:
         return ""
@@ -112,7 +116,7 @@ def _build_system_prompt(
     capability_prompt: str,
     soul: Soul,
     template: AgentTemplate,
-    contract_rules: list[ContractRule],
+    contract_rules: list[CovenantRule],
 ) -> str:
     """Build a template-driven, soul-aware system prompt.
 
@@ -259,13 +263,34 @@ class MessageHandler:
         """Load the soul for this tenant, or initialize a new unhatched one.
 
         The soul is saved immediately on creation so it persists even if
-        the subsequent reasoning call fails.
+        the subsequent reasoning call fails. Also ensures a default daily
+        context space exists for the tenant.
         """
+        import uuid
         soul = await self.state.get_soul(tenant_id)
         if soul is None:
             soul = Soul(tenant_id=tenant_id)
             await self.state.save_soul(soul)
             logger.info("Initialized new soul for tenant: %s", tenant_id)
+
+        # Ensure a daily context space exists — idempotent
+        spaces = await self.state.list_context_spaces(tenant_id)
+        if not any(s.is_default for s in spaces):
+            now = _now_iso()
+            daily_space = ContextSpace(
+                id=f"space_{uuid.uuid4().hex[:8]}",
+                tenant_id=tenant_id,
+                name="Daily",
+                description="General conversation and daily life",
+                space_type="daily",
+                status="active",
+                is_default=True,
+                created_at=now,
+                last_active_at=now,
+            )
+            await self.state.save_context_space(daily_space)
+            logger.info("Created default daily context space for tenant: %s", tenant_id)
+
         return soul
 
     async def _consolidate_bootstrap(self, soul: Soul) -> None:

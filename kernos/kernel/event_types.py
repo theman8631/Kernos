@@ -43,3 +43,29 @@ class EventType(str, Enum):
     SYSTEM_STARTED = "system.started"
     SYSTEM_STOPPED = "system.stopped"
     HANDLER_ERROR = "handler.error"
+
+    # --- Phase 2: Covenant lifecycle (Pillar B) ---
+    COVENANT_EVALUATED = "covenant.evaluated"
+    COVENANT_ACTION_STAGED = "covenant.action.staged"
+    COVENANT_ACTION_APPROVED = "covenant.action.approved"
+    COVENANT_ACTION_REJECTED = "covenant.action.rejected"
+    COVENANT_ACTION_EXPIRED = "covenant.action.expired"
+    COVENANT_RULE_GRADUATED = "covenant.rule.graduated"
+    COVENANT_RULE_REGRESSED = "covenant.rule.regressed"
+    COVENANT_RULE_CREATED = "covenant.rule.created"
+    COVENANT_RULE_UPDATED = "covenant.rule.updated"
+
+    # --- Phase 2: Entity resolution (Pillar A) ---
+    ENTITY_CREATED = "entity.created"
+    ENTITY_MERGED = "entity.merged"
+    ENTITY_LINKED = "entity.linked"
+
+    # --- Phase 2: Knowledge lifecycle (Pillar A) ---
+    KNOWLEDGE_REINFORCED = "knowledge.reinforced"
+    KNOWLEDGE_INVALIDATED = "knowledge.invalidated"
+    KNOWLEDGE_DECAYED = "knowledge.decayed"
+
+    # --- Phase 2: Context Spaces ---
+    CONTEXT_SPACE_CREATED = "context.space.created"
+    CONTEXT_SPACE_SWITCHED = "context.space.switched"
+    CONTEXT_SPACE_SUSPENDED = "context.space.suspended"

@@ -7,7 +7,6 @@ import pytest
 
 from kernos.kernel.projectors.rules import Tier1Result, tier1_extract
 from kernos.kernel.projectors.llm_extractor import (
-    _parse_extraction_response,
     run_tier2_extraction,
     _write_entry,
     _apply_correction,
@@ -256,46 +255,10 @@ def test_content_hash_length():
 
 
 # ---------------------------------------------------------------------------
-# _parse_extraction_response
+# _parse_extraction_response — REMOVED in SPEC-2.0
+# Structured output (output_schema) guarantees valid JSON from the API.
+# Code fence stripping is no longer needed. Tests moved to test_schema_foundation.py.
 # ---------------------------------------------------------------------------
-
-
-def test_parse_plain_json():
-    data = {"entities": [], "facts": [], "preferences": [], "corrections": []}
-    result = _parse_extraction_response(json.dumps(data))
-    assert result == data
-
-
-def test_parse_json_code_fence():
-    data = {"entities": [], "facts": [{"subject": "user", "content": "runs a bakery",
-                                        "confidence": "stated", "durability": "permanent"}],
-            "preferences": [], "corrections": []}
-    raw = f"```json\n{json.dumps(data)}\n```"
-    result = _parse_extraction_response(raw)
-    assert result == data
-
-
-def test_parse_plain_code_fence():
-    data = {"entities": [], "facts": [], "preferences": [], "corrections": []}
-    raw = f"```\n{json.dumps(data)}\n```"
-    result = _parse_extraction_response(raw)
-    assert result == data
-
-
-def test_parse_invalid_json_raises():
-    with pytest.raises(json.JSONDecodeError):
-        _parse_extraction_response("not json at all")
-
-
-def test_parse_code_fence_with_garbage_raises():
-    with pytest.raises(json.JSONDecodeError):
-        _parse_extraction_response("```json\nnot valid json\n```")
-
-
-def test_parse_empty_result():
-    result = _parse_extraction_response('{"entities": [], "facts": [], "preferences": [], "corrections": []}')
-    assert result["entities"] == []
-    assert result["corrections"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +272,7 @@ async def test_write_entry_writes_new():
     wrote = await _write_entry(
         state=state, events=events, tenant_id="t1",
         category="fact", subject="user", content="runs a bakery",
-        confidence="stated", durability="permanent",
+        confidence="stated",
         source_description="test", existing_hashes=set(),
         now="2026-01-01T00:00:00+00:00", tags=["fact"],
     )
@@ -327,7 +290,7 @@ async def test_write_entry_skips_duplicate_hash():
     wrote = await _write_entry(
         state=state, events=events, tenant_id="t1",
         category="fact", subject="user", content="runs a bakery",
-        confidence="stated", durability="permanent",
+        confidence="stated",
         source_description="test", existing_hashes={h},
         now="2026-01-01T00:00:00+00:00", tags=["fact"],
     )
@@ -344,7 +307,7 @@ async def test_write_entry_inferred_discarded_when_stated_exists():
     wrote = await _write_entry(
         state=state, events=events, tenant_id="t1",
         category="fact", subject="user", content="different content",
-        confidence="inferred", durability="permanent",
+        confidence="inferred",
         source_description="test", existing_hashes=set(),
         now="2026-01-01T00:00:00+00:00", tags=["fact"],
     )
@@ -361,7 +324,7 @@ async def test_write_entry_stated_marks_inferred_inactive():
     await _write_entry(
         state=state, events=events, tenant_id="t1",
         category="fact", subject="user", content="definitely a developer",
-        confidence="stated", durability="permanent",
+        confidence="stated",
         source_description="test", existing_hashes=set(),
         now="2026-01-01T00:00:00+00:00", tags=["fact"],
     )
@@ -379,7 +342,7 @@ async def test_write_entry_hash_added_to_existing_set():
     await _write_entry(
         state=state, events=events, tenant_id="t1",
         category="fact", subject="user", content="runs a bakery",
-        confidence="stated", durability="permanent",
+        confidence="stated",
         source_description="test", existing_hashes=existing,
         now="2026-01-01T00:00:00+00:00", tags=["fact"],
     )
@@ -645,14 +608,21 @@ async def test_tier2_deduplicates_via_hash():
     state.save_knowledge_entry.assert_not_called()
 
 
-async def test_tier2_handles_code_fence_response():
+async def test_tier2_writes_teacher_fact():
+    """Structured output (no code fences) writes knowledge correctly."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
-    data = {"entities": [], "facts": [{"subject": "user", "content": "is a teacher",
-                                        "confidence": "stated", "durability": "permanent"}],
-            "preferences": [], "corrections": []}
-    reasoning.complete_simple = AsyncMock(return_value=f"```json\n{json.dumps(data)}\n```")
+    data = {
+        "reasoning": "User is a teacher",
+        "entities": [],
+        "facts": [{"subject": "user", "content": "is a teacher",
+                   "confidence": "stated", "lifecycle_archetype": "structural",
+                   "foresight_signal": "", "foresight_expires": "", "salience": "0.5"}],
+        "preferences": [],
+        "corrections": [],
+    }
+    reasoning.complete_simple = AsyncMock(return_value=json.dumps(data))
 
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I'm a teacher"}],

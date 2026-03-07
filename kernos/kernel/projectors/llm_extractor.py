@@ -4,6 +4,9 @@ Fires as a background task after the response is sent. User never waits.
 Extracts structured knowledge (entities, facts, preferences, corrections)
 and writes to the State Store with deduplication, confidence precedence,
 and supersedes chains for corrections.
+
+Uses Anthropic native structured outputs (output_schema) for guaranteed-valid
+JSON — no markdown fence stripping, no JSON parse fallback needed.
 """
 import json
 import logging
@@ -15,6 +18,81 @@ from kernos.kernel.soul import Soul
 from kernos.kernel.state import KnowledgeEntry, StateStore, _content_hash
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Extraction schema — all fields required, no optional types
+# (avoids exponential grammar compilation cost on structured output models)
+# ---------------------------------------------------------------------------
+
+EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reasoning": {
+            "type": "string",
+            "description": "Brief analysis of what knowledge is present in the conversation"
+        },
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"},
+                    "relation": {"type": "string"},
+                    "durability": {"type": "string"}
+                },
+                "required": ["name", "type", "relation", "durability"],
+                "additionalProperties": False
+            }
+        },
+        "facts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "content": {"type": "string"},
+                    "confidence": {"type": "string"},
+                    "lifecycle_archetype": {"type": "string"},
+                    "foresight_signal": {"type": "string"},
+                    "foresight_expires": {"type": "string"},
+                    "salience": {"type": "string"}
+                },
+                "required": ["subject", "content", "confidence", "lifecycle_archetype"],
+                "additionalProperties": False
+            }
+        },
+        "preferences": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "content": {"type": "string"},
+                    "confidence": {"type": "string"},
+                    "lifecycle_archetype": {"type": "string"}
+                },
+                "required": ["subject", "content", "confidence", "lifecycle_archetype"],
+                "additionalProperties": False
+            }
+        },
+        "corrections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "field": {"type": "string"},
+                    "old_value": {"type": "string"},
+                    "new_value": {"type": "string"}
+                },
+                "required": ["field", "old_value", "new_value"],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["reasoning", "entities", "facts", "preferences", "corrections"],
+    "additionalProperties": False
+}
 
 _EXTRACTION_SYSTEM_PROMPT = """You extract knowledge worth remembering from conversations.
 
@@ -35,44 +113,38 @@ CORRECTIONS:
 If the user corrects something previously stated ("actually call me JT", "wait, I meant Tuesday"),
 emit a correction entry. The kernel will handle marking the old entry inactive.
 
-Return JSON only. No explanation. Schema:
+LIFECYCLE ARCHETYPES — classify each fact:
+- identity: name, birthday, defining traits — rarely changes (~2 years stable)
+- structural: employer, city, life role — changes infrequently (~4 months stable)
+- habitual: preferences, routines, work patterns — gradual drift (~6 weeks stable)
+- contextual: current project, upcoming event — changes regularly (~2 weeks stable)
+- ephemeral: current mood, today's plan — expires quickly (~1 day stable)
 
-{
-  "entities": [
-    {"name": "string", "type": "person|place|org", "relation": "string", "durability": "permanent"}
-  ],
-  "facts": [
-    {"subject": "user|entity_name", "content": "string", "confidence": "stated|inferred", "durability": "permanent|session|expires_at:<ISO>"}
-  ],
-  "preferences": [
-    {"subject": "string", "content": "string", "confidence": "stated|inferred", "durability": "permanent"}
-  ],
-  "corrections": [
-    {"field": "string", "old_value": "string", "new_value": "string"}
-  ]
-}
+FORESIGHT SIGNALS — if a fact has a time-bounded forward-looking implication:
+Include foresight_signal (e.g., "Avoid recommending alcohol") and foresight_expires
+(ISO date when the signal becomes irrelevant). Leave both empty if not applicable.
 
-If nothing is worth persisting, return: {"entities": [], "facts": [], "preferences": [], "corrections": []}"""
+SALIENCE — rate the importance of each fact from "0.0" (trivial aside) to "1.0"
+(central to user's life or current concerns). Most facts score "0.3"-"0.5".
+Facts from the main conversation topic score higher.
+
+Return your analysis first in "reasoning", then populate the arrays.
+Empty arrays are correct when nothing is worth persisting."""
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_extraction_response(raw_text: str) -> dict:
-    """Parse LLM extraction output, tolerating markdown code fences."""
-    text = raw_text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.splitlines()
-        # Remove opening fence (```json or ```)
-        lines = lines[1:]
-        # Remove closing fence
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    return json.loads(text)
+def _durability_to_archetype(durability: str) -> str:
+    """Map legacy durability string to lifecycle_archetype (for entity items)."""
+    if not durability or durability == "permanent":
+        return "structural"
+    if durability == "session":
+        return "ephemeral"
+    if durability.startswith("expires_at:"):
+        return "contextual"
+    return "structural"
 
 
 def _make_knowledge_id() -> str:
@@ -100,7 +172,7 @@ async def run_tier2_extraction(
         if not recent_turns:
             return
 
-        # Build conversation text (last 4 turns, user messages only for context window)
+        # Build conversation text (last 4 turns)
         turns_text = _format_turns(recent_turns[-4:])
 
         raw = await reasoning_service.complete_simple(
@@ -108,29 +180,27 @@ async def run_tier2_extraction(
             user_content=f"Conversation:\n{turns_text}",
             max_tokens=512,
             prefer_cheap=True,
+            output_schema=EXTRACTION_SCHEMA,
         )
 
-        try:
-            extracted = _parse_extraction_response(raw)
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Tier 2: failed to parse extraction response: %s — raw: %.200s", exc, raw)
-            return
+        extracted = json.loads(raw)
 
         existing_hashes = await state.get_knowledge_hashes(tenant_id)
         now = _now_iso()
         wrote_count = 0
 
-        # Entities
+        # Entities (still use durability field from schema for backwards compat)
         for item in extracted.get("entities", []):
             name = item.get("name", "").strip()
             relation = item.get("relation", "").strip()
             if not name:
                 continue
             content = f"{name} ({relation})" if relation else name
+            lifecycle_archetype = _durability_to_archetype(item.get("durability", "permanent"))
             wrote_count += await _write_entry(
                 state=state, events=events, tenant_id=tenant_id,
                 category="entity", subject=name, content=content,
-                confidence="stated", durability=item.get("durability", "permanent"),
+                confidence="stated", lifecycle_archetype=lifecycle_archetype,
                 source_description="tier2_llm entity extraction",
                 existing_hashes=existing_hashes, now=now, tags=["entity"],
             )
@@ -140,22 +210,34 @@ async def run_tier2_extraction(
             subject = item.get("subject", "user").strip()
             content = item.get("content", "").strip()
             confidence = item.get("confidence", "inferred")
-            durability = item.get("durability", "permanent")
+            lifecycle_archetype = item.get("lifecycle_archetype", "structural")
+            foresight_signal = item.get("foresight_signal", "")
+            foresight_expires = item.get("foresight_expires", "")
+            try:
+                salience = float(item.get("salience", "0.5"))
+            except (TypeError, ValueError):
+                salience = 0.5
             if not content:
                 continue
 
             wrote = await _write_entry(
                 state=state, events=events, tenant_id=tenant_id,
                 category="fact", subject=subject, content=content,
-                confidence=confidence, durability=durability,
+                confidence=confidence, lifecycle_archetype=lifecycle_archetype,
+                foresight_signal=foresight_signal, foresight_expires=foresight_expires,
+                salience=salience,
                 source_description="tier2_llm fact extraction",
                 existing_hashes=existing_hashes, now=now, tags=["fact"],
             )
             wrote_count += wrote
 
-            # Append user-subject permanent facts to soul.user_context,
+            # Append user-subject structural/identity facts to soul.user_context,
             # but skip name-related facts — Tier 1 owns soul.user_name.
-            if wrote and subject.lower() == "user" and durability == "permanent":
+            if (
+                wrote
+                and subject.lower() == "user"
+                and lifecycle_archetype in ("structural", "identity", "habitual")
+            ):
                 content_lower = content.lower()
                 is_name_fact = any(
                     content_lower.startswith(p)
@@ -170,12 +252,13 @@ async def run_tier2_extraction(
             subject = item.get("subject", "user").strip()
             content = item.get("content", "").strip()
             confidence = item.get("confidence", "stated")
+            lifecycle_archetype = item.get("lifecycle_archetype", "habitual")
             if not content:
                 continue
             wrote_count += await _write_entry(
                 state=state, events=events, tenant_id=tenant_id,
                 category="preference", subject=subject, content=content,
-                confidence=confidence, durability=item.get("durability", "permanent"),
+                confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                 source_description="tier2_llm preference extraction",
                 existing_hashes=existing_hashes, now=now, tags=["preference"],
             )
@@ -218,7 +301,10 @@ async def _write_entry(
     subject: str,
     content: str,
     confidence: str,
-    durability: str,
+    lifecycle_archetype: str = "structural",
+    foresight_signal: str = "",
+    foresight_expires: str = "",
+    salience: float = 0.5,
     source_description: str,
     existing_hashes: set[str],
     now: str,
@@ -259,8 +345,11 @@ async def _write_entry(
         last_referenced=now,
         tags=tags,
         active=True,
-        durability=durability,
         content_hash=h,
+        lifecycle_archetype=lifecycle_archetype,
+        foresight_signal=foresight_signal,
+        foresight_expires=foresight_expires,
+        salience=salience,
     )
     await state.save_knowledge_entry(entry)
     existing_hashes.add(h)
@@ -308,8 +397,8 @@ async def _apply_correction(
         tags=["correction"],
         active=True,
         supersedes=old_id,
-        durability="permanent",
         content_hash=h,
+        lifecycle_archetype="structural",
     )
     await state.save_knowledge_entry(new_entry)
 
