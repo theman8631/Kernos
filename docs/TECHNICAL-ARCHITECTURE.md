@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-08 (reflects Phase 2A complete state — entity resolution + fact dedup)
+> **Last updated:** 2026-03-08 (reflects Phase 2B complete state — context space routing)
 
 ---
 
@@ -21,7 +21,10 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
                                                       │    │     │
                                           ┌───────────┘    │     └───────────┐
                                           ▼                ▼                 ▼
-                                    [Soul + Template]  [Task Engine]  [State Store]
+                                 [Context Space Router] [Task Engine]  [State Store]
+                                          │                                  │
+                                          ▼                                  ▼
+                                    [Soul + Template]                  [Context Spaces]
                                                            │
                                                            ▼
                                                    [Reasoning Service]
@@ -94,20 +97,23 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 2. Auto-provision tenant if new (TenantStore + StateStore)
 3. Load or initialize Soul for this tenant
 4. Load conversation history (last 20 messages)
-5. Build system prompt from template + soul + contracts + capabilities
-6. Create Task, build ReasoningRequest
-7. Execute via TaskEngine → ReasoningService → LLM + tools
-8. Run memory projectors (Tier 1 sync, Tier 2 async)
-9. Append name ask if first interaction and name unknown
-10. Update soul (interaction count, hatch check, maturity check)
-11. Store response in conversation history
-12. Emit message.sent event
-13. Return response string to adapter
+5. **Route to context space** via ContextSpaceRouter (alias → entity → MRA fallback)
+6. Detect space switch, update `last_active_space_id`, emit `context.space.switched` event
+7. If space switched, prepend `[Switched from: X]` annotation to message
+8. Build system prompt from template + soul + **posture** + **scoped contracts** + capabilities
+9. Create Task, build ReasoningRequest
+10. Execute via TaskEngine → ReasoningService → LLM + tools
+11. Run memory projectors (Tier 1 sync, Tier 2 async) with `active_space_id`
+12. Append name ask if first interaction and name unknown
+13. Update soul (interaction count, hatch check, maturity check)
+14. Store response in conversation history
+15. Emit message.sent event
+16. Return response string to adapter
 
 **Key methods:**
 - `_get_or_init_soul()` — loads from State Store or creates new unhatched soul
 - `_post_response_soul_update()` — increments interactions, checks hatch, checks graduation
-- `_build_system_prompt()` — 8-layer template-driven assembly
+- `_build_system_prompt()` — 9-layer template-driven assembly (includes posture + scoped rules)
 
 ### Soul + Template System
 
@@ -131,12 +137,13 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 **System prompt assembly order:**
 1. Operating principles
 2. Soul personality (personality_notes if graduated, default_personality if not)
-3. User knowledge (user_name, user_context, communication_style from soul)
-4. Platform context (SMS/Discord communication constraints)
-5. Auth context (owner verified/unverified, unknown sender)
-6. Behavioral contracts (formatted from State Store)
-7. Capabilities (from registry)
-8. Bootstrap prompt (only if `bootstrap_graduated == False`)
+3. **Context space posture** (non-daily spaces only — working style override with "does not override core values" label)
+4. User knowledge (user_name, user_context, communication_style from soul)
+5. Platform context (SMS/Discord communication constraints)
+6. Auth context (owner verified/unverified, unknown sender)
+7. Behavioral contracts (**scoped**: space-specific + global rules via `query_covenant_rules`)
+8. Capabilities (from registry)
+9. Bootstrap prompt (only if `bootstrap_graduated == False`)
 
 **Soul maturity gate:** All four must be true for graduation:
 - `user_name` populated
@@ -230,6 +237,29 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - **Enhanced path** (requires VOYAGE_API_KEY): entity resolver + semantic deduplicator replace hash-only dedup
 - **Legacy path** (no VOYAGE_API_KEY): hash-only dedup, no entity resolution; graceful fallback
 
+### Context Space Router (Phase 2B)
+
+**What it does:** Routes inbound messages to the correct context space. Algorithmic only — no LLM calls. Runs at the top of `handler.process()` after tenant provisioning.
+
+**File:** `kernos/kernel/router.py`
+
+**Three-check cascade:**
+1. **Space name/alias match:** Checks if the message text contains a space name or routing alias. Daily space is excluded from name matching (it's the fallback, not a keyword target). Returns `confident=True`.
+2. **Entity ownership:** Checks if the message mentions an entity that has a `context_space` set. If so, routes to that entity's space. Returns `confident=True`.
+3. **MRA fallback:** Falls back to the most recently active space (by `last_active_at`). Returns `confident=False` — downstream (2C) can correct.
+
+**Handler integration:**
+- Space switch detection: compares `active_space_id` with `tenant_profile.last_active_space_id`
+- On switch: emits `context.space.switched` event, prepends `[Switched from: X]` annotation to LLM input
+- Updates `last_active_space_id` on profile and `last_active_at` on the active space
+- Passes `active_space_id` to memory projectors for knowledge scoping
+
+**Posture injection:** Non-daily spaces with a `posture` field get it injected into the system prompt after the personality layer, with a "does not override core values" boundary label.
+
+**Scoped rule loading:** `query_covenant_rules(context_space_scope=[active_space_id, None])` loads space-specific + global rules, excluding other spaces' rules. Daily-only tenants load all rules (same as Phase 1B).
+
+**Knowledge scoping:** Facts extracted in non-daily spaces get `context_space = active_space_id`. User-level structural/identity facts are always global (`context_space = ""`), regardless of active space.
+
 ### Entity Resolution Pipeline (Phase 2A)
 
 **What it does:** Resolves named mentions in Tier 2 extraction to canonical EntityNode records. Prevents duplicate entities, links aliases, and handles name collisions via the "present, don't presume" principle.
@@ -276,6 +306,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Agent lifecycle: agent.hatched, agent.bootstrap_graduated
 - Knowledge: knowledge.extracted, knowledge.reinforced (Phase 2A)
 - Entity: entity.created, entity.merged, entity.linked, entity.updated (Phase 2A)
+- Context Spaces: context.space.switched, context.space.created (Phase 2B)
 - Capabilities: capability.connected, capability.disconnected, capability.error
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
@@ -298,11 +329,12 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `conversations.json` — list of ConversationSummary
 - `entities.json` — list of EntityNode (Phase 2A)
 - `identity_edges.json` — list of IdentityEdge (Phase 2A)
+- `spaces.json` — list of ContextSpace (Phase 2B; daily space auto-created on soul init)
 - `embeddings.json` — map of entry_id → embedding vector (Phase 2A; separate from knowledge.json to avoid bloat)
 
 **Four domains:**
 
-**TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config.
+**TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config, last_active_space_id.
 
 **KnowledgeEntry:** id, tenant_id, category (entity/fact/preference/pattern), subject, content, confidence (stated/inferred/observed), source provenance, timestamps, tags, active flag, supersedes chain, durability (permanent/session/expires_at), content_hash for dedup, reinforcement_count, storage_strength.
 
@@ -361,6 +393,7 @@ Every tenant gets this directory tree on first contact:
 │   ├── conversations.json         # ConversationSummary records
 │   ├── entities.json              # EntityNode records (Phase 2A)
 │   ├── identity_edges.json        # IdentityEdge records (Phase 2A)
+│   ├── spaces.json                # ContextSpace records (Phase 2B)
 │   └── embeddings.json            # entry_id → embedding vector map (Phase 2A)
 ├── conversations/
 │   └── {conversation_id}.json     # Message history
@@ -428,6 +461,8 @@ Every "delete" operation is a relocation. Archive paths exist from day one. `Con
 | `kernos-cli knowledge <tenant_id> --include-archived` | Include archived/superseded entries |
 | `kernos-cli entities <tenant_id>` | EntityNode records with contact info (Phase 2A) |
 | `kernos-cli entities <tenant_id> --include-inactive` | Include inactive entities |
+| `kernos-cli spaces <tenant_id>` | Context spaces with posture, aliases, last_active_at |
+| `kernos-cli create-space <tenant_id> --name X` | Create a new context space (Phase 2B) |
 | `kernos-cli tenants` | All known tenants |
 
 ---
@@ -451,7 +486,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-471 tests across 16 test files.
+497 tests across 17 test files.
 
 | File | What it covers |
 |---|---|
@@ -470,6 +505,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_discord_adapter.py | Discord adapter |
 | test_twilio_adapter.py | Twilio SMS adapter |
 | test_entity_resolution.py | EntityNode, EmbeddingService, EntityResolver (Tier 1/2/3), FactDeduplicator, run_tier2_extraction dual-path (45 tests) |
+| test_routing.py | Context Space Router, query_covenant_rules scoping, posture injection, handler space switching, handoff annotation, knowledge scoping (26 tests) |
 | test_schema_foundation.py | Phase 2.0 schema models |
 
 ---
@@ -507,7 +543,7 @@ Both entry points (Discord and FastAPI) follow the same initialization: create s
 
 These are referenced in the architecture but not implemented:
 
-- **Context spaces** — domain-specific context windows with separate tools and postures
+- ~~**Context spaces** — domain-specific context windows with separate tools and postures~~ **COMPLETE (Phase 2B)** — routing, posture injection, scoped rules, knowledge scoping
 - **Awareness evaluator** — event-driven proactive notification system
 - **Consolidation daemon** — background pattern extraction and insight generation
 - **Dispatch Interceptor** — infrastructure-level behavioral contract enforcement

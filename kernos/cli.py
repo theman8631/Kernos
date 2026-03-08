@@ -305,6 +305,48 @@ async def cmd_entities(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# create-space
+# ---------------------------------------------------------------------------
+
+
+async def cmd_create_space(args) -> None:
+    """Create a new context space for a tenant."""
+    import uuid
+    from kernos.kernel.spaces import ContextSpace
+    from kernos.kernel.state_json import JsonStateStore
+    from datetime import datetime, timezone
+
+    state = JsonStateStore(_data_dir())
+    now = datetime.now(timezone.utc).isoformat()
+    space_id = f"space_{uuid.uuid4().hex[:8]}"
+
+    aliases = []
+    if args.aliases:
+        aliases = [a.strip() for a in args.aliases.split(",") if a.strip()]
+
+    space = ContextSpace(
+        id=space_id,
+        tenant_id=args.tenant_id,
+        name=args.name,
+        description=args.description or "",
+        space_type=args.type or "project",
+        status="active",
+        routing_aliases=aliases,
+        posture=args.posture or "",
+        created_at=now,
+        last_active_at=now,
+        is_default=False,
+    )
+    await state.save_context_space(space)
+    print(f"Created context space: {space_id}")
+    print(f"  Name: {args.name}")
+    if aliases:
+        print(f"  Aliases: {', '.join(aliases)}")
+    if args.posture:
+        print(f"  Posture: {args.posture}")
+
+
+# ---------------------------------------------------------------------------
 # costs
 # ---------------------------------------------------------------------------
 
@@ -514,6 +556,8 @@ async def _dispatch(args) -> None:
         await cmd_tasks(args)
     elif args.command == "capabilities":
         await cmd_capabilities(args)
+    elif args.command == "create-space":
+        await cmd_create_space(args)
     else:
         print("Unknown command. Run with --help for usage.")
 
@@ -584,6 +628,15 @@ def main() -> None:
     # capabilities
     p = subparsers.add_parser("capabilities", help="Show capability registry")
     p.add_argument("--tenant", dest="tenant", help="Tenant ID for persisted runtime status")
+
+    # create-space
+    p = subparsers.add_parser("create-space", help="Create a new context space")
+    p.add_argument("tenant_id")
+    p.add_argument("--name", required=True, help="Space name")
+    p.add_argument("--type", default="project", help="Space type (project/domain/managed_resource)")
+    p.add_argument("--aliases", help="Comma-separated routing aliases")
+    p.add_argument("--posture", help="Working style posture text")
+    p.add_argument("--description", help="One-line description")
 
     args = parser.parse_args()
     if not args.command:

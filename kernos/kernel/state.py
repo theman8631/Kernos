@@ -59,6 +59,7 @@ class TenantProfile:
     preferences: dict[str, Any] = field(default_factory=dict)
     capabilities: dict[str, str] = field(default_factory=dict)
     model_config: dict[str, Any] = field(default_factory=dict)
+    last_active_space_id: str = ""   # Tracks active space across messages
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +369,21 @@ class StateStore(ABC):
         rule_type: str | None = None,
         active_only: bool = True,
     ) -> list[CovenantRule]: ...
+
+    @abstractmethod
+    async def query_covenant_rules(
+        self,
+        tenant_id: str,
+        capability: str | None = None,
+        context_space_scope: list[str | None] | None = None,
+        active_only: bool = True,
+    ) -> list[CovenantRule]:
+        """Query covenant rules with optional context space scope filtering.
+
+        context_space_scope: [space_id, None] loads space-scoped + global rules.
+        If None (not provided), returns all rules (used by CLI/admin).
+        """
+        ...
 
     @abstractmethod
     async def add_contract_rule(self, rule: CovenantRule) -> None: ...

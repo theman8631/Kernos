@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from kernos.capability.client import MCPClientManager
 from kernos.capability.registry import CapabilityRegistry
 from kernos.kernel.engine import TaskEngine
+from kernos.kernel.router import ContextSpaceRouter
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
 from kernos.kernel.exceptions import (
@@ -117,12 +118,14 @@ def _build_system_prompt(
     soul: Soul,
     template: AgentTemplate,
     contract_rules: list[CovenantRule],
+    active_space: ContextSpace | None = None,
 ) -> str:
     """Build a template-driven, soul-aware system prompt.
 
     Layers (in injection order):
     1. Operating principles — universal KERNOS values
     2. Agent identity / personality — who the agent is for this user
+    2b. Context space posture — working style override for non-daily spaces
     3. User knowledge — what the agent knows about this person
     4. Platform context — communication channel constraints
     5. Auth context — sender trust level
@@ -141,6 +144,15 @@ def _build_system_prompt(
     parts.append(
         f"YOUR IDENTITY:\nYou are {agent_name}.\n{personality}"
     )
+
+    # 2b. Context space posture
+    if active_space and not active_space.is_default and active_space.posture:
+        parts.append(
+            f"## Current operating context: {active_space.name}\n"
+            f"(This shapes your working style — it does not override "
+            f"your core values or hard boundaries.)\n"
+            f"{active_space.posture}"
+        )
 
     # 3. User knowledge (only if the soul has accumulated something)
     user_knowledge_parts: list[str] = []
@@ -211,6 +223,7 @@ class MessageHandler:
         self.reasoning = reasoning
         self.registry = registry
         self.engine = engine
+        self._router = ContextSpaceRouter(self.state)
 
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
@@ -436,6 +449,63 @@ class MessageHandler:
             tenant_id, conversation_id, limit=20
         )
 
+        # Route to context space
+        active_space_id, routing_confident = await self._router.route(
+            tenant_id, message.content
+        )
+        active_space = (
+            await self.state.get_context_space(tenant_id, active_space_id)
+            if active_space_id
+            else None
+        )
+
+        # Detect and handle space switch
+        tenant_profile = await self.state.get_tenant_profile(tenant_id)
+        previous_space_id = tenant_profile.last_active_space_id if tenant_profile else ""
+        space_switched = (
+            active_space_id != previous_space_id
+            and previous_space_id != ""
+            and active_space_id != ""
+        )
+
+        if tenant_profile and active_space_id and active_space_id != previous_space_id:
+            tenant_profile.last_active_space_id = active_space_id
+            await self.state.save_tenant_profile(tenant_id, tenant_profile)
+
+        if active_space and active_space_id:
+            await self.state.update_context_space(
+                tenant_id, active_space_id,
+                {"last_active_at": _now_iso(), "status": "active"},
+            )
+
+        if space_switched:
+            try:
+                await emit_event(
+                    self.events,
+                    EventType.CONTEXT_SPACE_SWITCHED,
+                    tenant_id,
+                    "router",
+                    payload={
+                        "from_space": previous_space_id,
+                        "to_space": active_space_id,
+                        "confident": routing_confident,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit context.space.switched: %s", exc)
+
+        # Handoff annotation
+        if space_switched:
+            previous_space = await self.state.get_context_space(
+                tenant_id, previous_space_id
+            )
+            if previous_space:
+                message_content = f"[Switched from: {previous_space.name}]\n{message.content}"
+            else:
+                message_content = message.content
+        else:
+            message_content = message.content
+
         # Emit message.received
         try:
             await emit_event(
@@ -478,11 +548,17 @@ class MessageHandler:
 
         tools = self.registry.get_connected_tools()
         capability_prompt = self.registry.build_capability_prompt()
-        contract_rules = await self.state.get_contract_rules(tenant_id, active_only=True)
-        system_prompt = _build_system_prompt(
-            message, capability_prompt, soul, PRIMARY_TEMPLATE, contract_rules
+        space_scope = [active_space_id, None] if active_space_id else None
+        contract_rules = await self.state.query_covenant_rules(
+            tenant_id,
+            context_space_scope=space_scope,
+            active_only=True,
         )
-        messages: list[dict] = history + [{"role": "user", "content": message.content}]
+        system_prompt = _build_system_prompt(
+            message, capability_prompt, soul, PRIMARY_TEMPLATE, contract_rules,
+            active_space=active_space,
+        )
+        messages: list[dict] = history + [{"role": "user", "content": message_content}]
 
         request = ReasoningRequest(
             tenant_id=tenant_id,
@@ -508,6 +584,7 @@ class MessageHandler:
                 events=self.events,
                 reasoning_service=self.reasoning,
                 tenant_id=tenant_id,
+                active_space_id=active_space_id,
             )
 
             # Append name ask on first interaction if name still unknown after Tier 1

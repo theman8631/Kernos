@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 2A COMPLETE — 2B spec incoming
-**Owner:** Architect
-**Action:** Produce SPEC-2B (Dispatch Interceptor + Basic Retrieval)
+**Status:** Phase 2B COMPLETE — Context Space Routing live-verified
+**Owner:** Founder / Architect
+**Action:** Decide next spec: 2C (Context Assembly) or 2D (Dispatch Interceptor)
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | 2.0 | Schema Foundation Sprint | COMPLETE | 2026-03-06 | All Phase 2 data models planted; ContextSpace auto-created on soul init |
 | 2A | Entity Resolution + Fact Dedup | COMPLETE | 2026-03-08 | Three-tier cascade, three-zone dedup, Voyage AI embeddings, NOOP reinforcement |
-| 2B | Dispatch Interceptor + Basic Retrieval | — | — | Next spec |
+| 2B | Context Space Routing | COMPLETE | 2026-03-08 | Algorithmic router (alias → entity → MRA), posture injection, scoped rules, handoff annotation, knowledge space scoping |
 | 2C | Context Assembly | — | — | Relationship-role matching, cross-context retrieval |
 
 ---
@@ -83,11 +83,21 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-SPEC-2A complete. No active spec. Next: Phase 2B (Dispatch Interceptor / Covenant Enforcement) or Phase 2C (Context Assembly) — founder to decide.
+SPEC-2B complete. No active spec. Next: Phase 2C (Context Assembly) or Phase 2D (Dispatch Interceptor) — founder to decide.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-08: SPEC-2B — Context Space Routing — COMPLETE
+
+- **What:** Algorithmic context space routing activates the ContextSpace infrastructure planted in SPEC-2.0. Messages route to spaces via a three-check cascade: (1) space name/alias match in message text, (2) entity ownership — a mentioned entity belongs to a specific space, (3) MRA fallback — most recently active space, flagged as `confident=False`. The system prompt gains posture injection for non-daily spaces (plain English working style override with "does not override core values" label). Covenant rules load scoped: space-specific rules + global rules, excluding other spaces' rules. Space switches prepend a `[Switched from: X]` annotation to the LLM's input. Knowledge entries extracted in non-daily spaces get `context_space` set; user-level structural/identity facts are always global. Daily-only tenants have zero behavior change from Phase 1B.
+- **New files:** `kernos/kernel/router.py` (ContextSpaceRouter), `tests/test_routing.py` (26 tests)
+- **Modified files:** `state.py` (last_active_space_id on TenantProfile, query_covenant_rules ABC), `state_json.py` (query_covenant_rules with context_space_scope filtering), `handler.py` (router init, routing in process(), posture + scoped rules in _build_system_prompt(), handoff annotation, active_space_id to projectors), `coordinator.py` (active_space_id param), `llm_extractor.py` (active_space_id param, context_space on _write_entry/_write_entry_enhanced, _space_for_entry scoping logic), `cli.py` (create-space command)
+- **Tests:** 26 new tests in test_routing.py. Total: 497 passing.
+- **Live verified:** Alias routing (confident=True), MRA fallback (confident=False), space switch events with correct payload, posture injection (207-char system prompt difference), scoped rule filtering (8 vs 7 rules), knowledge scoping (Mike Sullivan fact tagged to Test Project space), handoff annotation on switch. See `tests/live/LIVE-TEST-2B.md`.
+- **Design note:** MRA fallback is "sticky" — without explicit routing signals, the router stays in the current space. This is by design; 2C's context assembly can correct routing for ambiguous messages.
+- **Full spec:** `specs/SPEC-2B-CONTEXT-SPACE-ROUTING.md`
 
 ### 2026-03-07: SPEC-2A — Entity Resolution + Fact Deduplication — COMPLETE
 
@@ -281,4 +291,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-08 (Phase 2A COMPLETE — entity resolution + fact dedup live-verified, 471 tests passing)*
+*Last updated: 2026-03-08 (Phase 2B COMPLETE — context space routing live-verified, 497 tests passing)*

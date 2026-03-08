@@ -273,6 +273,28 @@ class JsonStateStore(StateStore):
             results.append(rule)
         return results
 
+    async def query_covenant_rules(
+        self,
+        tenant_id: str,
+        capability: str | None = None,
+        context_space_scope: list[str | None] | None = None,
+        active_only: bool = True,
+    ) -> list[CovenantRule]:
+        path = self._state_dir(tenant_id) / "contracts.json"
+        raw = self._read_json(path, [])
+        results: list[CovenantRule] = []
+        for d in raw:
+            rule = _load_covenant_rule(d)
+            if active_only and not rule.active:
+                continue
+            if capability and rule.capability not in (capability, "general"):
+                continue
+            if context_space_scope is not None:
+                if rule.context_space not in context_space_scope:
+                    continue
+            results.append(rule)
+        return results
+
     async def add_contract_rule(self, rule: CovenantRule) -> None:
         path = self._state_dir(rule.tenant_id) / "contracts.json"
         rules = self._read_json(path, [])

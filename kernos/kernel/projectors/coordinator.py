@@ -33,6 +33,7 @@ async def run_projectors(
     events: EventStream,
     reasoning_service,
     tenant_id: str,
+    active_space_id: str = "",
 ) -> None:
     """Entry point called by handler after response is assembled.
 
@@ -108,5 +109,6 @@ async def run_projectors(
             fact_deduplicator=fact_deduplicator,
             embedding_service=embedding_service,
             embedding_store=embedding_store,
+            active_space_id=active_space_id,
         )
     )

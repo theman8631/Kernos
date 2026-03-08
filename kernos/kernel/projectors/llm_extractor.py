@@ -232,6 +232,7 @@ async def run_tier2_extraction(
     fact_deduplicator: FactDeduplicator | None = None,
     embedding_service: EmbeddingService | None = None,
     embedding_store: JsonEmbeddingStore | None = None,
+    active_space_id: str = "",
 ) -> None:
     """Run LLM-based knowledge extraction. Called as a background task.
 
@@ -285,6 +286,16 @@ async def run_tier2_extraction(
         existing_hashes = await state.get_knowledge_hashes(tenant_id)
         now = _now_iso()
         wrote_count = 0
+
+        def _space_for_entry(subject: str, archetype: str) -> str:
+            """Determine context_space for a knowledge entry.
+
+            User-level structural/identity facts are always global (empty string).
+            Everything else inherits the active space.
+            """
+            if subject.lower() == "user" and archetype in ("identity", "structural"):
+                return ""
+            return active_space_id or ""
 
         # Map entity name (lower) → resolved EntityNode.id (enhanced path only)
         entity_name_to_node_id: dict[str, str] = {}
@@ -356,6 +367,7 @@ async def run_tier2_extraction(
                     confidence="stated", lifecycle_archetype=lifecycle_archetype,
                     source_description="tier2_llm entity extraction",
                     existing_hashes=existing_hashes, now=now, tags=["entity"],
+                    context_space=_space_for_entry(name, lifecycle_archetype),
                 )
 
         # Facts
@@ -385,6 +397,7 @@ async def run_tier2_extraction(
                     salience=salience, entity_node_id=entity_node_id,
                     source_description="tier2_llm fact extraction",
                     existing_hashes=existing_hashes, now=now, tags=["fact"],
+                    context_space=_space_for_entry(subject, lifecycle_archetype),
                     fact_deduplicator=fact_deduplicator,
                     embedding_service=embedding_service,
                     embedding_store=embedding_store,
@@ -398,6 +411,7 @@ async def run_tier2_extraction(
                     salience=salience,
                     source_description="tier2_llm fact extraction",
                     existing_hashes=existing_hashes, now=now, tags=["fact"],
+                    context_space=_space_for_entry(subject, lifecycle_archetype),
                 )
             wrote_count += wrote
 
@@ -432,6 +446,7 @@ async def run_tier2_extraction(
                     confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                     source_description="tier2_llm preference extraction",
                     existing_hashes=existing_hashes, now=now, tags=["preference"],
+                    context_space=_space_for_entry(subject, lifecycle_archetype),
                     fact_deduplicator=fact_deduplicator,
                     embedding_service=embedding_service,
                     embedding_store=embedding_store,
@@ -443,6 +458,7 @@ async def run_tier2_extraction(
                     confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                     source_description="tier2_llm preference extraction",
                     existing_hashes=existing_hashes, now=now, tags=["preference"],
+                    context_space=_space_for_entry(subject, lifecycle_archetype),
                 )
 
         # Corrections
@@ -491,6 +507,7 @@ async def _write_entry(
     existing_hashes: set[str],
     now: str,
     tags: list[str],
+    context_space: str = "",
 ) -> int:
     """Write a KnowledgeEntry with dedup and confidence precedence. Returns 1 if written, 0 if skipped."""
     h = _content_hash(tenant_id, subject, content)
@@ -532,6 +549,7 @@ async def _write_entry(
         foresight_signal=foresight_signal,
         foresight_expires=foresight_expires,
         salience=salience,
+        context_space=context_space,
     )
     await state.save_knowledge_entry(entry)
     existing_hashes.add(h)
@@ -559,6 +577,7 @@ async def _write_entry_enhanced(
     fact_deduplicator: FactDeduplicator,
     embedding_service: EmbeddingService,
     embedding_store: JsonEmbeddingStore,
+    context_space: str = "",
 ) -> int:
     """Enhanced write path: embedding-based semantic dedup via FactDeduplicator.
 
@@ -608,6 +627,7 @@ async def _write_entry_enhanced(
         foresight_expires=foresight_expires,
         salience=salience,
         entity_node_id=entity_node_id,
+        context_space=context_space,
     )
 
     classification, target_id = await fact_deduplicator.classify(
