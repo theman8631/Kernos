@@ -7,15 +7,32 @@ and supersedes chains for corrections.
 
 Uses Anthropic native structured outputs (output_schema) for guaranteed-valid
 JSON — no markdown fence stripping, no JSON parse fallback needed.
+
+Enhanced path (entity_resolver + fact_deduplicator provided):
+  - Entity mentions resolved to EntityNodes via 3-tier cascade
+  - Facts classified by embedding similarity (ADD/UPDATE/NOOP)
+  - Embeddings stored in separate embeddings.json per tenant
+
+Legacy path (no resolver/deduplicator):
+  - Hash-based exact dedup only (unchanged from Phase 1B)
 """
+from __future__ import annotations
+
 import json
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
 from kernos.kernel.soul import Soul
 from kernos.kernel.state import KnowledgeEntry, StateStore, _content_hash
+
+if TYPE_CHECKING:
+    from kernos.kernel.dedup import FactDeduplicator
+    from kernos.kernel.embedding_store import JsonEmbeddingStore
+    from kernos.kernel.embeddings import EmbeddingService
+    from kernos.kernel.resolution import EntityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +56,12 @@ EXTRACTION_SCHEMA = {
                     "name": {"type": "string"},
                     "type": {"type": "string"},
                     "relation": {"type": "string"},
+                    "relationship_type": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "email": {"type": "string"},
                     "durability": {"type": "string"}
                 },
-                "required": ["name", "type", "relation", "durability"],
+                "required": ["name", "type", "relation", "relationship_type", "phone", "email", "durability"],
                 "additionalProperties": False
             }
         },
@@ -96,6 +116,11 @@ EXTRACTION_SCHEMA = {
 
 _EXTRACTION_SYSTEM_PROMPT = """You extract knowledge worth remembering from conversations.
 
+ENTITY CREATION RULES:
+Only extract named entities (Linda, Henderson, Acme Corp) or uniquely-identifiable relationship roles (my wife, my boss, my dentist). Do NOT create entities for vague references like "a friend", "some guy", "someone at work", or "a client". If a vague reference later gets a name, create the entity then.
+
+When a phone number, email address, or website is mentioned in connection with a person or organization, include it in the entity extraction. Classify the relationship_type (client, friend, supplier, contractor, wife, boss, etc.) from context. Leave phone/email empty strings if not mentioned.
+
 WORTH PERSISTING (permanent facts about the person):
 - Who they are: occupation, role, location, life situation (but NOT their name — name is tracked separately)
 - What they care about: goals, problems they're solving, values
@@ -132,6 +157,23 @@ Return your analysis first in "reasoning", then populate the arrays.
 Empty arrays are correct when nothing is worth persisting."""
 
 
+_VALID_CONFIDENCE = {"stated", "inferred", "observed"}
+
+
+def _normalize_confidence(value: str) -> str:
+    """Normalize LLM confidence values to the valid set.
+
+    LLMs sometimes return 'high', 'medium', 'low', 'certain', etc.
+    Map anything non-standard to 'inferred' (the conservative default).
+    """
+    v = value.lower().strip()
+    if v in _VALID_CONFIDENCE:
+        return v
+    if v in ("high", "certain", "definite", "sure"):
+        return "stated"
+    return "inferred"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -155,6 +197,29 @@ def _make_knowledge_id() -> str:
     return f"know_{ts}_{rand}"
 
 
+async def _build_entity_context(state: StateStore, tenant_id: str) -> str:
+    """Build compact entity list for injection into extraction prompt.
+
+    At personal scale (~200 entities), this is ~500 tokens.
+    Scoped to active entities only.
+    """
+    try:
+        entities = await state.query_entity_nodes(tenant_id, active_only=True)
+    except Exception:
+        return ""
+    if not entities:
+        return ""
+    lines = []
+    for e in entities[:200]:  # Hard cap for safety
+        parts = [e.canonical_name]
+        if e.entity_type:
+            parts.append(f"({e.entity_type})")
+        if e.relationship_type:
+            parts.append(f"— {e.relationship_type}")
+        lines.append(" ".join(parts))
+    return "Known entities: " + ", ".join(lines)
+
+
 async def run_tier2_extraction(
     *,
     recent_turns: list[dict],
@@ -163,21 +228,53 @@ async def run_tier2_extraction(
     events: EventStream,
     reasoning_service,
     tenant_id: str,
+    entity_resolver: EntityResolver | None = None,
+    fact_deduplicator: FactDeduplicator | None = None,
+    embedding_service: EmbeddingService | None = None,
+    embedding_store: JsonEmbeddingStore | None = None,
 ) -> None:
     """Run LLM-based knowledge extraction. Called as a background task.
 
     Errors are logged, never raised — the user's response was already sent.
+
+    When entity_resolver + fact_deduplicator are provided (enhanced path):
+      - Entity mentions are resolved to EntityNodes via 3-tier cascade
+      - Facts are classified by embedding similarity before writing
+    Otherwise falls back to hash-based exact dedup only (legacy path).
     """
+    enhanced = (
+        entity_resolver is not None
+        and fact_deduplicator is not None
+        and embedding_service is not None
+        and embedding_store is not None
+    )
+
     try:
         if not recent_turns:
             return
 
+        # Build entity context for coreference resolution (enhanced path only)
+        entity_context = ""
+        if enhanced:
+            entity_context = await _build_entity_context(state, tenant_id)
+
         # Build conversation text (last 4 turns)
         turns_text = _format_turns(recent_turns[-4:])
 
+        if entity_context:
+            user_content = (
+                f"{entity_context}\n\n"
+                "Extract knowledge from this conversation. "
+                "Resolve pronouns and references to full entity names where possible. "
+                "Be as explicit as possible in entity names — use full names, not just first names.\n\n"
+                f"Conversation:\n{turns_text}"
+            )
+        else:
+            user_content = f"Conversation:\n{turns_text}"
+
         raw = await reasoning_service.complete_simple(
             system_prompt=_EXTRACTION_SYSTEM_PROMPT,
-            user_content=f"Conversation:\n{turns_text}",
+            user_content=user_content,
             max_tokens=512,
             prefer_cheap=True,
             output_schema=EXTRACTION_SCHEMA,
@@ -189,27 +286,83 @@ async def run_tier2_extraction(
         now = _now_iso()
         wrote_count = 0
 
-        # Entities (still use durability field from schema for backwards compat)
+        # Map entity name (lower) → resolved EntityNode.id (enhanced path only)
+        entity_name_to_node_id: dict[str, str] = {}
+
+        # Entities
         for item in extracted.get("entities", []):
             name = item.get("name", "").strip()
-            relation = item.get("relation", "").strip()
             if not name:
                 continue
-            content = f"{name} ({relation})" if relation else name
-            lifecycle_archetype = _durability_to_archetype(item.get("durability", "permanent"))
-            wrote_count += await _write_entry(
-                state=state, events=events, tenant_id=tenant_id,
-                category="entity", subject=name, content=content,
-                confidence="stated", lifecycle_archetype=lifecycle_archetype,
-                source_description="tier2_llm entity extraction",
-                existing_hashes=existing_hashes, now=now, tags=["entity"],
-            )
+
+            if enhanced:
+                # Enhanced path: resolve to EntityNode via 3-tier cascade
+                entity_type = item.get("type", "")
+                contact_phone = item.get("phone", "").strip()
+                contact_email = item.get("email", "").strip()
+                relationship_type = item.get("relationship_type", "").strip()
+                context_text = "\n".join(t.get("content", "") for t in recent_turns)
+
+                try:
+                    node, resolution_type = await entity_resolver.resolve(
+                        tenant_id=tenant_id,
+                        mention=name,
+                        entity_type=entity_type,
+                        context=context_text,
+                        contact_phone=contact_phone,
+                        contact_email=contact_email,
+                    )
+                    # Enrich entity with contact/relationship info if not already set
+                    updated = False
+                    if contact_phone and not node.contact_phone:
+                        node.contact_phone = contact_phone
+                        updated = True
+                    if contact_email and not node.contact_email:
+                        node.contact_email = contact_email
+                        updated = True
+                    if relationship_type and not node.relationship_type:
+                        node.relationship_type = relationship_type
+                        updated = True
+                    if updated:
+                        await state.save_entity_node(node)
+
+                    entity_name_to_node_id[name.lower()] = node.id
+
+                    # Emit entity lifecycle event
+                    if resolution_type == "new_entity":
+                        ev = EventType.ENTITY_CREATED
+                    elif resolution_type in ("exact_match", "alias_match", "scored_match",
+                                             "llm_match", "contact_match"):
+                        ev = EventType.ENTITY_MERGED
+                    else:
+                        ev = EventType.ENTITY_LINKED
+                    try:
+                        await emit_event(events, ev, tenant_id, "entity_resolver",
+                                         payload={"name": name, "resolution_type": resolution_type,
+                                                  "entity_id": node.id})
+                    except Exception as exc:
+                        logger.warning("Tier 2: failed to emit entity event: %s", exc)
+
+                except Exception as exc:
+                    logger.warning("Tier 2: entity resolution failed for %r: %s", name, exc)
+            else:
+                # Legacy path: write as knowledge entry with hash-based dedup
+                relation = item.get("relation", "").strip()
+                content = f"{name} ({relation})" if relation else name
+                lifecycle_archetype = _durability_to_archetype(item.get("durability", "permanent"))
+                wrote_count += await _write_entry(
+                    state=state, events=events, tenant_id=tenant_id,
+                    category="entity", subject=name, content=content,
+                    confidence="stated", lifecycle_archetype=lifecycle_archetype,
+                    source_description="tier2_llm entity extraction",
+                    existing_hashes=existing_hashes, now=now, tags=["entity"],
+                )
 
         # Facts
         for item in extracted.get("facts", []):
             subject = item.get("subject", "user").strip()
             content = item.get("content", "").strip()
-            confidence = item.get("confidence", "inferred")
+            confidence = _normalize_confidence(item.get("confidence", "inferred"))
             lifecycle_archetype = item.get("lifecycle_archetype", "structural")
             foresight_signal = item.get("foresight_signal", "")
             foresight_expires = item.get("foresight_expires", "")
@@ -220,15 +373,32 @@ async def run_tier2_extraction(
             if not content:
                 continue
 
-            wrote = await _write_entry(
-                state=state, events=events, tenant_id=tenant_id,
-                category="fact", subject=subject, content=content,
-                confidence=confidence, lifecycle_archetype=lifecycle_archetype,
-                foresight_signal=foresight_signal, foresight_expires=foresight_expires,
-                salience=salience,
-                source_description="tier2_llm fact extraction",
-                existing_hashes=existing_hashes, now=now, tags=["fact"],
-            )
+            # Link to resolved entity if subject matches a known entity name
+            entity_node_id = entity_name_to_node_id.get(subject.lower(), "")
+
+            if enhanced:
+                wrote = await _write_entry_enhanced(
+                    state=state, events=events, tenant_id=tenant_id,
+                    category="fact", subject=subject, content=content,
+                    confidence=confidence, lifecycle_archetype=lifecycle_archetype,
+                    foresight_signal=foresight_signal, foresight_expires=foresight_expires,
+                    salience=salience, entity_node_id=entity_node_id,
+                    source_description="tier2_llm fact extraction",
+                    existing_hashes=existing_hashes, now=now, tags=["fact"],
+                    fact_deduplicator=fact_deduplicator,
+                    embedding_service=embedding_service,
+                    embedding_store=embedding_store,
+                )
+            else:
+                wrote = await _write_entry(
+                    state=state, events=events, tenant_id=tenant_id,
+                    category="fact", subject=subject, content=content,
+                    confidence=confidence, lifecycle_archetype=lifecycle_archetype,
+                    foresight_signal=foresight_signal, foresight_expires=foresight_expires,
+                    salience=salience,
+                    source_description="tier2_llm fact extraction",
+                    existing_hashes=existing_hashes, now=now, tags=["fact"],
+                )
             wrote_count += wrote
 
             # Append user-subject structural/identity facts to soul.user_context,
@@ -251,17 +421,29 @@ async def run_tier2_extraction(
         for item in extracted.get("preferences", []):
             subject = item.get("subject", "user").strip()
             content = item.get("content", "").strip()
-            confidence = item.get("confidence", "stated")
+            confidence = _normalize_confidence(item.get("confidence", "stated"))
             lifecycle_archetype = item.get("lifecycle_archetype", "habitual")
             if not content:
                 continue
-            wrote_count += await _write_entry(
-                state=state, events=events, tenant_id=tenant_id,
-                category="preference", subject=subject, content=content,
-                confidence=confidence, lifecycle_archetype=lifecycle_archetype,
-                source_description="tier2_llm preference extraction",
-                existing_hashes=existing_hashes, now=now, tags=["preference"],
-            )
+            if enhanced:
+                wrote_count += await _write_entry_enhanced(
+                    state=state, events=events, tenant_id=tenant_id,
+                    category="preference", subject=subject, content=content,
+                    confidence=confidence, lifecycle_archetype=lifecycle_archetype,
+                    source_description="tier2_llm preference extraction",
+                    existing_hashes=existing_hashes, now=now, tags=["preference"],
+                    fact_deduplicator=fact_deduplicator,
+                    embedding_service=embedding_service,
+                    embedding_store=embedding_store,
+                )
+            else:
+                wrote_count += await _write_entry(
+                    state=state, events=events, tenant_id=tenant_id,
+                    category="preference", subject=subject, content=content,
+                    confidence=confidence, lifecycle_archetype=lifecycle_archetype,
+                    source_description="tier2_llm preference extraction",
+                    existing_hashes=existing_hashes, now=now, tags=["preference"],
+                )
 
         # Corrections
         for item in extracted.get("corrections", []):
@@ -354,6 +536,130 @@ async def _write_entry(
     await state.save_knowledge_entry(entry)
     existing_hashes.add(h)
     return 1
+
+
+async def _write_entry_enhanced(
+    *,
+    state: StateStore,
+    events: EventStream,
+    tenant_id: str,
+    category: str,
+    subject: str,
+    content: str,
+    confidence: str,
+    lifecycle_archetype: str = "structural",
+    foresight_signal: str = "",
+    foresight_expires: str = "",
+    salience: float = 0.5,
+    entity_node_id: str = "",
+    source_description: str,
+    existing_hashes: set[str],
+    now: str,
+    tags: list[str],
+    fact_deduplicator: FactDeduplicator,
+    embedding_service: EmbeddingService,
+    embedding_store: JsonEmbeddingStore,
+) -> int:
+    """Enhanced write path: embedding-based semantic dedup via FactDeduplicator.
+
+    Returns 1 if a new entry was written or existing entry updated, 0 for NOOP.
+    """
+    from datetime import datetime, timezone
+
+    h = _content_hash(tenant_id, subject, content)
+
+    # Fast exact-dedup check (O(1)) — bypass embedding entirely for exact duplicates
+    if h in existing_hashes:
+        return 0
+
+    # Compute embedding for semantic dedup
+    try:
+        candidate_embedding = await embedding_service.embed(f"{subject} {content}")
+    except Exception as exc:
+        logger.warning("Tier 2: embedding failed for %r: %s", content[:60], exc)
+        # Fall back to hash-based dedup only
+        return await _write_entry(
+            state=state, events=events, tenant_id=tenant_id,
+            category=category, subject=subject, content=content,
+            confidence=confidence, lifecycle_archetype=lifecycle_archetype,
+            foresight_signal=foresight_signal, foresight_expires=foresight_expires,
+            salience=salience,
+            source_description=source_description,
+            existing_hashes=existing_hashes, now=now, tags=tags,
+        )
+
+    # Build the candidate entry (may or may not be written)
+    entry = KnowledgeEntry(
+        id=_make_knowledge_id(),
+        tenant_id=tenant_id,
+        category=category,
+        subject=subject,
+        content=content,
+        confidence=confidence,
+        source_event_id="",
+        source_description=source_description,
+        created_at=now,
+        last_referenced=now,
+        tags=tags,
+        active=True,
+        content_hash=h,
+        lifecycle_archetype=lifecycle_archetype,
+        foresight_signal=foresight_signal,
+        foresight_expires=foresight_expires,
+        salience=salience,
+        entity_node_id=entity_node_id,
+    )
+
+    classification, target_id = await fact_deduplicator.classify(
+        tenant_id, entry, candidate_embedding
+    )
+
+    if classification == "ADD":
+        await state.save_knowledge_entry(entry)
+        await embedding_store.save(tenant_id, entry.id, candidate_embedding)
+        existing_hashes.add(h)
+        return 1
+
+    elif classification == "UPDATE" and target_id:
+        old_entry = await state.get_knowledge_entry(tenant_id, target_id)
+        if old_entry:
+            old_entry_inactive = _replace(old_entry, active=False)
+            await state.save_knowledge_entry(old_entry_inactive)
+            entry = _replace(
+                entry,
+                supersedes=target_id,
+                storage_strength=old_entry.storage_strength + 1.0,
+            )
+        await state.save_knowledge_entry(entry)
+        await embedding_store.save(tenant_id, entry.id, candidate_embedding)
+        existing_hashes.add(h)
+        return 1
+
+    elif classification == "NOOP" and target_id:
+        # Reinforce the existing entry
+        existing = await state.get_knowledge_entry(tenant_id, target_id)
+        if existing:
+            reinforced = _replace(
+                existing,
+                reinforcement_count=existing.reinforcement_count + 1,
+                last_reinforced_at=now,
+                storage_strength=existing.storage_strength + 1.0,
+            )
+            await state.save_knowledge_entry(reinforced)
+            try:
+                await emit_event(
+                    events, EventType.KNOWLEDGE_REINFORCED, tenant_id,
+                    "fact_dedup",
+                    payload={
+                        "entry_id": target_id,
+                        "reinforcement_count": reinforced.reinforcement_count,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Tier 2: failed to emit knowledge.reinforced: %s", exc)
+        return 0
+
+    return 0
 
 
 async def _apply_correction(

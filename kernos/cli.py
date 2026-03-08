@@ -10,6 +10,7 @@ Run via the wrapper (recommended — no venv activation needed):
   ./kernos-cli contracts <tenant_id>
   ./kernos-cli soul <tenant_id>
   ./kernos-cli spaces <tenant_id>
+  ./kernos-cli entities <tenant_id> [--include-inactive]
   ./kernos-cli capabilities [--tenant <tenant_id>]
 
 Or manually with the venv active:
@@ -103,7 +104,10 @@ async def cmd_knowledge(args) -> None:
         subject=args.subject,
         category=args.category,
         active_only=not args.include_archived,
+        limit=args.limit,
     )
+    # Newest first
+    entries = sorted(entries, key=lambda e: e.created_at, reverse=True)
     if not entries:
         print(f"No knowledge entries found for '{args.tenant_id}'.")
         return
@@ -255,6 +259,49 @@ async def cmd_spaces(args) -> None:
             print(f"    posture: {s.posture}")
         if s.last_active_at:
             print(f"    last active: {s.last_active_at[:10]}")
+
+
+# ---------------------------------------------------------------------------
+# entities
+# ---------------------------------------------------------------------------
+
+
+async def cmd_entities(args) -> None:
+    """Display entity nodes for a tenant."""
+    from kernos.kernel.state_json import JsonStateStore
+
+    state = JsonStateStore(_data_dir())
+    entities = await state.query_entity_nodes(args.tenant_id, active_only=not args.include_inactive)
+    if not entities:
+        print(f"No entities found for '{args.tenant_id}'.")
+        return
+
+    print(f"{'─' * 60}")
+    print(f"  Entities: {args.tenant_id}  ({len(entities)} entities)")
+    print(f"{'─' * 60}")
+    for e in entities:
+        status = "" if e.active else "[inactive] "
+        type_label = f" ({e.entity_type})" if e.entity_type else ""
+        rel_label = f" — {e.relationship_type}" if e.relationship_type else ""
+        print(f"\n  {status}{e.canonical_name}{type_label}{rel_label}")
+        print(f"    id: {e.id}")
+        if e.aliases:
+            print(f"    aliases: {', '.join(e.aliases)}")
+        if e.contact_phone:
+            print(f"    phone: {e.contact_phone}")
+        if e.contact_email:
+            print(f"    email: {e.contact_email}")
+        if e.contact_address:
+            print(f"    address: {e.contact_address}")
+        if e.contact_website:
+            print(f"    website: {e.contact_website}")
+        if e.summary:
+            trunc = e.summary[:120] + "…" if len(e.summary) > 120 else e.summary
+            print(f"    summary: {trunc}")
+        if e.first_seen:
+            print(f"    first seen: {e.first_seen[:10]}  last seen: {e.last_seen[:10]}")
+        if e.knowledge_entry_ids:
+            print(f"    knowledge entries: {len(e.knowledge_entry_ids)}")
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +504,8 @@ async def _dispatch(args) -> None:
         await cmd_soul(args)
     elif args.command == "spaces":
         await cmd_spaces(args)
+    elif args.command == "entities":
+        await cmd_entities(args)
     elif args.command == "costs":
         await cmd_costs(args)
     elif args.command == "tenants":
@@ -493,6 +542,7 @@ def main() -> None:
     p.add_argument("--subject", help="Filter by subject (substring match)")
     p.add_argument("--category", help="Filter by category (entity/fact/preference/pattern)")
     p.add_argument("--include-archived", action="store_true")
+    p.add_argument("--limit", type=int, default=50, help="Max entries to show (default 50)")
 
     # contract (backwards-compatible)
     p = subparsers.add_parser("contract", help="View behavioral contract rules")
@@ -511,6 +561,11 @@ def main() -> None:
     # spaces
     p = subparsers.add_parser("spaces", help="View context spaces for a tenant")
     p.add_argument("tenant_id")
+
+    # entities
+    p = subparsers.add_parser("entities", help="View entity nodes for a tenant")
+    p.add_argument("tenant_id")
+    p.add_argument("--include-inactive", action="store_true")
 
     # costs
     p = subparsers.add_parser("costs", help="View cost summary from reasoning events")

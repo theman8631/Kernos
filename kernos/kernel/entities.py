@@ -16,6 +16,7 @@ class EntityNode:
     aliases: list[str] = field(default_factory=list)   # All observed surface forms
     entity_type: str = ""            # "person" | "organization" | "place" | "event" | "other"
     summary: str = ""                # LLM-generated entity summary (updated periodically)
+    relationship_type: str = ""      # "client", "friend", "supplier", "contractor", etc. Free-form.
     first_seen: str = ""
     last_seen: str = ""
     conversation_ids: list[str] = field(default_factory=list)
@@ -23,6 +24,13 @@ class EntityNode:
     embedding: list[float] = field(default_factory=list)  # Vector representation
     is_canonical: bool = True        # True if this is the cluster representative
     active: bool = True
+    context_space: str = ""          # Primary space this entity belongs to (empty = global)
+
+    # Contact information (person and organization types only)
+    contact_phone: str = ""
+    contact_email: str = ""
+    contact_address: str = ""        # Free text
+    contact_website: str = ""
 
 
 @dataclass

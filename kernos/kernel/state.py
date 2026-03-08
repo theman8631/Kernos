@@ -343,6 +343,11 @@ class StateStore(ABC):
         ...
 
     @abstractmethod
+    async def get_knowledge_entry(self, tenant_id: str, entry_id: str) -> "KnowledgeEntry | None":
+        """Get a single KnowledgeEntry by ID. Returns None if not found."""
+        ...
+
+    @abstractmethod
     async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
         """Return set of content_hash values for all active entries. O(1) dedup check."""
         ...
@@ -379,11 +384,15 @@ class StateStore(ABC):
 
     @abstractmethod
     async def query_entity_nodes(
-        self, tenant_id: str, name: str | None = None, entity_type: str | None = None
+        self,
+        tenant_id: str,
+        name: str | None = None,
+        entity_type: str | None = None,
+        active_only: bool = True,
     ) -> list[EntityNode]: ...
 
     @abstractmethod
-    async def save_identity_edge(self, edge: IdentityEdge) -> None: ...
+    async def save_identity_edge(self, tenant_id: str, edge: IdentityEdge) -> None: ...
 
     @abstractmethod
     async def query_identity_edges(

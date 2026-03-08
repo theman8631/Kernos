@@ -2,9 +2,17 @@
 
 Tier 1 runs synchronously (<1ms, zero cost, writes soul fields only).
 Tier 2 fires as an async background task (does not block the response).
+
+When VOYAGE_API_KEY is set, the enhanced path is used:
+  - EntityResolver resolves entity mentions to EntityNodes (3-tier cascade)
+  - FactDeduplicator classifies facts as ADD/UPDATE/NOOP (embedding similarity)
+  - Embeddings stored in {data_dir}/{tenant_id}/state/embeddings.json
+
+When VOYAGE_API_KEY is absent, falls back to hash-only dedup (Phase 1B behavior).
 """
 import asyncio
 import logging
+import os
 
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
@@ -65,6 +73,29 @@ async def run_projectors(
             logger.warning("Failed to emit knowledge.extracted (tier1): %s", exc)
 
     # --- Tier 2: async, does not block response ---
+    entity_resolver = None
+    fact_deduplicator = None
+    embedding_service = None
+    embedding_store = None
+
+    voyage_api_key = os.getenv("VOYAGE_API_KEY", "")
+    if voyage_api_key:
+        try:
+            from kernos.kernel.dedup import FactDeduplicator
+            from kernos.kernel.embedding_store import JsonEmbeddingStore
+            from kernos.kernel.embeddings import EmbeddingService
+            from kernos.kernel.resolution import EntityResolver
+
+            data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+            embedding_service = EmbeddingService(voyage_api_key)
+            embedding_store = JsonEmbeddingStore(data_dir)
+            entity_resolver = EntityResolver(state, embedding_service, reasoning_service)
+            fact_deduplicator = FactDeduplicator(
+                state, embedding_service, embedding_store, reasoning_service
+            )
+        except Exception as exc:
+            logger.warning("Failed to initialize entity resolution services: %s", exc)
+
     asyncio.create_task(
         run_tier2_extraction(
             recent_turns=recent_turns,
@@ -73,5 +104,9 @@ async def run_projectors(
             events=events,
             reasoning_service=reasoning_service,
             tenant_id=tenant_id,
+            entity_resolver=entity_resolver,
+            fact_deduplicator=fact_deduplicator,
+            embedding_service=embedding_service,
+            embedding_store=embedding_store,
         )
     )

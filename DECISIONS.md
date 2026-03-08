@@ -72,11 +72,19 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-SPEC-2.0 complete. No active spec. Next: Phase 2A (Entity Resolution) or Phase 2B (Dispatch Interceptor) — founder to decide.
+SPEC-2A complete. No active spec. Next: Phase 2B (Dispatch Interceptor / Covenant Enforcement) or Phase 2C (Context Assembly) — founder to decide.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-07: SPEC-2A — Entity Resolution + Fact Deduplication — COMPLETE
+
+- **What:** Three-tier entity resolution cascade (deterministic → multi-signal scoring → LLM) + three-zone fact deduplication (ADD / NOOP / LLM-classify). "Present, don't presume" principle implemented — name collision with mismatched context creates MAYBE_SAME_AS edge rather than auto-merging. Embeddings via Voyage AI voyage-3-lite stored separately in `embeddings.json` per tenant (keeps knowledge.json clean). NOOP reinforcement strengthens existing facts (reinforcement_count + storage_strength). Entity context injected into Tier 2 extraction prompt for coreference resolution. Graceful degradation: enhanced path requires VOYAGE_API_KEY; legacy hash-only dedup if absent.
+- **New files:** `kernos/kernel/embeddings.py`, `kernos/kernel/embedding_store.py`, `kernos/kernel/resolution.py`, `kernos/kernel/dedup.py`, `tests/test_entity_resolution.py`
+- **Modified files:** `entities.py` (6 new EntityNode fields), `state.py` (get_knowledge_entry, updated query_entity_nodes + save_identity_edge), `state_json.py` (implementations + per-tenant identity edges), `llm_extractor.py` (entity context injection, dual path, enhanced EXTRACTION_SCHEMA), `coordinator.py` (service initialization from VOYAGE_API_KEY), `cli.py` (entities command), `pyproject.toml` (rapidfuzz, jellyfish, voyageai deps)
+- **Tests:** 45 new tests in test_entity_resolution.py. Total: 471 passing.
+- **Full spec:** `specs/completed/SPEC-2A-ENTITY-RESOLUTION.md`
 
 ### 2026-03-06: Phase 1B — The Kernel — COMPLETE
 

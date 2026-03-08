@@ -7,7 +7,7 @@ Files per tenant under {data_dir}/{tenant_id}/state/:
   conversations.json   — list of ConversationSummary
   soul.json            — Soul (single object)
   entities.json        — list of EntityNode
-  identity_edges.json  — list of IdentityEdge
+  identity_edges.json  — list of IdentityEdge (per-tenant, Phase 2A)
   pending_actions.json — list of PendingAction
 
 The interface abstracts the backend — a future MemOS or database integration
@@ -202,6 +202,17 @@ class JsonStateStore(StateStore):
         raw.append(asdict(entry))
         self._write_json(path, raw)
 
+    async def get_knowledge_entry(
+        self, tenant_id: str, entry_id: str
+    ) -> KnowledgeEntry | None:
+        """Get a single KnowledgeEntry by ID."""
+        path = self._state_dir(tenant_id) / "knowledge.json"
+        raw = self._read_json(path, [])
+        for d in raw:
+            if d.get("id") == entry_id:
+                return _load_knowledge_entry(d)
+        return None
+
     async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
         """Return content_hash values for all active entries."""
         path = self._state_dir(tenant_id) / "knowledge.json"
@@ -306,14 +317,18 @@ class JsonStateStore(StateStore):
         return None
 
     async def query_entity_nodes(
-        self, tenant_id: str, name: str | None = None, entity_type: str | None = None
+        self,
+        tenant_id: str,
+        name: str | None = None,
+        entity_type: str | None = None,
+        active_only: bool = True,
     ) -> list[EntityNode]:
         path = self._state_dir(tenant_id) / "entities.json"
         raw = self._read_json(path, [])
         results: list[EntityNode] = []
         for d in raw:
             node = EntityNode(**d)
-            if not node.active:
+            if active_only and not node.active:
                 continue
             if entity_type and node.entity_type != entity_type:
                 continue
@@ -328,17 +343,8 @@ class JsonStateStore(StateStore):
             results.append(node)
         return results
 
-    async def save_identity_edge(self, edge: IdentityEdge) -> None:
-        path = self._state_dir(
-            # IdentityEdge has no tenant_id — derive from source node lookup isn't
-            # feasible here, so we store in a global edges file keyed by first node prefix.
-            # For now, use the source_id prefix to determine tenant dir via convention:
-            # callers must ensure they have the right tenant context.
-            # Phase 2A will provide a cleaner API.
-            "_edges"
-        ) / "identity_edges.json"
-        # Fallback: use a top-level edges store. This will be refined in Phase 2A.
-        path = self._data_dir / "_edges" / "identity_edges.json"
+    async def save_identity_edge(self, tenant_id: str, edge: IdentityEdge) -> None:
+        path = self._state_dir(tenant_id) / "identity_edges.json"
         raw = self._read_json(path, [])
         key = (edge.source_id, edge.target_id)
         for i, d in enumerate(raw):
@@ -352,7 +358,7 @@ class JsonStateStore(StateStore):
     async def query_identity_edges(
         self, tenant_id: str, entity_id: str
     ) -> list[IdentityEdge]:
-        path = self._data_dir / "_edges" / "identity_edges.json"
+        path = self._state_dir(tenant_id) / "identity_edges.json"
         raw = self._read_json(path, [])
         results = []
         for d in raw:
