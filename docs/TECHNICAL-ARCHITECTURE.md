@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-06 (reflects Phase 1B complete state)
+> **Last updated:** 2026-03-08 (reflects Phase 2A complete state — entity resolution + fact dedup)
 
 ---
 
@@ -41,6 +41,20 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
                                               ▼
                                         [Memory Projectors]
                                           (Tier 1 + Tier 2)
+                                              │
+                                    ┌─────────┴──────────┐
+                                    ▼                     ▼
+                             [Entity Resolver]    [Fact Deduplicator]
+                            (3-tier cascade)      (3-zone classifier)
+                                    │                     │
+                                    └──────┬──────────────┘
+                                           ▼
+                                  [Embedding Service]
+                                  (Voyage AI voyage-3-lite)
+                                           │
+                                           ▼
+                                  [Embedding Store]
+                                  (per-tenant embeddings.json)
 ```
 
 ---
@@ -211,8 +225,34 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Writes KnowledgeEntry records to State Store
 - Updates soul.user_context for permanent user facts
 - Handles corrections: marks old entries inactive, creates new with supersedes chain
-- Content hash deduplication prevents duplicate entries
+- Content hash deduplication prevents duplicate entries (legacy path)
 - Fires as async task — user never waits
+- **Enhanced path** (requires VOYAGE_API_KEY): entity resolver + semantic deduplicator replace hash-only dedup
+- **Legacy path** (no VOYAGE_API_KEY): hash-only dedup, no entity resolution; graceful fallback
+
+### Entity Resolution Pipeline (Phase 2A)
+
+**What it does:** Resolves named mentions in Tier 2 extraction to canonical EntityNode records. Prevents duplicate entities, links aliases, and handles name collisions via the "present, don't presume" principle.
+
+**Files:**
+- `kernos/kernel/resolution.py` — EntityResolver (3-tier cascade)
+- `kernos/kernel/embeddings.py` — EmbeddingService + cosine_similarity
+- `kernos/kernel/embedding_store.py` — JsonEmbeddingStore
+- `kernos/kernel/dedup.py` — FactDeduplicator (3-zone classifier)
+
+**EntityResolver — three-tier cascade:**
+1. **Tier 1 (deterministic):** Exact name match → alias match → contact info match → present_not_presume check. Zero LLM cost. Resolves 80%+ of cases.
+2. **Tier 2 (multi-signal scoring):** Jaro-Winkler (0.25) + Metaphone phonetic (0.10) + embedding cosine similarity (0.35) + token overlap (0.15) + type bonus (0.15). Score >0.85 → match. Score 0.50–0.85 → Tier 3.
+3. **Tier 3 (LLM judgment):** Structured output schema confirms or denies ambiguous matches. Used sparingly.
+
+**"Present, don't presume" principle:** When a new-person signal ("met today", "just met", "seems cool") appears alongside a mention that shares a name with an existing entity, the resolver creates a MAYBE_SAME_AS edge and a new EntityNode rather than auto-merging. Safe default over aggressive deduplication.
+
+**FactDeduplicator — three-zone classifier:**
+- **NOOP zone (>0.92 cosine similarity):** Existing entry reinforced (reinforcement_count + storage_strength). No LLM call.
+- **Ambiguous zone (0.65–0.92):** LLM classifies as ADD / UPDATE / NOOP. UPDATE creates supersedes chain.
+- **ADD zone (<0.65):** New entry written directly. No LLM call.
+
+**Entity context injection:** Known entities for the tenant injected into the Tier 2 extraction prompt for pronoun/coreference resolution (~500 token budget). Helps the LLM identify "she" as Sarah Henderson when that entity already exists.
 
 ---
 
@@ -234,7 +274,8 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Tools: tool.called, tool.result
 - Tasks: task.created, task.completed, task.failed
 - Agent lifecycle: agent.hatched, agent.bootstrap_graduated
-- Knowledge: knowledge.extracted
+- Knowledge: knowledge.extracted, knowledge.reinforced (Phase 2A)
+- Entity: entity.created, entity.merged, entity.linked, entity.updated (Phase 2A)
 - Capabilities: capability.connected, capability.disconnected, capability.error
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
@@ -255,12 +296,19 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `knowledge.json` — list of KnowledgeEntry
 - `contracts.json` — list of ContractRule
 - `conversations.json` — list of ConversationSummary
+- `entities.json` — list of EntityNode (Phase 2A)
+- `identity_edges.json` — list of IdentityEdge (Phase 2A)
+- `embeddings.json` — map of entry_id → embedding vector (Phase 2A; separate from knowledge.json to avoid bloat)
 
 **Four domains:**
 
 **TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config.
 
-**KnowledgeEntry:** id, tenant_id, category (entity/fact/preference/pattern), subject, content, confidence (stated/inferred/observed), source provenance, timestamps, tags, active flag, supersedes chain, durability (permanent/session/expires_at), content_hash for dedup.
+**KnowledgeEntry:** id, tenant_id, category (entity/fact/preference/pattern), subject, content, confidence (stated/inferred/observed), source provenance, timestamps, tags, active flag, supersedes chain, durability (permanent/session/expires_at), content_hash for dedup, reinforcement_count, storage_strength.
+
+**EntityNode:** id, tenant_id, canonical_name, entity_type (person/organization/place/thing), aliases, relationship_type (client/friend/spouse/etc.), context_space, contact_phone, contact_email, contact_address, contact_website, active, created_at, last_seen.
+
+**IdentityEdge:** source_id, target_id, edge_type (SAME_AS/MAYBE_SAME_AS/ALIAS_OF), confidence, created_at, source. Stored per-tenant in `{tenant_id}/state/identity_edges.json`.
 
 **ContractRule:** id, tenant_id, capability, rule_type (must/must_not/preference/escalation), description, active, source (default/user_stated/evolved), context_space (reserved, always None in Phase 1B).
 
@@ -310,7 +358,10 @@ Every tenant gets this directory tree on first contact:
 │   ├── soul.json                  # Soul (after hatch)
 │   ├── knowledge.json             # KnowledgeEntry records
 │   ├── contracts.json             # ContractRule records
-│   └── conversations.json         # ConversationSummary records
+│   ├── conversations.json         # ConversationSummary records
+│   ├── entities.json              # EntityNode records (Phase 2A)
+│   ├── identity_edges.json        # IdentityEdge records (Phase 2A)
+│   └── embeddings.json            # entry_id → embedding vector map (Phase 2A)
 ├── conversations/
 │   └── {conversation_id}.json     # Message history
 ├── events/
@@ -366,12 +417,17 @@ Every "delete" operation is a relocation. Archive paths exist from day one. `Con
 | Command | What it shows |
 |---|---|
 | `kernos-cli events <tenant_id>` | Recent events for a tenant |
+| `kernos-cli events <tenant_id> --type <type>` | Filtered events by type (e.g. entity.created, knowledge.reinforced) |
 | `kernos-cli tasks <tenant_id>` | Task history with costs |
 | `kernos-cli capabilities` | Live capability registry (reads from persisted state, not static catalog) |
 | `kernos-cli capabilities --tenant <id>` | Tenant-specific capability view |
 | `kernos-cli soul <tenant_id>` | Hatched soul: name, style, context, graduation status |
 | `kernos-cli contracts <tenant_id>` | Behavioral contract rules grouped by type |
-| `kernos-cli knowledge <tenant_id>` | Extracted knowledge entries |
+| `kernos-cli knowledge <tenant_id>` | Extracted knowledge entries (newest-first, default limit 50) |
+| `kernos-cli knowledge <tenant_id> --subject <name>` | Knowledge entries filtered by subject |
+| `kernos-cli knowledge <tenant_id> --include-archived` | Include archived/superseded entries |
+| `kernos-cli entities <tenant_id>` | EntityNode records with contact info (Phase 2A) |
+| `kernos-cli entities <tenant_id> --include-inactive` | Include inactive entities |
 | `kernos-cli tenants` | All known tenants |
 
 ---
@@ -384,7 +440,10 @@ Every reasoning call is logged with: model, input tokens, output tokens, estimat
 |---|---|---|
 | Primary reasoning (Claude Sonnet) | $0.03–0.11 per message | Every user message |
 | Tier 2 extraction (via complete_simple) | ~$0.004 per message | Every user message (async) |
+| Entity Resolver Tier 3 (LLM judgment) | ~$0.001 | Rare — only for ambiguous 0.50–0.85 score matches |
+| Fact Deduplicator LLM classify | ~$0.001 | Only for 0.65–0.92 similarity zone |
 | Bootstrap consolidation | ~$0.02 | Once per tenant lifetime |
+| Voyage AI embeddings | ~$0.0001 per extraction | Every Tier 2 run (enhanced path only) |
 
 Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
@@ -392,7 +451,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-297+ tests across 14 test files.
+471 tests across 16 test files.
 
 | File | What it covers |
 |---|---|
@@ -410,6 +469,8 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_models.py | NormalizedMessage model |
 | test_discord_adapter.py | Discord adapter |
 | test_twilio_adapter.py | Twilio SMS adapter |
+| test_entity_resolution.py | EntityNode, EmbeddingService, EntityResolver (Tier 1/2/3), FactDeduplicator, run_tier2_extraction dual-path (45 tests) |
+| test_schema_foundation.py | Phase 2.0 schema models |
 
 ---
 
@@ -436,6 +497,9 @@ Both entry points (Discord and FastAPI) follow the same initialization: create s
 | python-dotenv | Environment configuration |
 | filelock | Concurrent write safety for JSON files |
 | pydantic | Data validation (used in some tests and models) |
+| voyageai | Embedding service (Voyage AI voyage-3-lite) — Phase 2A |
+| rapidfuzz | Jaro-Winkler string similarity for entity matching — Phase 2A |
+| jellyfish | Metaphone phonetic matching for entity matching — Phase 2A |
 
 ---
 
@@ -448,7 +512,7 @@ These are referenced in the architecture but not implemented:
 - **Consolidation daemon** — background pattern extraction and insight generation
 - **Dispatch Interceptor** — infrastructure-level behavioral contract enforcement
 - **Multi-model routing** — Reasoning Service routes to different models by task type
-- **Entity resolution** — knowledge graph with identity linking
+- ~~**Entity resolution** — knowledge graph with identity linking~~ **COMPLETE (Phase 2A)**
 - **Memory decay** — FSRS-based temporal confidence with lifecycle archetypes
 - **Inline annotation** — memory cohort enriches messages with relevant context before the agent sees them
 - **Progressive autonomy** — behavioral contracts evolve from approval patterns (the Covenant Model)

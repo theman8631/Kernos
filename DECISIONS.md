@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Phase 1B COMPLETE — Housekeeping before Phase 2
+**Status:** Phase 2A COMPLETE — 2B spec incoming
 **Owner:** Architect
-**Action:** Produce Technical Architecture Document and organize project documentation
+**Action:** Produce SPEC-2B (Dispatch Interceptor + Basic Retrieval)
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -13,6 +13,17 @@
 ---
 
 ## Phase Status Tracker
+
+### Phase 2: Memory + Context Intelligence
+
+| ID | Spec | Status | Verified | Notes |
+|---|---|---|---|---|
+| 2.0 | Schema Foundation Sprint | COMPLETE | 2026-03-06 | All Phase 2 data models planted; ContextSpace auto-created on soul init |
+| 2A | Entity Resolution + Fact Dedup | COMPLETE | 2026-03-08 | Three-tier cascade, three-zone dedup, Voyage AI embeddings, NOOP reinforcement |
+| 2B | Dispatch Interceptor + Basic Retrieval | — | — | Next spec |
+| 2C | Context Assembly | — | — | Relationship-role matching, cross-context retrieval |
+
+---
 
 ### Phase 1A: First Spark — COMPLETE
 
@@ -270,4 +281,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-06 (Phase 1B COMPLETE — all 7 deliverables verified, 369 tests passing)*
+*Last updated: 2026-03-08 (Phase 2A COMPLETE — entity resolution + fact dedup live-verified, 471 tests passing)*
