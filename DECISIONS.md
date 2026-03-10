@@ -1,6 +1,6 @@
 ## NOW
 
-**Status:** Phase 2B COMPLETE — Context Space Routing live-verified
+**Status:** Phase 2B-v2 COMPLETE — LLM Context Space Routing live-verified
 **Owner:** Founder / Architect
 **Action:** Decide next spec: 2C (Context Assembly) or 2D (Dispatch Interceptor)
 
@@ -20,7 +20,8 @@
 |---|---|---|---|---|
 | 2.0 | Schema Foundation Sprint | COMPLETE | 2026-03-06 | All Phase 2 data models planted; ContextSpace auto-created on soul init |
 | 2A | Entity Resolution + Fact Dedup | COMPLETE | 2026-03-08 | Three-tier cascade, three-zone dedup, Voyage AI embeddings, NOOP reinforcement |
-| 2B | Context Space Routing | COMPLETE | 2026-03-08 | Algorithmic router (alias → entity → MRA), posture injection, scoped rules, handoff annotation, knowledge space scoping |
+| 2B | Context Space Routing (v1 — algorithmic) | SUPERSEDED | 2026-03-08 | Replaced by 2B-v2 |
+| 2B-v2 | Context Space Routing (LLM Router) | COMPLETE | 2026-03-10 | LLM router (Haiku), tagged message stream, space thread assembly, cross-domain injection, Gate 1/2 space creation, session exit |
 | 2C | Context Assembly | — | — | Relationship-role matching, cross-context retrieval |
 
 ---
@@ -83,11 +84,22 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-SPEC-2B complete. No active spec. Next: Phase 2C (Context Assembly) or Phase 2D (Dispatch Interceptor) — founder to decide.
+SPEC-2B-v2 complete. No active spec. Next: Phase 2C (Context Assembly) or Phase 2D (Dispatch Interceptor) — founder to decide.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-10: SPEC-2B-v2 — LLM Context Space Routing — COMPLETE
+
+- **What:** Replaces the previous algorithmic router (alias/entity/MRA matching) with an LLM-based router (Haiku) that reads message meaning. Every message gets `space_tags` stored on its conversation record — the full message stream is tagged rather than routed to a single space. Spaces are reconstructed per-domain from the tagged stream. Cross-domain injections appear in the system prompt as background context (not fake dialogue). Spaces create themselves organically via two gates: Gate 1 counts how many messages are tagged toward an unnamed topic cluster; Gate 2 fires an LLM call at the threshold to judge whether it's a real domain and generate name + description. Session exit maintenance fires when focus shifts away from a non-daily space, updating its description with what happened that session. LRU sunset caps active spaces at 40.
+- **Supersedes:** SPEC-2B (algorithmic router). ContextSpace model fields `routing_keywords`, `routing_entity_ids`, `routing_aliases`, `suggestion_suppressed_until` removed — LLM reads descriptions, not keyword lists.
+- **New files:** `tests/test_routing.py` (complete rewrite, 45 tests), `tests/live/LIVE-TEST-2B-v2.md`, `tests/live/run_live_test_2b_v2.py`
+- **Modified files:** `spaces.py` (dead fields removed), `persistence/base.py` (get_recent_full, get_space_thread, get_cross_domain_messages), `persistence/json_file.py` (implement new methods), `state.py` (topic hint ABC), `state_json.py` (topic hint impl), `reasoning.py` (prefer_cheap=True → Haiku model), `router.py` (LLMRouter replaces ContextSpaceRouter), `handler.py` (full process() rewrite + _assemble_space_context, _run_session_exit, _trigger_gate2, _enforce_space_cap), `cli.py` (remove alias args)
+- **Tests:** 516 passing (471 existing + 45 new routing tests).
+- **Live verified:** Haiku router working per message, Gate 1 counting (dnd_campaign 1→15), Gate 2 created `space_fbdace10` with LLM-generated description, multi-tagging on cross-domain messages, space thread assembly showing coherent D&D conversation, return-to-D&D routing correct. See `tests/live/LIVE-TEST-2B-v2.md`.
+- **Design note:** Topic hints (snake_case strings emitted by the router for emerging topics) are how Gate 1 counts before a space exists. Gate 2 clears hints on creation or decline. Space names may start as raw topic hint strings — session exit maintenance refines them over time.
+- **Full spec:** `specs/completed/SPEC-2B-v2-CONTEXT-ROUTING.md`
 
 ### 2026-03-08: SPEC-2B — Context Space Routing — COMPLETE
 
@@ -291,4 +303,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-08 (Phase 2B COMPLETE — context space routing live-verified, 497 tests passing)*
+*Last updated: 2026-03-10 (Phase 2B-v2 COMPLETE — LLM context space routing live-verified, 516 tests passing)*

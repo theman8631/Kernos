@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-08 (reflects Phase 2B complete state — context space routing)
+> **Last updated:** 2026-03-10 (reflects Phase 2B-v2 complete state — LLM context space routing)
 
 ---
 
@@ -21,10 +21,10 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
                                                       │    │     │
                                           ┌───────────┘    │     └───────────┐
                                           ▼                ▼                 ▼
-                                 [Context Space Router] [Task Engine]  [State Store]
+                                  [LLM Router (Haiku)] [Task Engine]  [State Store]
                                           │                                  │
                                           ▼                                  ▼
-                                    [Soul + Template]                  [Context Spaces]
+                                    [Soul + Template]             [Context Spaces + Topic Hints]
                                                            │
                                                            ▼
                                                    [Reasoning Service]
@@ -92,28 +92,37 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **File:** `kernos/messages/handler.py`
 
-**The process() flow:**
+**The process() flow (v2):**
 1. Derive `tenant_id` from message via `derive_tenant_id()` — `platform:sender`
 2. Auto-provision tenant if new (TenantStore + StateStore)
 3. Load or initialize Soul for this tenant
-4. Load conversation history (last 20 messages)
-5. **Route to context space** via ContextSpaceRouter (alias → entity → MRA fallback)
-6. Detect space switch, update `last_active_space_id`, emit `context.space.switched` event
-7. If space switched, prepend `[Switched from: X]` annotation to message
-8. Build system prompt from template + soul + **posture** + **scoped contracts** + capabilities
-9. Create Task, build ReasoningRequest
-10. Execute via TaskEngine → ReasoningService → LLM + tools
-11. Run memory projectors (Tier 1 sync, Tier 2 async) with `active_space_id`
-12. Append name ask if first interaction and name unknown
-13. Update soul (interaction count, hatch check, maturity check)
-14. Store response in conversation history
-15. Emit message.sent event
-16. Return response string to adapter
+4. Load conversation history with full metadata (`get_recent_full()` — includes timestamps and space_tags)
+5. **LLM Router:** One Haiku call → `RouterResult(tags, focus, continuation)`. Single-space tenants skip LLM call entirely.
+6. Detect space switch; if switched: fire `_run_session_exit()` async on outgoing space
+7. Update `last_active_space_id`, emit `context.space.switched` event
+8. **Gate 1:** For each tag not matching a known space ID: increment topic hint count; at threshold (15) fire `_trigger_gate2()` async
+9. Load active space; update `last_active_at`
+10. **`_assemble_space_context()`** — space thread (coherent domain conversation via `get_space_thread()`) + cross-domain injection from other spaces (`get_cross_domain_messages()`)
+11. Load scoped covenant rules (`query_covenant_rules(context_space_scope=[space_id, None])`)
+12. `_build_system_prompt()` — 9-layer assembly including cross-domain prefix + posture + scoped rules
+13. Store user message with `space_tags: router_result.tags`
+14. Create Task, build ReasoningRequest with **space thread** (not flat history) + current user message
+15. Execute via TaskEngine → ReasoningService → LLM + tools
+16. Run memory projectors (Tier 1 sync, Tier 2 async) with `active_space_id`
+17. Append name ask if first interaction and name unknown
+18. Update soul (interaction count, hatch check, maturity check)
+19. Store assistant response with `space_tags: router_result.tags`
+20. Emit message.sent event
+21. Return response string to adapter
 
 **Key methods:**
 - `_get_or_init_soul()` — loads from State Store or creates new unhatched soul
 - `_post_response_soul_update()` — increments interactions, checks hatch, checks graduation
-- `_build_system_prompt()` — 9-layer template-driven assembly (includes posture + scoped rules)
+- `_build_system_prompt()` — 9-layer assembly (includes cross-domain prefix, posture, scoped rules)
+- `_assemble_space_context()` — builds space thread + cross-domain prefix for the agent
+- `_run_session_exit()` — updates space name/description after focus shift (async, >= 3 messages)
+- `_trigger_gate2()` — Gate 2 LLM call to evaluate and potentially create a new space (async)
+- `_enforce_space_cap()` — archives LRU non-default space when 40-space cap is hit
 
 ### Soul + Template System
 
@@ -135,6 +144,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `bootstrap_prompt` — first-meeting guidance (presence, curiosity, competence through action)
 
 **System prompt assembly order:**
+0. **Cross-domain injection** (background context from other spaces — labeled, placed first for lower attention weight)
 1. Operating principles
 2. Soul personality (personality_notes if graduated, default_personality if not)
 3. **Context space posture** (non-daily spaces only — working style override with "does not override core values" label)
@@ -171,7 +181,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Two interfaces:**
 - `execute(request)` — full reasoning with tool-use loop. Used for agent conversations. Emits reasoning.request/response and tool.called/result events. Handles multi-turn tool use (agent calls tool, gets result, calls another tool, etc.)
-- `complete_simple(system_prompt, user_content, max_tokens, prefer_cheap)` — stateless single completion. No tools, no history, no task events. Used by kernel infrastructure (Tier 2 extraction, bootstrap consolidation).
+- `complete_simple(system_prompt, user_content, max_tokens, prefer_cheap)` — stateless single completion. No tools, no history, no task events. Used by kernel infrastructure (LLM router, Tier 2 extraction, Gate 2, session exit, bootstrap consolidation). `prefer_cheap=True` → Haiku (`claude-haiku-4-5-20251001`); `prefer_cheap=False` → Sonnet.
 
 **Provider abstraction:** `AnthropicProvider` implements the provider interface. Model and API key are configuration, not hardcoded in the handler. Currently only Anthropic is configured. Adding providers means implementing the provider interface.
 
@@ -237,24 +247,34 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - **Enhanced path** (requires VOYAGE_API_KEY): entity resolver + semantic deduplicator replace hash-only dedup
 - **Legacy path** (no VOYAGE_API_KEY): hash-only dedup, no entity resolution; graceful fallback
 
-### Context Space Router (Phase 2B)
+### Context Space Router (Phase 2B-v2)
 
-**What it does:** Routes inbound messages to the correct context space. Algorithmic only — no LLM calls. Runs at the top of `handler.process()` after tenant provisioning.
+**What it does:** Routes inbound messages to the correct context space using an LLM (Haiku). Reads message meaning, recent conversation history, temporal metadata, and space descriptions. Returns a `RouterResult` with tags, focus space, and continuation flag.
 
-**File:** `kernos/kernel/router.py`
+**File:** `kernos/kernel/router.py` — `LLMRouter` class
 
-**Three-check cascade:**
-1. **Space name/alias match:** Checks if the message text contains a space name or routing alias. Daily space is excluded from name matching (it's the fallback, not a keyword target). Returns `confident=True`.
-2. **Entity ownership:** Checks if the message mentions an entity that has a `context_space` set. If so, routes to that entity's space. Returns `confident=True`.
-3. **MRA fallback:** Falls back to the most recently active space (by `last_active_at`). Returns `confident=False` — downstream (2C) can correct.
+**RouterResult:**
+- `tags: list[str]` — space IDs the message belongs to (multi-tagging: one message can belong to multiple spaces). May also include snake_case topic hints for emerging topics not yet in a dedicated space.
+- `focus: str` — the single space ID the agent should focus on
+- `continuation: bool` — obvious short continuation (lol, ok, sounds good) → ride momentum, don't re-evaluate
 
-**Handler integration:**
-- Space switch detection: compares `active_space_id` with `tenant_profile.last_active_space_id`
-- On switch: emits `context.space.switched` event, prepends `[Switched from: X]` annotation to LLM input
-- Updates `last_active_space_id` on profile and `last_active_at` on the active space
-- Passes `active_space_id` to memory projectors for knowledge scoping
+**Single-space tenant fast path:** When only one space (daily) exists, router returns immediately without calling the LLM. Zero cost, zero latency.
+
+**Multi-space routing:** One Haiku call per message (~$0.001). Router sees: active space list with names + descriptions, last 15 messages with their timestamps and existing space_tags, temporal metadata (gap since last message), and the new message. Router produces structured JSON.
+
+**Topic hints:** When the router encounters a recurring topic that doesn't yet have a dedicated space, it may tag messages with a snake_case hint string (e.g., `dnd_campaign`). The kernel counts these via Gate 1.
+
+**Gate 1 → Gate 2 (organic space creation):**
+- **Gate 1:** After each routing call, tags not matching known space IDs are counted as topic hints (`topic_hints.json`). At threshold (15 messages), Gate 2 fires asynchronously.
+- **Gate 2:** One LLM call (Haiku) evaluates whether the accumulated messages represent a real recurring domain or a one-off topic. If yes: creates a new ContextSpace with a generated name and description, emits `context.space.created`, clears the hint. If no: clears the hint to avoid re-triggering soon.
+
+**LRU Sunset:** Hard cap of 40 active non-default spaces. When Gate 2 creates a space at the cap, the least recently used (by `last_active_at`) non-default space is archived — thread preserved on disk, removed from router's active list. Daily space is never archived.
+
+**Session exit maintenance:** When focus shifts away from a non-daily space (space switch detected), `_run_session_exit()` fires asynchronously. Requires 3+ messages tagged to that space. One Haiku call reviews the session and updates the space's name and description. Spaces get smarter about themselves over time.
 
 **Posture injection:** Non-daily spaces with a `posture` field get it injected into the system prompt after the personality layer, with a "does not override core values" boundary label.
+
+**Space thread assembly:** `_assemble_space_context()` reconstructs a coherent per-domain conversation from the tagged message stream. Agent sees only messages tagged to its active space — not the full interleaved stream. Cross-domain messages (from other spaces, last 5 turns) are injected as system-level background context.
 
 **Scoped rule loading:** `query_covenant_rules(context_space_scope=[active_space_id, None])` loads space-specific + global rules, excluding other spaces' rules. Daily-only tenants load all rules (same as Phase 1B).
 
@@ -330,11 +350,12 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `entities.json` — list of EntityNode (Phase 2A)
 - `identity_edges.json` — list of IdentityEdge (Phase 2A)
 - `spaces.json` — list of ContextSpace (Phase 2B; daily space auto-created on soul init)
+- `topic_hints.json` — `{hint_string: count}` for Gate 1 topic accumulation (Phase 2B-v2)
 - `embeddings.json` — map of entry_id → embedding vector (Phase 2A; separate from knowledge.json to avoid bloat)
 
 **Four domains:**
 
-**TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config, last_active_space_id.
+**TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config, last_active_space_id (persists focus space across messages).
 
 **KnowledgeEntry:** id, tenant_id, category (entity/fact/preference/pattern), subject, content, confidence (stated/inferred/observed), source provenance, timestamps, tags, active flag, supersedes chain, durability (permanent/session/expires_at), content_hash for dedup, reinforcement_count, storage_strength.
 
@@ -354,9 +375,18 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Storage:** `{data_dir}/{tenant_id}/conversations/{conversation_id}.json`
 
-**get_recent()** returns `[{"role": "user"|"assistant", "content": "..."}]` — the format Claude expects in its messages array. Full metadata stays on disk.
+**Message record format (v2):** Every message stored includes `space_tags: list[str]` alongside the standard fields:
+```json
+{"role": "user", "content": "...", "timestamp": "...", "space_tags": ["space_abc"], "platform": "discord", "tenant_id": "...", "conversation_id": "..."}
+```
+Pre-v2 messages have no `space_tags` (treated as belonging to the daily space in thread reconstruction).
 
-**archive()** moves to `{tenant_id}/archive/conversations/{timestamp}/` — non-destructive deletion per Blueprint mandate.
+**Methods:**
+- `get_recent()` — `[{"role": ..., "content": ...}]` — format Claude expects in messages array. Backwards-compat, full metadata stays on disk.
+- `get_recent_full()` — all stored fields including timestamp and space_tags. Used by the LLM router for context.
+- `get_space_thread(space_id, include_untagged)` — messages tagged to `space_id`, role+content only. `include_untagged=True` for daily space (migrates pre-v2 messages). Used by `_assemble_space_context()`.
+- `get_cross_domain_messages(active_space_id)` — messages from OTHER spaces (last 5 turns). Used for cross-domain injection into system prompt.
+- `archive()` — moves to `{tenant_id}/archive/conversations/{timestamp}/` — non-destructive per Blueprint mandate.
 
 ### Tenant Store
 
@@ -394,6 +424,7 @@ Every tenant gets this directory tree on first contact:
 │   ├── entities.json              # EntityNode records (Phase 2A)
 │   ├── identity_edges.json        # IdentityEdge records (Phase 2A)
 │   ├── spaces.json                # ContextSpace records (Phase 2B)
+│   ├── topic_hints.json           # Gate 1 topic hint counts (Phase 2B-v2)
 │   └── embeddings.json            # entry_id → embedding vector map (Phase 2A)
 ├── conversations/
 │   └── {conversation_id}.json     # Message history
@@ -461,8 +492,8 @@ Every "delete" operation is a relocation. Archive paths exist from day one. `Con
 | `kernos-cli knowledge <tenant_id> --include-archived` | Include archived/superseded entries |
 | `kernos-cli entities <tenant_id>` | EntityNode records with contact info (Phase 2A) |
 | `kernos-cli entities <tenant_id> --include-inactive` | Include inactive entities |
-| `kernos-cli spaces <tenant_id>` | Context spaces with posture, aliases, last_active_at |
-| `kernos-cli create-space <tenant_id> --name X` | Create a new context space (Phase 2B) |
+| `kernos-cli spaces <tenant_id>` | Context spaces with posture, description, last_active_at |
+| `kernos-cli create-space <tenant_id> --name X` | Create a new context space manually (Phase 2B; spaces also self-create via Gate 2) |
 | `kernos-cli tenants` | All known tenants |
 
 ---
@@ -474,9 +505,12 @@ Every reasoning call is logged with: model, input tokens, output tokens, estimat
 | Call type | Typical cost | Frequency |
 |---|---|---|
 | Primary reasoning (Claude Sonnet) | $0.03–0.11 per message | Every user message |
+| **LLM Router (Claude Haiku)** | **~$0.001 per message** | **Every user message with >1 space (else free)** |
 | Tier 2 extraction (via complete_simple) | ~$0.004 per message | Every user message (async) |
 | Entity Resolver Tier 3 (LLM judgment) | ~$0.001 | Rare — only for ambiguous 0.50–0.85 score matches |
 | Fact Deduplicator LLM classify | ~$0.001 | Only for 0.65–0.92 similarity zone |
+| **Gate 2 space creation (Claude Haiku)** | **~$0.001** | **Once per emerging topic at threshold (15 msgs)** |
+| **Session exit maintenance (Claude Haiku)** | **~$0.001** | **Once per focus shift away from non-daily space** |
 | Bootstrap consolidation | ~$0.02 | Once per tenant lifetime |
 | Voyage AI embeddings | ~$0.0001 per extraction | Every Tier 2 run (enhanced path only) |
 
@@ -486,7 +520,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-497 tests across 17 test files.
+516 tests across 17 test files.
 
 | File | What it covers |
 |---|---|
@@ -505,7 +539,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_discord_adapter.py | Discord adapter |
 | test_twilio_adapter.py | Twilio SMS adapter |
 | test_entity_resolution.py | EntityNode, EmbeddingService, EntityResolver (Tier 1/2/3), FactDeduplicator, run_tier2_extraction dual-path (45 tests) |
-| test_routing.py | Context Space Router, query_covenant_rules scoping, posture injection, handler space switching, handoff annotation, knowledge scoping (26 tests) |
+| test_routing.py | LLM Router (mocked), get_space_thread/get_cross_domain_messages/get_recent_full, token budget truncation, topic hint counting (Gate 1), query_covenant_rules scoping, system prompt posture + cross-domain prefix injection, handler space switching with session exit, space_tags on saved messages, daily-only zero change, knowledge scoping (45 tests) |
 | test_schema_foundation.py | Phase 2.0 schema models |
 
 ---
@@ -543,7 +577,7 @@ Both entry points (Discord and FastAPI) follow the same initialization: create s
 
 These are referenced in the architecture but not implemented:
 
-- ~~**Context spaces** — domain-specific context windows with separate tools and postures~~ **COMPLETE (Phase 2B)** — routing, posture injection, scoped rules, knowledge scoping
+- ~~**Context spaces** — domain-specific context windows with separate tools and postures~~ **COMPLETE (Phase 2B-v2)** — LLM router, per-message space tagging, space thread assembly, cross-domain injection, Gate 1/2 organic space creation, session exit maintenance, posture injection, scoped rules, knowledge scoping
 - **Awareness evaluator** — event-driven proactive notification system
 - **Consolidation daemon** — background pattern extraction and insight generation
 - **Dispatch Interceptor** — infrastructure-level behavioral contract enforcement

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from kernos.capability.client import MCPClientManager
 from kernos.capability.registry import CapabilityRegistry
 from kernos.kernel.engine import TaskEngine
-from kernos.kernel.router import ContextSpaceRouter
+from kernos.kernel.router import LLMRouter, RouterResult
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
 from kernos.kernel.exceptions import (
@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
 _PROVIDER = "anthropic"
+
+SPACE_THREAD_TOKEN_BUDGET = 4000
+CROSS_DOMAIN_INJECTION_TURNS = 5
+SPACE_CREATION_THRESHOLD = 15
+ACTIVE_SPACE_CAP = 40
 
 # Minimum interaction count before bootstrap graduation is even evaluated.
 _BOOTSTRAP_MIN_INTERACTIONS = 10
@@ -119,10 +124,12 @@ def _build_system_prompt(
     template: AgentTemplate,
     contract_rules: list[CovenantRule],
     active_space: ContextSpace | None = None,
+    cross_domain_prefix: str | None = None,
 ) -> str:
     """Build a template-driven, soul-aware system prompt.
 
     Layers (in injection order):
+    0. Cross-domain injection — background awareness from other spaces (if any)
     1. Operating principles — universal KERNOS values
     2. Agent identity / personality — who the agent is for this user
     2b. Context space posture — working style override for non-daily spaces
@@ -134,6 +141,14 @@ def _build_system_prompt(
     8. Bootstrap prompt — ONLY if soul has not graduated (bootstrap_graduated == False)
     """
     parts: list[str] = []
+
+    # 0. Cross-domain injection — background awareness from other spaces
+    if cross_domain_prefix:
+        parts.append(
+            f"## Recent activity in other areas (background context — read but do not dwell on):\n"
+            f"{cross_domain_prefix}\n"
+            f"(The current space thread follows below. Focus there.)"
+        )
 
     # 1. Operating principles
     parts.append(template.operating_principles)
@@ -223,7 +238,7 @@ class MessageHandler:
         self.reasoning = reasoning
         self.registry = registry
         self.engine = engine
-        self._router = ContextSpaceRouter(self.state)
+        self._router = LLMRouter(self.state, self.reasoning)
 
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
@@ -401,6 +416,229 @@ class MessageHandler:
 
         await self.state.save_soul(soul)
 
+    def _truncate_to_budget(self, messages: list[dict], budget_tokens: int) -> list[dict]:
+        """Drop oldest messages to fit within token budget. 4 chars ≈ 1 token."""
+        msgs = list(messages)
+        total = sum(len(m.get("content", "")) // 4 for m in msgs)
+        while total > budget_tokens and len(msgs) > 2:
+            dropped = msgs.pop(0)
+            total -= len(dropped.get("content", "")) // 4
+        return msgs
+
+    async def _assemble_space_context(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        active_space_id: str,
+        active_space: ContextSpace | None,
+    ) -> tuple[list[dict], str | None]:
+        """Assemble the agent's conversation context for the active space.
+
+        Returns (message_list, cross_domain_prefix) where:
+        - message_list: space thread (coherent domain conversation, role+content only)
+        - cross_domain_prefix: text to inject into system prompt (or None)
+        """
+        # Cross-domain injections — last 5 turns from other spaces
+        cross = await self.conversations.get_cross_domain_messages(
+            tenant_id, conversation_id, active_space_id,
+            last_n_turns=CROSS_DOMAIN_INJECTION_TURNS,
+        )
+        system_prefix: str | None = None
+        if cross:
+            lines = []
+            for msg in cross:
+                role_label = "You" if msg["role"] == "assistant" else "User"
+                ts = msg.get("timestamp", "")
+                content = str(msg.get("content", ""))[:300]
+                lines.append(f"[{role_label}, {ts}]: {content}")
+            system_prefix = "\n".join(lines)
+
+        # Space thread — the coherent domain conversation (role+content only)
+        is_daily = active_space.is_default if active_space else False
+        thread = await self.conversations.get_space_thread(
+            tenant_id, conversation_id, active_space_id,
+            max_messages=50,
+            include_untagged=is_daily,  # Daily includes pre-v2 untagged messages
+        )
+        truncated = self._truncate_to_budget(thread, SPACE_THREAD_TOKEN_BUDGET)
+
+        return truncated, system_prefix
+
+    async def _run_session_exit(
+        self, tenant_id: str, space_id: str, conversation_id: str
+    ) -> None:
+        """Update space name/description based on what happened in this session."""
+        space = await self.state.get_context_space(tenant_id, space_id)
+        if not space or space.is_default:
+            return
+
+        # Get messages tagged to this space from the conversation
+        session_messages = await self.conversations.get_space_thread(
+            tenant_id, conversation_id, space_id, max_messages=30
+        )
+        if len(session_messages) < 3:
+            return  # Too short to update description
+
+        formatted = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Agent'}: {str(m.get('content', ''))[:200]}"
+            for m in session_messages[-20:]
+        )
+
+        EXIT_SCHEMA = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"}
+            },
+            "required": ["name", "description"],
+            "additionalProperties": False
+        }
+
+        try:
+            result_str = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Review this conversation session and update the space name and description. "
+                    "The description helps the router understand what this space is about. "
+                    "Rename the space if the session revealed something the name misses. "
+                    "Keep description to 1-3 sentences. Be specific and concrete."
+                ),
+                user_content=(
+                    f"Space: {space.name}\n"
+                    f"Current description: {space.description}\n\n"
+                    f"Session:\n{formatted}"
+                ),
+                output_schema=EXIT_SCHEMA,
+                max_tokens=256,
+                prefer_cheap=True,
+            )
+            parsed = __import__("json").loads(result_str)
+            updates: dict = {}
+            if parsed.get("name") and parsed["name"] != space.name:
+                updates["name"] = parsed["name"]
+            if parsed.get("description") and parsed["description"] != space.description:
+                updates["description"] = parsed["description"]
+            if updates:
+                await self.state.update_context_space(tenant_id, space_id, updates)
+                logger.info("Session exit updated space %s: %s", space_id, updates)
+        except Exception as exc:
+            logger.warning("Session exit maintenance failed for %s: %s", space_id, exc)
+
+    async def _enforce_space_cap(self, tenant_id: str) -> None:
+        """Archive the least recently used space if at the active cap."""
+        spaces = await self.state.list_context_spaces(tenant_id)
+        active = [s for s in spaces if s.status == "active" and not s.is_default]
+        if len(active) < ACTIVE_SPACE_CAP:
+            return
+        lru = sorted(active, key=lambda s: s.last_active_at)[0]
+        await self.state.update_context_space(tenant_id, lru.id, {"status": "archived"})
+        try:
+            await emit_event(
+                self.events,
+                EventType.CONTEXT_SPACE_SUSPENDED,
+                tenant_id,
+                "space_cap",
+                payload={"space_id": lru.id, "name": lru.name, "reason": "lru_sunset"},
+            )
+        except Exception as exc:
+            logger.warning("Failed to emit context.space.suspended: %s", exc)
+        logger.info("Archived LRU space %s (%s) for tenant %s", lru.id, lru.name, tenant_id)
+
+    async def _trigger_gate2(
+        self, tenant_id: str, topic_hint: str, conversation_id: str
+    ) -> None:
+        """Gate 2: LLM decides whether to create a space for this topic cluster."""
+        import uuid
+        import json as _json
+
+        # Gather sample messages tagged with this hint
+        recent = await self.conversations.get_recent_full(tenant_id, conversation_id, limit=100)
+        hint_messages = [
+            m for m in recent
+            if topic_hint in m.get("space_tags", [])
+        ]
+        if not hint_messages:
+            return
+
+        formatted = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Agent'}: {str(m.get('content', ''))[:200]}"
+            for m in hint_messages[-20:]
+        )
+
+        GATE2_SCHEMA = {
+            "type": "object",
+            "properties": {
+                "create_space": {"type": "boolean"},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "reasoning": {"type": "string"}
+            },
+            "required": ["create_space", "name", "description", "reasoning"],
+            "additionalProperties": False
+        }
+
+        try:
+            result_str = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "You are evaluating whether a recurring topic in someone's life deserves "
+                    "its own dedicated context space. A space is for recurring domains — "
+                    "ongoing projects, hobbies, professional areas — not one-off topics that "
+                    "happened to run long. If this is a real domain, name it concisely and "
+                    "write a 1-2 sentence description of what it covers."
+                ),
+                user_content=(
+                    f"Topic hint: {topic_hint}\n\n"
+                    f"Messages about this topic:\n{formatted}"
+                ),
+                output_schema=GATE2_SCHEMA,
+                max_tokens=256,
+                prefer_cheap=True,
+            )
+            parsed = _json.loads(result_str)
+            if parsed.get("create_space"):
+                await self._enforce_space_cap(tenant_id)
+                now = _now_iso()
+                new_space = ContextSpace(
+                    id=f"space_{uuid.uuid4().hex[:8]}",
+                    tenant_id=tenant_id,
+                    name=parsed.get("name", topic_hint.replace("_", " ").title()),
+                    description=parsed.get("description", ""),
+                    space_type="domain",
+                    status="active",
+                    created_at=now,
+                    last_active_at=now,
+                    is_default=False,
+                )
+                await self.state.save_context_space(new_space)
+                await self.state.clear_topic_hint(tenant_id, topic_hint)
+                try:
+                    await emit_event(
+                        self.events,
+                        EventType.CONTEXT_SPACE_CREATED,
+                        tenant_id,
+                        "gate2",
+                        payload={
+                            "space_id": new_space.id,
+                            "name": new_space.name,
+                            "description": new_space.description,
+                            "topic_hint": topic_hint,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to emit context.space.created: %s", exc)
+                logger.info(
+                    "Gate 2 created space %s (%s) for tenant %s",
+                    new_space.id, new_space.name, tenant_id
+                )
+            else:
+                # Not a real domain — clear hint count to avoid re-triggering soon
+                await self.state.clear_topic_hint(tenant_id, topic_hint)
+                logger.info(
+                    "Gate 2 declined space creation for hint '%s' (tenant %s): %s",
+                    topic_hint, tenant_id, parsed.get("reasoning", "")
+                )
+        except Exception as exc:
+            logger.warning("Gate 2 failed for hint '%s': %s", topic_hint, exc)
+
     async def _update_conversation_summary(
         self, tenant_id: str, conversation_id: str, platform: str
     ) -> None:
@@ -428,55 +666,61 @@ class MessageHandler:
     async def process(self, message: NormalizedMessage) -> str:
         """Process a NormalizedMessage and return a response string.
 
-        Flow:
-        1. Derive tenant_id and provision if new (TenantStore + StateStore)
-        2. Load soul (initialize if new tenant's first message)
-        3. Load recent conversation history
-        4. Emit message.received
-        5. Store user message (before reasoning call)
-        6. Build ReasoningRequest from template + soul + contracts + registry
-        7. Delegate to TaskEngine
-        8. On success: update soul, store response, emit message.sent, update summary
+        Flow (v2):
+        1. Provision + soul init
+        2. Load recent history with full metadata
+        3. LLM router → RouterResult (tags, focus, continuation)
+        4. Detect space switch + session exit on outgoing space
+        5. Update last_active_space_id, emit switch event
+        6. Gate 1: topic hint tracking for emerging topics
+        7. Load active space, update last_active_at
+        8. Assemble space-specific context thread + cross-domain prefix
+        9. Build system prompt with posture + scoped rules + cross-domain prefix
+        10. Reasoning (space thread, not flat history)
+        11. Store user + assistant messages with space_tags
+        12. Memory projectors, soul update, conversation summary
         """
         tenant_id = derive_tenant_id(message)
         conversation_id = message.conversation_id
 
-        # Steps 1–3: provision, load soul, load history
+        # Steps 1–2: provision, load soul
         await self.tenants.get_or_create(tenant_id)
         await self._ensure_tenant_state(tenant_id, message)
         soul = await self._get_or_init_soul(tenant_id)
-        history = await self.conversations.get_recent(
+
+        # Step 2: Load recent history with full metadata (for router)
+        recent_full = await self.conversations.get_recent_full(
             tenant_id, conversation_id, limit=20
         )
 
-        # Route to context space
-        active_space_id, routing_confident = await self._router.route(
-            tenant_id, message.content
-        )
-        active_space = (
-            await self.state.get_context_space(tenant_id, active_space_id)
-            if active_space_id
-            else None
-        )
-
-        # Detect and handle space switch
+        # Step 3: Route the message (LLM call, or immediate fallback for single-space)
         tenant_profile = await self.state.get_tenant_profile(tenant_id)
-        previous_space_id = tenant_profile.last_active_space_id if tenant_profile else ""
+        current_focus_id = tenant_profile.last_active_space_id if tenant_profile else ""
+
+        router_result = await self._router.route(
+            tenant_id, message.content, recent_full, current_focus_id
+        )
+        active_space_id = router_result.focus
+
+        # Step 4: Detect space switch
+        previous_space_id = current_focus_id
         space_switched = (
             active_space_id != previous_space_id
             and previous_space_id != ""
             and active_space_id != ""
         )
 
+        # Session exit maintenance on the outgoing space (async, best-effort)
+        if space_switched:
+            import asyncio
+            asyncio.create_task(
+                self._run_session_exit(tenant_id, previous_space_id, conversation_id)
+            )
+
+        # Step 5: Update last_active_space_id + emit switch event
         if tenant_profile and active_space_id and active_space_id != previous_space_id:
             tenant_profile.last_active_space_id = active_space_id
             await self.state.save_tenant_profile(tenant_id, tenant_profile)
-
-        if active_space and active_space_id:
-            await self.state.update_context_space(
-                tenant_id, active_space_id,
-                {"last_active_at": _now_iso(), "status": "active"},
-            )
 
         if space_switched:
             try:
@@ -488,23 +732,46 @@ class MessageHandler:
                     payload={
                         "from_space": previous_space_id,
                         "to_space": active_space_id,
-                        "confident": routing_confident,
+                        "router_tags": router_result.tags,
+                        "continuation": router_result.continuation,
                     },
                 )
             except Exception as exc:
                 logger.warning("Failed to emit context.space.switched: %s", exc)
 
-        # Handoff annotation
-        if space_switched:
-            previous_space = await self.state.get_context_space(
-                tenant_id, previous_space_id
+        # Step 6: Gate 1 — topic hint tracking for tags that are not known space IDs
+        known_space_ids = {
+            s.id for s in await self.state.list_context_spaces(tenant_id)
+        }
+        for tag in router_result.tags:
+            if tag and tag not in known_space_ids:
+                try:
+                    await self.state.increment_topic_hint(tenant_id, tag)
+                    count = await self.state.get_topic_hint_count(tenant_id, tag)
+                    if count >= SPACE_CREATION_THRESHOLD:
+                        import asyncio
+                        asyncio.create_task(
+                            self._trigger_gate2(tenant_id, tag, conversation_id)
+                        )
+                except Exception as exc:
+                    logger.warning("Gate 1 tracking failed for hint '%s': %s", tag, exc)
+
+        # Step 7: Load active space, update last_active_at
+        active_space = (
+            await self.state.get_context_space(tenant_id, active_space_id)
+            if active_space_id
+            else None
+        )
+        if active_space and active_space_id:
+            await self.state.update_context_space(
+                tenant_id, active_space_id,
+                {"last_active_at": _now_iso(), "status": "active"},
             )
-            if previous_space:
-                message_content = f"[Switched from: {previous_space.name}]\n{message.content}"
-            else:
-                message_content = message.content
-        else:
-            message_content = message.content
+
+        # Step 8: Assemble space-specific context
+        space_messages, cross_domain_prefix = await self._assemble_space_context(
+            tenant_id, conversation_id, active_space_id, active_space
+        )
 
         # Emit message.received
         try:
@@ -524,7 +791,7 @@ class MessageHandler:
         except Exception as exc:
             logger.warning("Failed to emit message.received: %s", exc)
 
-        # Store user message before the reasoning call
+        # Store user message WITH space_tags
         user_entry = {
             "role": "user",
             "content": message.content,
@@ -532,10 +799,11 @@ class MessageHandler:
             "platform": message.platform,
             "tenant_id": tenant_id,
             "conversation_id": conversation_id,
+            "space_tags": router_result.tags,
         }
         await self.conversations.append(tenant_id, conversation_id, user_entry)
 
-        # Build and execute task
+        # Step 9: Build system prompt
         task = Task(
             id=generate_task_id(),
             type=TaskType.REACTIVE_SIMPLE,
@@ -557,8 +825,11 @@ class MessageHandler:
         system_prompt = _build_system_prompt(
             message, capability_prompt, soul, PRIMARY_TEMPLATE, contract_rules,
             active_space=active_space,
+            cross_domain_prefix=cross_domain_prefix,
         )
-        messages: list[dict] = history + [{"role": "user", "content": message_content}]
+
+        # Step 10: Build messages array from space thread + current user message
+        messages: list[dict] = space_messages + [{"role": "user", "content": message.content}]
 
         request = ReasoningRequest(
             tenant_id=tenant_id,
@@ -574,8 +845,10 @@ class MessageHandler:
             task = await self.engine.execute(task, request)
             response_text = task.result_text
 
-            # Tier 1 runs sync (updates soul.user_name / communication_style if found).
-            # Tier 2 fires as a background task (does not block the response).
+            # Tier 1 + Tier 2 projectors
+            history = await self.conversations.get_recent(
+                tenant_id, conversation_id, limit=20
+            )
             await run_projectors(
                 user_message=message.content,
                 recent_turns=history[-4:],
@@ -587,28 +860,18 @@ class MessageHandler:
                 active_space_id=active_space_id,
             )
 
-            # Append name ask on first interaction if name still unknown after Tier 1
             response_text = _maybe_append_name_ask(response_text, soul)
 
         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
             logger.error(
                 "Claude API connection/timeout error for sender=%s: %s",
-                message.sender,
-                exc,
-                exc_info=True,
+                message.sender, exc, exc_info=True,
             )
             try:
                 await emit_event(
-                    self.events,
-                    EventType.HANDLER_ERROR,
-                    tenant_id,
-                    "handler",
-                    payload={
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "conversation_id": conversation_id,
-                        "stage": "api_call",
-                    },
+                    self.events, EventType.HANDLER_ERROR, tenant_id, "handler",
+                    payload={"error_type": type(exc).__name__, "error_message": str(exc),
+                             "conversation_id": conversation_id, "stage": "api_call"},
                 )
             except Exception:
                 pass
@@ -617,22 +880,13 @@ class MessageHandler:
         except ReasoningRateLimitError as exc:
             logger.error(
                 "Claude API rate limit hit for sender=%s: %s",
-                message.sender,
-                exc,
-                exc_info=True,
+                message.sender, exc, exc_info=True,
             )
             try:
                 await emit_event(
-                    self.events,
-                    EventType.HANDLER_ERROR,
-                    tenant_id,
-                    "handler",
-                    payload={
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "conversation_id": conversation_id,
-                        "stage": "api_call",
-                    },
+                    self.events, EventType.HANDLER_ERROR, tenant_id, "handler",
+                    payload={"error_type": type(exc).__name__, "error_message": str(exc),
+                             "conversation_id": conversation_id, "stage": "api_call"},
                 )
             except Exception:
                 pass
@@ -641,22 +895,13 @@ class MessageHandler:
         except ReasoningProviderError as exc:
             logger.error(
                 "Claude API provider error for sender=%s: %s",
-                message.sender,
-                exc,
-                exc_info=True,
+                message.sender, exc, exc_info=True,
             )
             try:
                 await emit_event(
-                    self.events,
-                    EventType.HANDLER_ERROR,
-                    tenant_id,
-                    "handler",
-                    payload={
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "conversation_id": conversation_id,
-                        "stage": "api_call",
-                    },
+                    self.events, EventType.HANDLER_ERROR, tenant_id, "handler",
+                    payload={"error_type": type(exc).__name__, "error_message": str(exc),
+                             "conversation_id": conversation_id, "stage": "api_call"},
                 )
             except Exception:
                 pass
@@ -665,22 +910,13 @@ class MessageHandler:
         except Exception as exc:
             logger.error(
                 "Unexpected error in handler for sender=%s: %s",
-                message.sender,
-                exc,
-                exc_info=True,
+                message.sender, exc, exc_info=True,
             )
             try:
                 await emit_event(
-                    self.events,
-                    EventType.HANDLER_ERROR,
-                    tenant_id,
-                    "handler",
-                    payload={
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "conversation_id": conversation_id,
-                        "stage": "general",
-                    },
+                    self.events, EventType.HANDLER_ERROR, tenant_id, "handler",
+                    payload={"error_type": type(exc).__name__, "error_message": str(exc),
+                             "conversation_id": conversation_id, "stage": "general"},
                 )
             except Exception:
                 pass
@@ -689,7 +925,7 @@ class MessageHandler:
         # Update soul after successful response
         await self._post_response_soul_update(soul)
 
-        # Store assistant response
+        # Store assistant response WITH space_tags
         assistant_entry = {
             "role": "assistant",
             "content": response_text,
@@ -697,16 +933,14 @@ class MessageHandler:
             "platform": message.platform,
             "tenant_id": tenant_id,
             "conversation_id": conversation_id,
+            "space_tags": router_result.tags,
         }
         await self.conversations.append(tenant_id, conversation_id, assistant_entry)
 
         # Emit message.sent
         try:
             await emit_event(
-                self.events,
-                EventType.MESSAGE_SENT,
-                tenant_id,
-                "handler",
+                self.events, EventType.MESSAGE_SENT, tenant_id, "handler",
                 payload={
                     "content": response_text,
                     "conversation_id": conversation_id,

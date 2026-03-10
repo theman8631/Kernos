@@ -27,6 +27,46 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
+    async def get_recent_full(
+        self, tenant_id: str, conversation_id: str, limit: int = 20
+    ) -> list[dict]:
+        """Return the most recent messages with full metadata (timestamp, space_tags, etc.).
+
+        Unlike get_recent(), includes all saved fields. Used by the router and
+        thread reconstruction methods.
+        Returns empty list for a new tenant/conversation.
+        """
+        ...
+
+    @abstractmethod
+    async def get_space_thread(
+        self, tenant_id: str, conversation_id: str,
+        space_id: str, max_messages: int = 50,
+        include_untagged: bool = False,
+    ) -> list[dict]:
+        """Return messages tagged to this space, in chronological order.
+
+        Filters the full message stream by space_tags containing space_id.
+        Returns only role and content fields (suitable for the agent's messages array).
+        include_untagged: if True, also include messages with no space_tags (migration compat).
+        Returns the most recent max_messages that match.
+        """
+        ...
+
+    @abstractmethod
+    async def get_cross_domain_messages(
+        self, tenant_id: str, conversation_id: str,
+        active_space_id: str, last_n_turns: int = 5,
+    ) -> list[dict]:
+        """Return recent messages from OTHER spaces for ephemeral cross-domain injection.
+
+        Returns the last N message pairs (user + assistant) that were NOT
+        tagged to the active space. Includes role, content, and timestamp.
+        Untagged messages (from pre-v2 conversations) are excluded.
+        """
+        ...
+
+    @abstractmethod
     async def archive(self, tenant_id: str, conversation_id: str) -> None:
         """Move a conversation to the shadow archive. Non-destructive.
 

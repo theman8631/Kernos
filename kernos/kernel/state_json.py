@@ -75,6 +75,22 @@ def _load_covenant_rule(d: dict) -> CovenantRule:
     return CovenantRule(**data)
 
 
+_CONTEXT_SPACE_FIELDS = {
+    "id", "tenant_id", "name", "description", "space_type", "status",
+    "posture", "model_preference", "created_at", "last_active_at", "is_default",
+}
+
+
+def _load_context_space(d: dict) -> ContextSpace:
+    """Load ContextSpace from dict, silently ignoring unknown/removed fields.
+
+    Old spaces.json files may have routing_keywords, routing_aliases,
+    routing_entity_ids, suggestion_suppressed_until — all removed in v2.
+    """
+    filtered = {k: v for k, v in d.items() if k in _CONTEXT_SPACE_FIELDS}
+    return ContextSpace(**filtered)
+
+
 def _load_knowledge_entry(d: dict) -> KnowledgeEntry:
     """Load KnowledgeEntry from dict, applying durability → lifecycle_archetype migration.
 
@@ -451,13 +467,13 @@ class JsonStateStore(StateStore):
         raw = self._read_json(path, [])
         for d in raw:
             if d.get("id") == space_id:
-                return ContextSpace(**d)
+                return _load_context_space(d)
         return None
 
     async def list_context_spaces(self, tenant_id: str) -> list[ContextSpace]:
         path = self._state_dir(tenant_id) / "spaces.json"
         raw = self._read_json(path, [])
-        return [ContextSpace(**d) for d in raw]
+        return [_load_context_space(d) for d in raw]
 
     async def update_context_space(
         self, tenant_id: str, space_id: str, updates: dict
@@ -473,6 +489,30 @@ class JsonStateStore(StateStore):
                 self._write_json(path, raw)
                 return
         logger.warning("update_context_space: id %s not found for tenant %s", space_id, tenant_id)
+
+    # -----------------------------------------------------------------------
+    # Topic Hints (Gate 1 space creation)
+    # -----------------------------------------------------------------------
+
+    def _topic_hints_path(self, tenant_id: str) -> Path:
+        return self._state_dir(tenant_id) / "topic_hints.json"
+
+    async def increment_topic_hint(self, tenant_id: str, hint: str) -> None:
+        path = self._topic_hints_path(tenant_id)
+        hints = self._read_json(path, {})
+        hints[hint] = hints.get(hint, 0) + 1
+        self._write_json(path, hints)
+
+    async def get_topic_hint_count(self, tenant_id: str, hint: str) -> int:
+        path = self._topic_hints_path(tenant_id)
+        hints = self._read_json(path, {})
+        return hints.get(hint, 0)
+
+    async def clear_topic_hint(self, tenant_id: str, hint: str) -> None:
+        path = self._topic_hints_path(tenant_id)
+        hints = self._read_json(path, {})
+        hints.pop(hint, None)
+        self._write_json(path, hints)
 
     # -----------------------------------------------------------------------
     # Conversation Summaries

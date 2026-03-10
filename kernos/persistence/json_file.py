@@ -87,6 +87,53 @@ class JsonConversationStore(ConversationStore):
         # Return only role and content — full metadata stays on disk
         return [{"role": e["role"], "content": e["content"]} for e in recent]
 
+    async def get_recent_full(
+        self, tenant_id: str, conversation_id: str, limit: int = 20
+    ) -> list[dict]:
+        path = self._conversation_path(tenant_id, conversation_id)
+        if not path.exists():
+            return []
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        return entries[-limit:] if len(entries) > limit else entries
+
+    async def get_space_thread(
+        self, tenant_id: str, conversation_id: str,
+        space_id: str, max_messages: int = 50,
+        include_untagged: bool = False,
+    ) -> list[dict]:
+        path = self._conversation_path(tenant_id, conversation_id)
+        if not path.exists():
+            return []
+        with open(path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+        space_messages = []
+        for e in entries:
+            tags = e.get("space_tags", None)
+            if tags is None:
+                if include_untagged:
+                    space_messages.append({"role": e["role"], "content": e["content"]})
+            elif space_id in tags:
+                space_messages.append({"role": e["role"], "content": e["content"]})
+        return space_messages[-max_messages:]
+
+    async def get_cross_domain_messages(
+        self, tenant_id: str, conversation_id: str,
+        active_space_id: str, last_n_turns: int = 5,
+    ) -> list[dict]:
+        path = self._conversation_path(tenant_id, conversation_id)
+        if not path.exists():
+            return []
+        with open(path, "r", encoding="utf-8") as f:
+            all_entries = json.load(f)
+        # Only include messages that have space_tags AND don't include active_space_id
+        cross = [
+            {"role": e["role"], "content": e["content"], "timestamp": e.get("timestamp", "")}
+            for e in all_entries
+            if e.get("space_tags") is not None and active_space_id not in e.get("space_tags", [])
+        ]
+        return cross[-(last_n_turns * 2):]
+
     async def archive(self, tenant_id: str, conversation_id: str) -> None:
         path = self._conversation_path(tenant_id, conversation_id)
         if not path.exists():

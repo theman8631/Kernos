@@ -749,9 +749,6 @@ def test_context_space_defaults():
     assert space.space_type == "daily"
     assert space.status == "active"
     assert space.is_default is False
-    assert space.routing_keywords == []
-    assert space.routing_entity_ids == []
-    assert space.routing_aliases == []
     assert space.description == ""
     assert space.posture == ""
 
@@ -778,7 +775,6 @@ async def test_state_store_context_space_crud(tmp_path):
         id="space_abc123", tenant_id="t1", name="TTRPG — Aethoria Campaign",
         description="Fantasy RPG campaign",
         space_type="project", status="active",
-        routing_keywords=["aethoria", "campaign", "D&D"],
         created_at=now, last_active_at=now,
     )
     await store.save_context_space(space)
@@ -787,7 +783,7 @@ async def test_state_store_context_space_crud(tmp_path):
     assert fetched is not None
     assert fetched.name == "TTRPG — Aethoria Campaign"
     assert fetched.space_type == "project"
-    assert "aethoria" in fetched.routing_keywords
+    assert fetched.description == "Fantasy RPG campaign"
 
 
 async def test_state_store_list_context_spaces(tmp_path):

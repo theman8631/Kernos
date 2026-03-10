@@ -24,7 +24,8 @@ from kernos.kernel.exceptions import (
 logger = logging.getLogger(__name__)
 
 _PROVIDER = "anthropic"
-_SIMPLE_MODEL = "claude-sonnet-4-6"  # Used by complete_simple(); cheap routing is Phase 2
+_SIMPLE_MODEL = "claude-sonnet-4-6"  # Used by complete_simple()
+_CHEAP_MODEL = "claude-haiku-4-5-20251001"  # Used by complete_simple() when prefer_cheap=True
 
 
 def _now_iso() -> str:
@@ -232,14 +233,15 @@ class ReasoningService:
         """Single stateless completion. No tools, no history, no task events.
 
         Used by kernel infrastructure (extraction, consolidation) not by agents.
-        Returns raw text response. prefer_cheap is reserved for Phase 2 routing.
+        Returns raw text response. prefer_cheap uses Haiku-class model for cost efficiency.
 
         When output_schema is provided, uses Anthropic's native structured outputs
         (constrained decoding). Schema compliance is guaranteed by the API — no
         json.loads() retry logic needed. Returns "{}" on truncation or refusal.
         """
+        model = _CHEAP_MODEL if prefer_cheap else _SIMPLE_MODEL
         response = await self._provider.complete(
-            model=_SIMPLE_MODEL,
+            model=model,
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
             tools=[],

@@ -78,6 +78,9 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
 
     conversations = AsyncMock(spec=ConversationStore)
     conversations.get_recent.return_value = []
+    conversations.get_recent_full.return_value = []
+    conversations.get_space_thread.return_value = []
+    conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
 
     tenants = AsyncMock(spec=TenantStore)
@@ -114,6 +117,12 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     )
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
+    state.query_covenant_rules.return_value = []
+    state.list_context_spaces.return_value = []
+    state.get_context_space.return_value = None
+    state.increment_topic_hint.return_value = None
+    state.get_topic_hint_count.return_value = 0
+    state.clear_topic_hint.return_value = None
     state.get_knowledge_hashes.return_value = set()
     state.query_knowledge.return_value = []
 
@@ -348,7 +357,8 @@ async def test_handler_tool_calls_go_to_audit_not_conversation():
 
 async def test_handler_loads_history_into_messages():
     handler, mock_provider = _make_handler()
-    handler.conversations.get_recent.return_value = [
+    # In v2, message history comes from get_space_thread (via _assemble_space_context)
+    handler.conversations.get_space_thread.return_value = [
         {"role": "user", "content": "My name is Alice"},
         {"role": "assistant", "content": "Nice to meet you, Alice!"},
     ]
@@ -380,6 +390,9 @@ async def test_handler_creates_task_via_engine():
     mcp = MagicMock(spec=MCPClientManager)
     conversations = AsyncMock(spec=ConversationStore)
     conversations.get_recent.return_value = []
+    conversations.get_recent_full.return_value = []
+    conversations.get_space_thread.return_value = []
+    conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
     tenants = AsyncMock(spec=TenantStore)
     tenants.get_or_create.return_value = {"tenant_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
@@ -395,6 +408,12 @@ async def test_handler_creates_task_via_engine():
     state.get_soul.return_value = None
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
+    state.query_covenant_rules.return_value = []
+    state.list_context_spaces.return_value = []
+    state.get_context_space.return_value = None
+    state.increment_topic_hint.return_value = None
+    state.get_topic_hint_count.return_value = 0
+    state.clear_topic_hint.return_value = None
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry()
@@ -431,6 +450,9 @@ async def test_handler_uses_task_result_text_as_response():
     mcp = MagicMock(spec=MCPClientManager)
     conversations = AsyncMock(spec=ConversationStore)
     conversations.get_recent.return_value = []
+    conversations.get_recent_full.return_value = []
+    conversations.get_space_thread.return_value = []
+    conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
     tenants = AsyncMock(spec=TenantStore)
     tenants.get_or_create.return_value = {"tenant_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
@@ -448,6 +470,12 @@ async def test_handler_uses_task_result_text_as_response():
     )
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
+    state.query_covenant_rules.return_value = []
+    state.list_context_spaces.return_value = []
+    state.get_context_space.return_value = None
+    state.increment_topic_hint.return_value = None
+    state.get_topic_hint_count.return_value = 0
+    state.clear_topic_hint.return_value = None
     state.get_knowledge_hashes.return_value = set()
     state.query_knowledge.return_value = []
 

@@ -253,8 +253,6 @@ async def cmd_spaces(args) -> None:
         print(f"    id: {s.id}")
         if s.description:
             print(f"    {s.description}")
-        if s.routing_keywords:
-            print(f"    keywords: {', '.join(s.routing_keywords)}")
         if s.posture:
             print(f"    posture: {s.posture}")
         if s.last_active_at:
@@ -320,10 +318,6 @@ async def cmd_create_space(args) -> None:
     now = datetime.now(timezone.utc).isoformat()
     space_id = f"space_{uuid.uuid4().hex[:8]}"
 
-    aliases = []
-    if args.aliases:
-        aliases = [a.strip() for a in args.aliases.split(",") if a.strip()]
-
     space = ContextSpace(
         id=space_id,
         tenant_id=args.tenant_id,
@@ -331,7 +325,6 @@ async def cmd_create_space(args) -> None:
         description=args.description or "",
         space_type=args.type or "project",
         status="active",
-        routing_aliases=aliases,
         posture=args.posture or "",
         created_at=now,
         last_active_at=now,
@@ -340,8 +333,6 @@ async def cmd_create_space(args) -> None:
     await state.save_context_space(space)
     print(f"Created context space: {space_id}")
     print(f"  Name: {args.name}")
-    if aliases:
-        print(f"  Aliases: {', '.join(aliases)}")
     if args.posture:
         print(f"  Posture: {args.posture}")
 
@@ -634,7 +625,6 @@ def main() -> None:
     p.add_argument("tenant_id")
     p.add_argument("--name", required=True, help="Space name")
     p.add_argument("--type", default="project", help="Space type (project/domain/managed_resource)")
-    p.add_argument("--aliases", help="Comma-separated routing aliases")
     p.add_argument("--posture", help="Working style posture text")
     p.add_argument("--description", help="One-line description")
 
