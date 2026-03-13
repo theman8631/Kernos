@@ -601,6 +601,12 @@ class CompactionService:
             index_path.read_text(encoding="utf-8")
         )
 
+        # 4b. Personality evolution — rewrite soul.personality_notes
+        try:
+            await self._evolve_personality(tenant_id)
+        except Exception as exc:
+            logger.warning("Personality evolution failed for %s: %s", tenant_id, exc)
+
         # 5. Create new active document
         living_state = self._extract_living_state(active_doc)
         forward_entries = self._extract_forward_relevant_entries(
@@ -665,3 +671,50 @@ class CompactionService:
             "Rotated compaction document for %s/%s — archive #%d",
             tenant_id, space_id, comp_state.archive_count,
         )
+
+    async def _evolve_personality(self, tenant_id: str) -> None:
+        """Rewrite soul.personality_notes based on accumulated knowledge.
+
+        Fires only on compaction rotation — infrequent, cheap, deliberate.
+        Failure never blocks rotation.
+        """
+        from kernos.kernel.soul import Soul
+
+        soul = await self.state.get_soul(tenant_id)
+        if not soul:
+            return
+
+        # Load recent user knowledge entries (last 30 days or all if fewer)
+        user_ke = await self.state.query_knowledge(
+            tenant_id, subject="user", active_only=True, limit=30,
+        )
+        user_facts = [e.content for e in user_ke
+                      if e.lifecycle_archetype in ("structural", "identity", "habitual")]
+        if not user_facts:
+            return
+
+        current_personality = soul.personality_notes or "(no personality notes yet)"
+        facts_text = "\n".join(f"- {f}" for f in user_facts)
+
+        result = await self.reasoning.complete_simple(
+            system_prompt=(
+                "You are updating an AI agent's internal personality profile "
+                "for a specific user. Revise the existing profile based on new "
+                "observations. Preserve the stable core — this should feel like "
+                "the same document, revised, not replaced."
+            ),
+            user_content=(
+                f"Current personality profile:\n{current_personality}\n\n"
+                f"User facts (recent observations):\n{facts_text}\n\n"
+                "Rewrite the personality profile. Describe PATTERNS, not events. "
+                "'Approaches problems by mapping them to familiar frameworks' is "
+                "a pattern. 'Mentioned late-night coding on March 6' is an event "
+                "— do not include events. Keep it concise — 3-5 sentences."
+            ),
+            max_tokens=300,
+            prefer_cheap=True,
+        )
+
+        soul.personality_notes = result.strip()
+        await self.state.save_soul(soul)
+        logger.info("Personality evolved for tenant %s on rotation", tenant_id)

@@ -644,6 +644,124 @@ class TestRotation:
 
 
 # ---------------------------------------------------------------------------
+# Personality Evolution on Rotation
+# ---------------------------------------------------------------------------
+
+
+class TestPersonalityEvolution:
+    async def test_personality_evolves_on_rotation(self, tmp_path):
+        """_rotate() calls _evolve_personality which rewrites soul.personality_notes."""
+        from kernos.kernel.soul import Soul
+        from kernos.kernel.state import KnowledgeEntry
+
+        big_doc = "# Ledger\n\n## Compaction #1\nContent.\n\n## Compaction #2\nMore.\n\n# Living State\n\nCurrent state.\n"
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            side_effect=["Summary of archive.", "Updated personality: curious and driven."]
+        )
+        mock_state = MagicMock()
+        soul = Soul(tenant_id="t1", personality_notes="Initial personality.")
+        mock_state.get_soul = AsyncMock(return_value=soul)
+        mock_state.query_knowledge = AsyncMock(return_value=[
+            KnowledgeEntry(
+                id="ke1", tenant_id="t1", category="fact", subject="user",
+                content="Builds software intuitively", confidence="stated",
+                source_event_id="", source_description="test",
+                created_at="2026-01-01T00:00:00+00:00",
+                last_referenced="2026-01-01T00:00:00+00:00",
+                tags=[], lifecycle_archetype="habitual",
+            ),
+        ])
+        mock_state.save_soul = AsyncMock()
+
+        adapter = EstimateTokenAdapter()
+        service = CompactionService(
+            state=mock_state, reasoning=mock_reasoning,
+            token_adapter=adapter, data_dir=str(tmp_path),
+        )
+
+        space_dir = tmp_path / "t1" / "state" / "compaction" / "sp1"
+        space_dir.mkdir(parents=True)
+        (space_dir / "active_document.md").write_text(big_doc)
+
+        cs = CompactionState(
+            space_id="sp1", compaction_number=2,
+            global_compaction_number=2, history_tokens=500,
+            document_budget=1000, message_ceiling=500,
+            conversation_headroom=8000,
+        )
+
+        space = MagicMock()
+        space.name = "Test"
+        space.description = "test"
+
+        await service._rotate("t1", "sp1", space, cs)
+
+        # Verify personality was updated
+        mock_state.save_soul.assert_called()
+        saved_soul = mock_state.save_soul.call_args[0][0]
+        assert "curious and driven" in saved_soul.personality_notes
+
+    async def test_personality_evolution_failure_doesnt_block_rotation(self, tmp_path):
+        """If personality evolution fails, rotation still completes."""
+        big_doc = "# Ledger\n\n## Compaction #1\nContent.\n\n# Living State\n\nCurrent state.\n"
+        mock_reasoning = MagicMock()
+        # First call: index summary. Second call (personality): will fail
+        mock_reasoning.complete_simple = AsyncMock(
+            side_effect=["Summary.", Exception("LLM failure")]
+        )
+        mock_state = MagicMock()
+        mock_state.get_soul = AsyncMock(return_value=MagicMock(personality_notes="old"))
+        mock_state.query_knowledge = AsyncMock(return_value=[
+            MagicMock(content="fact", lifecycle_archetype="structural"),
+        ])
+
+        adapter = EstimateTokenAdapter()
+        service = CompactionService(
+            state=mock_state, reasoning=mock_reasoning,
+            token_adapter=adapter, data_dir=str(tmp_path),
+        )
+
+        space_dir = tmp_path / "t1" / "state" / "compaction" / "sp1"
+        space_dir.mkdir(parents=True)
+        (space_dir / "active_document.md").write_text(big_doc)
+
+        cs = CompactionState(
+            space_id="sp1", compaction_number=1,
+            global_compaction_number=1, history_tokens=500,
+            document_budget=1000, message_ceiling=500,
+            conversation_headroom=8000,
+        )
+
+        space = MagicMock()
+        space.name = "Test"
+
+        # Should NOT raise
+        await service._rotate("t1", "sp1", space, cs)
+
+        # Archive should still be created
+        assert (space_dir / "archives" / "compaction_archive_001.md").exists()
+
+    async def test_no_personality_evolution_without_knowledge(self, tmp_path):
+        """If no user knowledge entries, personality is not rewritten."""
+        mock_reasoning = MagicMock()
+        mock_state = MagicMock()
+        mock_state.get_soul = AsyncMock(return_value=MagicMock(personality_notes="original"))
+        mock_state.query_knowledge = AsyncMock(return_value=[])
+        mock_state.save_soul = AsyncMock()
+
+        service = CompactionService(
+            state=mock_state, reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        await service._evolve_personality("t1")
+
+        # save_soul should NOT be called (no facts to work with)
+        mock_state.save_soul.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Adaptive Headroom
 # ---------------------------------------------------------------------------
 
