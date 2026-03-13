@@ -101,6 +101,7 @@ class JsonConversationStore(ConversationStore):
         self, tenant_id: str, conversation_id: str,
         space_id: str, max_messages: int = 50,
         include_untagged: bool = False,
+        include_timestamp: bool = False,
     ) -> list[dict]:
         path = self._conversation_path(tenant_id, conversation_id)
         if not path.exists():
@@ -110,11 +111,17 @@ class JsonConversationStore(ConversationStore):
         space_messages = []
         for e in entries:
             tags = e.get("space_tags", None)
+            matched = False
             if tags is None:
                 if include_untagged:
-                    space_messages.append({"role": e["role"], "content": e["content"]})
+                    matched = True
             elif space_id in tags:
-                space_messages.append({"role": e["role"], "content": e["content"]})
+                matched = True
+            if matched:
+                msg: dict = {"role": e["role"], "content": e["content"]}
+                if include_timestamp:
+                    msg["timestamp"] = e.get("timestamp", "")
+                space_messages.append(msg)
         return space_messages[-max_messages:]
 
     async def get_cross_domain_messages(

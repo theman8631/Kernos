@@ -773,9 +773,14 @@ class TestSystemPromptCrossDomainPrefix:
             platform="discord", platform_capabilities=["text"],
             conversation_id="c1", timestamp=datetime.now(timezone.utc), tenant_id="u",
         )
+        # The prefix now comes pre-formatted from _assemble_space_context with section headers
+        prefix = (
+            "## Recent activity in other areas (background — read but do not dwell on):\n"
+            "[User, 2026-03-10T09:00:00]: Legal work stuff"
+        )
         prompt = _build_system_prompt(
             msg, "caps", soul, PRIMARY_TEMPLATE, [],
-            cross_domain_prefix="[User, 2026-03-10T09:00:00]: Legal work stuff",
+            cross_domain_prefix=prefix,
         )
         assert "Recent activity in other areas" in prompt
         assert "Legal work stuff" in prompt

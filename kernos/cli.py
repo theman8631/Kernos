@@ -303,6 +303,94 @@ async def cmd_entities(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# compaction
+# ---------------------------------------------------------------------------
+
+
+async def cmd_compaction(args) -> None:
+    """Display compaction state for a tenant's context spaces."""
+    from kernos.kernel.compaction import CompactionService
+    from kernos.kernel.tokens import EstimateTokenAdapter
+    from kernos.kernel.state_json import JsonStateStore
+
+    state = JsonStateStore(_data_dir())
+    adapter = EstimateTokenAdapter()
+
+    # Create a minimal compaction service just for loading state
+    service = CompactionService(
+        state=state, reasoning=None, token_adapter=adapter, data_dir=_data_dir()  # type: ignore[arg-type]
+    )
+
+    if args.space_id:
+        # Show specific space
+        comp_state = await service.load_state(args.tenant_id, args.space_id)
+        if comp_state is None:
+            print(f"No compaction state found for space '{args.space_id}'.")
+            return
+        _print_compaction_state(comp_state)
+
+        # Show first/last 10 lines of active document
+        doc = await service.load_document(args.tenant_id, args.space_id)
+        if doc:
+            lines = doc.splitlines()
+            print(f"\n  Active document ({len(lines)} lines):")
+            for line in lines[:10]:
+                print(f"    {line}")
+            if len(lines) > 20:
+                print(f"    ... ({len(lines) - 20} lines omitted) ...")
+                for line in lines[-10:]:
+                    print(f"    {line}")
+            elif len(lines) > 10:
+                for line in lines[10:]:
+                    print(f"    {line}")
+    else:
+        # Show all spaces
+        spaces = await state.list_context_spaces(args.tenant_id)
+        if not spaces:
+            print(f"No context spaces found for '{args.tenant_id}'.")
+            return
+
+        print(f"{'─' * 60}")
+        print(f"  Compaction State: {args.tenant_id}")
+        print(f"{'─' * 60}")
+
+        for space in spaces:
+            comp_state = await service.load_state(args.tenant_id, space.id)
+            status_label = "[no compaction state]" if comp_state is None else ""
+            default_label = " [default]" if space.is_default else ""
+            print(f"\n  {space.name}{default_label} ({space.id}) {status_label}")
+            if comp_state:
+                print(f"    compactions: {comp_state.global_compaction_number} (current rotation: {comp_state.compaction_number})")
+                print(f"    archives: {comp_state.archive_count}")
+                print(f"    history_tokens: {comp_state.history_tokens}")
+                print(f"    document_budget: {comp_state.document_budget}")
+                print(f"    headroom: {comp_state.conversation_headroom}")
+                print(f"    cumulative_new_tokens: {comp_state.cumulative_new_tokens} / ceiling: {comp_state.message_ceiling}")
+                if comp_state.last_compaction_at:
+                    print(f"    last compaction: {comp_state.last_compaction_at[:19]}")
+
+
+def _print_compaction_state(cs) -> None:
+    """Print a single CompactionState in detail."""
+    print(f"{'─' * 60}")
+    print(f"  Compaction State: {cs.space_id}")
+    print(f"{'─' * 60}")
+    print(f"  compaction_number:        {cs.compaction_number}")
+    print(f"  global_compaction_number: {cs.global_compaction_number}")
+    print(f"  archive_count:            {cs.archive_count}")
+    print(f"  history_tokens:           {cs.history_tokens}")
+    print(f"  document_budget:          {cs.document_budget}")
+    print(f"  conversation_headroom:    {cs.conversation_headroom}")
+    print(f"  cumulative_new_tokens:    {cs.cumulative_new_tokens}")
+    print(f"  message_ceiling:          {cs.message_ceiling}")
+    print(f"  index_tokens:             {cs.index_tokens}")
+    print(f"  _context_def_tokens:      {cs._context_def_tokens}")
+    print(f"  _system_overhead:         {cs._system_overhead}")
+    if cs.last_compaction_at:
+        print(f"  last_compaction_at:       {cs.last_compaction_at}")
+
+
+# ---------------------------------------------------------------------------
 # create-space
 # ---------------------------------------------------------------------------
 
@@ -549,6 +637,8 @@ async def _dispatch(args) -> None:
         await cmd_capabilities(args)
     elif args.command == "create-space":
         await cmd_create_space(args)
+    elif args.command == "compaction":
+        await cmd_compaction(args)
     else:
         print("Unknown command. Run with --help for usage.")
 
@@ -619,6 +709,11 @@ def main() -> None:
     # capabilities
     p = subparsers.add_parser("capabilities", help="Show capability registry")
     p.add_argument("--tenant", dest="tenant", help="Tenant ID for persisted runtime status")
+
+    # compaction
+    p = subparsers.add_parser("compaction", help="View compaction state for a tenant")
+    p.add_argument("tenant_id")
+    p.add_argument("space_id", nargs="?", default=None, help="Optional space ID for detailed view")
 
     # create-space
     p = subparsers.add_parser("create-space", help="Create a new context space")

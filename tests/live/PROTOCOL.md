@@ -12,9 +12,13 @@ A deliverable is not COMPLETE until a live test passes.
 
 ---
 
-## Who Runs Them
+## Execution Method
 
-The founder runs live tests. Claude Code does not execute them.
+Live tests use **direct handler invocation** — calling `MessageHandler.process()` programmatically from a Python script. This avoids needing Discord or any external platform running. The handler receives a `NormalizedMessage` with the test tenant's credentials and processes it through the full pipeline (routing, reasoning, projectors, compaction, etc.) against real data and the real Anthropic API.
+
+A test harness script (e.g., `tests/live/run_2c_live.py`) constructs the handler with real persistence stores pointing at `./data`, sends messages in sequence, and inspects state between exchanges via CLI-equivalent calls.
+
+The founder reviews live test results and addresses issues as needed.
 
 ---
 
@@ -53,7 +57,7 @@ Every live test file must contain these sections, in order:
 
 ### Phase 1: {Phase name}
 
-**Step 1:** Send in Discord:
+**Step 1:** Send via handler:
 ```
 {exact message}
 ```
@@ -86,7 +90,7 @@ Expected: {what the output should contain}
 
 ## Result Recording
 
-After running, the founder fills in actual results inline — either:
+Results are recorded inline in the test document — either:
 - Appending actual output below each Expected block, or
 - Noting deviations and filing issues
 

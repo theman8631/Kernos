@@ -69,3 +69,8 @@ class EventType(str, Enum):
     CONTEXT_SPACE_CREATED = "context.space.created"
     CONTEXT_SPACE_SWITCHED = "context.space.switched"
     CONTEXT_SPACE_SUSPENDED = "context.space.suspended"
+
+    # --- Phase 2C: Compaction ---
+    COMPACTION_TRIGGERED = "compaction.triggered"
+    COMPACTION_COMPLETED = "compaction.completed"
+    COMPACTION_ROTATION = "compaction.rotation"

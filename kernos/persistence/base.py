@@ -43,12 +43,14 @@ class ConversationStore(ABC):
         self, tenant_id: str, conversation_id: str,
         space_id: str, max_messages: int = 50,
         include_untagged: bool = False,
+        include_timestamp: bool = False,
     ) -> list[dict]:
         """Return messages tagged to this space, in chronological order.
 
         Filters the full message stream by space_tags containing space_id.
-        Returns only role and content fields (suitable for the agent's messages array).
+        Returns role and content fields (suitable for the agent's messages array).
         include_untagged: if True, also include messages with no space_tags (migration compat).
+        include_timestamp: if True, also include the timestamp field.
         Returns the most recent max_messages that match.
         """
         ...

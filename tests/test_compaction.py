@@ -1,0 +1,889 @@
+"""Tests for the compaction system (SPEC-2C).
+
+Covers: token adapters, CompactionState round-trip, document parsing,
+compact() with mock LLM, rotation + archival, trigger logic, headroom
+estimation, context assembly integration.
+"""
+import json
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from kernos.kernel.compaction import (
+    COMPACTION_INSTRUCTION_TOKENS,
+    COMPACTION_MODEL_USABLE_TOKENS,
+    COMPACTION_SYSTEM_PROMPT,
+    DEFAULT_DAILY_HEADROOM,
+    MODEL_MAX_TOKENS,
+    CompactionService,
+    CompactionState,
+    compute_document_budget,
+    estimate_headroom,
+)
+from kernos.kernel.tokens import (
+    AnthropicTokenAdapter,
+    EstimateTokenAdapter,
+    TokenAdapter,
+)
+
+
+# ---------------------------------------------------------------------------
+# Token Adapters
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateTokenAdapter:
+    async def test_empty_string(self):
+        adapter = EstimateTokenAdapter()
+        assert await adapter.count_tokens("") == 0
+
+    async def test_short_string(self):
+        adapter = EstimateTokenAdapter()
+        result = await adapter.count_tokens("hello")
+        expected = math.ceil(len("hello") / 4 * 1.2)
+        assert result == expected
+
+    async def test_long_string(self):
+        adapter = EstimateTokenAdapter()
+        text = "x" * 1000
+        result = await adapter.count_tokens(text)
+        expected = math.ceil(1000 / 4 * 1.2)
+        assert result == expected
+
+    async def test_returns_int(self):
+        adapter = EstimateTokenAdapter()
+        result = await adapter.count_tokens("test string")
+        assert isinstance(result, int)
+
+
+class TestAnthropicTokenAdapter:
+    async def test_fallback_on_failure(self):
+        adapter = AnthropicTokenAdapter(api_key="bad-key")
+        # Force client creation to fail
+        adapter._client = MagicMock()
+        adapter._client.messages.count_tokens.side_effect = Exception("API error")
+
+        result = await adapter.count_tokens("hello world")
+        # Should fall back to estimate
+        expected = math.ceil(len("hello world") / 4 * 1.2)
+        assert result == expected
+
+    async def test_success_path(self):
+        adapter = AnthropicTokenAdapter(api_key="test-key")
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.input_tokens = 42
+        mock_client.messages.count_tokens.return_value = mock_response
+        adapter._client = mock_client
+
+        result = await adapter.count_tokens("test")
+        assert result == 42
+
+
+# ---------------------------------------------------------------------------
+# CompactionState
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionState:
+    def test_defaults(self):
+        cs = CompactionState(space_id="sp1")
+        assert cs.history_tokens == 0
+        assert cs.compaction_number == 0
+        assert cs.cumulative_new_tokens == 0
+        assert cs.last_compaction_at == ""
+
+    async def test_round_trip(self, tmp_path):
+        """CompactionState survives save → load cycle."""
+        adapter = EstimateTokenAdapter()
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=adapter, data_dir=str(tmp_path),
+        )
+
+        original = CompactionState(
+            space_id="sp1",
+            history_tokens=5000,
+            compaction_number=3,
+            global_compaction_number=7,
+            archive_count=2,
+            message_ceiling=100000,
+            document_budget=180000,
+            conversation_headroom=8000,
+            cumulative_new_tokens=2500,
+            last_compaction_at="2026-03-10T12:00:00+00:00",
+            index_tokens=150,
+            _context_def_tokens=200,
+            _system_overhead=4000,
+        )
+
+        await service.save_state("tenant1", "sp1", original)
+        loaded = await service.load_state("tenant1", "sp1")
+
+        assert loaded is not None
+        assert loaded.space_id == "sp1"
+        assert loaded.history_tokens == 5000
+        assert loaded.compaction_number == 3
+        assert loaded.global_compaction_number == 7
+        assert loaded.archive_count == 2
+        assert loaded.message_ceiling == 100000
+        assert loaded.conversation_headroom == 8000
+        assert loaded.cumulative_new_tokens == 2500
+        assert loaded.last_compaction_at == "2026-03-10T12:00:00+00:00"
+        assert loaded.index_tokens == 150
+        assert loaded._context_def_tokens == 200
+        assert loaded._system_overhead == 4000
+
+    async def test_load_nonexistent(self, tmp_path):
+        adapter = EstimateTokenAdapter()
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=adapter, data_dir=str(tmp_path),
+        )
+        result = await service.load_state("tenant1", "nonexistent")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Document Budget
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentBudget:
+    def test_basic_computation(self):
+        budget = compute_document_budget(200_000, 4000, 0, 8000)
+        assert budget == 188_000
+
+    def test_with_index(self):
+        budget = compute_document_budget(200_000, 4000, 500, 8000)
+        assert budget == 187_500
+
+    def test_large_headroom(self):
+        budget = compute_document_budget(200_000, 4000, 0, 40000)
+        assert budget == 156_000
+
+
+# ---------------------------------------------------------------------------
+# Document Parsing
+# ---------------------------------------------------------------------------
+
+SAMPLE_DOC = """# Ledger
+
+## Compaction #1 — 2026-03-01T10:00:00 → 2026-03-01T12:00:00
+
+User discussed plans for the D&D campaign. Introduced character Elara, a half-elf ranger.
+Decision: campaign will use homebrew rules for magic.
+
+## Compaction #2 — 2026-03-02T14:00:00 → 2026-03-02T16:00:00
+
+Session focused on dungeon exploration. Party encountered a trapped corridor.
+Elara used perception check — rolled 18. Found hidden passage.
+
+## Compaction #3 — 2026-03-03T09:00:00 → 2026-03-03T11:00:00
+
+Boss fight with the Lich King. Party nearly TPK'd but Elara's critical hit saved the day.
+Decision: next session will explore the Lich King's treasury.
+
+# Living State
+
+## Current Situation
+The party has just defeated the Lich King and is about to explore the treasury.
+
+## Active Characters
+- Elara (half-elf ranger) — player character
+- Grimjaw (dwarf fighter) — NPC ally
+
+## Open Items
+- Treasury exploration next session
+- Homebrew magic rules still being refined
+"""
+
+EMPTY_DOC = ""
+
+NO_LEDGER_DOC = """# Living State
+
+Just some content here.
+"""
+
+NO_LIVING_STATE_DOC = """# Ledger
+
+## Compaction #1 — 2026-03-01T10:00:00 → 2026-03-01T12:00:00
+
+Some entry content here.
+"""
+
+
+class TestDocumentParsing:
+    def setup_method(self):
+        self.service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+
+    def test_parse_ledger_entries(self):
+        entries = self.service._parse_ledger_entries(SAMPLE_DOC)
+        assert len(entries) == 3
+        assert "Compaction #1" in entries[0]
+        assert "Compaction #2" in entries[1]
+        assert "Compaction #3" in entries[2]
+
+    def test_parse_ledger_empty_doc(self):
+        entries = self.service._parse_ledger_entries(EMPTY_DOC)
+        assert entries == []
+
+    def test_parse_ledger_no_ledger_section(self):
+        entries = self.service._parse_ledger_entries(NO_LEDGER_DOC)
+        assert entries == []
+
+    def test_extract_living_state(self):
+        ls = self.service._extract_living_state(SAMPLE_DOC)
+        assert "Current Situation" in ls
+        assert "Elara" in ls
+        assert "Lich King" in ls
+
+    def test_extract_living_state_empty(self):
+        ls = self.service._extract_living_state(EMPTY_DOC)
+        assert ls == ""
+
+    def test_extract_living_state_no_section(self):
+        ls = self.service._extract_living_state(NO_LIVING_STATE_DOC)
+        assert ls == ""
+
+    def test_forward_relevant_entries_last_2(self):
+        result = self.service._extract_forward_relevant_entries(SAMPLE_DOC, 3)
+        assert "Compaction #2" in result
+        assert "Compaction #3" in result
+        assert "Compaction #1" not in result
+
+    def test_forward_relevant_entries_single(self):
+        doc = """# Ledger
+
+## Compaction #1 — 2026-03-01 → 2026-03-01
+
+Only one entry.
+
+# Living State
+
+Some state.
+"""
+        result = self.service._extract_forward_relevant_entries(doc, 1)
+        assert "Compaction #1" in result
+
+    def test_forward_relevant_entries_empty(self):
+        result = self.service._extract_forward_relevant_entries(EMPTY_DOC, 0)
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# Message Formatting
+# ---------------------------------------------------------------------------
+
+
+class TestFormatMessages:
+    def setup_method(self):
+        self.service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+
+    def test_basic_formatting(self):
+        messages = [
+            {"role": "user", "content": "Hello", "timestamp": "2026-03-01T10:00:00"},
+            {"role": "assistant", "content": "Hi there!", "timestamp": "2026-03-01T10:00:01"},
+        ]
+        result = self.service._format_messages(messages)
+        assert "[User, 2026-03-01T10:00:00]: Hello" in result
+        assert "[Agent, 2026-03-01T10:00:01]: Hi there!" in result
+
+    def test_no_timestamp(self):
+        messages = [{"role": "user", "content": "Hey"}]
+        result = self.service._format_messages(messages)
+        assert "[User]: Hey" in result
+
+
+# ---------------------------------------------------------------------------
+# Trigger Logic
+# ---------------------------------------------------------------------------
+
+
+class TestTriggerLogic:
+    async def test_should_compact_below_ceiling(self):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+        cs = CompactionState(
+            space_id="sp1", cumulative_new_tokens=5000, message_ceiling=10000
+        )
+        assert await service.should_compact("sp1", cs) is False
+
+    async def test_should_compact_at_ceiling(self):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+        cs = CompactionState(
+            space_id="sp1", cumulative_new_tokens=10000, message_ceiling=10000
+        )
+        assert await service.should_compact("sp1", cs) is True
+
+    async def test_should_compact_above_ceiling(self):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+        cs = CompactionState(
+            space_id="sp1", cumulative_new_tokens=15000, message_ceiling=10000
+        )
+        assert await service.should_compact("sp1", cs) is True
+
+
+# ---------------------------------------------------------------------------
+# Ceiling Computation
+# ---------------------------------------------------------------------------
+
+
+class TestCeilingComputation:
+    def test_basic_ceiling(self):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+        cs = CompactionState(
+            space_id="sp1",
+            _context_def_tokens=200,
+            history_tokens=5000,
+        )
+        ceiling = service._compute_ceiling(cs)
+        expected = COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS - 200 - 5000
+        assert ceiling == expected
+
+    def test_ceiling_zero_history(self):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir="/tmp",
+        )
+        cs = CompactionState(space_id="sp1", _context_def_tokens=0, history_tokens=0)
+        ceiling = service._compute_ceiling(cs)
+        assert ceiling == COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS
+
+
+# ---------------------------------------------------------------------------
+# Compact (mock LLM)
+# ---------------------------------------------------------------------------
+
+
+class TestCompact:
+    async def test_first_compaction(self, tmp_path):
+        """First compaction creates a document with Compaction #1 and Living State."""
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(return_value=(
+            "# Ledger\n\n"
+            "## Compaction #1 — 2026-03-10T10:00:00 → 2026-03-10T12:00:00\n\n"
+            "User discussed D&D campaign plans.\n\n"
+            "# Living State\n\n"
+            "## Current Situation\nPlanning a new campaign.\n"
+        ))
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(
+            id="sp1", tenant_id="t1", name="D&D Campaign",
+            description="Fantasy campaign", space_type="domain",
+        )
+
+        cs = CompactionState(
+            space_id="sp1",
+            message_ceiling=100000,
+            document_budget=180000,
+            conversation_headroom=8000,
+            cumulative_new_tokens=50000,
+            _context_def_tokens=200,
+            _system_overhead=4000,
+        )
+
+        messages = [
+            {"role": "user", "content": "Let's plan our D&D campaign", "timestamp": "2026-03-10T10:00:00"},
+            {"role": "assistant", "content": "Great! What kind of campaign?", "timestamp": "2026-03-10T10:00:30"},
+        ]
+
+        result = await service.compact("t1", "sp1", space, messages, cs)
+
+        assert result.compaction_number == 1
+        assert result.global_compaction_number == 1
+        assert result.cumulative_new_tokens == 0
+        assert result.last_compaction_at != ""
+        assert result.history_tokens > 0
+
+        # Verify document was written
+        doc = await service.load_document("t1", "sp1")
+        assert doc is not None
+        assert "Compaction #1" in doc
+        assert "Living State" in doc
+
+    async def test_second_compaction_appends(self, tmp_path):
+        """Second compaction appends Compaction #2, leaves #1 unchanged."""
+        first_doc = (
+            "# Ledger\n\n"
+            "## Compaction #1 — 2026-03-10T10:00:00 → 2026-03-10T12:00:00\n\n"
+            "First session content.\n\n"
+            "# Living State\n\n"
+            "Initial state.\n"
+        )
+
+        updated_doc = (
+            "# Ledger\n\n"
+            "## Compaction #1 — 2026-03-10T10:00:00 → 2026-03-10T12:00:00\n\n"
+            "First session content.\n\n"
+            "## Compaction #2 — 2026-03-11T14:00:00 → 2026-03-11T16:00:00\n\n"
+            "Second session content.\n\n"
+            "# Living State\n\n"
+            "Updated state.\n"
+        )
+
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(return_value=updated_doc)
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        # Pre-write the first document
+        from kernos.utils import _safe_name
+        space_dir = tmp_path / _safe_name("t1") / "state" / "compaction" / _safe_name("sp1")
+        space_dir.mkdir(parents=True)
+        (space_dir / "active_document.md").write_text(first_doc)
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(
+            id="sp1", tenant_id="t1", name="D&D",
+            description="Campaign", space_type="domain",
+        )
+
+        cs = CompactionState(
+            space_id="sp1",
+            compaction_number=1,
+            global_compaction_number=1,
+            message_ceiling=100000,
+            document_budget=180000,
+            conversation_headroom=8000,
+            cumulative_new_tokens=50000,
+            history_tokens=500,
+            _context_def_tokens=200,
+            _system_overhead=4000,
+        )
+
+        messages = [
+            {"role": "user", "content": "Continue the campaign", "timestamp": "2026-03-11T14:00:00"},
+        ]
+
+        result = await service.compact("t1", "sp1", space, messages, cs)
+
+        assert result.compaction_number == 2
+        assert result.global_compaction_number == 2
+
+        doc = await service.load_document("t1", "sp1")
+        assert "Compaction #1" in doc
+        assert "Compaction #2" in doc
+
+    async def test_compaction_resets_accumulator(self, tmp_path):
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(return_value="# Ledger\n\n# Living State\n\nEmpty.\n")
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+
+        cs = CompactionState(
+            space_id="sp1",
+            cumulative_new_tokens=99999,
+            message_ceiling=100000,
+            document_budget=180000,
+            _context_def_tokens=0,
+            _system_overhead=0,
+        )
+
+        result = await service.compact("t1", "sp1", space, [], cs)
+        assert result.cumulative_new_tokens == 0
+
+
+# ---------------------------------------------------------------------------
+# Rotation
+# ---------------------------------------------------------------------------
+
+
+class TestRotation:
+    async def test_rotation_creates_archive(self, tmp_path):
+        """When doc exceeds budget, rotation creates archive + index."""
+        # Make a doc that will exceed a tiny budget
+        big_doc = (
+            "# Ledger\n\n"
+            "## Compaction #1 — 2026-03-01 → 2026-03-01\n\n"
+            "Entry one.\n\n"
+            "## Compaction #2 — 2026-03-02 → 2026-03-02\n\n"
+            "Entry two.\n\n"
+            "# Living State\n\n"
+            "Current state content.\n"
+        )
+
+        mock_reasoning = MagicMock()
+        # First call: compact() returns a big doc
+        # Second call: _rotate() generates index summary
+        mock_reasoning.complete_simple = AsyncMock(
+            side_effect=[big_doc, "Summary of archive contents."]
+        )
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(
+            id="sp1", tenant_id="t1", name="Test",
+            description="Test space", space_type="domain",
+        )
+
+        cs = CompactionState(
+            space_id="sp1",
+            compaction_number=2,
+            global_compaction_number=5,
+            message_ceiling=100000,
+            document_budget=10,  # Tiny budget forces rotation
+            conversation_headroom=8000,
+            _context_def_tokens=200,
+            _system_overhead=4000,
+        )
+
+        result = await service.compact("t1", "sp1", space, [], cs)
+
+        # After rotation
+        assert result.archive_count == 1
+        assert result.compaction_number == 0  # Reset after rotation
+
+        # Check archive file exists
+        from kernos.utils import _safe_name
+        archive_path = (
+            tmp_path / _safe_name("t1") / "state" / "compaction"
+            / _safe_name("sp1") / "archives" / "compaction_archive_001.md"
+        )
+        assert archive_path.exists()
+
+        # Check index exists
+        index_path = (
+            tmp_path / _safe_name("t1") / "state" / "compaction"
+            / _safe_name("sp1") / "index.md"
+        )
+        assert index_path.exists()
+        index_content = index_path.read_text()
+        assert "Archive #1" in index_content
+        assert "Summary of archive contents" in index_content
+
+    async def test_rotation_carries_forward_entries(self, tmp_path):
+        """After rotation, new doc has Living State + last 2 Ledger entries."""
+        big_doc = (
+            "# Ledger\n\n"
+            "## Compaction #1 — 2026-03-01 → 2026-03-01\n\n"
+            "Old entry.\n\n"
+            "## Compaction #2 — 2026-03-02 → 2026-03-02\n\n"
+            "Recent entry 1.\n\n"
+            "## Compaction #3 — 2026-03-03 → 2026-03-03\n\n"
+            "Recent entry 2.\n\n"
+            "# Living State\n\n"
+            "Current state.\n"
+        )
+
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            side_effect=[big_doc, "Archive summary."]
+        )
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+
+        cs = CompactionState(
+            space_id="sp1",
+            compaction_number=3,
+            global_compaction_number=3,
+            document_budget=10,  # Force rotation
+            message_ceiling=100000,
+            conversation_headroom=8000,
+            _context_def_tokens=200,
+            _system_overhead=4000,
+        )
+
+        await service.compact("t1", "sp1", space, [], cs)
+
+        # Check new active document
+        doc = await service.load_document("t1", "sp1")
+        assert doc is not None
+        # Should have the last 2 entries carried forward
+        assert "Compaction #2" in doc
+        assert "Compaction #3" in doc
+        # First entry should NOT be carried forward
+        assert "Compaction #1" not in doc
+        # Living State should be carried forward
+        assert "Current state" in doc
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Headroom
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveHeadroom:
+    async def test_high_rotation_rate_reduces_headroom(self, tmp_path):
+        """If rotation rate > 20%, headroom is reduced by 5%."""
+        big_doc = "# Ledger\n\n# Living State\n\nContent.\n"
+
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            side_effect=[big_doc, "Summary."]
+        )
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+
+        cs = CompactionState(
+            space_id="sp1",
+            compaction_number=1,
+            global_compaction_number=3,
+            archive_count=0,  # Will become 1 after rotation → 1/4 = 25% > 20%
+            document_budget=10,
+            message_ceiling=100000,
+            conversation_headroom=10000,
+            _context_def_tokens=0,
+            _system_overhead=4000,
+        )
+
+        result = await service.compact("t1", "sp1", space, [], cs)
+
+        # 25% > 20% → headroom reduced by 5%
+        assert result.conversation_headroom == int(10000 * 0.95)
+
+
+# ---------------------------------------------------------------------------
+# Headroom Estimation
+# ---------------------------------------------------------------------------
+
+
+class TestHeadroomEstimation:
+    async def test_estimate_returns_clamped_value(self):
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            return_value=json.dumps({
+                "reasoning": "D&D needs lots of context",
+                "estimated_tokens_per_exchange": 800,
+                "minimum_recent_exchanges": 15,
+                "conversation_headroom": 12000,
+            })
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(
+            id="sp1", tenant_id="t1", name="D&D Campaign",
+            description="Fantasy RPG", space_type="domain",
+        )
+
+        result = await estimate_headroom(mock_reasoning, space)
+        assert result == 12000
+
+    async def test_estimate_clamps_high(self):
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            return_value=json.dumps({
+                "reasoning": "Huge",
+                "estimated_tokens_per_exchange": 5000,
+                "minimum_recent_exchanges": 20,
+                "conversation_headroom": 100000,
+            })
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Big")
+
+        result = await estimate_headroom(mock_reasoning, space)
+        assert result == 40000
+
+    async def test_estimate_clamps_low(self):
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            return_value=json.dumps({
+                "reasoning": "Tiny",
+                "estimated_tokens_per_exchange": 50,
+                "minimum_recent_exchanges": 2,
+                "conversation_headroom": 100,
+            })
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Small")
+
+        result = await estimate_headroom(mock_reasoning, space)
+        assert result == 4000
+
+    async def test_estimate_default_on_missing_field(self):
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            return_value=json.dumps({
+                "reasoning": "Oops",
+                "estimated_tokens_per_exchange": 100,
+                "minimum_recent_exchanges": 5,
+            })
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+
+        result = await estimate_headroom(mock_reasoning, space)
+        assert result == DEFAULT_DAILY_HEADROOM
+
+
+# ---------------------------------------------------------------------------
+# Document Persistence
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentPersistence:
+    async def test_load_document_nonexistent(self, tmp_path):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        doc = await service.load_document("t1", "sp1")
+        assert doc is None
+
+    async def test_load_index_nonexistent(self, tmp_path):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        idx = await service.load_index("t1", "sp1")
+        assert idx is None
+
+    async def test_document_survives_write_read(self, tmp_path):
+        service = CompactionService(
+            state=MagicMock(), reasoning=MagicMock(),
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        from kernos.utils import _safe_name
+        space_dir = tmp_path / _safe_name("t1") / "state" / "compaction" / _safe_name("sp1")
+        space_dir.mkdir(parents=True)
+        (space_dir / "active_document.md").write_text("test content")
+
+        doc = await service.load_document("t1", "sp1")
+        assert doc == "test content"
+
+
+# ---------------------------------------------------------------------------
+# Compaction System Prompt
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionPrompt:
+    def test_prompt_contains_key_instructions(self):
+        assert "context historian" in COMPACTION_SYSTEM_PROMPT
+        assert "Ledger" in COMPACTION_SYSTEM_PROMPT
+        assert "Living State" in COMPACTION_SYSTEM_PROMPT
+        assert "append only" in COMPACTION_SYSTEM_PROMPT.lower()
+        assert "minimum resolution floor" in COMPACTION_SYSTEM_PROMPT.lower()
+        assert "never resolve ambiguity by discarding" in COMPACTION_SYSTEM_PROMPT.lower()
+
+
+# ---------------------------------------------------------------------------
+# Event Emission
+# ---------------------------------------------------------------------------
+
+
+class TestEventEmission:
+    async def test_compact_emits_events(self, tmp_path):
+        mock_reasoning = MagicMock()
+        mock_reasoning.complete_simple = AsyncMock(
+            return_value="# Ledger\n\n# Living State\n\nState.\n"
+        )
+
+        mock_events = MagicMock()
+        mock_events.append = AsyncMock()
+
+        from kernos.kernel.events import JsonEventStream
+        events = JsonEventStream(str(tmp_path))
+
+        service = CompactionService(
+            state=MagicMock(), reasoning=mock_reasoning,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+            events=events,
+        )
+
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+
+        cs = CompactionState(
+            space_id="sp1", message_ceiling=100000, document_budget=180000,
+            _context_def_tokens=0, _system_overhead=0,
+        )
+
+        await service.compact("t1", "sp1", space, [], cs)
+
+        # Check that compaction events were emitted
+        all_events = await events.query("t1", event_types=["compaction.triggered"], limit=10)
+        assert len(all_events) >= 1
+
+        completed = await events.query("t1", event_types=["compaction.completed"], limit=10)
+        assert len(completed) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Include Timestamp in Space Thread
+# ---------------------------------------------------------------------------
+
+
+class TestSpaceThreadTimestamp:
+    async def test_include_timestamp_false(self, tmp_path):
+        """Default behavior: no timestamp in output."""
+        from kernos.persistence.json_file import JsonConversationStore
+
+        store = JsonConversationStore(str(tmp_path))
+        await store.append("t1", "c1", {
+            "role": "user", "content": "hello",
+            "timestamp": "2026-03-10T10:00:00", "space_tags": ["sp1"],
+        })
+
+        thread = await store.get_space_thread("t1", "c1", "sp1")
+        assert len(thread) == 1
+        assert "timestamp" not in thread[0]
+
+    async def test_include_timestamp_true(self, tmp_path):
+        """With include_timestamp=True, timestamp is present."""
+        from kernos.persistence.json_file import JsonConversationStore
+
+        store = JsonConversationStore(str(tmp_path))
+        await store.append("t1", "c1", {
+            "role": "user", "content": "hello",
+            "timestamp": "2026-03-10T10:00:00", "space_tags": ["sp1"],
+        })
+
+        thread = await store.get_space_thread("t1", "c1", "sp1", include_timestamp=True)
+        assert len(thread) == 1
+        assert thread[0]["timestamp"] == "2026-03-10T10:00:00"

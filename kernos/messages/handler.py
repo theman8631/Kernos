@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime, timezone
 
 from kernos.capability.client import MCPClientManager
@@ -142,13 +143,10 @@ def _build_system_prompt(
     """
     parts: list[str] = []
 
-    # 0. Cross-domain injection — background awareness from other spaces
+    # 0. Compaction context — index, cross-domain injections, compaction document
+    # The prefix is built by _assemble_space_context with section headers already applied.
     if cross_domain_prefix:
-        parts.append(
-            f"## Recent activity in other areas (background context — read but do not dwell on):\n"
-            f"{cross_domain_prefix}\n"
-            f"(The current space thread follows below. Focus there.)"
-        )
+        parts.append(cross_domain_prefix)
 
     # 1. Operating principles
     parts.append(template.operating_principles)
@@ -240,6 +238,16 @@ class MessageHandler:
         self.engine = engine
         self._router = LLMRouter(self.state, self.reasoning)
 
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import AnthropicTokenAdapter
+        self.compaction = CompactionService(
+            state=state,
+            reasoning=reasoning,
+            token_adapter=AnthropicTokenAdapter(os.getenv("ANTHROPIC_API_KEY", "")),
+            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+            events=events,
+        )
+
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
     ) -> None:
@@ -318,6 +326,40 @@ class MessageHandler:
             )
             await self.state.save_context_space(daily_space)
             logger.info("Created default daily context space for tenant: %s", tenant_id)
+
+            # Initialize compaction state for daily space with default headroom
+            try:
+                from kernos.kernel.compaction import (
+                    CompactionState,
+                    compute_document_budget,
+                    MODEL_MAX_TOKENS,
+                    COMPACTION_MODEL_USABLE_TOKENS,
+                    COMPACTION_INSTRUCTION_TOKENS,
+                    DEFAULT_DAILY_HEADROOM,
+                )
+                context_def = (
+                    f"Space: {daily_space.name}\nType: {daily_space.space_type}\n"
+                    f"Description: {daily_space.description}\nPosture: {daily_space.posture}\n"
+                )
+                context_def_tokens = await self.compaction.adapter.count_tokens(context_def)
+                system_overhead = 4000  # Approximate for daily space
+                doc_budget = compute_document_budget(
+                    MODEL_MAX_TOKENS, system_overhead, 0, DEFAULT_DAILY_HEADROOM
+                )
+                daily_comp = CompactionState(
+                    space_id=daily_space.id,
+                    conversation_headroom=DEFAULT_DAILY_HEADROOM,
+                    document_budget=doc_budget,
+                    message_ceiling=min(
+                        doc_budget,
+                        COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS - context_def_tokens,
+                    ),
+                    _context_def_tokens=context_def_tokens,
+                    _system_overhead=system_overhead,
+                )
+                await self.compaction.save_state(tenant_id, daily_space.id, daily_comp)
+            except Exception as exc:
+                logger.warning("Failed to init compaction state for daily space: %s", exc)
 
         return soul
 
@@ -434,16 +476,36 @@ class MessageHandler:
     ) -> tuple[list[dict], str | None]:
         """Assemble the agent's conversation context for the active space.
 
-        Returns (message_list, cross_domain_prefix) where:
-        - message_list: space thread (coherent domain conversation, role+content only)
-        - cross_domain_prefix: text to inject into system prompt (or None)
+        Context window layout (top to bottom):
+        [System prompt]                    <- primacy zone
+        [Compaction index] (if exists)     <- historical awareness
+        [Cross-domain injections]          <- background, low attention
+        [Compaction document]
+          |-- Ledger (oldest -> newest)    <- middle zone (archival)
+          |-- Living State                 <- approaching recency zone
+        [Recent conversation messages]     <- strongest recency zone
+
+        Returns (recent_messages, system_prefix) where:
+        - recent_messages: messages since last compaction (the live thread)
+        - system_prefix: index + cross-domain + compaction doc for system prompt
         """
-        # Cross-domain injections — last 5 turns from other spaces
+        prefix_parts: list[str] = []
+
+        # 1. Compaction index (if archives exist)
+        comp_state = await self.compaction.load_state(tenant_id, active_space_id)
+        if comp_state and comp_state.index_tokens > 0:
+            index_text = await self.compaction.load_index(tenant_id, active_space_id)
+            if index_text:
+                prefix_parts.append(
+                    f"## Archived history (summaries — full archives available on request):\n"
+                    f"{index_text}"
+                )
+
+        # 2. Cross-domain injections — last 5 turns from other spaces
         cross = await self.conversations.get_cross_domain_messages(
             tenant_id, conversation_id, active_space_id,
             last_n_turns=CROSS_DOMAIN_INJECTION_TURNS,
         )
-        system_prefix: str | None = None
         if cross:
             lines = []
             for msg in cross:
@@ -451,18 +513,46 @@ class MessageHandler:
                 ts = msg.get("timestamp", "")
                 content = str(msg.get("content", ""))[:300]
                 lines.append(f"[{role_label}, {ts}]: {content}")
-            system_prefix = "\n".join(lines)
+            prefix_parts.append(
+                f"## Recent activity in other areas (background — read but do not dwell on):\n"
+                + "\n".join(lines)
+            )
 
-        # Space thread — the coherent domain conversation (role+content only)
+        # 3. Compaction document (Ledger -> Living State)
+        active_doc = await self.compaction.load_document(tenant_id, active_space_id)
+        if active_doc:
+            prefix_parts.append(
+                f"## Context history for this space:\n{active_doc}"
+            )
+
+        system_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
+
+        # 4. Recent messages since last compaction (the live thread)
         is_daily = active_space.is_default if active_space else False
         thread = await self.conversations.get_space_thread(
             tenant_id, conversation_id, active_space_id,
             max_messages=50,
-            include_untagged=is_daily,  # Daily includes pre-v2 untagged messages
+            include_untagged=is_daily,
+            include_timestamp=True,  # Needed for post-compaction filtering
         )
-        truncated = self._truncate_to_budget(thread, SPACE_THREAD_TOKEN_BUDGET)
 
-        return truncated, system_prefix
+        # Filter to messages since last compaction
+        if comp_state and comp_state.last_compaction_at:
+            thread = [
+                m for m in thread
+                if m.get("timestamp", "") > comp_state.last_compaction_at
+            ]
+
+        # Strip timestamps before sending to reasoning (only role+content in messages array)
+        recent_messages = [
+            {"role": m["role"], "content": m["content"]} for m in thread
+        ]
+
+        # Fallback: if no compaction state and no compaction doc, use old truncation
+        if not comp_state and not active_doc:
+            recent_messages = self._truncate_to_budget(recent_messages, SPACE_THREAD_TOKEN_BUDGET)
+
+        return recent_messages, system_prefix
 
     async def _run_session_exit(
         self, tenant_id: str, space_id: str, conversation_id: str
@@ -610,6 +700,42 @@ class MessageHandler:
                 )
                 await self.state.save_context_space(new_space)
                 await self.state.clear_topic_hint(tenant_id, topic_hint)
+
+                # Initialize compaction state for the new space
+                try:
+                    from kernos.kernel.compaction import (
+                        CompactionState,
+                        compute_document_budget,
+                        estimate_headroom,
+                        MODEL_MAX_TOKENS,
+                        COMPACTION_MODEL_USABLE_TOKENS,
+                        COMPACTION_INSTRUCTION_TOKENS,
+                    )
+                    headroom = await estimate_headroom(self.reasoning, new_space)
+                    context_def = (
+                        f"Space: {new_space.name}\nType: {new_space.space_type}\n"
+                        f"Description: {new_space.description}\nPosture: {new_space.posture}\n"
+                    )
+                    context_def_tokens = await self.compaction.adapter.count_tokens(context_def)
+                    system_overhead = 4000  # Approximate
+                    doc_budget = compute_document_budget(
+                        MODEL_MAX_TOKENS, system_overhead, 0, headroom
+                    )
+                    gate2_comp = CompactionState(
+                        space_id=new_space.id,
+                        conversation_headroom=headroom,
+                        document_budget=doc_budget,
+                        message_ceiling=min(
+                            doc_budget,
+                            COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS - context_def_tokens,
+                        ),
+                        _context_def_tokens=context_def_tokens,
+                        _system_overhead=system_overhead,
+                    )
+                    await self.compaction.save_state(tenant_id, new_space.id, gate2_comp)
+                except Exception as exc:
+                    logger.warning("Failed to init compaction state for gate2 space: %s", exc)
+
                 try:
                     await emit_event(
                         self.events,
@@ -936,6 +1062,39 @@ class MessageHandler:
             "space_tags": router_result.tags,
         }
         await self.conversations.append(tenant_id, conversation_id, assistant_entry)
+
+        # Track tokens for compaction trigger
+        try:
+            comp_state = await self.compaction.load_state(tenant_id, active_space_id)
+            if comp_state:
+                exchange_tokens = await self.compaction.adapter.count_tokens(
+                    message.content + "\n" + response_text
+                )
+                comp_state.cumulative_new_tokens += exchange_tokens
+
+                if await self.compaction.should_compact(active_space_id, comp_state):
+                    # Get messages with timestamps for compaction
+                    is_daily = active_space.is_default if active_space else False
+                    space_thread_full = await self.conversations.get_space_thread(
+                        tenant_id, conversation_id, active_space_id,
+                        max_messages=200,
+                        include_untagged=is_daily,
+                        include_timestamp=True,
+                    )
+                    # Filter to messages since last compaction
+                    new_messages = [
+                        m for m in space_thread_full
+                        if m.get("timestamp", "") > (comp_state.last_compaction_at or "")
+                    ]
+                    if new_messages and active_space:
+                        comp_state = await self.compaction.compact(
+                            tenant_id, active_space_id, active_space,
+                            new_messages, comp_state,
+                        )
+                else:
+                    await self.compaction.save_state(tenant_id, active_space_id, comp_state)
+        except Exception as exc:
+            logger.warning("Compaction tracking failed for %s/%s: %s", tenant_id, active_space_id, exc)
 
         # Emit message.sent
         try:
