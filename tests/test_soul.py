@@ -118,33 +118,30 @@ def test_soul_not_mature_missing_fields():
     soul = Soul(
         tenant_id="t1",
         user_name="Alice",
-        user_context="runs a bakery",
         communication_style="direct",
         interaction_count=5,  # below threshold
     )
-    assert _is_soul_mature(soul) is False
+    assert _is_soul_mature(soul, has_user_knowledge=True) is False
 
 
 def test_soul_mature_all_signals():
     soul = Soul(
         tenant_id="t1",
         user_name="Alice",
-        user_context="runs a bakery",
         communication_style="direct",
         interaction_count=10,
     )
-    assert _is_soul_mature(soul) is True
+    assert _is_soul_mature(soul, has_user_knowledge=True) is True
 
 
-def test_soul_not_mature_missing_user_context():
+def test_soul_not_mature_missing_user_knowledge():
     soul = Soul(
         tenant_id="t1",
         user_name="Alice",
-        user_context="",
         communication_style="direct",
         interaction_count=15,
     )
-    assert _is_soul_mature(soul) is False
+    assert _is_soul_mature(soul, has_user_knowledge=False) is False
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +234,44 @@ def test_system_prompt_excludes_user_context_section_when_empty():
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert "USER CONTEXT:" not in prompt
+
+
+def test_system_prompt_includes_knowledge_entries():
+    from kernos.kernel.state import KnowledgeEntry
+    soul = Soul(tenant_id="t1", user_name="JT")
+    msg = _make_message_stub()
+    entries = [
+        KnowledgeEntry(
+            id="ke1", tenant_id="t1", category="fact", subject="user",
+            content="Lives in Seattle", confidence="stated",
+            source_event_id="", source_description="test",
+            created_at=_now(), last_referenced=_now(), tags=[],
+            lifecycle_archetype="structural",
+        ),
+        KnowledgeEntry(
+            id="ke2", tenant_id="t1", category="fact", subject="user",
+            content="Building Kernos", confidence="stated",
+            source_event_id="", source_description="test",
+            created_at=_now(), last_referenced=_now(), tags=[],
+            lifecycle_archetype="structural",
+        ),
+    ]
+    prompt = _build_system_prompt(
+        msg, "caps", soul, PRIMARY_TEMPLATE, [],
+        user_knowledge_entries=entries,
+    )
+    assert "USER CONTEXT:" in prompt
+    assert "Lives in Seattle" in prompt
+    assert "Building Kernos" in prompt
+    assert "JT" in prompt
+
+
+def test_system_prompt_ignores_deprecated_soul_user_context():
+    """soul.user_context should NOT appear in the prompt even if populated."""
+    soul = Soul(tenant_id="t1", user_context="old stale data")
+    msg = _make_message_stub()
+    prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
+    assert "old stale data" not in prompt
 
 
 def test_system_prompt_includes_contracts():

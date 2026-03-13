@@ -429,21 +429,8 @@ async def run_tier2_extraction(
                 )
             wrote_count += wrote
 
-            # Append user-subject structural/identity facts to soul.user_context,
-            # but skip name-related facts — Tier 1 owns soul.user_name.
-            if (
-                wrote
-                and subject.lower() == "user"
-                and lifecycle_archetype in ("structural", "identity", "habitual")
-            ):
-                content_lower = content.lower()
-                is_name_fact = any(
-                    content_lower.startswith(p)
-                    for p in ("name is ", "goes by ", "called ", "known as ", "name: ")
-                )
-                if not is_name_fact:
-                    soul.user_context = (soul.user_context + "\n" + content).strip() if soul.user_context else content
-                    await state.save_soul(soul)
+            # User-subject facts are written as KnowledgeEntries above.
+            # soul.user_context is deprecated — no longer appended to.
 
         # Preferences
         for item in extracted.get("preferences", []):

@@ -105,14 +105,16 @@ def _maybe_append_name_ask(response_text: str, soul: Soul) -> str:
     return response_text.rstrip() + "\n\nBy the way — what should I call you?"
 
 
-def _is_soul_mature(soul: Soul) -> bool:
+def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
     """Check whether the soul has enough substance for bootstrap graduation.
 
     All four signals must be present — interaction count alone is never sufficient.
+    has_user_knowledge replaces the deprecated soul.user_context check —
+    True when the tenant has at least one active user-subject KnowledgeEntry.
     """
     return (
         bool(soul.user_name)
-        and bool(soul.user_context)
+        and has_user_knowledge
         and bool(soul.communication_style)
         and soul.interaction_count >= _BOOTSTRAP_MIN_INTERACTIONS
     )
@@ -126,6 +128,7 @@ def _build_system_prompt(
     contract_rules: list[CovenantRule],
     active_space: ContextSpace | None = None,
     cross_domain_prefix: str | None = None,
+    user_knowledge_entries: list | None = None,
 ) -> str:
     """Build a template-driven, soul-aware system prompt.
 
@@ -167,12 +170,13 @@ def _build_system_prompt(
             f"{active_space.posture}"
         )
 
-    # 3. User knowledge (only if the soul has accumulated something)
+    # 3. User knowledge — from soul fields + KnowledgeEntries
     user_knowledge_parts: list[str] = []
     if soul.user_name:
         user_knowledge_parts.append(f"User's name: {soul.user_name}")
-    if soul.user_context:
-        user_knowledge_parts.append(soul.user_context)
+    if user_knowledge_entries:
+        for entry in user_knowledge_entries:
+            user_knowledge_parts.append(entry.content)
     if soul.communication_style:
         user_knowledge_parts.append(f"Communication style: {soul.communication_style}")
     if user_knowledge_parts:
@@ -371,12 +375,20 @@ class MessageHandler:
         """
         from kernos.kernel.template import PRIMARY_TEMPLATE
 
+        # Query user knowledge from KnowledgeEntries
+        user_ke = await self.state.query_knowledge(
+            soul.tenant_id, subject="user", active_only=True, limit=20,
+        )
+        user_facts = [e.content for e in user_ke
+                      if e.lifecycle_archetype in ("structural", "identity", "habitual")]
+        context_text = "\n".join(f"- {f}" for f in user_facts) if user_facts else "unknown"
+
         prompt = (
             "You are reflecting on your first interactions with a user.\n\n"
             f"Bootstrap intent:\n{PRIMARY_TEMPLATE.bootstrap_prompt}\n\n"
             f"What you've learned:\n"
             f"- Name: {soul.user_name or 'unknown'}\n"
-            f"- Context: {soul.user_context or 'unknown'}\n"
+            f"- Known facts:\n{context_text}\n"
             f"- Style: {soul.communication_style or 'unknown'}\n"
             f"- Interactions: {soul.interaction_count}\n\n"
             "Write 2-3 sentences of personality notes — how you'll approach "
@@ -432,7 +444,11 @@ class MessageHandler:
         soul.interaction_count += 1
 
         # Check bootstrap graduation: consolidate, then graduate
-        if not soul.bootstrap_graduated and _is_soul_mature(soul):
+        user_ke = await self.state.query_knowledge(
+            soul.tenant_id, subject="user", active_only=True, limit=1,
+        )
+        has_user_knowledge = len(user_ke) > 0
+        if not soul.bootstrap_graduated and _is_soul_mature(soul, has_user_knowledge=has_user_knowledge):
             await self._consolidate_bootstrap(soul)
             soul.bootstrap_graduated = True
             soul.bootstrap_graduated_at = now
@@ -948,10 +964,19 @@ class MessageHandler:
             context_space_scope=space_scope,
             active_only=True,
         )
+        # Query user knowledge from KnowledgeEntries (replaces soul.user_context)
+        user_ke = await self.state.query_knowledge(
+            tenant_id, subject="user", active_only=True, limit=50,
+        )
+        user_knowledge_entries = [
+            e for e in user_ke
+            if e.lifecycle_archetype in ("structural", "identity", "habitual")
+        ]
         system_prompt = _build_system_prompt(
             message, capability_prompt, soul, PRIMARY_TEMPLATE, contract_rules,
             active_space=active_space,
             cross_domain_prefix=cross_domain_prefix,
+            user_knowledge_entries=user_knowledge_entries,
         )
 
         # Step 10: Build messages array from space thread + current user message

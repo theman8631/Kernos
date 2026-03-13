@@ -476,7 +476,8 @@ async def test_tier2_writes_facts():
     assert saved.content == "runs a bakery"
 
 
-async def test_tier2_appends_user_fact_to_soul_context():
+async def test_tier2_does_not_append_to_soul_user_context():
+    """soul.user_context is deprecated — Tier 2 should NOT append to it."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
@@ -495,8 +496,9 @@ async def test_tier2_appends_user_fact_to_soul_context():
         reasoning_service=reasoning, tenant_id="t1",
     )
 
-    assert "runs a bakery" in soul.user_context
-    state.save_soul.assert_called()
+    # Fact is written as KnowledgeEntry, NOT appended to soul.user_context
+    assert soul.user_context == ""
+    state.save_knowledge_entry.assert_called()
 
 
 async def test_tier2_skips_empty_turns():

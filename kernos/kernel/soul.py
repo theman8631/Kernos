@@ -25,7 +25,10 @@ class Soul:
 
     # User relationship
     user_name: str = ""           # What to call the user
-    user_context: str = ""        # Free-text: what the agent knows about the user
+    # DEPRECATED: user_context is no longer written or read at runtime.
+    # User knowledge is now queried from KnowledgeEntries at prompt-build time.
+    # Field retained for JSON serialization compat with existing soul.json files.
+    user_context: str = ""
     communication_style: str = "" # "direct", "warm", "formal", etc. — inferred or stated
 
     # Lifecycle
