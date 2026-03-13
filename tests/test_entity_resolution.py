@@ -1253,3 +1253,146 @@ async def test_tier2_extraction_role_match_event(tmp_path):
     assert len(entities) == 1
     assert entities[0].canonical_name == "Liana"
     assert "user's wife" in entities[0].aliases
+
+
+# ---------------------------------------------------------------------------
+# Embedding Pipeline Fixes (corrections + retry)
+# ---------------------------------------------------------------------------
+
+
+async def test_correction_generates_embedding(tmp_path):
+    """_apply_correction routes new entries through embedding pipeline."""
+    from kernos.kernel.projectors.llm_extractor import _apply_correction
+    from kernos.kernel.soul import Soul
+
+    state = JsonStateStore(str(tmp_path))
+    events = MagicMock()
+    events.emit = AsyncMock()
+    soul = Soul(tenant_id="t1")
+
+    mock_embed_service = MagicMock()
+    mock_embed_service.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+    embed_store = JsonEmbeddingStore(str(tmp_path))
+
+    # Write an old entry to correct
+    old_entry = KnowledgeEntry(
+        id="ke_old", tenant_id="t1", category="fact", subject="user.location",
+        content="Lives in Portland", confidence="stated",
+        source_event_id="", source_description="test",
+        created_at=_now(), last_referenced=_now(), tags=[],
+    )
+    await state.save_knowledge_entry(old_entry)
+
+    await _apply_correction(
+        state=state, events=events, soul=soul,
+        tenant_id="t1", field="user.location",
+        old_value="Portland", new_value="Lives in Seattle",
+        now=_now(),
+        embedding_service=mock_embed_service,
+        embedding_store=embed_store,
+    )
+
+    # New entry should exist
+    entries = await state.query_knowledge("t1", active_only=True)
+    new_entries = [e for e in entries if "Seattle" in e.content]
+    assert len(new_entries) == 1
+
+    # Embedding should be generated
+    mock_embed_service.embed.assert_called_once()
+    embedding = await embed_store.get("t1", new_entries[0].id)
+    assert embedding == [0.1, 0.2, 0.3]
+
+
+async def test_correction_without_embedding_service_still_works(tmp_path):
+    """_apply_correction works without embedding service (legacy path)."""
+    from kernos.kernel.projectors.llm_extractor import _apply_correction
+    from kernos.kernel.soul import Soul
+
+    state = JsonStateStore(str(tmp_path))
+    events = MagicMock()
+    events.emit = AsyncMock()
+    soul = Soul(tenant_id="t1")
+
+    await _apply_correction(
+        state=state, events=events, soul=soul,
+        tenant_id="t1", field="user.location",
+        old_value="Portland", new_value="Lives in Seattle",
+        now=_now(),
+        # No embedding_service or embedding_store
+    )
+
+    entries = await state.query_knowledge("t1", active_only=True)
+    assert any("Seattle" in e.content for e in entries)
+
+
+async def test_embedding_retry_on_first_failure():
+    """Embedding generation retries once on failure before falling back."""
+    from kernos.kernel.projectors.llm_extractor import _write_entry_enhanced
+    from kernos.kernel.dedup import FactDeduplicator
+
+    state = MagicMock()
+    state.save_knowledge_entry = AsyncMock()
+    state.query_knowledge = AsyncMock(return_value=[])
+    state.get_knowledge_hashes = AsyncMock(return_value=set())
+    state.get_knowledge_entry = AsyncMock(return_value=None)
+    events = MagicMock()
+    events.emit = AsyncMock()
+
+    # Fail first, succeed second
+    mock_embed = MagicMock()
+    mock_embed.embed = AsyncMock(side_effect=[Exception("timeout"), [0.1, 0.2]])
+
+    mock_store = MagicMock()
+    mock_store.save = AsyncMock()
+
+    mock_dedup = MagicMock()
+    mock_dedup.classify = AsyncMock(return_value=("ADD", None))
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await _write_entry_enhanced(
+            state=state, events=events, tenant_id="t1",
+            category="fact", subject="user", content="builds things",
+            confidence="stated", lifecycle_archetype="structural",
+            source_description="test", existing_hashes=set(), now=_now(),
+            tags=[], embedding_service=mock_embed,
+            embedding_store=mock_store, fact_deduplicator=mock_dedup,
+        )
+
+    assert result == 1
+    assert mock_embed.embed.call_count == 2
+    mock_store.save.assert_called_once()
+
+
+async def test_embedding_falls_back_after_two_failures():
+    """After 2 embedding failures, falls back to hash-only dedup."""
+    from kernos.kernel.projectors.llm_extractor import _write_entry_enhanced
+
+    state = MagicMock()
+    state.save_knowledge_entry = AsyncMock()
+    state.query_knowledge = AsyncMock(return_value=[])
+    state.get_knowledge_hashes = AsyncMock(return_value=set())
+    events = MagicMock()
+    events.emit = AsyncMock()
+
+    mock_embed = MagicMock()
+    mock_embed.embed = AsyncMock(side_effect=Exception("persistent failure"))
+
+    mock_store = MagicMock()
+    mock_dedup = MagicMock()
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await _write_entry_enhanced(
+            state=state, events=events, tenant_id="t1",
+            category="fact", subject="user", content="builds things",
+            confidence="stated", lifecycle_archetype="structural",
+            source_description="test", existing_hashes=set(), now=_now(),
+            tags=[], embedding_service=mock_embed,
+            embedding_store=mock_store, fact_deduplicator=mock_dedup,
+        )
+
+    # Should still write via hash-only fallback
+    assert result == 1
+    assert mock_embed.embed.call_count == 2
+    state.save_knowledge_entry.assert_called_once()
+    # Embedding store should NOT be called (fallback path)
+    mock_store.save.assert_not_called()

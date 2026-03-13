@@ -606,6 +606,63 @@ async def cmd_tenants(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Backfill Embeddings
+# ---------------------------------------------------------------------------
+
+
+async def cmd_backfill_embeddings(args) -> None:
+    """Generate embeddings for knowledge entries that lack them."""
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from kernos.kernel.state_json import JsonStateStore
+    from kernos.kernel.embedding_store import JsonEmbeddingStore
+    from kernos.kernel.embeddings import EmbeddingService
+
+    api_key = os.getenv("VOYAGE_API_KEY", "")
+    if not api_key:
+        print("ERROR: VOYAGE_API_KEY not set in environment. Cannot generate embeddings.")
+        return
+
+    data_dir = _data_dir()
+    state = JsonStateStore(data_dir)
+    embed_store = JsonEmbeddingStore(data_dir)
+    embed_service = EmbeddingService(api_key)
+
+    tenant_id = args.tenant_id
+    all_entries = await state.query_knowledge(tenant_id, active_only=True, limit=500)
+
+    missing = []
+    for entry in all_entries:
+        existing = await embed_store.get(tenant_id, entry.id)
+        if existing is None:
+            missing.append(entry)
+
+    print(f"Total active entries: {len(all_entries)}")
+    print(f"Entries missing embeddings: {len(missing)}")
+
+    if not missing:
+        print("Nothing to backfill.")
+        return
+
+    success = 0
+    failed = 0
+    for entry in missing:
+        text = f"{entry.subject} {entry.content}"
+        try:
+            embedding = await embed_service.embed(text)
+            await embed_store.save(tenant_id, entry.id, embedding)
+            success += 1
+            print(f"  ✓ {entry.id}: {entry.content[:60]}")
+        except Exception as exc:
+            failed += 1
+            print(f"  ✗ {entry.id}: {exc}")
+
+    print(f"\nBackfill complete: {success} embedded, {failed} failed")
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -639,6 +696,8 @@ async def _dispatch(args) -> None:
         await cmd_create_space(args)
     elif args.command == "compaction":
         await cmd_compaction(args)
+    elif args.command == "backfill-embeddings":
+        await cmd_backfill_embeddings(args)
     else:
         print("Unknown command. Run with --help for usage.")
 
@@ -714,6 +773,10 @@ def main() -> None:
     p = subparsers.add_parser("compaction", help="View compaction state for a tenant")
     p.add_argument("tenant_id")
     p.add_argument("space_id", nargs="?", default=None, help="Optional space ID for detailed view")
+
+    # backfill-embeddings
+    p = subparsers.add_parser("backfill-embeddings", help="Generate embeddings for entries that lack them")
+    p.add_argument("tenant_id")
 
     # create-space
     p = subparsers.add_parser("create-space", help="Create a new context space")

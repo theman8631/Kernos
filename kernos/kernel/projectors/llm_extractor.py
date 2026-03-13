@@ -473,6 +473,8 @@ async def run_tier2_extraction(
                 state=state, events=events, soul=soul,
                 tenant_id=tenant_id, field=field,
                 old_value=old_value, new_value=new_value, now=now,
+                embedding_service=embedding_service,
+                embedding_store=embedding_store,
             )
 
         if wrote_count > 0:
@@ -592,12 +594,20 @@ async def _write_entry_enhanced(
     if h in existing_hashes:
         return 0
 
-    # Compute embedding for semantic dedup
-    try:
-        candidate_embedding = await embedding_service.embed(f"{subject} {content}")
-    except Exception as exc:
-        logger.warning("Tier 2: embedding failed for %r: %s", content[:60], exc)
-        # Fall back to hash-based dedup only
+    # Compute embedding for semantic dedup (1 retry with 2s delay)
+    import asyncio
+    candidate_embedding = None
+    for attempt in range(2):
+        try:
+            candidate_embedding = await embedding_service.embed(f"{subject} {content}")
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("Tier 2: embedding failed for %r (retrying in 2s): %s", content[:60], exc)
+                await asyncio.sleep(2)
+            else:
+                logger.warning("Tier 2: embedding retry failed for %r: %s — falling back to hash dedup", content[:60], exc)
+    if candidate_embedding is None:
         return await _write_entry(
             state=state, events=events, tenant_id=tenant_id,
             category=category, subject=subject, content=content,
@@ -693,6 +703,8 @@ async def _apply_correction(
     old_value: str,
     new_value: str,
     now: str,
+    embedding_service: EmbeddingService | None = None,
+    embedding_store: JsonEmbeddingStore | None = None,
 ) -> None:
     """Handle a correction: find old entry, mark inactive, create new with supersedes."""
     # Search for an active entry whose content contains the old value
@@ -709,12 +721,13 @@ async def _apply_correction(
         old_id = old_entry.id
 
     # Create corrected entry
-    h = _content_hash(tenant_id, field or "user", new_value)
+    subject = field or "user"
+    h = _content_hash(tenant_id, subject, new_value)
     new_entry = KnowledgeEntry(
         id=_make_knowledge_id(),
         tenant_id=tenant_id,
         category="fact",
-        subject=field or "user",
+        subject=subject,
         content=new_value,
         confidence="stated",
         source_event_id="",
@@ -728,6 +741,14 @@ async def _apply_correction(
         lifecycle_archetype="structural",
     )
     await state.save_knowledge_entry(new_entry)
+
+    # Generate embedding for the correction entry
+    if embedding_service and embedding_store:
+        try:
+            embedding = await embedding_service.embed(f"{subject} {new_value}")
+            await embedding_store.save(tenant_id, new_entry.id, embedding)
+        except Exception as exc:
+            logger.warning("Tier 2: embedding failed for correction %r: %s", new_value[:60], exc)
 
     # Update soul fields if the correction maps to one
     field_lower = field.lower()
