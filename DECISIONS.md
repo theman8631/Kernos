@@ -1,6 +1,6 @@
 ## NOW
 
-**Status:** Phase 2B-v2 COMPLETE — LLM Context Space Routing live-verified
+**Status:** SPEC-2A-PATCH COMPLETE — Relationship-Role Entity Linking live-verified
 **Owner:** Founder / Architect
 **Action:** Decide next spec: 2C (Context Assembly) or 2D (Dispatch Interceptor)
 
@@ -20,6 +20,7 @@
 |---|---|---|---|---|
 | 2.0 | Schema Foundation Sprint | COMPLETE | 2026-03-06 | All Phase 2 data models planted; ContextSpace auto-created on soul init |
 | 2A | Entity Resolution + Fact Dedup | COMPLETE | 2026-03-08 | Three-tier cascade, three-zone dedup, Voyage AI embeddings, NOOP reinforcement |
+| 2A-PATCH | Relationship-Role Entity Linking | COMPLETE | 2026-03-13 | role_match Tier 1, entity upgrade, split reconciliation. Self-healed live split. |
 | 2B | Context Space Routing (v1 — algorithmic) | SUPERSEDED | 2026-03-08 | Replaced by 2B-v2 |
 | 2B-v2 | Context Space Routing (LLM Router) | COMPLETE | 2026-03-10 | LLM router (Haiku), tagged message stream, space thread assembly, cross-domain injection, Gate 1/2 space creation, session exit |
 | 2C | Context Assembly | — | — | Relationship-role matching, cross-context retrieval |
@@ -110,6 +111,15 @@ SPEC-2B-v2 complete. No active spec. Next: Phase 2C (Context Assembly) or Phase 
 - **Live verified:** Alias routing (confident=True), MRA fallback (confident=False), space switch events with correct payload, posture injection (207-char system prompt difference), scoped rule filtering (8 vs 7 rules), knowledge scoping (Mike Sullivan fact tagged to Test Project space), handoff annotation on switch. See `tests/live/LIVE-TEST-2B.md`.
 - **Design note:** MRA fallback is "sticky" — without explicit routing signals, the router stays in the current space. This is by design; 2C's context assembly can correct routing for ambiguous messages.
 - **Full spec:** `specs/SPEC-2B-CONTEXT-SPACE-ROUTING.md`
+
+### 2026-03-13: SPEC-2A-PATCH — Relationship-Role Entity Linking — COMPLETE
+
+- **What:** Fixed the split-entity problem where "my wife" and "Liana" created two separate EntityNodes. Three changes: (1) Extraction prompt updated — name+role together ("my wife Liana") now produces ONE entity with both fields, not two. (2) Tier 1 resolution gains `role_match` check — when incoming entity has a `relationship_type`, existing role-named entities ("user's wife") are matched and upgraded: real name becomes canonical, role becomes alias. Role_match runs before exact name matching to ensure split entities always route through reconciliation. (3) Split reconciliation — if a role entity AND a separate named entity both exist, the next "my wife Liana" mention merges them: knowledge entries migrated, duplicate deactivated, SAME_AS edge created. (4) Two coordinator/extractor bugs fixed: EntityResolver was only instantiated with VOYAGE_API_KEY present; `enhanced` flag gated entity resolution behind embeddings. Both fixed — entity resolution (Tier 1 deterministic) now always active regardless of Voyage.
+- **Modified files:** `kernos/kernel/projectors/llm_extractor.py` (prompt addition, `resolve_entities` flag split from `enhanced`, `relationship_type` passed to resolver, `role_match` in ENTITY_MERGED events), `kernos/kernel/resolution.py` (`_role_forms()` helper, `relationship_type` param on `resolve()` + `_tier1_resolve()`, `role_match` Tier 1 check, `_apply_role_match()` upgrade + split reconciliation), `kernos/kernel/projectors/coordinator.py` (EntityResolver always instantiated for Tier 1)
+- **Tests:** 7 new tests in `test_entity_resolution.py`. Total: 523 passing.
+- **Live verified:** Live split (ent_cb0bed64 "user's wife" + ent_decd315d "Liana") self-healed on first "My wife Liana is amazing" message. entity.merged event emitted (role_match). SAME_AS edge created (confidence=1.0). See `tests/live/LIVE-TEST-2A-PATCH.md`.
+- **Note on AC6 (knowledge entry linkage):** Historical KEs from the 2A live test have empty `entity_node_id` — a known data gap from before the field was populated. The reconciliation correctly migrates entries that ARE linked; back-filling historical entries deferred (non-blocking).
+- **Full spec:** `specs/SPEC-2A-PATCH-ROLE-LINKING.md`
 
 ### 2026-03-07: SPEC-2A — Entity Resolution + Fact Deduplication — COMPLETE
 

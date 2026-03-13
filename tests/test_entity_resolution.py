@@ -1004,3 +1004,252 @@ async def test_tier2_enhanced_path_fact_noop_reinforcement(tmp_path):
     reinforced = await state.get_knowledge_entry("t1", existing.id)
     if reinforced:
         assert reinforced.reinforcement_count >= 1  # At least unchanged or reinforced
+
+
+# ---------------------------------------------------------------------------
+# SPEC-2A-PATCH: Relationship-Role Entity Linking
+# ---------------------------------------------------------------------------
+
+
+async def test_role_match_upgrades_entity(tmp_path):
+    """Tier 1 role_match: 'Liana' with relationship_type='wife' matches
+    existing 'user's wife' entity and upgrades it."""
+    from kernos.kernel.resolution import EntityResolver
+
+    state = JsonStateStore(tmp_path)
+    # Pre-existing role-based entity
+    role_node = _ent("t1", "user's wife", "person", relationship_type="wife")
+    await state.save_entity_node(role_node)
+
+    resolver = EntityResolver(state, embeddings=None, reasoning=None)
+    node, res_type = await resolver.resolve(
+        tenant_id="t1",
+        mention="Liana",
+        entity_type="person",
+        context="My wife Liana is amazing",
+        relationship_type="wife",
+    )
+
+    assert res_type == "role_match"
+    assert node.id == role_node.id
+    assert node.canonical_name == "Liana"
+    assert "user's wife" in node.aliases
+    assert node.relationship_type == "wife"
+
+    # Verify persisted
+    saved = (await state.query_entity_nodes("t1", active_only=True))
+    liana = next((n for n in saved if n.id == role_node.id), None)
+    assert liana is not None
+    assert liana.canonical_name == "Liana"
+
+
+async def test_role_match_my_form(tmp_path):
+    """role_match works for 'my boss' form too."""
+    from kernos.kernel.resolution import EntityResolver
+
+    state = JsonStateStore(tmp_path)
+    boss_node = _ent("t1", "my boss", "person", relationship_type="boss")
+    await state.save_entity_node(boss_node)
+
+    resolver = EntityResolver(state, embeddings=None, reasoning=None)
+    node, res_type = await resolver.resolve(
+        tenant_id="t1",
+        mention="Tom",
+        entity_type="person",
+        context="My boss Tom just promoted me",
+        relationship_type="boss",
+    )
+
+    assert res_type == "role_match"
+    assert node.canonical_name == "Tom"
+    assert "my boss" in node.aliases
+
+
+async def test_role_only_no_name_creates_role_entity(tmp_path):
+    """When only a role is mentioned (no name), a new role-based entity is created."""
+    from kernos.kernel.resolution import EntityResolver
+
+    state = JsonStateStore(tmp_path)
+    resolver = EntityResolver(state, embeddings=None, reasoning=None)
+
+    node, res_type = await resolver.resolve(
+        tenant_id="t1",
+        mention="user's wife",
+        entity_type="person",
+        context="My wife called",
+        relationship_type="wife",
+    )
+
+    assert res_type == "new_entity"
+    assert node.canonical_name == "user's wife"
+    # relationship_type enrichment happens in the extractor layer post-resolve
+
+
+async def test_name_only_no_role_no_existing_creates_entity(tmp_path):
+    """Name-only mention without relationship_type still creates a new entity."""
+    from kernos.kernel.resolution import EntityResolver
+
+    state = JsonStateStore(tmp_path)
+    resolver = EntityResolver(state, embeddings=None, reasoning=None)
+
+    node, res_type = await resolver.resolve(
+        tenant_id="t1",
+        mention="Liana",
+        entity_type="person",
+        context="Liana called me",
+    )
+
+    assert res_type == "new_entity"
+    assert node.canonical_name == "Liana"
+
+
+async def test_split_entity_reconciliation(tmp_path):
+    """When both 'user's wife' and 'Liana' exist as separate entities,
+    resolving 'Liana' with relationship_type='wife' merges them."""
+    from kernos.kernel.resolution import EntityResolver
+    from kernos.kernel.state import KnowledgeEntry, _content_hash
+
+    state = JsonStateStore(tmp_path)
+
+    # Two split entities (the live data situation)
+    role_node = _ent("t1", "user's wife", "person", relationship_type="wife")
+    role_node.knowledge_entry_ids = []
+    await state.save_entity_node(role_node)
+
+    name_node = _ent("t1", "Liana", "person")
+    name_node.knowledge_entry_ids = []
+    await state.save_entity_node(name_node)
+
+    # Knowledge entries on each
+    k1 = _know("t1", "user's wife", "Loves Italian food")
+    k1.entity_node_id = role_node.id
+    role_node.knowledge_entry_ids.append(k1.id)
+    await state.save_knowledge_entry(k1)
+    await state.save_entity_node(role_node)
+
+    k2 = _know("t1", "Liana", "Gave cookies")
+    k2.entity_node_id = name_node.id
+    name_node.knowledge_entry_ids.append(k2.id)
+    await state.save_knowledge_entry(k2)
+    await state.save_entity_node(name_node)
+
+    resolver = EntityResolver(state, embeddings=None, reasoning=None)
+    merged, res_type = await resolver.resolve(
+        tenant_id="t1",
+        mention="Liana",
+        entity_type="person",
+        context="My wife Liana is amazing",
+        relationship_type="wife",
+    )
+
+    assert res_type == "role_match"
+    assert merged.canonical_name == "Liana"
+    assert "user's wife" in merged.aliases
+
+    # k2's knowledge entry should now point to role_node (the surviving entity)
+    k2_updated = await state.get_knowledge_entry("t1", k2.id)
+    assert k2_updated is not None
+    assert k2_updated.entity_node_id == role_node.id
+
+    # name_node should be deactivated
+    all_nodes = await state.query_entity_nodes("t1", active_only=False)
+    liana_dup = next((n for n in all_nodes if n.id == name_node.id), None)
+    assert liana_dup is not None
+    assert liana_dup.active is False
+
+    # SAME_AS edge created
+    edges = await state.query_identity_edges("t1", role_node.id)
+    assert any(
+        e.source_id == role_node.id and e.target_id == name_node.id
+        and e.edge_type == "SAME_AS"
+        for e in edges
+    )
+
+    # Only one active entity remains
+    active = await state.query_entity_nodes("t1", active_only=True)
+    assert len(active) == 1
+    assert active[0].canonical_name == "Liana"
+
+
+async def test_role_match_no_duplicate_no_split(tmp_path):
+    """role_match with no existing named entity just upgrades cleanly."""
+    from kernos.kernel.resolution import EntityResolver
+
+    state = JsonStateStore(tmp_path)
+    role_node = _ent("t1", "user's wife", "person", relationship_type="wife")
+    await state.save_entity_node(role_node)
+
+    resolver = EntityResolver(state, embeddings=None, reasoning=None)
+    node, res_type = await resolver.resolve(
+        tenant_id="t1",
+        mention="Liana",
+        entity_type="person",
+        context="",
+        relationship_type="wife",
+    )
+
+    assert res_type == "role_match"
+    active = await state.query_entity_nodes("t1", active_only=True)
+    assert len(active) == 1
+    assert active[0].canonical_name == "Liana"
+
+
+async def test_tier2_extraction_role_match_event(tmp_path):
+    """Enhanced extraction path emits ENTITY_MERGED for role_match resolution."""
+    import json as _json
+
+    from kernos.kernel.dedup import FactDeduplicator
+    from kernos.kernel.embedding_store import JsonEmbeddingStore
+    from kernos.kernel.events import JsonEventStream
+    from kernos.kernel.projectors.llm_extractor import run_tier2_extraction
+    from kernos.kernel.resolution import EntityResolver
+    from kernos.kernel.soul import Soul
+
+    state = JsonStateStore(tmp_path)
+    events = JsonEventStream(tmp_path)
+    soul = Soul(tenant_id="t1")
+    emb_store = JsonEmbeddingStore(tmp_path)
+
+    # Pre-existing role entity
+    role_node = _ent("t1", "user's wife", "person", relationship_type="wife")
+    await state.save_entity_node(role_node)
+
+    mock_reasoning = AsyncMock()
+    mock_reasoning.complete_simple = AsyncMock(
+        return_value=_json.dumps({
+            "reasoning": "Wife Liana mentioned",
+            "entities": [{"name": "Liana", "type": "person",
+                           "relation": "wife", "relationship_type": "wife",
+                           "phone": "", "email": "", "durability": "permanent"}],
+            "facts": [],
+            "preferences": [],
+            "corrections": [],
+        })
+    )
+
+    mock_embeddings = AsyncMock()
+    mock_embeddings.embed = AsyncMock(return_value=[0.5, 0.5])
+
+    mock_dedup = AsyncMock()
+    mock_dedup.classify = AsyncMock(return_value=("ADD", None))
+
+    resolver = EntityResolver(state, mock_embeddings, mock_reasoning)
+    dedup = FactDeduplicator(state, mock_embeddings, emb_store, mock_reasoning)
+
+    await run_tier2_extraction(
+        recent_turns=[{"role": "user", "content": "My wife Liana is amazing"}],
+        soul=soul,
+        state=state,
+        events=events,
+        reasoning_service=mock_reasoning,
+        tenant_id="t1",
+        entity_resolver=resolver,
+        fact_deduplicator=dedup,
+        embedding_service=mock_embeddings,
+        embedding_store=emb_store,
+    )
+
+    entities = await state.query_entity_nodes("t1", active_only=True)
+    assert len(entities) == 1
+    assert entities[0].canonical_name == "Liana"
+    assert "user's wife" in entities[0].aliases

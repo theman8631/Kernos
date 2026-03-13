@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 TITLES = {"mr", "mrs", "ms", "dr", "prof", "sir", "lord", "lady", "rev", "the"}
 STOPWORDS = {"a", "an", "and", "of", "in", "at", "to", "for", "on", "is", "are", "was", "were"}
 
+
+def _role_forms(relationship_type: str) -> list[str]:
+    """Return the canonical role-name forms for a given relationship type.
+
+    E.g. "wife" → ["user's wife", "my wife", "wife"]
+    """
+    rt = relationship_type.lower()
+    return [f"user's {rt}", f"my {rt}", rt]
+
 # New-person signals for context-fit check
 NEW_PERSON_SIGNALS = [
     "met today", "just met", "met this", "new friend",
@@ -66,16 +75,18 @@ class EntityResolver:
         context: str,
         contact_phone: str = "",
         contact_email: str = "",
+        relationship_type: str = "",
     ) -> tuple[EntityNode, str]:
         """Resolve a mention to an EntityNode.
 
         Returns (entity_node, resolution_type) where resolution_type is one of:
           "exact_match" | "alias_match" | "contact_match" | "present_not_presume" |
-          "scored_match" | "llm_match" | "new_entity"
+          "role_match" | "scored_match" | "llm_match" | "new_entity"
         """
         # --- Tier 1: Deterministic ---
         node, res_type = await self._tier1_resolve(
-            tenant_id, mention, entity_type, contact_phone, contact_email, context
+            tenant_id, mention, entity_type, contact_phone, contact_email, context,
+            relationship_type=relationship_type,
         )
         if node is not None:
             if res_type == "present_not_presume":
@@ -96,6 +107,13 @@ class EntityResolver:
                 )
                 await self._state.save_identity_edge(tenant_id, edge)
                 return new_node, "present_not_presume"
+
+            elif res_type == "role_match":
+                # Upgrade: real name becomes canonical, role-based name becomes alias
+                return await self._apply_role_match(
+                    tenant_id, node, mention, entity_type, relationship_type
+                )
+
             else:
                 # Definitive match — update last_seen and return
                 await self._update_last_seen(node, tenant_id)
@@ -191,6 +209,7 @@ class EntityResolver:
         contact_phone: str,
         contact_email: str,
         context: str,
+        relationship_type: str = "",
     ) -> tuple[EntityNode | None, str]:
         existing = await self._state.query_entity_nodes(tenant_id, active_only=True)
 
@@ -204,7 +223,18 @@ class EntityResolver:
                 if node.contact_email and node.contact_email == contact_email:
                     return node, "contact_match"
 
-        # 2. Exact canonical name + type match
+        # 2. Relationship-role match — checked before name matching so that "Liana" with
+        #    relationship_type="wife" always routes through role_match when a role entity
+        #    ("user's wife") exists, even if a separate "Liana" entity also exists.
+        #    This ensures split entities reconcile correctly.
+        if relationship_type:
+            forms = _role_forms(relationship_type)
+            forms_lower = [r.lower() for r in forms]
+            for node in existing:
+                if node.canonical_name.lower() in forms_lower:
+                    return node, "role_match"
+
+        # 3. Exact canonical name + type match
         for node in existing:
             if node.canonical_name.lower() == mention.lower() and (
                 not entity_type or not node.entity_type or entity_type == node.entity_type
@@ -214,7 +244,7 @@ class EntityResolver:
                 else:
                     return node, "present_not_presume"
 
-        # 3. Exact alias match
+        # 4. Exact alias match
         for node in existing:
             if mention.lower() in [a.lower() for a in node.aliases]:
                 if self._context_fits(node, context):
@@ -373,6 +403,74 @@ class EntityResolver:
             return parsed.get("is_same_entity", False), parsed.get("confidence", 0.0)
         except Exception:
             return False, 0.0
+
+    # -------------------------------------------------------------------------
+    # Role-match upgrade + split reconciliation
+    # -------------------------------------------------------------------------
+
+    async def _apply_role_match(
+        self,
+        tenant_id: str,
+        node: EntityNode,
+        mention: str,
+        entity_type: str,
+        relationship_type: str,
+    ) -> tuple[EntityNode, str]:
+        """Upgrade a role-based entity with a real name and reconcile any split duplicate.
+
+        After this call:
+          - node.canonical_name == mention (e.g., "Liana")
+          - old role name (e.g., "user's wife") is in node.aliases
+          - Any separate entity named `mention` is merged in and deactivated
+        """
+        # Upgrade canonical name to the real name
+        old_name = node.canonical_name
+        node.canonical_name = mention
+        if old_name.lower() not in [a.lower() for a in node.aliases]:
+            node.aliases.append(old_name)
+        if mention.lower() not in [a.lower() for a in node.aliases]:
+            node.aliases.append(mention)
+        if relationship_type and not node.relationship_type:
+            node.relationship_type = relationship_type
+        node.last_seen = _now_iso()
+        await self._state.save_entity_node(node)
+
+        # Split reconciliation: look for a separate named entity that should be merged
+        existing = await self._state.query_entity_nodes(tenant_id, active_only=True)
+        for other in existing:
+            if (other.id == node.id or
+                    other.canonical_name.lower() != mention.lower() or
+                    other.entity_type != node.entity_type):
+                continue
+            # Found a duplicate named entity — merge into `node`
+            for entry_id in other.knowledge_entry_ids:
+                if entry_id not in node.knowledge_entry_ids:
+                    node.knowledge_entry_ids.append(entry_id)
+                entry = await self._state.get_knowledge_entry(tenant_id, entry_id)
+                if entry:
+                    entry.entity_node_id = node.id
+                    await self._state.save_knowledge_entry(entry)
+            for alias in other.aliases:
+                if alias.lower() not in [a.lower() for a in node.aliases]:
+                    node.aliases.append(alias)
+            other.active = False
+            await self._state.save_entity_node(other)
+            edge = IdentityEdge(
+                source_id=node.id,
+                target_id=other.id,
+                edge_type="SAME_AS",
+                confidence=1.0,
+                evidence_signals=["role_name_merge"],
+                created_at=_now_iso(),
+            )
+            await self._state.save_identity_edge(tenant_id, edge)
+            logger.info(
+                "Role-match reconciliation: merged %s (%s) into %s (%s)",
+                other.id, other.canonical_name, node.id, node.canonical_name,
+            )
+
+        await self._state.save_entity_node(node)
+        return node, "role_match"
 
     # -------------------------------------------------------------------------
     # Helpers

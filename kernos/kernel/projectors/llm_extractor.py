@@ -121,6 +121,16 @@ Only extract named entities (Linda, Henderson, Acme Corp) or uniquely-identifiab
 
 When a phone number, email address, or website is mentioned in connection with a person or organization, include it in the entity extraction. Classify the relationship_type (client, friend, supplier, contractor, wife, boss, etc.) from context. Leave phone/email empty strings if not mentioned.
 
+When a name and a relationship role appear together in the same phrase ('my wife Liana', 'Liana, my wife', 'my boss Tom', 'Tom, who is my boss'), emit ONE entity with both the name and the relationship type. Do NOT emit the role and the name as separate entities.
+
+Example:
+  "My wife Liana loves cooking"
+  → entity: {name: "Liana", type: "person", relationship_type: "wife"}
+  NOT: {name: "user's wife"} AND {name: "Liana"} as two entities
+
+When only a role is mentioned without a name ('my wife called'), emit the role-based entity: {name: "user's wife", relationship_type: "wife"}
+When only a name is mentioned without a role ('Liana called'), emit the name-based entity as before: {name: "Liana"}
+
 WORTH PERSISTING (permanent facts about the person):
 - Who they are: occupation, role, location, life situation (but NOT their name — name is tracked separately)
 - What they care about: goals, problems they're solving, values
@@ -243,8 +253,11 @@ async def run_tier2_extraction(
       - Facts are classified by embedding similarity before writing
     Otherwise falls back to hash-based exact dedup only (legacy path).
     """
+    # Entity resolution is Tier 1 deterministic — works without embeddings.
+    # Fact deduplication (embedding similarity) requires Voyage backing.
+    resolve_entities = entity_resolver is not None
     enhanced = (
-        entity_resolver is not None
+        resolve_entities
         and fact_deduplicator is not None
         and embedding_service is not None
         and embedding_store is not None
@@ -297,7 +310,7 @@ async def run_tier2_extraction(
                 return ""
             return active_space_id or ""
 
-        # Map entity name (lower) → resolved EntityNode.id (enhanced path only)
+        # Map entity name (lower) → resolved EntityNode.id (entity resolution path only)
         entity_name_to_node_id: dict[str, str] = {}
 
         # Entities
@@ -306,7 +319,7 @@ async def run_tier2_extraction(
             if not name:
                 continue
 
-            if enhanced:
+            if resolve_entities:
                 # Enhanced path: resolve to EntityNode via 3-tier cascade
                 entity_type = item.get("type", "")
                 contact_phone = item.get("phone", "").strip()
@@ -322,6 +335,7 @@ async def run_tier2_extraction(
                         context=context_text,
                         contact_phone=contact_phone,
                         contact_email=contact_email,
+                        relationship_type=relationship_type,
                     )
                     # Enrich entity with contact/relationship info if not already set
                     updated = False
@@ -343,7 +357,7 @@ async def run_tier2_extraction(
                     if resolution_type == "new_entity":
                         ev = EventType.ENTITY_CREATED
                     elif resolution_type in ("exact_match", "alias_match", "scored_match",
-                                             "llm_match", "contact_match"):
+                                             "llm_match", "contact_match", "role_match"):
                         ev = EventType.ENTITY_MERGED
                     else:
                         ev = EventType.ENTITY_LINKED

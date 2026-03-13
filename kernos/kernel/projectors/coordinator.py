@@ -74,10 +74,14 @@ async def run_projectors(
             logger.warning("Failed to emit knowledge.extracted (tier1): %s", exc)
 
     # --- Tier 2: async, does not block response ---
-    entity_resolver = None
     fact_deduplicator = None
     embedding_service = None
     embedding_store = None
+
+    # EntityResolver Tier 1 is deterministic (no embeddings needed) — always available.
+    # The enhanced resolver (Tier 2+3) requires VOYAGE_API_KEY for embedding similarity.
+    from kernos.kernel.resolution import EntityResolver
+    entity_resolver = EntityResolver(state, embeddings=None, reasoning=None)
 
     voyage_api_key = os.getenv("VOYAGE_API_KEY", "")
     if voyage_api_key:
@@ -85,7 +89,6 @@ async def run_projectors(
             from kernos.kernel.dedup import FactDeduplicator
             from kernos.kernel.embedding_store import JsonEmbeddingStore
             from kernos.kernel.embeddings import EmbeddingService
-            from kernos.kernel.resolution import EntityResolver
 
             data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
             embedding_service = EmbeddingService(voyage_api_key)
