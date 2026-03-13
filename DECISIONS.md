@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** SPEC-2A-PATCH COMPLETE — Relationship-Role Entity Linking live-verified
+**Status:** SPEC-2C COMPLETE — Context Space Compaction System live-verified
 **Owner:** Founder / Architect
-**Action:** Decide next spec: 2C (Context Assembly) or 2D (Dispatch Interceptor)
+**Action:** Decide next spec: 2D (Dispatch Interceptor) or other Phase 2 work
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -23,7 +23,7 @@
 | 2A-PATCH | Relationship-Role Entity Linking | COMPLETE | 2026-03-13 | role_match Tier 1, entity upgrade, split reconciliation. Self-healed live split. |
 | 2B | Context Space Routing (v1 — algorithmic) | SUPERSEDED | 2026-03-08 | Replaced by 2B-v2 |
 | 2B-v2 | Context Space Routing (LLM Router) | COMPLETE | 2026-03-10 | LLM router (Haiku), tagged message stream, space thread assembly, cross-domain injection, Gate 1/2 space creation, session exit |
-| 2C | Context Assembly | — | — | Relationship-role matching, cross-context retrieval |
+| 2C | Context Space Compaction | COMPLETE | 2026-03-13 | Two-layer compaction (Ledger + Living State), token tracking, domain-adaptive editorial judgment, rotation + archival |
 
 ---
 
@@ -85,11 +85,20 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-SPEC-2B-v2 complete. No active spec. Next: Phase 2C (Context Assembly) or Phase 2D (Dispatch Interceptor) — founder to decide.
+SPEC-2C complete. No active spec. Next: Phase 2D (Dispatch Interceptor) or other Phase 2 work — founder to decide.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-13: SPEC-2C — Context Space Compaction System — COMPLETE
+
+- **What:** Replaces naive `_truncate_to_budget()` with a two-layer compaction system per context space. Every space gets a Ledger (append-only historical record with domain-appropriate editorial judgment) and a Living State (rewritten each cycle to reflect current truth). Token tracking via `cumulative_new_tokens` triggers compaction when the ceiling is reached. The ceiling is computed from model capacity minus instructions, context definition, and existing history. Document rotation seals full documents as archives with index summaries. Adaptive headroom reduces conversation headroom by 5% if rotation rate exceeds 20%.
+- **New files:** `kernos/kernel/tokens.py` (TokenAdapter ABC + AnthropicTokenAdapter + EstimateTokenAdapter), `kernos/kernel/compaction.py` (CompactionState dataclass + CompactionService + COMPACTION_SYSTEM_PROMPT), `tests/test_compaction.py` (45 tests), `tests/live/run_2c_live.py`, `tests/live/run_2c_phase2.py`
+- **Modified files:** `kernos/kernel/event_types.py` (3 compaction event types), `kernos/persistence/base.py` + `json_file.py` (`include_timestamp` param on `get_space_thread()`), `kernos/messages/handler.py` (CompactionService init, token tracking after response, compaction trigger, headroom init on daily/Gate 2 spaces, `_assemble_space_context()` rewrite for compaction-aware context), `kernos/cli.py` (`compaction` command)
+- **Tests:** 568 passing (516 existing + 52 new compaction tests).
+- **Live verified:** D&D space — 2 compactions fired correctly with domain-appropriate narrative Ledger entries. Daily space — 1 compaction with operational/task-oriented Ledger entries. Same COMPACTION_SYSTEM_PROMPT produces distinctly different editorial voices per domain. Historical context query successfully recalled compacted history. Graceful degradation: AnthropicTokenAdapter falls back to EstimateTokenAdapter when API credits exhausted. See `tests/live/LIVE-TEST-2C.md`.
+- **Full spec:** `specs/SPEC-2C-COMPACTION.md`
 
 ### 2026-03-10: SPEC-2B-v2 — LLM Context Space Routing — COMPLETE
 
@@ -313,4 +322,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-10 (Phase 2B-v2 COMPLETE — LLM context space routing live-verified, 516 tests passing)*
+*Last updated: 2026-03-13 (Phase 2C COMPLETE — Context Space Compaction live-verified, 568 tests passing)*

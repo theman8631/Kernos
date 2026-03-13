@@ -1,3 +1,5 @@
+> **Superseded:** This test covers SPEC-2B (algorithmic routing), which was replaced by SPEC-2B-v2 (LLM routing). See `LIVE-TEST-2B-v2.md` for the current live test.
+
 # Live Test Results: SPEC-2B — Context Space Routing
 
 **Date:** 2026-03-08

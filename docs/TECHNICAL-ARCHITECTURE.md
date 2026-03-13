@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-10 (reflects Phase 2B-v2 complete state — LLM context space routing)
+> **Last updated:** 2026-03-13 (reflects Phase 2C complete state — Context Space Compaction)
 
 ---
 
@@ -47,7 +47,8 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
                                               │
                                     ┌─────────┴──────────┐
                                     ▼                     ▼
-                             [Entity Resolver]    [Fact Deduplicator]
+                             [Entity Resolver]    [Fact Deduplicator]    [Compaction Service]
+                                                                        (Ledger + Living State)
                             (3-tier cascade)      (3-zone classifier)
                                     │                     │
                                     └──────┬──────────────┘
@@ -112,14 +113,15 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 17. Append name ask if first interaction and name unknown
 18. Update soul (interaction count, hatch check, maturity check)
 19. Store assistant response with `space_tags: router_result.tags`
-20. Emit message.sent event
-21. Return response string to adapter
+20. **Compaction token tracking:** Count exchange tokens, accumulate to `cumulative_new_tokens`. If `should_compact()`: load full thread with timestamps, filter post-compaction messages, call `compact()`. Compaction failure never breaks response flow.
+21. Emit message.sent event
+22. Return response string to adapter
 
 **Key methods:**
 - `_get_or_init_soul()` — loads from State Store or creates new unhatched soul
 - `_post_response_soul_update()` — increments interactions, checks hatch, checks graduation
 - `_build_system_prompt()` — 9-layer assembly (includes cross-domain prefix, posture, scoped rules)
-- `_assemble_space_context()` — builds space thread + cross-domain prefix for the agent
+- `_assemble_space_context()` — compaction-aware context assembly: index + cross-domain + compaction document + post-compaction messages; falls back to full thread when no compaction state
 - `_run_session_exit()` — updates space name/description after focus shift (async, >= 3 messages)
 - `_trigger_gate2()` — Gate 2 LLM call to evaluate and potentially create a new space (async)
 - `_enforce_space_cap()` — archives LRU non-default space when 40-space cap is hit
@@ -280,6 +282,28 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Knowledge scoping:** Facts extracted in non-daily spaces get `context_space = active_space_id`. User-level structural/identity facts are always global (`context_space = ""`), regardless of active space.
 
+### Context Space Compaction (Phase 2C)
+
+**What it does:** Replaces naive message truncation with structured history preservation. Each context space maintains a two-layer compaction document: an append-only **Ledger** (immutable historical entries with domain-appropriate editorial judgment) and a rewritable **Living State** (current-truth snapshot updated each cycle).
+
+**Files:**
+- `kernos/kernel/compaction.py` — CompactionState dataclass, CompactionService, COMPACTION_SYSTEM_PROMPT
+- `kernos/kernel/tokens.py` — TokenAdapter ABC, AnthropicTokenAdapter, EstimateTokenAdapter
+
+**CompactionState** (per space): compaction_number, global_compaction_number, cumulative_new_tokens, message_ceiling, history_tokens, document_budget, conversation_headroom, archive_count, index_tokens, last_compaction_at.
+
+**Trigger:** After every exchange, exchange tokens are counted and accumulated. When `cumulative_new_tokens >= message_ceiling`, compaction fires. Ceiling = `COMPACTION_MODEL_USABLE_TOKENS (160k) - instructions (2k) - context_def_tokens - history_tokens`.
+
+**Compaction flow:** One Haiku LLM call with COMPACTION_SYSTEM_PROMPT processes uncompacted messages. The LLM appends a new Ledger entry (immutable, self-contained, domain-aware) and rewrites the Living State. Existing Ledger entries are never modified.
+
+**Token adapters:** AnthropicTokenAdapter wraps the free `count_tokens` endpoint; graceful fallback to EstimateTokenAdapter (`ceil(len/4 * 1.2)`) on any failure.
+
+**Document rotation:** When the active document exceeds `document_budget`, it's sealed as an archive. An index summary is generated (Haiku). Living State + last 2 Ledger entries carry forward to the new active document. Adaptive headroom reduces conversation headroom by 5% if rotation rate > 20%.
+
+**Persistence:** `{data_dir}/{tenant_id}/state/compaction/{space_id}/` — `state.json`, `active_document.md`, `index.md`, `archives/`.
+
+**Domain-adaptive editorial judgment:** Same COMPACTION_SYSTEM_PROMPT produces narrative entries for creative spaces (D&D: story beats, character actions, world details) and operational entries for daily spaces (task logs, action items, capability constraints). The minimum resolution floor preserves named entities, decisions/commitments, behavior-changing facts, and unresolved exceptions.
+
 ### Entity Resolution Pipeline (Phase 2A)
 
 **What it does:** Resolves named mentions in Tier 2 extraction to canonical EntityNode records. Prevents duplicate entities, links aliases, and handles name collisions via the "present, don't presume" principle.
@@ -327,6 +351,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Knowledge: knowledge.extracted, knowledge.reinforced (Phase 2A)
 - Entity: entity.created, entity.merged, entity.linked, entity.updated (Phase 2A)
 - Context Spaces: context.space.switched, context.space.created (Phase 2B)
+- Compaction: compaction.triggered, compaction.completed, compaction.rotation (Phase 2C)
 - Capabilities: capability.connected, capability.disconnected, capability.error
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
@@ -425,7 +450,13 @@ Every tenant gets this directory tree on first contact:
 │   ├── identity_edges.json        # IdentityEdge records (Phase 2A)
 │   ├── spaces.json                # ContextSpace records (Phase 2B)
 │   ├── topic_hints.json           # Gate 1 topic hint counts (Phase 2B-v2)
-│   └── embeddings.json            # entry_id → embedding vector map (Phase 2A)
+│   ├── embeddings.json            # entry_id → embedding vector map (Phase 2A)
+│   └── compaction/                # Per-space compaction state (Phase 2C)
+│       └── {space_id}/
+│           ├── state.json         # CompactionState
+│           ├── active_document.md # Ledger + Living State
+│           ├── index.md           # Archive index (after rotation)
+│           └── archives/          # Sealed compaction documents
 ├── conversations/
 │   └── {conversation_id}.json     # Message history
 ├── events/
@@ -494,6 +525,8 @@ Every "delete" operation is a relocation. Archive paths exist from day one. `Con
 | `kernos-cli entities <tenant_id> --include-inactive` | Include inactive entities |
 | `kernos-cli spaces <tenant_id>` | Context spaces with posture, description, last_active_at |
 | `kernos-cli create-space <tenant_id> --name X` | Create a new context space manually (Phase 2B; spaces also self-create via Gate 2) |
+| `kernos-cli compaction <tenant_id>` | Per-space compaction state (compaction_number, tokens, ceiling, archives) |
+| `kernos-cli compaction <tenant_id> <space_id>` | Compaction state + first/last 10 lines of active document |
 | `kernos-cli tenants` | All known tenants |
 
 ---
@@ -511,6 +544,8 @@ Every reasoning call is logged with: model, input tokens, output tokens, estimat
 | Fact Deduplicator LLM classify | ~$0.001 | Only for 0.65–0.92 similarity zone |
 | **Gate 2 space creation (Claude Haiku)** | **~$0.001** | **Once per emerging topic at threshold (15 msgs)** |
 | **Session exit maintenance (Claude Haiku)** | **~$0.001** | **Once per focus shift away from non-daily space** |
+| **Compaction (Claude Haiku)** | **~$0.002–0.005** | **When cumulative_new_tokens >= ceiling (varies by space activity)** |
+| **Headroom estimation (Claude Haiku)** | **~$0.001** | **Once per Gate 2 space creation** |
 | Bootstrap consolidation | ~$0.02 | Once per tenant lifetime |
 | Voyage AI embeddings | ~$0.0001 per extraction | Every Tier 2 run (enhanced path only) |
 
@@ -520,7 +555,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-516 tests across 17 test files.
+568 tests across 18 test files.
 
 | File | What it covers |
 |---|---|
@@ -540,6 +575,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_twilio_adapter.py | Twilio SMS adapter |
 | test_entity_resolution.py | EntityNode, EmbeddingService, EntityResolver (Tier 1/2/3), FactDeduplicator, run_tier2_extraction dual-path (45 tests) |
 | test_routing.py | LLM Router (mocked), get_space_thread/get_cross_domain_messages/get_recent_full, token budget truncation, topic hint counting (Gate 1), query_covenant_rules scoping, system prompt posture + cross-domain prefix injection, handler space switching with session exit, space_tags on saved messages, daily-only zero change, knowledge scoping (45 tests) |
+| test_compaction.py | Token adapters, CompactionState round-trip, document parsing, trigger logic, ceiling computation, compact() with mock LLM, rotation + archival, adaptive headroom, headroom estimation, event emission (45 tests) |
 | test_schema_foundation.py | Phase 2.0 schema models |
 
 ---
@@ -580,6 +616,7 @@ These are referenced in the architecture but not implemented:
 - ~~**Context spaces** — domain-specific context windows with separate tools and postures~~ **COMPLETE (Phase 2B-v2)** — LLM router, per-message space tagging, space thread assembly, cross-domain injection, Gate 1/2 organic space creation, session exit maintenance, posture injection, scoped rules, knowledge scoping
 - **Awareness evaluator** — event-driven proactive notification system
 - **Consolidation daemon** — background pattern extraction and insight generation
+- ~~**Context space compaction** — structured history preservation replacing naive truncation~~ **COMPLETE (Phase 2C)** — two-layer compaction (Ledger + Living State), token tracking, domain-adaptive editorial judgment, rotation + archival
 - **Dispatch Interceptor** — infrastructure-level behavioral contract enforcement
 - **Multi-model routing** — Reasoning Service routes to different models by task type
 - ~~**Entity resolution** — knowledge graph with identity linking~~ **COMPLETE (Phase 2A)**
