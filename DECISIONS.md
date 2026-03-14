@@ -1,14 +1,16 @@
 ## NOW
 
-**Status:** SPEC-2D COMPLETE — Active Retrieval (`remember` tool) + NL Contract Parser live-verified (13/14 steps passed, 627 tests)
-**Owner:** Founder / Architect
-**Action:** Decide next Phase 2 spec or begin Phase 3 planning
+**Status:** Phase 2 COMPLETE. Phase 3 starting. SPEC-3A (Per-Space File System) in review.
+**Owner:** Architect
+**Action:** SPEC-3A under Kit review. When approved, moves to Ready for Claude Code.
+**Tests:** 633+
+**Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
-> **What this file is:** The bridge between planning and execution. The founder and Claude (architect) plan here. Claude Code executes against the Active Spec section. Read `docs/BLUEPRINT.md` for full vision and architecture. Read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel design that governs Phase 1B. If something in this file conflicts with those documents, this file wins (it represents more recent decisions).
+> **What this file is:** The execution bridge between planning and implementation. Claude Code reads this file first, then executes the Active Spec. **Planning and roadmap decisions live in Notion** — not here. This file tracks: current status (NOW block), phase completion (tracker), and architectural decisions made (decision log).
 >
-> **Rule:** Claude Code reads this file first, then executes the Active Spec. Don't jump ahead to future phases. Don't build things not in the current spec.
+> For as-built architecture: see `docs/TECHNICAL-ARCHITECTURE.md`. For kernel design: see `docs/KERNEL-ARCHITECTURE-OUTLINE.md`. If something in this file conflicts with those documents, this file wins (it represents more recent decisions).
 
 ---
 
@@ -271,76 +273,10 @@ Full diagnostic audit of the kernel before Phase 2D. Six questions investigated;
 
 ---
 
-## Open Questions
-
-- **Twilio A2P registration:** Submitted, pending approval. Doesn't block development. When approved, SMS adapter lights up with zero code changes.
-- **MemOS integration timing:** Blueprint specifies MemOS as the memory/storage backend. Current JSON-on-disk stores are interface-abstracted and swappable. Evaluate MemOS fit during or after 1B.2 when the State Store patterns are more established.
-
----
-
-## Future Considerations
-
-Design notes for features not yet specced. These inform architecture decisions now so we don't build anything that blocks them later.
-
-### Context Spaces — Transparent Multi-Context Routing (Phase 2)
-
-The kernel maintains multiple isolated context windows behind a single user conversation. Each project, hobby domain, or life thread gets its own context with accumulated depth. The kernel routes messages based on content analysis (algorithmic where possible, lightweight LLM only when necessary).
-
-**Key mechanics:**
-- **Free handoff annotations:** On every context switch, the kernel injects a one-line note from the yielding context's State Store metadata. Zero LLM cost. Covers 90% of cross-reference ambiguity.
-- **Agent self-service:** Agents have a `query_context` tool to pull recent messages from other context spaces when the annotation isn't enough. The agent decides when — LLMs naturally know when they're missing context.
-- **No agent-to-agent telephone:** Agents don't talk to each other for information exchange. They read shared state. The kernel annotates and provides tools. The user just talks.
-- **Context types:** Managed resources (website, bookkeeping), creative projects (TTRPG), hobby domains (fantasy football), life threads (parenting, relationships). Same mechanics, different origins.
-- **Emergent creation:** The kernel can notice when a user repeatedly discusses the same topic and suggest a dedicated context space. Sensitive topics require careful behavioral contract governance.
-
-### Consolidation Daemon — Pattern Recognition and Insight Generation (Phase 2)
-
-Background process running during idle periods. Not just memory maintenance — creative connection-finding across the user's data. "I noticed you're still paying for your gym membership — about $400 since you last went." "Your glass supplier raised prices and craft fair season starts next month." Insights queued as proactive tasks, delivered at natural moments.
-
-**Cost logging mandatory:** Every daemon run logged with tokens, model, cost. Economy mode reduces frequency and uses cheaper models.
-
-### Daily Briefing — Emergent, Not Imposed (Phase 2)
-
-Don't push a daily briefing on new users. Let it assemble from connected capabilities, suggested at natural moments. Calendar connected → "Want a morning schedule summary?" Email connected → "Want email highlights?" The briefing emerges when capabilities make it useful.
-
-### Quality/Cost Tiers — User-Facing Model Selection (Phase 2)
-
-Five tiers from Economy to Ultra. User never sees model names. Adaptive within tier — failed/rejected output triggers automatic model upgrade with bias toward staying upgraded for similar future tasks. Plumber sees a cost/quality dial, never "Haiku" or "Opus."
-
-### Proactive Agent Behavior — Outbound Messaging (Phase 2)
-
-Agent initiates messages, not just responds. Pre-appointment reminders, contextual alerts ("you're going to be late"), insight delivery. Requires awareness evaluator (event-driven, not polling) with separate detection and delivery timing. Situation model maintains lightweight estimate of what user is doing — updated by events, not polling.
-
-### Capability Installation Framing (Design Principle)
-
-Only surface decisions that affect the user's world: money, access to personal data, external communication. Technical details (packages, dependencies, configurations) are kernel infrastructure the user never sees. Security (malware scanning, package verification) is a kernel layer. "I'll need hosting, about $X/year" — not "I need to install 7 packages."
-
-### User Profiles — Strengths, Weaknesses, Domain Expertise (Phase 2+)
-
-State Store tracks not just preferences but capabilities. "User has difficulty remembering things" → more proactive reminders. "User is a medical doctor" → trust domain expertise. Agent posture adapts based on the user's profile.
-
-### Calendar OAuth Re-authentication UX (Phase 2)
-
-Current re-auth requires manual terminal commands. The plumber can't handle this. Need a clean flow where the agent guides re-authentication through the conversation or a simple link. Non-trivial — MCP server auth is external to KERNOS. May require wrapping or replacing the auth flow.
-
-### Managed Resources as Agent-Built Systems (Phase 3+)
-
-Websites, bookkeeping systems, legal document trackers, customer payment links, scheduled reports — not just files the agent created but ongoing systems the agent maintains. Each becomes a capability in the graph. The plumber's invoicing system isn't a plugin — it's something KERNOS assembled from conversations about their needs.
-
-### The "Think" Task Type (Phase 2+)
-
-Not everything decomposes. Complex creative work, architecture discussions, nuanced analysis — these need a single powerful model with full context doing holistic reasoning. The task engine must recognize when decomposition would harm output and route the entire task as one reasoning pass.
-
-### Algorithmic-First Design Principle
-
-Every kernel function should be evaluated: can this be done algorithmically without an LLM call? Handoff annotations are free (State Store metadata lookup). Context routing can be largely keyword matching. Capability status is a registry read. LLM calls are reserved for genuine reasoning — understanding language, generating responses, evaluating ambiguity. Find every opportunity where algorithmic solutions replace LLM calls.
-
----
-
 ## Completed Specs
 
 Full specifications for completed phases have been moved to `specs/completed/` for reference. They are not active execution context.
 
 ---
 
-*Last updated: 2026-03-13 (Pre-2D audit complete — soul user_context eliminated, personality evolution on rotation, embedding pipeline fixed, 577 tests passing)*
+*Last updated: 2026-03-14 (Phase 2 complete — 648 tests passing. Planning moved to Notion.)*

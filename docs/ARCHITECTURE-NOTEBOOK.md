@@ -1,3 +1,13 @@
+> ⚠️ **HISTORICAL DOCUMENT — Phases 1A through early Phase 2**
+>
+> Design rationale and brainstorming from early development. Some sections
+> (spawning decision model, kernel primitive definitions) remain current.
+> Others (context space routing discussion, inline annotation) describe
+> approaches that were superseded.
+>
+> For current design decisions: see Notion Kit Reviews and Session Notes
+> For rejected approaches: see Notion Rejected Approaches page
+
 # KERNOS Architecture Notebook
 
 > **What this is:** A curated capture of architectural thinking, design rationale, and deferred decisions from brainstorming sessions across Phase 1A and 1B development. This is NOT a spec and NOT a decision log. It lives in the repo and in the Claude Project files so the architect always has this context when working on future phases.

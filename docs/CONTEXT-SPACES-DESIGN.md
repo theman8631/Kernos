@@ -1,3 +1,12 @@
+> ⚠️ **SUPERSEDED — March 2026**
+>
+> This design was replaced by the Context Routing v0.3 design (founder + Kit),
+> which introduced the LLM router, tagged message stream, and two-gate space
+> creation. The v0.3 design is implemented in SPEC-2B-v2.
+>
+> For the current design: see `specs/completed/SPEC-2B-v2-CONTEXT-ROUTING.md`
+> For the canonical v0.3 design document: see Notion workspace
+
 # Context Spaces — Design Document for KERNOS Phase 2
 
 > **What this is:** A design document for context spaces — the mechanism by which one agent maintains multiple isolated domains of knowledge, posture, and behavioral rules behind a single conversational interface. Concrete enough to derive specs from. Does not specify file paths or function signatures.

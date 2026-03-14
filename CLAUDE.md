@@ -2,13 +2,13 @@
 
 ## Project: KERNOS
 
-A personal agentic operating system. Full vision and architecture: `docs/BLUEPRINT.md`.
+A personal agentic operating system. As-built architecture: `docs/TECHNICAL-ARCHITECTURE.md`.
 
 ## Before You Do Anything
 
-1. **Read `DECISIONS.md` first.** It contains the Active Spec you should execute, recent architectural decisions, and open questions. If something in DECISIONS.md conflicts with the Blueprint, DECISIONS.md wins (it's more recent).
-2. **Read `docs/BLUEPRINT.md`** for full architectural context — the six pillars, four design principles, and phase structure.
-3. **Execute only the Active Spec** in DECISIONS.md. Don't jump ahead to future phases. Don't build things not in the current spec.
+1. **Read `DECISIONS.md` first.** The NOW block tells you what to do. It contains the Active Spec you should execute and recent architectural decisions. If something in DECISIONS.md conflicts with other documents, DECISIONS.md wins (it's more recent).
+2. **Read `docs/TECHNICAL-ARCHITECTURE.md`** for as-built architecture — components, data flows, interfaces. (`docs/BLUEPRINT.md` is a historical vision document, not the current reference.)
+3. **Execute only the Active Spec** in DECISIONS.md. Don't jump ahead to future phases. Don't build things not in the current spec. Planning lives in Notion; specs come to you via DECISIONS.md.
 
 ## Kernel Architecture Context
 

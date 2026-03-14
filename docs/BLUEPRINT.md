@@ -1,3 +1,13 @@
+> ⚠️ **HISTORICAL DOCUMENT — February 2026**
+>
+> This is the original vision document for KERNOS. The vision paragraphs
+> remain accurate but implementation details (phases, specific technologies
+> like MemOS/MemCubes, component names) have evolved significantly.
+>
+> For current architecture: see `docs/TECHNICAL-ARCHITECTURE.md`
+> For current planning: see Notion workspace
+> For current decisions: see `DECISIONS.md`
+
 # KERNOS
 
 ## Master Project Blueprint v0.1

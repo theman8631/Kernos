@@ -7,20 +7,32 @@
 A personal agentic operating system. Text a phone number, get agents working
 for you within an hour. No technical knowledge required.
 
-**Status:** Phase 1B complete. Kernel operational with soul, memory projectors,
-and behavioral contracts. Phase 2 preparation underway.
+**Status:** Phase 2 complete. 633+ tests. Phase 3 (Agent Workspace) starting.
+Active planning in [Notion workspace](https://notion.so).
 
 ## Documentation
 
 | Document | Purpose |
 |---|---|
-| [DECISIONS.md](DECISIONS.md) | Current status, active spec, decision log. **Start here.** |
-| [docs/BLUEPRINT.md](docs/BLUEPRINT.md) | Vision, architecture decisions, implementation phases |
-| [docs/TECHNICAL-ARCHITECTURE.md](docs/TECHNICAL-ARCHITECTURE.md) | Living map of what exists — components, data flows, interfaces |
-| [docs/KERNEL-ARCHITECTURE-OUTLINE.md](docs/KERNEL-ARCHITECTURE-OUTLINE.md) | The kernel design: five primitives, three operational modes |
-| [docs/ARCHITECTURE-NOTEBOOK.md](docs/ARCHITECTURE-NOTEBOOK.md) | Design rationale, deferred decisions, brainstorming insights |
-| [research/](research/) | Phase 2 preparation research papers |
+| [DECISIONS.md](DECISIONS.md) | Current status and decision log. **Start here.** |
+| [docs/TECHNICAL-ARCHITECTURE.md](docs/TECHNICAL-ARCHITECTURE.md) | As-built architecture — what exists in code right now |
+| [docs/KERNEL-ARCHITECTURE-OUTLINE.md](docs/KERNEL-ARCHITECTURE-OUTLINE.md) | Kernel design: five primitives, three operational modes |
 | [specs/completed/](specs/completed/) | All completed implementation specs |
+
+### Planning
+
+Active planning, roadmap, and design discussions live in the **Notion workspace** — not in the repo.
+The repo contains execution artifacts (specs, decisions, code). Notion contains planning artifacts
+(roadmap, reviews, session notes, open questions).
+
+### Historical Reference
+
+| Document | Purpose |
+|---|---|
+| [docs/BLUEPRINT.md](docs/BLUEPRINT.md) | Original vision document (Feb 2026) — vision is current, implementation details evolved |
+| [docs/ARCHITECTURE-NOTEBOOK.md](docs/ARCHITECTURE-NOTEBOOK.md) | Design rationale from Phases 1A–2 — some sections current, some superseded |
+| [docs/CONTEXT-SPACES-DESIGN.md](docs/CONTEXT-SPACES-DESIGN.md) | Pre-v0.3 context space design — superseded by SPEC-2B-v2 |
+| [research/](research/) | Phase 2 preparation research papers |
 
 ## Quick Start
 
