@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
@@ -266,7 +267,13 @@ When ambiguous — err toward preservation. If you are unsure whether a detail b
 4. Preserve specificity in both layers. Names, numbers, identifiers, exact phrasing of commitments — these survive compaction at full fidelity wherever they appear.
 5. The document must be self-contained. A future reader with no access to the original messages should be able to continue the conversation from the Living State and reconstruct any historical moment from the Ledger.
 6. Number Ledger entries sequentially.
-7. Every Ledger entry carries a message date range header regardless of domain."""
+7. Every Ledger entry carries a message date range header regardless of domain.
+
+---
+
+#### Files
+
+If this context space has files (created via write_file), include a FILES section in the Living State listing each file's name and description. When files are created, updated, or deleted in the new messages, update the FILES section accordingly. Do not include file contents — only names and descriptions."""
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +297,11 @@ class CompactionService:
         self.adapter = token_adapter
         self.data_dir = Path(data_dir)
         self.events = events
+        self._files = None  # Set by handler after construction
+
+    def set_files(self, files: Any) -> None:
+        """Wire up the file service for manifest injection during compaction."""
+        self._files = files
 
     def _space_dir(self, tenant_id: str, space_id: str) -> Path:
         from kernos.utils import _safe_name
@@ -498,6 +510,18 @@ class CompactionService:
             f"Description: {space.description}\n"
             f"Posture: {space.posture}\n"
         )
+
+        # Manifest injection — tell the compaction model what files exist
+        if self._files:
+            try:
+                manifest = await self._files.load_manifest(tenant_id, space_id)
+                if manifest:
+                    manifest_text = "Current files in this space:\n"
+                    for fname, desc in manifest.items():
+                        manifest_text += f"  - {fname}: {desc}\n"
+                    space_definition += f"\n{manifest_text}"
+            except Exception as exc:
+                logger.warning("Failed to load manifest for compaction injection: %s", exc)
 
         # Build the compaction call
         user_content = ""

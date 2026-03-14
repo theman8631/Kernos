@@ -162,6 +162,7 @@ class ReasoningRequest:
     trigger: str
     max_tokens: int = 1024
     active_space_id: str = ""  # For kernel tool routing (e.g., remember)
+    input_text: str = ""       # Current user message — used by delete principle enforcement
 
 
 @dataclass
@@ -223,10 +224,15 @@ class ReasoningService:
         self._mcp = mcp
         self._audit = audit
         self._retrieval = None  # Set by handler after construction (avoids circular import)
+        self._files = None      # Set by handler after construction
 
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
         self._retrieval = retrieval
+
+    def set_files(self, files: Any) -> None:
+        """Wire up the file service for kernel tool routing."""
+        self._files = files
 
     async def complete_simple(
         self,
@@ -262,6 +268,23 @@ class ReasoningService:
             return "{}"
         text_parts = [b.text for b in response.content if b.type == "text"]
         return "".join(text_parts)
+
+    # Kernel tools: intercepted before MCP, never passed through to external servers
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file"}
+
+    def _check_delete_allowed(self, user_message: str) -> bool:
+        """Delete only allowed when the user explicitly requested it.
+
+        Checks the current user message for delete intent. The agent cannot
+        self-initiate deletion — this is a kernel principle, not a model instruction.
+        """
+        delete_signals = [
+            "delete", "remove", "get rid of", "trash",
+            "clean up", "clear out", "throw away", "discard",
+            "drop", "nuke", "wipe", "erase",
+        ]
+        msg_lower = user_message.lower()
+        return any(signal in msg_lower for signal in delete_signals)
 
     async def reason(self, request: ReasoningRequest) -> ReasoningResult:
         """Run a full reasoning turn, including tool-use loop.
@@ -372,17 +395,83 @@ class ReasoningService:
                 )
 
                 t_tool = time.monotonic()
-                # Kernel tool routing: remember is handled internally
-                if block.name == "remember" and self._retrieval:
-                    try:
-                        result = await self._retrieval.search(
-                            request.tenant_id,
-                            (block.input or {}).get("query", ""),
-                            request.active_space_id,
-                        )
-                    except Exception as exc:
-                        logger.warning("Kernel tool 'remember' failed: %s", exc)
-                        result = "Memory search failed — try asking in a different way."
+                # Kernel tool routing: remember + file tools handled internally
+                if block.name in self._KERNEL_TOOLS:
+                    tool_args = block.input or {}
+                    if block.name == "remember":
+                        if self._retrieval:
+                            try:
+                                result = await self._retrieval.search(
+                                    request.tenant_id,
+                                    tool_args.get("query", ""),
+                                    request.active_space_id,
+                                )
+                            except Exception as exc:
+                                logger.warning("Kernel tool 'remember' failed: %s", exc)
+                                result = "Memory search failed — try asking in a different way."
+                        else:
+                            result = "Memory search is not available right now."
+                    elif block.name == "write_file":
+                        if self._files:
+                            try:
+                                result = await self._files.write_file(
+                                    request.tenant_id,
+                                    request.active_space_id,
+                                    tool_args.get("name", ""),
+                                    tool_args.get("content", ""),
+                                    tool_args.get("description", ""),
+                                )
+                            except Exception as exc:
+                                logger.warning("Kernel tool 'write_file' failed: %s", exc)
+                                result = "File write failed — try again."
+                        else:
+                            result = "File system is not available right now."
+                    elif block.name == "read_file":
+                        if self._files:
+                            try:
+                                result = await self._files.read_file(
+                                    request.tenant_id,
+                                    request.active_space_id,
+                                    tool_args.get("name", ""),
+                                )
+                            except Exception as exc:
+                                logger.warning("Kernel tool 'read_file' failed: %s", exc)
+                                result = "File read failed — try again."
+                        else:
+                            result = "File system is not available right now."
+                    elif block.name == "list_files":
+                        if self._files:
+                            try:
+                                result = await self._files.list_files(
+                                    request.tenant_id,
+                                    request.active_space_id,
+                                )
+                            except Exception as exc:
+                                logger.warning("Kernel tool 'list_files' failed: %s", exc)
+                                result = "File listing failed — try again."
+                        else:
+                            result = "File system is not available right now."
+                    elif block.name == "delete_file":
+                        if not self._check_delete_allowed(request.input_text):
+                            result = (
+                                "I can't delete files on my own — that's a standing principle. "
+                                "If you'd like me to remove a file, just ask directly "
+                                "(e.g. 'delete old-draft.md')."
+                            )
+                        elif self._files:
+                            try:
+                                result = await self._files.delete_file(
+                                    request.tenant_id,
+                                    request.active_space_id,
+                                    tool_args.get("name", ""),
+                                )
+                            except Exception as exc:
+                                logger.warning("Kernel tool 'delete_file' failed: %s", exc)
+                                result = "File deletion failed — try again."
+                        else:
+                            result = "File system is not available right now."
+                    else:
+                        result = f"Kernel tool '{block.name}' not handled."
                 else:
                     result = await self._mcp.call_tool(block.name, block.input)
                 tool_duration_ms = int((time.monotonic() - t_tool) * 1000)

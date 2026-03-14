@@ -253,6 +253,12 @@ class MessageHandler:
             events=events,
         )
 
+        # Wire up file service for kernel file tools
+        from kernos.kernel.files import FileService
+        self._files = FileService(os.getenv("KERNOS_DATA_DIR", "./data"))
+        reasoning.set_files(self._files)
+        self.compaction.set_files(self._files)
+
         # Wire up retrieval service for the `remember` kernel tool
         self._retrieval = None
         try:
@@ -590,6 +596,29 @@ class MessageHandler:
             recent_messages = self._truncate_to_budget(recent_messages, SPACE_THREAD_TOKEN_BUDGET)
 
         return recent_messages, system_prefix
+
+    async def _handle_file_upload(
+        self,
+        tenant_id: str,
+        active_space_id: str,
+        filename: str,
+        content: str,
+    ) -> str:
+        """Handle a user-uploaded text file.
+
+        Same storage as agent-created files. Same read_file() interface.
+        Returns a notification string to prepend to the user's message context.
+        """
+        try:
+            content.encode("utf-8")
+        except (UnicodeEncodeError, AttributeError):
+            return "I can only handle text files right now — images and PDFs are coming soon."
+
+        description = f"Uploaded by user on {_now_iso()[:10]}"
+        await self._files.write_file(
+            tenant_id, active_space_id, filename, content, description
+        )
+        return f"[File uploaded: {filename}. You can read it with read_file if needed.]"
 
     async def _run_session_exit(
         self, tenant_id: str, space_id: str, conversation_id: str
@@ -931,6 +960,17 @@ class MessageHandler:
                 {"last_active_at": _now_iso(), "status": "active"},
             )
 
+        # Step 7b: Handle file uploads from context (downloaded by platform adapter)
+        upload_notifications: list[str] = []
+        if message.context and active_space_id:
+            for att in message.context.get("attachments", []):
+                filename = att.get("filename", "upload.txt")
+                content = att.get("content", "")
+                note = await self._handle_file_upload(
+                    tenant_id, active_space_id, filename, content
+                )
+                upload_notifications.append(note)
+
         # Step 8: Assemble space-specific context
         space_messages, cross_domain_prefix = await self._assemble_space_context(
             tenant_id, conversation_id, active_space_id, active_space
@@ -982,6 +1022,9 @@ class MessageHandler:
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             tools = tools + [REMEMBER_TOOL]
+        # Add kernel-managed file tools (always available)
+        from kernos.kernel.files import FILE_TOOLS
+        tools = tools + FILE_TOOLS
         capability_prompt = self.registry.build_capability_prompt()
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
@@ -1005,7 +1048,11 @@ class MessageHandler:
         )
 
         # Step 10: Build messages array from space thread + current user message
-        messages: list[dict] = space_messages + [{"role": "user", "content": message.content}]
+        # Prepend upload notifications so the agent knows files arrived
+        user_content = message.content
+        if upload_notifications:
+            user_content = "\n".join(upload_notifications) + ("\n\n" + message.content if message.content else "")
+        messages: list[dict] = space_messages + [{"role": "user", "content": user_content}]
 
         request = ReasoningRequest(
             tenant_id=tenant_id,
@@ -1016,6 +1063,7 @@ class MessageHandler:
             model=_MODEL,
             trigger="user_message",
             active_space_id=active_space_id,
+            input_text=message.content,
         )
 
         try:

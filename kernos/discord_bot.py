@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 
 import discord
 from dotenv import load_dotenv
@@ -120,6 +121,12 @@ def _chunk_response(text: str) -> list[str]:
     return chunks
 
 
+_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".py", ".json", ".csv", ".yaml", ".yml",
+    ".toml", ".html", ".css", ".js", ".ts", ".sh", ".xml",
+}
+
+
 @client.event
 async def on_message(message):
     # Don't respond to ourselves
@@ -134,6 +141,38 @@ async def on_message(message):
         return
 
     normalized = adapter.inbound(message)
+
+    # Process Discord attachments: download text files into context for the handler
+    if message.attachments:
+        text_attachments = []
+        binary_rejections = []
+        for att in message.attachments:
+            ext = Path(att.filename).suffix.lower()
+            if ext in _TEXT_EXTENSIONS:
+                try:
+                    raw = await att.read()
+                    content = raw.decode("utf-8")
+                    text_attachments.append({"filename": att.filename, "content": content})
+                except Exception as exc:
+                    logger.warning("Failed to read attachment %s: %s", att.filename, exc)
+                    binary_rejections.append(att.filename)
+            else:
+                binary_rejections.append(att.filename)
+
+        if text_attachments:
+            if normalized.context is None:
+                normalized.context = {}
+            normalized.context["attachments"] = text_attachments
+
+        if binary_rejections:
+            rejection_note = (
+                "I can only handle text files right now — "
+                f"{', '.join(binary_rejections)} cannot be processed (binary or unreadable)."
+            )
+            await message.channel.send(rejection_note)
+            if not text_attachments and not message.content:
+                return
+
     async with message.channel.typing():
         response_text = await handler.process(normalized)
     for chunk in _chunk_response(response_text):

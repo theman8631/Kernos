@@ -21,3 +21,5 @@ class ContextSpace:
     created_at: str = ""
     last_active_at: str = ""
     is_default: bool = False         # True only for the daily space
+    max_file_size_bytes: int | None = None  # None = unlimited (enforcement reserved for 3B+)
+    max_space_bytes: int | None = None      # None = unlimited (enforcement reserved for 3B+)

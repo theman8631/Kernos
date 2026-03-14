@@ -12,6 +12,7 @@ Run via the wrapper (recommended — no venv activation needed):
   ./kernos-cli spaces <tenant_id>
   ./kernos-cli entities <tenant_id> [--include-inactive]
   ./kernos-cli capabilities [--tenant <tenant_id>]
+  ./kernos-cli files <tenant_id> <space_id>
 
 Or manually with the venv active:
   source .venv/bin/activate
@@ -306,6 +307,62 @@ async def cmd_entities(args) -> None:
             print(f"    first seen: {e.first_seen[:10]}  last seen: {e.last_seen[:10]}")
         if e.knowledge_entry_ids:
             print(f"    knowledge entries: {len(e.knowledge_entry_ids)}")
+
+
+# ---------------------------------------------------------------------------
+# files
+# ---------------------------------------------------------------------------
+
+
+async def cmd_files(args) -> None:
+    """Display files for a tenant's context space."""
+    from kernos.kernel.files import FileService
+
+    service = FileService(_data_dir())
+    tenant_id = args.tenant_id
+    space_id = args.space_id
+
+    manifest = await service.load_manifest(tenant_id, space_id)
+
+    print(f"{'─' * 60}")
+    print(f"  Files: {tenant_id} / {space_id}")
+    print(f"{'─' * 60}")
+
+    if not manifest:
+        print("  No files in this space.")
+    else:
+        from kernos.utils import _safe_name
+        files_dir = (
+            Path(_data_dir())
+            / _safe_name(tenant_id)
+            / "spaces"
+            / space_id
+            / "files"
+        )
+        print(f"  {len(manifest)} file(s):\n")
+        for name, desc in sorted(manifest.items()):
+            file_path = files_dir / name
+            size = file_path.stat().st_size if file_path.exists() else 0
+            print(f"  {name}  ({size} bytes)")
+            print(f"    {desc}")
+
+    # .deleted directory status
+    from kernos.utils import _safe_name as _sn
+    deleted_dir = (
+        Path(_data_dir())
+        / _sn(tenant_id)
+        / "spaces"
+        / space_id
+        / "files"
+        / ".deleted"
+    )
+    if deleted_dir.exists():
+        deleted_files = list(deleted_dir.iterdir())
+        print(f"\n  .deleted/: {len(deleted_files)} file(s) preserved for recovery")
+        for f in sorted(deleted_files):
+            print(f"    {f.name}")
+    else:
+        print("\n  .deleted/: empty")
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +757,8 @@ async def _dispatch(args) -> None:
         await cmd_capabilities(args)
     elif args.command == "create-space":
         await cmd_create_space(args)
+    elif args.command == "files":
+        await cmd_files(args)
     elif args.command == "compaction":
         await cmd_compaction(args)
     elif args.command == "backfill-embeddings":
@@ -774,6 +833,11 @@ def main() -> None:
     # capabilities
     p = subparsers.add_parser("capabilities", help="Show capability registry")
     p.add_argument("--tenant", dest="tenant", help="Tenant ID for persisted runtime status")
+
+    # files
+    p = subparsers.add_parser("files", help="View files for a context space")
+    p.add_argument("tenant_id")
+    p.add_argument("space_id")
 
     # compaction
     p = subparsers.add_parser("compaction", help="View compaction state for a tenant")
