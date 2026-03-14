@@ -174,3 +174,47 @@ def test_no_handler_imports_in_discord_adapter():
         source = f.read()
     assert "kernos.messages.handler" not in source
     assert "import handler" not in source
+
+
+# --- Response chunking ---
+
+
+class TestChunkResponse:
+    def test_short_message_single_chunk(self):
+        from kernos.discord_bot import _chunk_response
+        result = _chunk_response("Hello world")
+        assert result == ["Hello world"]
+
+    def test_exact_limit_single_chunk(self):
+        from kernos.discord_bot import _chunk_response, DISCORD_MAX_LENGTH
+        text = "x" * DISCORD_MAX_LENGTH
+        result = _chunk_response(text)
+        assert result == [text]
+
+    def test_splits_on_newline(self):
+        from kernos.discord_bot import _chunk_response, DISCORD_MAX_LENGTH
+        # Two lines that fit in one chunk, third forces a second chunk
+        line = "a" * 900
+        text = line + "\n" + line + "\n" + line
+        result = _chunk_response(text)
+        assert all(len(c) <= DISCORD_MAX_LENGTH for c in result)
+        assert len(result) == 2
+
+    def test_hard_cut_when_no_newline(self):
+        from kernos.discord_bot import _chunk_response, DISCORD_MAX_LENGTH
+        text = "x" * 4500  # No newlines at all
+        result = _chunk_response(text)
+        assert all(len(c) <= DISCORD_MAX_LENGTH for c in result)
+        assert "".join(result) == text
+
+    def test_empty_string(self):
+        from kernos.discord_bot import _chunk_response
+        result = _chunk_response("")
+        assert result == [""]
+
+    def test_many_short_lines(self):
+        from kernos.discord_bot import _chunk_response, DISCORD_MAX_LENGTH
+        text = "\n".join(f"Line {i}" for i in range(500))
+        result = _chunk_response(text)
+        assert all(len(c) <= DISCORD_MAX_LENGTH for c in result)
+        assert len(result) > 1

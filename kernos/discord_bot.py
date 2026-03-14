@@ -90,6 +90,35 @@ async def on_ready():
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 
 
+DISCORD_MAX_LENGTH = 2000
+
+
+def _chunk_response(text: str) -> list[str]:
+    """Split text into chunks that fit Discord's 2000-char limit.
+
+    Splits on newlines where possible; falls back to hard cuts.
+    """
+    if len(text) <= DISCORD_MAX_LENGTH:
+        return [text]
+
+    chunks: list[str] = []
+    while text:
+        if len(text) <= DISCORD_MAX_LENGTH:
+            chunks.append(text)
+            break
+
+        # Find the last newline within the limit
+        cut = text.rfind("\n", 0, DISCORD_MAX_LENGTH)
+        if cut <= 0:
+            # No newline found — hard cut
+            cut = DISCORD_MAX_LENGTH
+
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+
+    return chunks
+
+
 @client.event
 async def on_message(message):
     # Don't respond to ourselves
@@ -106,7 +135,8 @@ async def on_message(message):
     normalized = adapter.inbound(message)
     async with message.channel.typing():
         response_text = await handler.process(normalized)
-    await message.channel.send(response_text)
+    for chunk in _chunk_response(response_text):
+        await message.channel.send(chunk)
 
 
 if __name__ == "__main__":
