@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-13 (reflects Phase 2C complete state — Context Space Compaction)
+> **Last updated:** 2026-03-14 (reflects Phase 2D complete state — Active Retrieval + NL Contract Parser)
 
 ---
 
@@ -28,11 +28,11 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
                                                            │
                                                            ▼
                                                    [Reasoning Service]
-                                                      │         │
-                                              ┌───────┘         └────────┐
-                                              ▼                          ▼
-                                        [LLM Provider]          [MCP Tool Calls]
-                                        (Anthropic API)         (Google Calendar)
+                                                      │         │         │
+                                              ┌───────┘         │         └────────┐
+                                              ▼                 ▼                  ▼
+                                        [LLM Provider]   [Retrieval Service]  [MCP Tool Calls]
+                                        (Anthropic API)  (remember tool)      (Google Calendar)
                                                                        │
                                                                        ▼
                                                             [Capability Registry]
@@ -107,9 +107,9 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 11. Load scoped covenant rules (`query_covenant_rules(context_space_scope=[space_id, None])`)
 12. `_build_system_prompt()` — 9-layer assembly including cross-domain prefix + posture + scoped rules
 13. Store user message with `space_tags: router_result.tags`
-14. Create Task, build ReasoningRequest with **space thread** (not flat history) + current user message
-15. Execute via TaskEngine → ReasoningService → LLM + tools
-16. Run memory projectors (Tier 1 sync, Tier 2 async) with `active_space_id`
+14. Create Task, build ReasoningRequest with **space thread** (not flat history) + current user message + `active_space_id` for kernel tool routing
+15. Execute via TaskEngine → ReasoningService → LLM + tools (including kernel-managed `remember` tool)
+16. Run memory projectors (Tier 1 sync, Tier 2 async) with `active_space_id` and `active_space` for behavioral instruction detection
 17. Append name ask if first interaction and name unknown
 18. Update soul (interaction count, hatch check, maturity check)
 19. Store assistant response with `space_tags: router_result.tags`
@@ -187,7 +187,30 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Provider abstraction:** `AnthropicProvider` implements the provider interface. Model and API key are configuration, not hardcoded in the handler. Currently only Anthropic is configured. Adding providers means implementing the provider interface.
 
-**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the service calls the tool via MCPClientManager, feeds the result back, and continues until the LLM returns end_turn.
+**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the service checks for kernel-managed tools first (e.g., `remember`), then routes to MCPClientManager for MCP tools. Feeds the result back and continues until the LLM returns end_turn.
+
+**Kernel tool routing (2D):** The `remember` tool is intercepted before MCPClientManager. `ReasoningRequest.active_space_id` provides the space context needed for retrieval. `set_retrieval()` wires the RetrievalService after construction (avoids circular imports).
+
+### Retrieval Service (2D)
+
+**What it does:** Handles `remember()` tool calls — searches KnowledgeEntries, the entity graph, and compaction archives. Returns formatted readable text within a 1500-token budget.
+
+**File:** `kernos/kernel/retrieval.py`
+
+**Pipeline:** Three stages, sequential:
+1. **Gather candidates** (concurrent via `asyncio.gather`): semantic search over KnowledgeEntries, entity name/alias matching + SAME_AS resolution, compaction archive search (2 Haiku calls: index match + extraction)
+2. **Rank by quality:** `compute_quality_score()` = `(recency × 0.4) + (confidence × 0.3) + (reinforcement × 0.3)`. Space relevance boost (1.2x), foresight boost (1.5x). Replaces the FSRS-6 formula.
+3. **Format results:** Entity data first, then ranked knowledge, then archive extract, then MAYBE_SAME_AS notes. Hard cap at 1500 tokens.
+
+**Tool definition:** `REMEMBER_TOOL` — registered alongside MCP tools in the handler. Kernel-managed, not MCP.
+
+### NL Contract Parser (2D)
+
+**What it does:** Converts natural language behavioral instructions to CovenantRules.
+
+**File:** `kernos/kernel/contract_parser.py`
+
+**Flow:** Tier 2 extraction detects `behavioral_instruction` category → coordinator fires `parse_behavioral_instruction()` → Haiku call with `CONTRACT_PARSER_SCHEMA` → creates CovenantRule with `source="user_stated"`. `must_not` rules get `enforcement_tier="confirm"`, others get `"silent"`. Global rules have `context_space=None`, space-scoped rules inherit the active space.
 
 ### Capability Registry
 
@@ -352,6 +375,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Entity: entity.created, entity.merged, entity.linked, entity.updated (Phase 2A)
 - Context Spaces: context.space.switched, context.space.created (Phase 2B)
 - Compaction: compaction.triggered, compaction.completed, compaction.rotation (Phase 2C)
+- Covenant: covenant.rule.created (Phase 2D — NL contract parser creates user-stated rules)
 - Capabilities: capability.connected, capability.disconnected, capability.error
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
@@ -518,7 +542,7 @@ Every "delete" operation is a relocation. Archive paths exist from day one. `Con
 | `kernos-cli capabilities --tenant <id>` | Tenant-specific capability view |
 | `kernos-cli soul <tenant_id>` | Hatched soul: name, style, context, graduation status |
 | `kernos-cli contracts <tenant_id>` | Behavioral contract rules grouped by type |
-| `kernos-cli knowledge <tenant_id>` | Extracted knowledge entries (newest-first, default limit 50) |
+| `kernos-cli knowledge <tenant_id>` | Extracted knowledge entries (newest-first, default limit 50) — displays quality score `Q=` with component breakdown (recency, conf, reinf) |
 | `kernos-cli knowledge <tenant_id> --subject <name>` | Knowledge entries filtered by subject |
 | `kernos-cli knowledge <tenant_id> --include-archived` | Include archived/superseded entries |
 | `kernos-cli entities <tenant_id>` | EntityNode records with contact info (Phase 2A) |
@@ -546,6 +570,8 @@ Every reasoning call is logged with: model, input tokens, output tokens, estimat
 | **Session exit maintenance (Claude Haiku)** | **~$0.001** | **Once per focus shift away from non-daily space** |
 | **Compaction (Claude Haiku)** | **~$0.002–0.005** | **When cumulative_new_tokens >= ceiling (varies by space activity)** |
 | **Headroom estimation (Claude Haiku)** | **~$0.001** | **Once per Gate 2 space creation** |
+| **Archive retrieval (Claude Haiku × 2)** | **~$0.002** | **Per remember() call that matches an archive (index lookup + extraction)** |
+| **NL Contract Parser (Claude Haiku)** | **~$0.001** | **Per behavioral instruction detected in Tier 2** |
 | Bootstrap consolidation | ~$0.02 | Once per tenant lifetime |
 | Voyage AI embeddings | ~$0.0001 per extraction | Every Tier 2 run (enhanced path only) |
 
@@ -555,7 +581,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-568 tests across 18 test files.
+627 tests across 19 test files.
 
 | File | What it covers |
 |---|---|
@@ -576,6 +602,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_entity_resolution.py | EntityNode, EmbeddingService, EntityResolver (Tier 1/2/3), FactDeduplicator, run_tier2_extraction dual-path (45 tests) |
 | test_routing.py | LLM Router (mocked), get_space_thread/get_cross_domain_messages/get_recent_full, token budget truncation, topic hint counting (Gate 1), query_covenant_rules scoping, system prompt posture + cross-domain prefix injection, handler space switching with session exit, space_tags on saved messages, daily-only zero change, knowledge scoping (45 tests) |
 | test_compaction.py | Token adapters, CompactionState round-trip, document parsing, trigger logic, ceiling computation, compact() with mock LLM, rotation + archival, adaptive headroom, headroom estimation, event emission (45 tests) |
+| test_retrieval.py | Quality score ranking, knowledge search, entity traversal + SAME_AS merge, archive search, result formatting, token budget enforcement, foresight/space boosts, NL contract parser, kernel tool routing, template/prompt checks (50 tests) |
 | test_schema_foundation.py | Phase 2.0 schema models |
 
 ---

@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Pre-2D audit COMPLETE — soul user_context eliminated, personality evolution, embedding pipeline fixed
+**Status:** SPEC-2D COMPLETE — Active Retrieval (`remember` tool) + NL Contract Parser live-verified (13/14 steps passed, 627 tests)
 **Owner:** Founder / Architect
-**Action:** Decide next spec: 2D (Dispatch Interceptor) or other Phase 2 work
+**Action:** Decide next Phase 2 spec or begin Phase 3 planning
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
 
@@ -24,6 +24,7 @@
 | 2B | Context Space Routing (v1 — algorithmic) | SUPERSEDED | 2026-03-08 | Replaced by 2B-v2 |
 | 2B-v2 | Context Space Routing (LLM Router) | COMPLETE | 2026-03-10 | LLM router (Haiku), tagged message stream, space thread assembly, cross-domain injection, Gate 1/2 space creation, session exit |
 | 2C | Context Space Compaction | COMPLETE | 2026-03-13 | Two-layer compaction (Ledger + Living State), token tracking, domain-adaptive editorial judgment, rotation + archival |
+| 2D | Active Retrieval + NL Contract Parser | COMPLETE | 2026-03-14 | `remember` kernel tool, RetrievalService (knowledge + entity + archive search), NL Contract Parser, quality score ranking replaces FSRS-6. 627 tests, 13/14 live steps passed. |
 
 ---
 

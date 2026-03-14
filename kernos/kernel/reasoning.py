@@ -161,6 +161,7 @@ class ReasoningRequest:
     model: str
     trigger: str
     max_tokens: int = 1024
+    active_space_id: str = ""  # For kernel tool routing (e.g., remember)
 
 
 @dataclass
@@ -221,6 +222,11 @@ class ReasoningService:
         self._events = events
         self._mcp = mcp
         self._audit = audit
+        self._retrieval = None  # Set by handler after construction (avoids circular import)
+
+    def set_retrieval(self, retrieval: Any) -> None:
+        """Wire up the retrieval service for kernel tool routing."""
+        self._retrieval = retrieval
 
     async def complete_simple(
         self,
@@ -366,7 +372,19 @@ class ReasoningService:
                 )
 
                 t_tool = time.monotonic()
-                result = await self._mcp.call_tool(block.name, block.input)
+                # Kernel tool routing: remember is handled internally
+                if block.name == "remember" and self._retrieval:
+                    try:
+                        result = await self._retrieval.search(
+                            request.tenant_id,
+                            (block.input or {}).get("query", ""),
+                            request.active_space_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'remember' failed: %s", exc)
+                        result = "Memory search failed — try asking in a different way."
+                else:
+                    result = await self._mcp.call_tool(block.name, block.input)
                 tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
 
                 is_error = result.startswith("Tool error:") or result.startswith(

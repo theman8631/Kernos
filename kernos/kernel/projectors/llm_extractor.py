@@ -163,6 +163,16 @@ SALIENCE — rate the importance of each fact from "0.0" (trivial aside) to "1.0
 (central to user's life or current concerns). Most facts score "0.3"-"0.5".
 Facts from the main conversation topic score higher.
 
+BEHAVIORAL INSTRUCTIONS:
+If the user states a behavioral rule, preference, or instruction about how \
+you should operate ("never do X", "always check with me before Y", \
+"don't mention Z", "I prefer you to..."), classify it as a fact with:
+  category: "behavioral_instruction" (use this exact string in the subject field)
+  subject: "behavioral_instruction"
+  content: the full instruction as stated
+  confidence: "stated"
+  lifecycle_archetype: "structural"
+
 Return your analysis first in "reasoning", then populate the arrays.
 Empty arrays are correct when nothing is worth persisting."""
 

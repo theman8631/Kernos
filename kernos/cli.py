@@ -95,7 +95,7 @@ async def cmd_profile(args) -> None:
 
 async def cmd_knowledge(args) -> None:
     from datetime import datetime, timezone
-    from kernos.kernel.state import compute_retrieval_strength
+    from kernos.kernel.retrieval import compute_quality_score
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
@@ -117,10 +117,16 @@ async def cmd_knowledge(args) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
     for e in entries:
         status = "" if e.active else "[archived] "
-        r = compute_retrieval_strength(e, now_iso)
-        r_str = f"{r:.2f}"
+        q = compute_quality_score(e, "", now_iso)
+        # Component breakdown
+        from kernos.kernel.retrieval import _days_since
+        days_old = _days_since(e.created_at, now_iso)
+        recency = max(1.0 - (days_old / 90.0), 0.1)
+        conf_map = {"stated": 1.0, "observed": 0.8, "inferred": 0.6, "high": 0.9, "medium": 0.7, "low": 0.5}
+        conf = conf_map.get(e.confidence, 0.6)
+        reinf = min(e.reinforcement_count / 5.0, 1.0)
         print(f"\n  {status}[{e.confidence}] {e.category}: \"{e.content}\" ({e.created_at[:10]})")
-        print(f"    subject: {e.subject} | archetype: {e.lifecycle_archetype} | R: {r_str} | salience: {e.salience:.2f}")
+        print(f"    subject: {e.subject} | archetype: {e.lifecycle_archetype} | Q={q:.2f} (recency={recency:.2f} conf={conf:.1f} reinf={reinf:.1f})")
         if e.foresight_signal:
             expires = f" (expires {e.foresight_expires[:10]})" if e.foresight_expires else ""
             print(f"    foresight: {e.foresight_signal}{expires}")

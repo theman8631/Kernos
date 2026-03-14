@@ -375,6 +375,20 @@ class CompactionService:
             return None
         return index_path.read_text(encoding="utf-8")
 
+    async def load_archive(
+        self, tenant_id: str, space_id: str, archive_number: str
+    ) -> str | None:
+        """Load a specific compaction archive by number. Returns None if not found."""
+        # Normalize archive number — handle "1", "001", "#1", "Archive #1", etc.
+        num_str = "".join(c for c in archive_number if c.isdigit())
+        if not num_str:
+            return None
+        archive_name = f"compaction_archive_{int(num_str):03d}.md"
+        archive_path = self._space_dir(tenant_id, space_id) / "archives" / archive_name
+        if not archive_path.exists():
+            return None
+        return archive_path.read_text(encoding="utf-8")
+
     # --- Trigger ---
 
     async def should_compact(

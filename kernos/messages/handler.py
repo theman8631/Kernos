@@ -252,6 +252,26 @@ class MessageHandler:
             events=events,
         )
 
+        # Wire up retrieval service for the `remember` kernel tool
+        self._retrieval = None
+        try:
+            voyage_api_key = os.getenv("VOYAGE_API_KEY", "")
+            if voyage_api_key:
+                from kernos.kernel.embeddings import EmbeddingService
+                from kernos.kernel.embedding_store import JsonEmbeddingStore
+                from kernos.kernel.retrieval import RetrievalService
+                data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                self._retrieval = RetrievalService(
+                    state=state,
+                    embedding_service=EmbeddingService(voyage_api_key),
+                    embedding_store=JsonEmbeddingStore(data_dir),
+                    compaction=self.compaction,
+                    reasoning=reasoning,
+                )
+                reasoning.set_retrieval(self._retrieval)
+        except Exception as exc:
+            logger.warning("Failed to initialize RetrievalService: %s", exc)
+
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
     ) -> None:
@@ -957,6 +977,10 @@ class MessageHandler:
         )
 
         tools = self.registry.get_connected_tools()
+        # Add the kernel-managed `remember` tool when retrieval is available
+        if self._retrieval:
+            from kernos.kernel.retrieval import REMEMBER_TOOL
+            tools = tools + [REMEMBER_TOOL]
         capability_prompt = self.registry.build_capability_prompt()
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
@@ -990,6 +1014,7 @@ class MessageHandler:
             tools=tools,
             model=_MODEL,
             trigger="user_message",
+            active_space_id=active_space_id,
         )
 
         try:
@@ -1009,6 +1034,7 @@ class MessageHandler:
                 reasoning_service=self.reasoning,
                 tenant_id=tenant_id,
                 active_space_id=active_space_id,
+                active_space=active_space,
             )
 
             response_text = _maybe_append_name_ask(response_text, soul)
