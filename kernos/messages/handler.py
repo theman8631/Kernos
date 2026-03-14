@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from kernos.capability.client import MCPClientManager
 from kernos.capability.registry import CapabilityRegistry
+from kernos.kernel.credentials import resolve_anthropic_credential
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.router import LLMRouter, RouterResult
 from kernos.kernel.event_types import EventType
@@ -247,7 +248,7 @@ class MessageHandler:
         self.compaction = CompactionService(
             state=state,
             reasoning=reasoning,
-            token_adapter=AnthropicTokenAdapter(os.getenv("ANTHROPIC_API_KEY", "")),
+            token_adapter=AnthropicTokenAdapter(resolve_anthropic_credential()),
             data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
             events=events,
         )

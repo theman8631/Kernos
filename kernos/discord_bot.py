@@ -7,6 +7,7 @@ from mcp import StdioServerParameters
 
 import dataclasses
 
+from kernos.kernel.credentials import resolve_anthropic_credential
 from kernos.messages.adapters.discord_bot import DiscordAdapter
 from kernos.messages.handler import MessageHandler
 from kernos.capability.client import MCPClientManager
@@ -83,7 +84,7 @@ async def on_ready():
     connected = [c.name for c in registry.get_connected()]
     logger.info("Capability registry ready — connected: %s", connected or "none")
 
-    provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+    provider = AnthropicProvider(api_key=resolve_anthropic_credential())
     reasoning = ReasoningService(provider, events, mcp_manager, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine)

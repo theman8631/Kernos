@@ -12,6 +12,7 @@ load_dotenv()
 import dataclasses
 
 from kernos.messages.adapters.twilio_sms import TwilioSMSAdapter
+from kernos.kernel.credentials import resolve_anthropic_credential
 from kernos.messages.handler import MessageHandler
 from kernos.capability.client import MCPClientManager
 from kernos.capability.known import KNOWN_CAPABILITIES
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
     tenants = JsonTenantStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
-    provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+    provider = AnthropicProvider(api_key=resolve_anthropic_credential())
     reasoning = ReasoningService(provider, events, mcp_manager, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     app.state.handler = MessageHandler(
