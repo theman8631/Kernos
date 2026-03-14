@@ -7,7 +7,7 @@
 A personal agentic operating system. Text a phone number, get agents working
 for you within an hour. No technical knowledge required.
 
-**Status:** Phase 2 complete. 633+ tests. Phase 3 (Agent Workspace) starting.
+**Status:** Phase 3 in progress. 711 tests. SPEC-3A (Per-Space File System) complete.
 Active planning in [Notion workspace](https://notion.so).
 
 ## Documentation
@@ -18,6 +18,7 @@ Active planning in [Notion workspace](https://notion.so).
 | [docs/TECHNICAL-ARCHITECTURE.md](docs/TECHNICAL-ARCHITECTURE.md) | As-built architecture — what exists in code right now |
 | [docs/KERNEL-ARCHITECTURE-OUTLINE.md](docs/KERNEL-ARCHITECTURE-OUTLINE.md) | Kernel design: five primitives, three operational modes |
 | [specs/completed/](specs/completed/) | All completed implementation specs |
+| Planning & Roadmap | Notion workspace (Kabe, Kit, Architect) — forward planning, design discussions, reviews |
 
 ### Planning
 

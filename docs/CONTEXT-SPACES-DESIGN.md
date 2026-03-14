@@ -1,11 +1,9 @@
-> ⚠️ **SUPERSEDED — March 2026**
->
-> This design was replaced by the Context Routing v0.3 design (founder + Kit),
-> which introduced the LLM router, tagged message stream, and two-gate space
-> creation. The v0.3 design is implemented in SPEC-2B-v2.
->
-> For the current design: see `specs/completed/SPEC-2B-v2-CONTEXT-ROUTING.md`
-> For the canonical v0.3 design document: see Notion workspace
+## ⚠️ SUPERSEDED
+
+This is the pre-v0.3 context spaces design. The implemented design (v0.3
+with LLM router, tagged message stream, two-gate creation) was designed
+by the founder and Kit. See `docs/TECHNICAL-ARCHITECTURE.md` for the as-built
+description.
 
 # Context Spaces — Design Document for KERNOS Phase 2
 

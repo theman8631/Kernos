@@ -1,12 +1,7 @@
-> ⚠️ **HISTORICAL DOCUMENT — February 2026**
->
-> This is the original vision document for KERNOS. The vision paragraphs
-> remain accurate but implementation details (phases, specific technologies
-> like MemOS/MemCubes, component names) have evolved significantly.
->
-> For current architecture: see `docs/TECHNICAL-ARCHITECTURE.md`
-> For current planning: see Notion workspace
-> For current decisions: see `DECISIONS.md`
+## ⚠️ HISTORICAL — Last updated 2026-02-27
+
+This document captures the original vision. For current architecture see
+`docs/TECHNICAL-ARCHITECTURE.md`. For current planning see the Notion workspace.
 
 # KERNOS
 

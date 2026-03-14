@@ -1,6 +1,6 @@
 ## NOW
 
-**Status:** SPEC-3A COMPLETE — Per-Space File System live-verified (9/11 steps passed, 711 tests). Phase 3 continuing.
+**Status:** SPEC-3A COMPLETE. Tracing infrastructure in progress (ROUTE, TOOL_LOOP, KERNEL_TOOL, FILE_*, REMEMBER trace points). Phase 3 continuing.
 **Owner:** Founder / Architect
 **Action:** Decide next Phase 3 spec.
 **Tests:** 711

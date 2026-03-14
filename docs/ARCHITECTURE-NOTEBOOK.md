@@ -1,12 +1,8 @@
-> ⚠️ **HISTORICAL DOCUMENT — Phases 1A through early Phase 2**
->
-> Design rationale and brainstorming from early development. Some sections
-> (spawning decision model, kernel primitive definitions) remain current.
-> Others (context space routing discussion, inline annotation) describe
-> approaches that were superseded.
->
-> For current design decisions: see Notion Kit Reviews and Session Notes
-> For rejected approaches: see Notion Rejected Approaches page
+## ⚠️ HISTORICAL — Last updated 2026-03-06
+
+New design rationale is captured in the Notion workspace (Kit Reviews,
+Session Notes). Kit's spawning decision model (Section 12) remains valid
+for Phase 3 reference.
 
 # KERNOS Architecture Notebook
 
