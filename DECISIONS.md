@@ -1,6 +1,6 @@
 ## NOW
 
-**Status:** SPEC-2C COMPLETE — Context Space Compaction System live-verified
+**Status:** Pre-2D audit COMPLETE — soul user_context eliminated, personality evolution, embedding pipeline fixed
 **Owner:** Founder / Architect
 **Action:** Decide next spec: 2D (Dispatch Interceptor) or other Phase 2 work
 
@@ -90,6 +90,26 @@ SPEC-2C complete. No active spec. Next: Phase 2D (Dispatch Interceptor) or other
 ---
 
 ## Decisions Made
+
+### 2026-03-13: Pre-2D Diagnostic Audit — Findings and Decisions
+
+Full diagnostic audit of the kernel before Phase 2D. Six questions investigated; eight decisions recorded.
+
+- **DECIDED — Soul user_context eliminated.** `soul.user_context` was an append-only string with no dedup — 24 lines of contradictory facts ("Lives in Portland" AND "Lives in Seattle"). Replaced by KnowledgeEntry query at prompt-build time. `_build_system_prompt()` now queries active user-subject KEs with archetype in (structural, identity, habitual). Soul becomes the relationship layer only (name, communication style, personality). Field retained on dataclass for serialization compat, marked deprecated.
+
+- **DECIDED — Personality evolution on rotation.** `soul.personality_notes` rewritten via one Haiku call on compaction rotation. Prompt: describe patterns, not events. "Approaches problems by mapping them to familiar frameworks" is a pattern. "Mentioned late-night coding on March 6" is an event — excluded. Preserves stable core; revision, not replacement. Fires only on rotation — infrequent, cheap, deliberate.
+
+- **DECIDED — Embedding pipeline fixed.** Three gaps: (1) `_apply_correction()` bypassed embeddings entirely — now routes through embedding pipeline. (2) `_write_entry_enhanced()` had zero retries — now retries once with 2s delay before fallback. (3) No way to fix historical gaps — added `kernos-cli backfill-embeddings <tenant_id>`. Backfill run: 29/29 entries embedded, 0 failed. Coverage: 67/67 (was 38/67).
+
+- **DECIDED — Dead weight fields: keep for now, 2D decides.** `salience`, `foresight_signal`, `foresight_expires` are written by Tier 2 extraction but never read in production code (CLI display only). Foresight fields were designed for the retrieval tool — 2D will either wire them into retrieval ranking or cut them. Do not remove yet.
+
+- **DECIDED — `compute_retrieval_strength()` is orphaned, 2D wires it.** The FSRS-6 power-law decay formula exists in `state.py` and uses `lifecycle_archetype`, `storage_strength`, `last_reinforced_at` — but is only called from CLI (`cli.py:120`). Not integrated into context assembly or knowledge injection. The retrieval tool in 2D becomes the consumer. If 2D finds a simpler ranking sufficient, the function gets removed.
+
+- **DECIDED — Entities do not reach the conversation model.** EntityNodes inform Tier 2 extraction only (coreference resolution via `_build_entity_context()`). After user_context elimination, user facts come from KnowledgeEntries at prompt-build time. Entity relationships, aliases, and graph structure are invisible to the conversation model. Identity edges (SAME_AS, MAYBE_SAME_AS) are not traversed at inference time. 2D's retrieval tool surfaces entity data when the agent searches. Prompt-build may also include lightweight entity context alongside user KEs — 2D decides.
+
+- **DECIDED — NL Contract Parser is unbuilt.** No code path creates covenant rules from conversation. `CovenantRule.source` field supports three values (default/user_stated/evolved) but only "default" has a code path. The one `user_stated` rule in live data (`rule_test_scoped`) was manually inserted for SPEC-2B testing. 2D builds the NL Contract Parser or defers it.
+
+- **DECIDED — Keep dirty test data.** Existing contradictions (location conflicts in soul), split entities (Liana SAME_AS merge, Sarah MAYBE_SAME_AS), and embedding backfill results are valuable for resilience testing. Do not wipe tenant data before 2D.
 
 ### 2026-03-13: SPEC-2C — Context Space Compaction System — COMPLETE
 
@@ -322,4 +342,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-13 (Phase 2C COMPLETE — Context Space Compaction live-verified, 568 tests passing)*
+*Last updated: 2026-03-13 (Pre-2D audit complete — soul user_context eliminated, personality evolution on rotation, embedding pipeline fixed, 577 tests passing)*
