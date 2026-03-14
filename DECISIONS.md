@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Phase 2 COMPLETE. Phase 3 starting. SPEC-3A (Per-Space File System) in review.
-**Owner:** Architect
-**Action:** SPEC-3A under Kit review. When approved, moves to Ready for Claude Code.
-**Tests:** 633+
+**Status:** SPEC-3A COMPLETE — Per-Space File System live-verified (9/11 steps passed, 711 tests). Phase 3 continuing.
+**Owner:** Founder / Architect
+**Action:** Decide next Phase 3 spec.
+**Tests:** 711
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -15,6 +15,14 @@
 ---
 
 ## Phase Status Tracker
+
+### Phase 3: Agent Workspace
+
+| ID | Spec | Status | Verified | Notes |
+|---|---|---|---|---|
+| 3A | Per-Space File System | COMPLETE | 2026-03-14 | Four kernel-managed file tools (write/read/list/delete), soft delete, manifest, compaction integration, Discord upload handling. 63 new tests. 711 total. |
+
+---
 
 ### Phase 2: Memory + Context Intelligence
 
@@ -88,11 +96,20 @@ If a deliverable is purely internal (refactoring, test infrastructure, documenta
 
 ## Active Spec
 
-SPEC-2C complete. No active spec. Next: Phase 2D (Dispatch Interceptor) or other Phase 2 work — founder to decide.
+SPEC-3A complete. No active spec. Founder to decide next Phase 3 spec.
 
 ---
 
 ## Decisions Made
+
+### 2026-03-14: SPEC-3A — Per-Space File System — COMPLETE
+
+- **What:** Four kernel-managed tools (write_file, read_file, list_files, delete_file) routed through ReasoningService intercept. Per-space file directories at `data/{tenant_id}/spaces/{space_id}/files/`. Soft delete moves files to `.deleted/` with timestamp — nothing permanently deleted. File manifest in `.manifest.json` (fast path for list_files, source for compaction Living State). Compaction integration: manifest injected into compact() input, FILES section guidance added to COMPACTION_SYSTEM_PROMPT. Discord attachment handling: text files downloaded by bot, stored in context, handler processes them via _handle_file_upload(). Delete principle enforcement: kernel checks user message for delete signals — agent cannot self-initiate deletion. ContextSpace gains `max_file_size_bytes` / `max_space_bytes` config hooks (None defaults, enforcement deferred). CLI: `kernos-cli files <tenant_id> <space_id>`.
+- **New files:** `kernos/kernel/files.py` (FileService + FILE_TOOLS), `tests/test_files.py` (63 tests)
+- **Modified files:** `spaces.py` (config hooks), `reasoning.py` (KERNEL_TOOLS set, set_files(), input_text on ReasoningRequest, _check_delete_allowed(), file tool routing), `compaction.py` (manifest injection, FILES guidance), `template.py` (file tool awareness in operating principles), `handler.py` (FileService wired, FILE_TOOLS added, _handle_file_upload(), attachment context processing, input_text on request), `discord_bot.py` (text attachment download + context injection), `cli.py` (files command)
+- **Tests:** 63 new tests in test_files.py. Total: 711 passing.
+- **Live verified:** 9/11 steps passed. Henderson NDA draft created in Business space. D&D session log (3155 bytes, pip-session-log.md) created in D&D space. Cross-space isolation confirmed bidirectionally. CLI working. 2 failures were test design issues (fresh conversation with no routing context for D&D space) — not implementation bugs. See `tests/live/LIVE-TEST-3A.md`.
+- **Full spec:** `specs/completed/SPEC-3A-FILE-SYSTEM.md`
 
 ### 2026-03-13: Pre-2D Diagnostic Audit — Findings and Decisions
 
@@ -279,4 +296,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-14 (Phase 2 complete — 648 tests passing. Planning moved to Notion.)*
+*Last updated: 2026-03-14 (SPEC-3A complete — 711 tests passing. Per-Space File System live-verified.)*
