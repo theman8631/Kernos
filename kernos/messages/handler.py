@@ -902,6 +902,12 @@ class MessageHandler:
             and active_space_id != ""
         )
 
+        logger.info(
+            "ROUTE: msg=%s space=%s tags=%s confident=%s prev=%s switched=%s",
+            message.content[:60], active_space_id, router_result.tags,
+            router_result.continuation, previous_space_id, space_switched,
+        )
+
         # Session exit maintenance on the outgoing space (async, best-effort)
         if space_switched:
             import asyncio

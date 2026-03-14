@@ -22,6 +22,33 @@ The founder reviews live test results and addresses issues as needed.
 
 ---
 
+## Enabling Trace Logging
+
+All `run_*_live.py` scripts enable INFO-level logging at startup:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO, format='%(name)s %(message)s')
+```
+
+This surfaces structured trace points that are grep-able by prefix:
+
+| Prefix | Source | What it shows |
+|---|---|---|
+| `ROUTE:` | `handler.py` | Space routing decision per message |
+| `TOOL_LOOP` | `reasoning.py` | Per-iteration tool dispatch and loop exit |
+| `KERNEL_TOOL` | `reasoning.py` | Which kernel tool was intercepted |
+| `FILE_WRITE/READ/LIST/DELETE` | `files.py` | File operations with space + name |
+| `REMEMBER` | `retrieval.py` | Memory search query and result counts |
+
+To filter during a live run:
+
+```bash
+python tests/live/run_3a_live.py 2>&1 | grep -E "ROUTE:|TOOL_LOOP|KERNEL_TOOL|FILE_"
+```
+
+---
+
 ## File Naming
 
 ```

@@ -365,6 +365,11 @@ class ReasoningService:
                 if block.type != "tool_use":
                     continue
 
+                logger.info(
+                    "TOOL_LOOP iter=%d tool=%s kernel=%s",
+                    iterations, block.name, block.name in self._KERNEL_TOOLS,
+                )
+
                 # Emit tool.called
                 try:
                     await emit_event(
@@ -397,6 +402,10 @@ class ReasoningService:
                 t_tool = time.monotonic()
                 # Kernel tool routing: remember + file tools handled internally
                 if block.name in self._KERNEL_TOOLS:
+                    logger.info(
+                        "KERNEL_TOOL name=%s space=%s",
+                        block.name, request.active_space_id,
+                    )
                     tool_args = block.input or {}
                     if block.name == "remember":
                         if self._retrieval:
@@ -588,7 +597,14 @@ class ReasoningService:
             request.model, total_input_tokens, total_output_tokens
         )
 
+        logger.info(
+            "TOOL_LOOP exit: iterations=%d stop=%s has_text=%s",
+            iterations, response.stop_reason,
+            bool([b for b in response.content if b.type == "text"]),
+        )
+
         if iterations >= self.MAX_TOOL_ITERATIONS:
+            logger.warning("TOOL_LOOP EXHAUSTED after %d iterations", iterations)
             return ReasoningResult(
                 text="I'm having trouble completing that request. Try asking in a simpler way.",
                 model=request.model,

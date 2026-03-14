@@ -234,6 +234,11 @@ class RetrievalService:
         knowledge_candidates.sort(key=lambda c: c.quality_score, reverse=True)
 
         # Stage 3: Format within token budget
+        logger.info(
+            "REMEMBER query=%s space=%s knowledge=%d entities=%d archive=%s",
+            query[:60], active_space_id, len(knowledge_candidates),
+            len(entity_results), bool(archive_result),
+        )
         return self._format_results(
             knowledge_candidates, entity_results, archive_result, maybe_same_as
         )

@@ -7,9 +7,12 @@ cross-space isolation, and compaction manifest injection.
 """
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
+
+logging.basicConfig(level=logging.INFO, format='%(name)s %(message)s')
 
 from dotenv import load_dotenv
 load_dotenv()

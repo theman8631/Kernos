@@ -6,9 +6,12 @@ Tests the remember tool, NL contract parser, and quality scoring.
 """
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
+
+logging.basicConfig(level=logging.INFO, format='%(name)s %(message)s')
 
 from dotenv import load_dotenv
 load_dotenv()

@@ -159,6 +159,7 @@ class FileService:
         await self._update_manifest(tenant_id, space_id, name, description)
 
         action = "Updated" if is_update else "Created"
+        logger.info("FILE_WRITE space=%s name=%s size=%d", space_id, name, len(content))
         return f"{action} '{name}' ({len(content)} chars). Description: {description}"
 
     async def read_file(
@@ -172,7 +173,9 @@ class FileService:
             return f"Error: Invalid filename '{name}'."
 
         file_path = self._space_files_dir(tenant_id, space_id) / name
-        if not file_path.exists():
+        exists = file_path.exists()
+        logger.info("FILE_READ space=%s name=%s exists=%s", space_id, name, exists)
+        if not exists:
             return f"Error: File '{name}' not found. Use list_files to see available files."
         return file_path.read_text(encoding="utf-8")
 
@@ -183,6 +186,7 @@ class FileService:
     ) -> str:
         """List all files with descriptions. Returns formatted text."""
         manifest = await self._load_manifest(tenant_id, space_id)
+        logger.info("FILE_LIST space=%s count=%d", space_id, len(manifest))
         if not manifest:
             return "No files in this space yet."
 
@@ -206,8 +210,10 @@ class FileService:
 
         file_path = self._space_files_dir(tenant_id, space_id) / name
         if not file_path.exists():
+            logger.info("FILE_DELETE space=%s name=%s exists=False", space_id, name)
             return f"Error: File '{name}' not found."
 
+        logger.info("FILE_DELETE space=%s name=%s exists=True", space_id, name)
         deleted_dir = self._deleted_dir(tenant_id, space_id)
         deleted_dir.mkdir(parents=True, exist_ok=True)
 
