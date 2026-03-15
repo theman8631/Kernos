@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** SPEC-3B COMPLETE — Per-Space Tool Scoping live-verified (13/13 steps). System space, tool filtering, request_tool, 747 tests.
+**Status:** SPEC-3D COMPLETE — Dispatch Interceptor live-verified (9/9 steps). Gate in tool-use loop, must_not covenants block before fast path, explicit instruction fast path, covenant/permission authorization, DISPATCH_GATE events, delete_file consolidated. 802 tests.
 **Owner:** Founder / Architect
 **Action:** Decide next Phase 3 spec.
-**Tests:** 747
+**Tests:** 802
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -22,6 +22,7 @@
 |---|---|---|---|---|
 | 3A | Per-Space File System | COMPLETE | 2026-03-14 | Four kernel-managed file tools (write/read/list/delete), soft delete, manifest, compaction integration, Discord upload handling. 63 new tests. 711 total. |
 | 3B | Per-Space Tool Scoping | COMPLETE | 2026-03-15 | System space auto-provisioned, active_tools on ContextSpace, universal flag on capabilities, space-aware build_capability_prompt() + get_tools_for_space(), Gate 2 seeding, request_tool kernel meta-tool, LRU exemption. 36 new tests. 747 total. |
+| 3D | Dispatch Interceptor | COMPLETE | 2026-03-15 | Gate in tool-use loop, must_not covenants block before fast path, explicit instruction fast path, permission overrides + covenant authorization (Haiku), DISPATCH_GATE events, delete_file consolidated into universal gate. 55 new tests. 802 total. |
 
 ---
 

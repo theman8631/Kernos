@@ -40,6 +40,7 @@ This surfaces structured trace points that are grep-able by prefix:
 | `KERNEL_TOOL` | `reasoning.py` | Which kernel tool was intercepted |
 | `FILE_WRITE/READ/LIST/DELETE` | `files.py` | File operations with space + name |
 | `REMEMBER` | `retrieval.py` | Memory search query and result counts |
+| `GATE:` | `reasoning.py` | Dispatch gate decision: tool, effect, allowed, reason, method |
 
 To filter during a live run:
 

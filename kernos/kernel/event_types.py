@@ -74,3 +74,7 @@ class EventType(str, Enum):
     COMPACTION_TRIGGERED = "compaction.triggered"
     COMPACTION_COMPLETED = "compaction.completed"
     COMPACTION_ROTATION = "compaction.rotation"
+
+    # --- Phase 3D: Dispatch Interceptor ---
+    DISPATCH_GATE = "dispatch.gate"
+    # Payload: tool_name, effect, allowed, reason, method

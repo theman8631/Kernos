@@ -963,6 +963,18 @@ class TestKernelToolRouting:
         service = ReasoningService(provider, events, mcp, audit)
         service.set_retrieval(AsyncMock())  # Retrieval wired but not for this call
 
+        # Wire registry so dispatch gate classifies calendar_create as "read"
+        from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, CapabilityStatus
+        cap = CapabilityInfo(
+            name="test-cal", display_name="Test", description="Test",
+            category="test", status=CapabilityStatus.CONNECTED,
+            tools=["calendar_create"], server_name="test",
+            tool_effects={"calendar_create": "read"},
+        )
+        registry = CapabilityRegistry(mcp=None)
+        registry.register(cap)
+        service.set_registry(registry)
+
         provider.complete = AsyncMock(side_effect=[
             ProviderResponse(
                 content=[

@@ -6,7 +6,7 @@ import pytest
 
 from kernos.capability.client import MCPClientManager
 from kernos.capability.known import KNOWN_CAPABILITIES
-from kernos.capability.registry import CapabilityRegistry
+from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, CapabilityStatus
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, JsonEventStream
@@ -101,9 +101,25 @@ def _make_mock_handler(tools: list[dict] | None = None):
     # Same events and audit mocks shared between handler and ReasoningService
     mock_provider = AsyncMock(spec=Provider)
     registry = MagicMock(spec=CapabilityRegistry)
-    registry.get_connected_tools.return_value = tools or []
+    tools_list = tools or []
+    registry.get_connected_tools.return_value = tools_list
+    registry.get_tools_for_space.return_value = tools_list
     registry.build_capability_prompt.return_value = "CURRENT CAPABILITIES — conversation only."
-    registry.get_all.return_value = []
+    if tools_list:
+        tool_names = [t["name"] for t in tools_list]
+        cap = CapabilityInfo(
+            name="test-capability",
+            display_name="Test Capability",
+            description="Test capability",
+            category="test",
+            status=CapabilityStatus.CONNECTED,
+            tools=tool_names,
+            server_name="test",
+            tool_effects={name: "read" for name in tool_names},
+        )
+        registry.get_all.return_value = [cap]
+    else:
+        registry.get_all.return_value = []
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)

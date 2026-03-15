@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-15 (reflects Phase 3B complete state — Per-Space Tool Scoping)
+> **Last updated:** 2026-03-15 (reflects Phase 3D complete state — Dispatch Interceptor)
 
 ---
 
@@ -188,11 +188,13 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Provider abstraction:** `AnthropicProvider` implements the provider interface. Model and API key are configuration, not hardcoded in the handler. Currently only Anthropic is configured. Adding providers means implementing the provider interface.
 
-**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the service checks for kernel-managed tools first, then routes to MCPClientManager for MCP tools. Feeds the result back and continues until the LLM returns end_turn.
+**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
 
-**Kernel tool routing:** Six kernel-managed tools (`remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`) are intercepted before MCPClientManager. `ReasoningRequest.active_space_id` provides the space context. `set_retrieval()`, `set_registry()`, and `set_state()` wire services after construction (avoids circular imports).
+**Dispatch gate (3D):** Inserted between tool call proposal and execution. Classifies every tool call's effect level (`read` → bypass, `soft_write`/`hard_write`/`unknown` → gate). Four-step authorization: (0) `_has_prohibiting_covenant()` — must_not rules block even explicit instructions, no LLM; (1) `_explicit_instruction_matches()` — keyword matching against user message, no LLM; (2) `_check_permission_or_covenant()` — permission override lookup + one Haiku call against covenant rules; (3) ask user — block and surface proposed action. Blocked tool calls return a `[SYSTEM] Action blocked` tool_result so the model can explain to the user.
 
-**Structured trace logging:** INFO-level grep-able prefixes in the kernel layer: `ROUTE:` (routing decisions in handler), `TOOL_LOOP` (iteration + exit + exhaustion in reasoning), `KERNEL_TOOL` (kernel intercepts), `FILE_WRITE/READ/LIST/DELETE` (file operations in files.py), `REMEMBER` (retrieval calls in retrieval.py).
+**Kernel tool routing:** Six kernel-managed tools (`remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`) are intercepted before MCPClientManager. Read tools (`remember`, `list_files`, `read_file`, `request_tool`) bypass the gate. Write tools (`write_file`, `delete_file`) are gated through the dispatch interceptor. `set_retrieval()`, `set_registry()`, and `set_state()` wire services after construction (avoids circular imports).
+
+**Structured trace logging:** INFO-level grep-able prefixes in the kernel layer: `ROUTE:` (routing decisions in handler), `TOOL_LOOP` (iteration + exit + exhaustion in reasoning), `KERNEL_TOOL` (kernel intercepts), `GATE:` (dispatch gate decisions in reasoning), `FILE_WRITE/READ/LIST/DELETE` (file operations in files.py), `REMEMBER` (retrieval calls in retrieval.py).
 
 ### Retrieval Service (2D)
 
@@ -358,6 +360,24 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Entity context injection:** Known entities for the tenant injected into the Tier 2 extraction prompt for pronoun/coreference resolution (~500 token budget). Helps the LLM identify "she" as Sarah Henderson when that entity already exists.
 
+### Dispatch Interceptor (Phase 3D)
+
+**What it does:** Gates write/action tool calls before execution. Reads pass silently. Writes require either an explicit user instruction, a matching covenant rule, or user confirmation. The gate cannot be bypassed by model inference.
+
+**File:** `kernos/kernel/reasoning.py` — `GateResult` dataclass, gate methods on `ReasoningService`
+
+**Effect classification:** `_classify_tool_effect(tool_name, active_space)` → `"read"` (bypass), `"soft_write"` (gate), `"hard_write"` (gate), `"unknown"` (gate as hard_write). Kernel tools have hardcoded classifications. MCP tools use `tool_effects` from `CapabilityInfo`.
+
+**Four-step authorization:**
+0. **must_not covenant check** — `_has_prohibiting_covenant()`. Prohibitive rules block even explicit instructions. Structured data lookup against `CovenantRule.rule_type == "must_not"`, no LLM. Matches on capability name, tool name, or domain keywords.
+1. **Explicit instruction** — `_explicit_instruction_matches()`. Imperative verb + tool domain in user message. `TOOL_SIGNALS` dict maps tool names to signal phrases. Confirmation signals recognized when conversation shows a previously blocked action.
+2. **Permission override + covenant** — `_check_permission_or_covenant()`. Fast dict lookup on `TenantProfile.permission_overrides`, then one Haiku call checking if any covenant rule authorizes the action (YES/NO/AMBIGUOUS).
+3. **Ask user** — block and surface proposed action via `[SYSTEM] Action blocked` tool_result.
+
+**GateResult:** `allowed: bool`, `reason: str`, `method: str`, `proposed_action: str`. Emitted in `DISPATCH_GATE` events.
+
+**Consolidation:** 3A's `_check_delete_allowed()` removed. `delete_file` signals moved to `TOOL_SIGNALS`. Same signals, same behavior, one code path.
+
 ### File Service (Phase 3A)
 
 **What it does:** Gives the agent persistent, per-space file storage. Files live inside a space and are accessible only within that space's context.
@@ -441,6 +461,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Context Spaces: context.space.switched, context.space.created (Phase 2B)
 - Compaction: compaction.triggered, compaction.completed, compaction.rotation (Phase 2C)
 - Covenant: covenant.rule.created (Phase 2D — NL contract parser creates user-stated rules)
+- Dispatch: dispatch.gate (Phase 3D — tool_name, effect, allowed, reason, method)
 - Capabilities: capability.connected, capability.disconnected, capability.error
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
@@ -469,7 +490,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Four domains:**
 
-**TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config, last_active_space_id (persists focus space across messages).
+**TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config, last_active_space_id (persists focus space across messages), `permission_overrides: dict[str, str]` (Phase 3D — capability_name → "ask" | "always-allow", system-wide permission for the dispatch gate).
 
 **KnowledgeEntry:** id, tenant_id, category (entity/fact/preference/pattern), subject, content, confidence (stated/inferred/observed), source provenance, timestamps, tags, active flag, supersedes chain, durability (permanent/session/expires_at), content_hash for dedup, reinforcement_count, storage_strength.
 
@@ -646,6 +667,7 @@ Every reasoning call is logged with: model, input tokens, output tokens, estimat
 | **Headroom estimation (Claude Haiku)** | **~$0.001** | **Once per Gate 2 space creation** |
 | **Archive retrieval (Claude Haiku × 2)** | **~$0.002** | **Per remember() call that matches an archive (index lookup + extraction)** |
 | **NL Contract Parser (Claude Haiku)** | **~$0.001** | **Per behavioral instruction detected in Tier 2** |
+| **Dispatch gate covenant check (Claude Haiku)** | **~$0.001** | **Per gated write tool call when no explicit instruction found (Step 2 only)** |
 | Bootstrap consolidation | ~$0.02 | Once per tenant lifetime |
 | Voyage AI embeddings | ~$0.0001 per extraction | Every Tier 2 run (enhanced path only) |
 
@@ -655,7 +677,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-747 tests across 21 test files.
+802 tests across 22 test files.
 
 | File | What it covers |
 |---|---|
@@ -680,6 +702,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_schema_foundation.py | Phase 2.0 schema models |
 | test_files.py | FileService CRUD, manifest tracking, soft delete, text-only enforcement, cross-space isolation, FILE_TOOLS definitions (Phase 3A) |
 | test_tool_scoping.py | CapabilityInfo.universal, _visible_capability_names, get_tools_for_space, build_capability_prompt(space=), active_tools persistence, request_tool (exact/fuzzy/not-installed), LRU exemption, connected capability helpers (36 tests, Phase 3B) |
+| test_dispatch_gate.py | GateResult, tool effect classification, explicit instruction matching, must_not covenant blocking, covenant authorization (YES/NO/AMBIGUOUS), permission overrides, gate integration, read bypass, unknown tool handling, delete_file consolidation, confirmation signals (55 tests, Phase 3D) |
 
 ---
 
@@ -720,7 +743,7 @@ These are referenced in the architecture but not implemented:
 - **Awareness evaluator** — event-driven proactive notification system
 - **Consolidation daemon** — background pattern extraction and insight generation
 - ~~**Context space compaction** — structured history preservation replacing naive truncation~~ **COMPLETE (Phase 2C)** — two-layer compaction (Ledger + Living State), token tracking, domain-adaptive editorial judgment, rotation + archival
-- **Dispatch Interceptor** — infrastructure-level behavioral contract enforcement
+- ~~**Dispatch Interceptor** — infrastructure-level behavioral contract enforcement~~ **COMPLETE (Phase 3D)** — gate in tool-use loop, must_not covenant pre-check, explicit instruction fast path, permission overrides, covenant authorization via Haiku, delete_file consolidated
 - **Multi-model routing** — Reasoning Service routes to different models by task type
 - ~~**Entity resolution** — knowledge graph with identity linking~~ **COMPLETE (Phase 2A)**
 - **Memory decay** — FSRS-based temporal confidence with lifecycle archetypes

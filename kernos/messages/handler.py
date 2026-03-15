@@ -1190,6 +1190,7 @@ a tool in a specific space, just ask — I'll activate it.
             trigger="user_message",
             active_space_id=active_space_id,
             input_text=message.content,
+            active_space=active_space,
         )
 
         try:

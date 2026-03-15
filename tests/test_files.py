@@ -328,7 +328,7 @@ class TestFileToolsConstant:
 
 
 # ---------------------------------------------------------------------------
-# Delete principle enforcement (via ReasoningService._check_delete_allowed)
+# Delete principle enforcement (now via dispatch gate _explicit_instruction_matches)
 # ---------------------------------------------------------------------------
 
 
@@ -336,32 +336,32 @@ class TestDeletePrincipleEnforcement:
     def test_delete_allowed_with_delete_signal(self):
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._check_delete_allowed("delete old-draft.md") is True
+        assert svc._explicit_instruction_matches("delete_file", {}, "delete old-draft.md") is True
 
     def test_delete_allowed_with_remove_signal(self):
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._check_delete_allowed("please remove the file") is True
+        assert svc._explicit_instruction_matches("delete_file", {}, "please remove the file") is True
 
     def test_delete_allowed_with_get_rid_of(self):
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._check_delete_allowed("get rid of the old notes") is True
+        assert svc._explicit_instruction_matches("delete_file", {}, "get rid of the old notes") is True
 
     def test_delete_blocked_with_no_signal(self):
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._check_delete_allowed("what is the weather today?") is False
+        assert svc._explicit_instruction_matches("delete_file", {}, "what is the weather today?") is False
 
     def test_delete_blocked_with_innocent_message(self):
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._check_delete_allowed("update my campaign notes") is False
+        assert svc._explicit_instruction_matches("delete_file", {}, "update my campaign notes") is False
 
     def test_delete_allowed_case_insensitive(self):
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._check_delete_allowed("DELETE the file") is True
+        assert svc._explicit_instruction_matches("delete_file", {}, "DELETE the file") is True
 
 
 # ---------------------------------------------------------------------------
@@ -393,12 +393,11 @@ class TestKernelToolRoutingFiles:
 
     async def test_delete_blocked_without_user_request(self, tmp_path):
         svc, _ = self._make_reasoning(tmp_path)
-        from kernos.kernel.reasoning import ReasoningService
-        assert not svc._check_delete_allowed("what are my files?")
+        assert not svc._explicit_instruction_matches("delete_file", {}, "what are my files?")
 
     async def test_delete_allowed_with_user_request(self, tmp_path):
         svc, _ = self._make_reasoning(tmp_path)
-        assert svc._check_delete_allowed("delete campaign-notes.md")
+        assert svc._explicit_instruction_matches("delete_file", {}, "delete campaign-notes.md")
 
     def test_kernel_tools_set_contains_all_file_tools(self):
         from kernos.kernel.reasoning import ReasoningService

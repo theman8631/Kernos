@@ -12,6 +12,7 @@ from kernos.kernel.exceptions import (
     ReasoningRateLimitError,
     ReasoningTimeoutError,
 )
+from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, CapabilityStatus
 from kernos.kernel.reasoning import (
     AnthropicProvider,
     ContentBlock,
@@ -43,8 +44,12 @@ def _make_request(**kwargs) -> ReasoningRequest:
     return ReasoningRequest(**defaults)
 
 
-def _make_service(mock_provider=None, tools_for_mcp=None):
-    """Return a ReasoningService with mock provider, events, mcp, audit."""
+def _make_service(mock_provider=None, tools_for_mcp=None, read_tool_names: list[str] | None = None):
+    """Return a ReasoningService with mock provider, events, mcp, audit.
+
+    read_tool_names: MCP tool names to register as "read" in the dispatch gate registry.
+    These bypass the gate automatically. Used for tests that exercise MCP tool routing.
+    """
     if mock_provider is None:
         mock_provider = AsyncMock(spec=Provider)
 
@@ -58,6 +63,23 @@ def _make_service(mock_provider=None, tools_for_mcp=None):
     audit.log.return_value = None
 
     service = ReasoningService(mock_provider, events, mcp, audit)
+
+    # Wire a registry so the dispatch gate can classify tools
+    if read_tool_names:
+        cap = CapabilityInfo(
+            name="test-capability",
+            display_name="Test Capability",
+            description="Test",
+            category="test",
+            status=CapabilityStatus.CONNECTED,
+            tools=read_tool_names,
+            server_name="test",
+            tool_effects={name: "read" for name in read_tool_names},
+        )
+        registry = CapabilityRegistry(mcp=None)
+        registry.register(cap)
+        service.set_registry(registry)
+
     return service, mock_provider, events, mcp, audit
 
 
@@ -98,7 +120,7 @@ async def test_reason_returns_text_on_simple_response():
 
 
 async def test_reason_tool_use_loop_calls_mcp_and_continues():
-    service, mock_provider, events, mcp, audit = _make_service()
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["list_events"])
     mcp.call_tool.return_value = "Meeting at 10am"
 
     mock_provider.complete.side_effect = [
@@ -118,7 +140,7 @@ async def test_reason_tool_use_loop_calls_mcp_and_continues():
 
 
 async def test_reason_safety_valve_at_max_iterations():
-    service, mock_provider, events, mcp, audit = _make_service()
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["some_tool"])
     # Always return tool_use to trigger safety valve
     mock_provider.complete.return_value = _tool_response("some_tool", "tu_x", {})
     mcp.call_tool.return_value = "result"
@@ -150,7 +172,7 @@ async def test_reason_emits_reasoning_request_and_response():
 
 
 async def test_reason_emits_tool_called_and_result():
-    service, mock_provider, events, mcp, audit = _make_service()
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["my_tool"])
     mcp.call_tool.return_value = "some data"
 
     mock_provider.complete.side_effect = [

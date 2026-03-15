@@ -60,6 +60,10 @@ class TenantProfile:
     capabilities: dict[str, str] = field(default_factory=dict)
     model_config: dict[str, Any] = field(default_factory=dict)
     last_active_space_id: str = ""   # Tracks active space across messages
+    permission_overrides: dict[str, str] = field(default_factory=dict)
+    # Maps capability_name → "ask" | "always-allow"
+    # Default (not in dict) = "ask" (gate fires)
+    # "always-allow" → bypass gate for all write tools in this capability
 
 
 # ---------------------------------------------------------------------------

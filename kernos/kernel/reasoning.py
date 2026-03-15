@@ -3,10 +3,11 @@
 The handler calls ``ReasoningService.reason()`` instead of importing any provider SDK.
 ReasoningService owns the full tool-use loop, event emission, and audit logging.
 """
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -194,7 +195,19 @@ class ReasoningRequest:
     trigger: str
     max_tokens: int = 1024
     active_space_id: str = ""  # For kernel tool routing (e.g., remember)
-    input_text: str = ""       # Current user message — used by delete principle enforcement
+    input_text: str = ""       # Current user message — used by dispatch gate
+    active_space: Any = None   # ContextSpace | None — for gate tool effect classification
+
+
+@dataclass
+class GateResult:
+    """The outcome of a dispatch gate check."""
+
+    allowed: bool
+    reason: str    # "explicit_instruction", "permission_override", "covenant_authorized",
+                   # "covenant_denied", "covenant_ambiguous", "no_covenants", "no_authorization"
+    method: str    # "fast_path", "always_allow", "haiku_check", "ask_user", "none"
+    proposed_action: str = ""  # Human-readable description of what was blocked
 
 
 @dataclass
@@ -314,19 +327,323 @@ class ReasoningService:
     # Kernel tools: intercepted before MCP, never passed through to external servers
     _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool"}
 
-    def _check_delete_allowed(self, user_message: str) -> bool:
-        """Delete only allowed when the user explicitly requested it.
+    # ---------------------------------------------------------------------------
+    # Dispatch Gate (SPEC-3D)
+    # ---------------------------------------------------------------------------
 
-        Checks the current user message for delete intent. The agent cannot
-        self-initiate deletion — this is a kernel principle, not a model instruction.
+    _TOOL_SIGNALS: dict[str, list[str]] = {
+        # Calendar writes
+        "create-event": ["schedule", "book", "set up", "add to calendar", "make an appointment",
+                         "create event", "put on my calendar", "block time", "add meeting"],
+        "update-event": ["reschedule", "move", "change", "update event", "push back", "move to"],
+        "delete-event": ["cancel", "remove event", "delete event", "take off calendar"],
+        # Email writes
+        "send-email": ["send", "email", "write to", "reply to", "forward"],
+        "delete-email": ["delete email", "trash", "remove email"],
+        # File writes (kernel tools)
+        "write_file": ["create file", "write", "save", "draft"],
+        "delete_file": ["delete", "remove", "get rid of", "trash", "clean up",
+                        "clear out", "throw away", "discard", "drop", "nuke", "wipe", "erase"],
+    }
+
+    _CONFIRMATION_SIGNALS: list[str] = [
+        "yes", "go ahead", "do it", "proceed", "confirmed", "approve",
+        "that's fine", "ok", "sure", "yep", "yeah",
+    ]
+
+    # Phrases in an assistant message that indicate a previously blocked action
+    _BLOCKED_CONTEXT_INDICATORS: list[str] = [
+        "don't have permission",
+        "need your permission",
+        "should i go ahead",
+        "should i proceed",
+        "need explicit",
+        "haven't authorized",
+        "would you like me to",
+        "waiting for your",
+        "permission before",
+        "your approval",
+        "explicit instruction",
+    ]
+
+    # Domain keywords for matching must_not covenants against tool names
+    _DOMAIN_KEYWORDS: dict[str, list[str]] = {
+        "create-event": ["calendar", "event", "schedule", "meeting", "appointment"],
+        "update-event": ["calendar", "event", "schedule", "meeting"],
+        "delete-event": ["calendar", "event"],
+        "send-email": ["email", "mail", "message"],
+        "delete-email": ["email", "mail"],
+        "write_file": ["file", "write"],
+        "delete_file": ["file", "delete"],
+    }
+
+    def _get_domain_keywords(self, tool_name: str) -> list[str]:
+        """Return domain keywords for matching against covenant rule descriptions."""
+        return self._DOMAIN_KEYWORDS.get(tool_name, [])
+
+    async def _has_prohibiting_covenant(
+        self, tool_name: str, tenant_id: str, active_space_id: str,
+    ) -> bool:
+        """Check if any must_not covenant rule prohibits this tool call.
+
+        must_not rules override EVERYTHING — including explicit instructions.
+        This runs BEFORE the fast path to prevent bypass.
+        No LLM call — structured data lookup only.
         """
-        delete_signals = [
-            "delete", "remove", "get rid of", "trash",
-            "clean up", "clear out", "throw away", "discard",
-            "drop", "nuke", "wipe", "erase",
-        ]
+        if not self._state:
+            return False
+        try:
+            rules = await self._state.query_covenant_rules(
+                tenant_id,
+                context_space_scope=[active_space_id, None],
+                active_only=True,
+            )
+        except Exception as exc:
+            logger.warning("Gate: must_not covenant query failed: %s", exc)
+            return False
+
+        cap_name = self._get_capability_for_tool(tool_name)
+        for rule in rules:
+            if rule.rule_type != "must_not":
+                continue
+            desc_lower = rule.description.lower()
+            # Match on capability name
+            if cap_name and cap_name.lower() in desc_lower:
+                return True
+            # Match on tool name
+            if tool_name.lower() in desc_lower:
+                return True
+            # Match on domain keywords
+            domain_keywords = self._get_domain_keywords(tool_name)
+            if any(kw in desc_lower for kw in domain_keywords):
+                return True
+        return False
+
+    def _classify_tool_effect(self, tool_name: str, active_space: Any) -> str:
+        """Classify a tool call's effect level.
+
+        Returns: "read", "soft_write", "hard_write", or "unknown"
+        Kernel tools have hardcoded classifications.
+        MCP tools use tool_effects from CapabilityInfo.
+        Unknown defaults to "hard_write" (safe default).
+        """
+        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool"}
+        _KERNEL_WRITES = {"write_file", "delete_file"}
+
+        if tool_name in _KERNEL_READS:
+            return "read"
+        if tool_name in _KERNEL_WRITES:
+            return "soft_write"
+
+        if not self._registry:
+            return "unknown"
+
+        for cap in self._registry.get_all():
+            if tool_name in (cap.tool_effects or {}):
+                return cap.tool_effects[tool_name]
+            if tool_name in (cap.tools or []) and tool_name not in (cap.tool_effects or {}):
+                return "unknown"  # Tool exists but no effect declared
+
+        return "unknown"  # Not found at all → safe default
+
+    def _get_capability_for_tool(self, tool_name: str) -> str | None:
+        """Return the capability name that owns this tool, or None."""
+        if not self._registry:
+            return None
+        for cap in self._registry.get_all():
+            if tool_name in (cap.tools or []):
+                return cap.name
+        return None
+
+    def _explicit_instruction_matches(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        user_message: str,
+        messages: list[dict] | None = None,
+    ) -> bool:
+        """Check if the user's current message directly authorizes this tool call.
+
+        Step 1 fast path — no LLM call. Checks:
+        1. Tool-specific instruction signals (imperative verb + domain)
+        2. Confirmation signals when context shows a previously blocked action
+        """
         msg_lower = user_message.lower()
-        return any(signal in msg_lower for signal in delete_signals)
+
+        # Tool-specific signals
+        signals = self._TOOL_SIGNALS.get(tool_name, [])
+        if any(signal in msg_lower for signal in signals):
+            return True
+
+        # Universal confirmation: user confirms a previously blocked action
+        if messages and any(signal in msg_lower for signal in self._CONFIRMATION_SIGNALS):
+            # Look for the last assistant message in the conversation
+            for msg in reversed(messages[-6:]):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # Content blocks
+                        content = " ".join(
+                            b.get("text", "") if isinstance(b, dict) else ""
+                            for b in content
+                        )
+                    if isinstance(content, str):
+                        content_lower = content.lower()
+                        if any(ind in content_lower for ind in self._BLOCKED_CONTEXT_INDICATORS):
+                            return True
+                    break  # Only check the most recent assistant message
+
+        return False
+
+    def _describe_action(self, tool_name: str, tool_input: dict) -> str:
+        """Generate a human-readable description of a proposed tool call."""
+        if tool_name == "create-event":
+            summary = tool_input.get("summary", "an event")
+            start = tool_input.get("start", "unspecified time")
+            return f"Create calendar event: '{summary}' at {start}"
+        if tool_name == "update-event":
+            summary = tool_input.get("summary", "an event")
+            return f"Update calendar event: '{summary}'"
+        if tool_name == "delete-event":
+            summary = tool_input.get("summary", "an event")
+            return f"Delete calendar event: '{summary}'"
+        if tool_name == "send-email":
+            to = tool_input.get("to", "someone")
+            subject = tool_input.get("subject", "no subject")
+            return f"Send email to {to}: '{subject}'"
+        if tool_name == "delete-email":
+            msg_id = tool_input.get("id", "a message")
+            return f"Delete email: {msg_id}"
+        if tool_name == "delete_file":
+            name = tool_input.get("name", "a file")
+            return f"Delete file: {name}"
+        if tool_name == "write_file":
+            name = tool_input.get("name", "a file")
+            return f"Write/update file: {name}"
+        return f"Execute {tool_name} with {json.dumps(tool_input)[:200]}"
+
+    async def _check_permission_or_covenant(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        tenant_id: str,
+        active_space_id: str,
+    ) -> GateResult:
+        """Step 2: Permission override check (fast) then covenant authorization (Haiku).
+
+        Returns GateResult(allowed=True) if authorized, else False.
+        """
+        # Permission override — fast dict lookup
+        cap_name = self._get_capability_for_tool(tool_name)
+        if cap_name and self._state:
+            try:
+                tenant = await self._state.get_tenant_profile(tenant_id)
+                if tenant and tenant.permission_overrides:
+                    permission = tenant.permission_overrides.get(cap_name)
+                    if permission == "always-allow":
+                        return GateResult(
+                            allowed=True, reason="permission_override",
+                            method="always_allow",
+                        )
+            except Exception as exc:
+                logger.warning("Gate: permission check failed: %s", exc)
+
+        # Covenant rules — one Haiku call
+        if not self._state:
+            return GateResult(allowed=False, reason="no_covenants", method="none")
+
+        try:
+            rules = await self._state.query_covenant_rules(
+                tenant_id,
+                context_space_scope=[active_space_id, None],
+                active_only=True,
+            )
+        except Exception as exc:
+            logger.warning("Gate: covenant query failed: %s", exc)
+            return GateResult(allowed=False, reason="no_covenants", method="none")
+
+        if not rules:
+            return GateResult(allowed=False, reason="no_covenants", method="none")
+
+        action_desc = self._describe_action(tool_name, tool_input)
+        rules_text = "\n".join(
+            f"- [{r.rule_type}] {r.description} (scope: {r.context_space or 'global'})"
+            for r in rules
+        )
+
+        try:
+            result = await self.complete_simple(
+                system_prompt=(
+                    "You are checking whether a proposed agent action is authorized by "
+                    "any of the user's standing rules (covenants). "
+                    "Answer ONLY with: YES, NO, or AMBIGUOUS.\n"
+                    "YES = a rule explicitly covers this action.\n"
+                    "NO = no rule covers this action.\n"
+                    "AMBIGUOUS = a rule might cover this but the scope is unclear."
+                ),
+                user_content=(
+                    f"Proposed action: {action_desc}\n\n"
+                    f"Active covenant rules:\n{rules_text}"
+                ),
+                max_tokens=16,
+                prefer_cheap=True,
+            )
+        except Exception as exc:
+            logger.warning("Gate: covenant Haiku call failed: %s", exc)
+            return GateResult(allowed=False, reason="no_covenants", method="none")
+
+        answer = result.strip().upper()
+        if answer == "YES":
+            return GateResult(allowed=True, reason="covenant_authorized", method="haiku_check")
+
+        reason = "covenant_denied" if answer == "NO" else "covenant_ambiguous"
+        return GateResult(allowed=False, reason=reason, method="haiku_check")
+
+    async def _gate_tool_call(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        effect: str,
+        user_message: str,
+        tenant_id: str,
+        active_space_id: str,
+        messages: list[dict] | None = None,
+    ) -> GateResult:
+        """Four-step authorization for write tool calls.
+
+        Step 0: must_not covenant check — prohibitive rules block even explicit instructions
+        Step 1: Explicit instruction in current message (fast path, no LLM)
+        Step 2: Permission override or covenant authorization (one Haiku call)
+        Step 3: Ask user — block and surface proposed action
+        """
+        # Step 0: must_not covenants override everything (no LLM — structured lookup)
+        if await self._has_prohibiting_covenant(tool_name, tenant_id, active_space_id):
+            return GateResult(
+                allowed=False,
+                reason="covenant_prohibited",
+                method="must_not_block",
+                proposed_action=self._describe_action(tool_name, tool_input),
+            )
+
+        # Step 1: Explicit instruction (fast path)
+        if self._explicit_instruction_matches(tool_name, tool_input, user_message, messages):
+            return GateResult(allowed=True, reason="explicit_instruction", method="fast_path")
+
+        # Step 2: Permission override or covenant
+        auth = await self._check_permission_or_covenant(
+            tool_name, tool_input, tenant_id, active_space_id,
+        )
+        if auth.allowed:
+            return auth
+
+        # Step 3: Block and ask user — preserve covenant reason if available
+        reason = auth.reason if auth.reason != "no_covenants" else "no_authorization"
+        return GateResult(
+            allowed=False,
+            reason=reason,
+            method="ask_user",
+            proposed_action=self._describe_action(tool_name, tool_input),
+        )
 
     async def _handle_request_tool(
         self,
@@ -485,6 +802,53 @@ class ReasoningService:
                     iterations, block.name, block.name in self._KERNEL_TOOLS,
                 )
 
+                # Dispatch Gate: classify and check write tools before execution
+                tool_effect = self._classify_tool_effect(block.name, request.active_space)
+                if tool_effect in ("soft_write", "hard_write", "unknown"):
+                    gate_result = await self._gate_tool_call(
+                        block.name, block.input or {}, tool_effect,
+                        request.input_text, request.tenant_id,
+                        request.active_space_id,
+                        messages=request.messages,
+                    )
+
+                    try:
+                        await emit_event(
+                            self._events,
+                            EventType.DISPATCH_GATE,
+                            request.tenant_id,
+                            "dispatch_interceptor",
+                            payload={
+                                "tool_name": block.name,
+                                "effect": tool_effect,
+                                "allowed": gate_result.allowed,
+                                "reason": gate_result.reason,
+                                "method": gate_result.method,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to emit dispatch.gate: %s", exc)
+
+                    logger.info(
+                        "GATE: tool=%s effect=%s allowed=%s reason=%s method=%s",
+                        block.name, tool_effect, gate_result.allowed,
+                        gate_result.reason, gate_result.method,
+                    )
+
+                    if not gate_result.allowed:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": (
+                                f"[SYSTEM] Action blocked by dispatch gate. "
+                                f"Proposed: {gate_result.proposed_action}. "
+                                f"No explicit instruction or standing rule authorizes this. "
+                                f"Ask the user for permission before proceeding. "
+                                f"If they confirm, you may offer to create a standing rule."
+                            ),
+                        })
+                        continue
+
                 # Emit tool.called
                 try:
                     await emit_event(
@@ -576,13 +940,7 @@ class ReasoningService:
                         else:
                             result = "File system is not available right now."
                     elif block.name == "delete_file":
-                        if not self._check_delete_allowed(request.input_text):
-                            result = (
-                                "I can't delete files on my own — that's a standing principle. "
-                                "If you'd like me to remove a file, just ask directly "
-                                "(e.g. 'delete old-draft.md')."
-                            )
-                        elif self._files:
+                        if self._files:
                             try:
                                 result = await self._files.delete_file(
                                     request.tenant_id,

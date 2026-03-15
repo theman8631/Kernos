@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from kernos.capability.registry import CapabilityRegistry
+from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, CapabilityStatus
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.exceptions import (
     ReasoningConnectionError,
@@ -60,14 +60,34 @@ def _mock_provider_tool_response(name: str, id: str, input: dict) -> ProviderRes
 
 
 def _make_mock_registry(tools: list[dict] | None = None) -> MagicMock:
-    """Return a mock CapabilityRegistry."""
+    """Return a mock CapabilityRegistry.
+
+    Builds a real CapabilityInfo for any provided tools, marking them as "read"
+    by default so the dispatch gate classifies them correctly.
+    """
     registry = MagicMock(spec=CapabilityRegistry)
-    registry.get_connected_tools.return_value = tools or []
+    tools_list = tools or []
+    registry.get_connected_tools.return_value = tools_list
+    registry.get_tools_for_space.return_value = tools_list
     registry.build_capability_prompt.return_value = (
-        "CURRENT CAPABILITIES — conversation only." if not tools
+        "CURRENT CAPABILITIES — conversation only." if not tools_list
         else "CONNECTED CAPABILITIES — you can use these:\n- Calendar tools available."
     )
-    registry.get_all.return_value = []
+    if tools_list:
+        tool_names = [t["name"] for t in tools_list]
+        cap = CapabilityInfo(
+            name="test-capability",
+            display_name="Test Capability",
+            description="Test capability",
+            category="test",
+            status=CapabilityStatus.CONNECTED,
+            tools=tool_names,
+            server_name="test",
+            tool_effects={name: "read" for name in tool_names},
+        )
+        registry.get_all.return_value = [cap]
+    else:
+        registry.get_all.return_value = []
     return registry
 
 
