@@ -27,6 +27,7 @@ class MCPClientManager:
         self._tools: list[dict] = []
         self._exit_stack = AsyncExitStack()
         self._events = events
+        self._runtime_stacks: dict[str, AsyncExitStack] = {}
 
     def register_server(self, name: str, params: StdioServerParameters) -> None:
         """Register an MCP server configuration. Does not connect."""
@@ -112,6 +113,112 @@ class MCPClientManager:
                     except Exception as emit_exc:
                         logger.warning("Failed to emit capability.error: %s", emit_exc)
 
+    async def connect_one(self, server_name: str) -> bool:
+        """Connect a single MCP server at runtime. Returns True on success."""
+        if server_name not in self._servers:
+            return False
+        if server_name in self._sessions:
+            return True  # Already connected
+
+        params = self._servers[server_name]
+        stack = AsyncExitStack()
+        try:
+            read, write = await stack.enter_async_context(stdio_client(params))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            self._sessions[server_name] = session
+            self._runtime_stacks[server_name] = stack
+
+            result = await session.list_tools()
+            tool_names = []
+            for tool in result.tools:
+                self._tool_to_session[tool.name] = server_name
+                self._tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema,
+                    }
+                )
+                tool_names.append(tool.name)
+                logger.info("Discovered tool: %s (server: %s)", tool.name, server_name)
+
+            logger.info(
+                "Connected to MCP server %s — %d tools discovered",
+                server_name,
+                len(result.tools),
+            )
+            from kernos.kernel.event_types import EventType
+            from kernos.kernel.events import emit_event
+            if self._events:
+                try:
+                    await emit_event(
+                        self._events,
+                        EventType.CAPABILITY_CONNECTED,
+                        "system",
+                        "capability_manager",
+                        payload={
+                            "server_name": server_name,
+                            "tool_count": len(tool_names),
+                            "tool_names": tool_names,
+                            "error": None,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to emit capability.connected: %s", exc)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to connect %s: %s", server_name, exc)
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+            return False
+
+    async def disconnect_one(self, server_name: str) -> bool:
+        """Disconnect a single MCP server at runtime. Returns True if it was connected."""
+        if server_name not in self._sessions:
+            return False
+
+        # Remove tools for this server
+        self._tools = [
+            t for t in self._tools
+            if self._tool_to_session.get(t["name"]) != server_name
+        ]
+        self._tool_to_session = {
+            k: v for k, v in self._tool_to_session.items() if v != server_name
+        }
+        del self._sessions[server_name]
+
+        # Close runtime stack if one exists (servers connected via connect_one)
+        if server_name in self._runtime_stacks:
+            try:
+                await self._runtime_stacks[server_name].aclose()
+            except Exception:
+                pass
+            del self._runtime_stacks[server_name]
+
+        if self._events:
+            try:
+                from kernos.kernel.event_types import EventType
+                from kernos.kernel.events import emit_event
+                await emit_event(
+                    self._events,
+                    EventType.CAPABILITY_DISCONNECTED,
+                    "system",
+                    "capability_manager",
+                    payload={
+                        "server_name": server_name,
+                        "tool_count": 0,
+                        "tool_names": [],
+                        "error": None,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit capability.disconnected: %s", exc)
+
+        return True
+
     async def disconnect_all(self) -> None:
         """Disconnect from all MCP servers and clean up subprocesses."""
         if self._events:
@@ -135,6 +242,13 @@ class MCPClientManager:
                     )
                 except Exception as exc:
                     logger.warning("Failed to emit capability.disconnected: %s", exc)
+
+        for name, stack in list(self._runtime_stacks.items()):
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+        self._runtime_stacks.clear()
 
         await self._exit_stack.aclose()
         logger.info("Disconnected from all MCP servers")

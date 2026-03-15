@@ -78,3 +78,9 @@ class EventType(str, Enum):
     # --- Phase 3D: Dispatch Interceptor ---
     DISPATCH_GATE = "dispatch.gate"
     # Payload: tool_name, effect, allowed, reason, method
+
+    # --- Phase 3B+: MCP Installation ---
+    TOOL_INSTALLED = "tool.installed"
+    # Payload: capability_name, tool_count, universal
+    TOOL_UNINSTALLED = "tool.uninstalled"
+    # Payload: capability_name

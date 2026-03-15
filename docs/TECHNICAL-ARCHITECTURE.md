@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-15 (reflects Phase 3D complete state — Dispatch Interceptor)
+> **Last updated:** 2026-03-15 (reflects SPEC-3B+ complete state — MCP Installation)
 
 ---
 
@@ -126,6 +126,21 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `_trigger_gate2()` — Gate 2 LLM call to evaluate and potentially create a new space; seeds `active_tools` from `recommended_tools` (async)
 - `_enforce_space_cap()` — archives LRU non-system, non-default space when 40-space cap is hit
 - `_write_system_docs()` — writes `capabilities-overview.md` and `how-to-connect-tools.md` to system space at creation (Phase 3B)
+- `_connect_after_credential()` — writes credential to disk, calls `connect_one()`, updates registry, persists config, refreshes docs (SPEC-3B+)
+- `_persist_mcp_config()` — serializes connected + uninstalled servers to `mcp-servers.json` in system space files (SPEC-3B+)
+- `_disconnect_capability()` — calls `disconnect_one()`, updates registry to SUPPRESSED, persists config (SPEC-3B+)
+- `_maybe_load_mcp_config()` — startup merge; reads `mcp-servers.json` and connects any unconfigured servers; runs once per tenant per process (SPEC-3B+)
+- `_infer_pending_capability()` — scans recent system space messages to identify which capability is being installed (SPEC-3B+)
+
+**Secure input state (SPEC-3B+):**
+- `SecureInputState` dataclass: `capability_name: str`, `expires_at: datetime`
+- `_secure_input_state: dict[str, SecureInputState]` — per-tenant mode flag on the handler instance
+- When the agent responds with "secure api", the handler creates a `SecureInputState` for that tenant with a 10-minute expiry
+- On the next inbound message, `process()` checks `_secure_input_state` first — before storage, before LLM — and treats the message body as the credential. The credential goes to disk; the message never enters the conversation history or LLM context.
+- If the window expires, the state is cleared and the user is asked to retry.
+
+**Constructor parameters (SPEC-3B+):**
+- `secrets_dir: str` — directory for credential files (default: `./secrets`; overridable via `KERNOS_SECRETS_DIR` env var)
 
 ### Soul + Template System
 
@@ -226,11 +241,12 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `kernos/capability/known.py` — KNOWN_CAPABILITIES static catalog
 - `kernos/capability/client.py` — MCPClientManager
 
-**Three tiers:**
+**Capability statuses:**
 - CONNECTED — MCP server running, tools discovered, ready to use
 - AVAILABLE — known capability, not connected. Agent can offer setup.
 - DISCOVERABLE — exists in ecosystem, not configured (Phase 4)
 - ERROR — was connected, currently failing
+- SUPPRESSED — user explicitly uninstalled. Hidden from catalog and capability prompt but can be reinstalled.
 
 **Runtime initialization** (in `app.py` / `discord_bot.py`):
 1. Load KNOWN_CAPABILITIES as AVAILABLE
@@ -238,7 +254,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 3. Connect MCP servers, discover tools
 4. Promote capabilities to CONNECTED if their server returns tools
 
-**CapabilityInfo fields:** name, description, status, tools (list of discovered MCP tools), `universal: bool` (Phase 3B — if True, visible in all spaces without explicit activation).
+**CapabilityInfo fields:** name, description, status, tools (list of discovered MCP tools), `universal: bool` (Phase 3B — if True, visible in all spaces without explicit activation), `tool_effects: dict[str, str]` (Phase 3D — maps tool name to effect level for dispatch gate), `requires_web_interface: bool` (SPEC-3B+ — True if setup requires browser-based OAuth), `server_command: str | None` (SPEC-3B+ — executable to launch the MCP server), `server_args: list[str]` (SPEC-3B+ — arguments for the server command), `credentials_key: str | None` (SPEC-3B+ — name of the env var the server needs for its API key), `env_template: dict[str, str]` (SPEC-3B+ — env var template; `{credentials}` placeholder is substituted at connect time).
 
 **System prompt integration:** `build_capability_prompt(space=)` generates the CAPABILITIES section from live registry state, filtered to the space's visible capabilities. Connected capabilities listed with descriptions. Available capabilities listed with setup hints. Agent never claims a capability that isn't backed by a real connection.
 
@@ -252,6 +268,12 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Currently connected servers:**
 - `google-calendar` — via `@cocal/google-calendar-mcp`, 13 tools discovered
+
+**Methods:**
+- `connect_all()` — connects all registered servers at startup, discovers tools, promotes capabilities to CONNECTED.
+- `disconnect_all()` — disconnects all servers on shutdown.
+- `connect_one(server_name) -> bool` — connects a single server by name. Used by MCP Installation (SPEC-3B+) when a new capability is installed at runtime.
+- `disconnect_one(server_name) -> bool` — disconnects a single server. Used when the user uninstalls a capability.
 
 **Tool flow:** ReasoningService calls `mcp_manager.call_tool(name, args)` → MCPClientManager routes to the correct server → server executes → result returned → ReasoningService feeds result back to LLM.
 
@@ -396,6 +418,59 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Space isolation:** `FileService` is constructed with a `(tenant_id, space_id)` pair. Files are never visible across spaces.
 
+### MCP Installation (SPEC-3B+)
+
+**What it does:** Allows the agent to install and uninstall MCP capability servers at runtime — discovering new tools, collecting credentials securely, and persisting server configuration across restarts.
+
+**Config persistence:** MCP server configuration is stored as `mcp-servers.json` in the tenant's system space files directory (`{data_dir}/{tenant_id}/spaces/{system_space_id}/files/mcp-servers.json`). Schema:
+```json
+{
+  "servers": {
+    "<server_name>": { "command": "...", "args": [...], "env": {...} }
+  },
+  "uninstalled": ["<server_name>", ...]
+}
+```
+The `uninstalled` list tracks servers the user has explicitly removed — they are hidden from the catalog but can be reinstalled.
+
+**MCPClientManager additions:**
+- `connect_one(server_name) -> bool` — connects a single named server, discovers its tools, updates the registry to CONNECTED. Returns True on success.
+- `disconnect_one(server_name) -> bool` — disconnects a single named server, marks registry status SUPPRESSED, clears its tool list. Returns True on success.
+
+**Secure credential handoff:** When the agent needs an API key or secret to install a capability, it enters a secure input mode:
+1. Agent responds with "secure api" trigger phrase.
+2. Handler detects trigger, creates a `SecureInputState(capability_name, expires_at)` keyed by tenant_id in `_secure_input_state`.
+3. The next message from the user is intercepted at the very start of `process()` — before storage, before LLM — and treated as a credential.
+4. `expires_at` is 10 minutes from trigger. If the user takes longer, the state is cleared and the credential is never captured.
+5. The credential is written to disk and never enters the conversation pipeline, the LLM context, or the event stream.
+
+**`resolve_mcp_credentials(server_config, tenant_id, secrets_dir) -> dict`** — resolves `{credentials}` template placeholders in server env config. Reads credential from `secrets/{safe_tenant_id}/{capability_name}.key` and substitutes into the env dict before the server is launched.
+
+**Credential storage:** Credentials are stored at `secrets/{safe_tenant_id}/{capability_name}.key` with `0o600` file permissions (owner read/write only). The `secrets_dir` defaults to `./secrets` and can be overridden via the `KERNOS_SECRETS_DIR` environment variable.
+
+**Startup merge flow:** `_maybe_load_mcp_config(tenant_id)` is called in `process()` after soul init, once per tenant per process lifetime (tracked in `_mcp_config_loaded: set[str]`). It reads `mcp-servers.json` from the system space, resolves credentials, and connects any servers not already connected and not in the `uninstalled` list.
+
+**Post-connect flow:**
+1. `connect_one()` connects the server and discovers tools.
+2. The capability registry is updated to CONNECTED with the discovered tools.
+3. `mcp-servers.json` is persisted with the new server entry.
+4. `capabilities-overview.md` in the system space is refreshed.
+5. A `tool.installed` event is emitted (payload: `capability_name`, `tool_count`, `universal`).
+
+**Post-disconnect flow:**
+1. `disconnect_one()` stops the server session.
+2. Registry status is set to SUPPRESSED.
+3. The server's tool list is cleared.
+4. `mcp-servers.json` is updated (server moved to `uninstalled` list).
+5. A `tool.uninstalled` event is emitted (payload: `capability_name`).
+
+**Handler methods:**
+- `_connect_after_credential()` — called after secure credential capture; writes credential to disk, calls `connect_one()`, runs post-connect flow.
+- `_persist_mcp_config()` — serializes connected + uninstalled servers to `mcp-servers.json` in the system space.
+- `_disconnect_capability()` — handles user-initiated uninstall; calls `disconnect_one()`, runs post-disconnect flow.
+- `_maybe_load_mcp_config()` — startup merge; idempotent, once per tenant per process.
+- `_infer_pending_capability()` — scans recent system space messages to identify which capability is currently being installed when the secure credential arrives.
+
 ### System Space (Phase 3B)
 
 **What it is:** A singleton, always-present context space auto-provisioned alongside Daily at tenant initialization. Provides a dedicated home for system configuration and tool management.
@@ -463,6 +538,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Covenant: covenant.rule.created (Phase 2D — NL contract parser creates user-stated rules)
 - Dispatch: dispatch.gate (Phase 3D — tool_name, effect, allowed, reason, method)
 - Capabilities: capability.connected, capability.disconnected, capability.error
+- MCP Installation: tool.installed (payload: capability_name, tool_count, universal), tool.uninstalled (payload: capability_name) (SPEC-3B+)
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
 
@@ -677,7 +753,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-802 tests across 22 test files.
+849 tests across 23 test files.
 
 | File | What it covers |
 |---|---|
@@ -703,6 +779,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_files.py | FileService CRUD, manifest tracking, soft delete, text-only enforcement, cross-space isolation, FILE_TOOLS definitions (Phase 3A) |
 | test_tool_scoping.py | CapabilityInfo.universal, _visible_capability_names, get_tools_for_space, build_capability_prompt(space=), active_tools persistence, request_tool (exact/fuzzy/not-installed), LRU exemption, connected capability helpers (36 tests, Phase 3B) |
 | test_dispatch_gate.py | GateResult, tool effect classification, explicit instruction matching, must_not covenant blocking, covenant authorization (YES/NO/AMBIGUOUS), permission overrides, gate integration, read bypass, unknown tool handling, delete_file consolidation, confirmation signals (55 tests, Phase 3D) |
+| test_mcp_install.py | SecureInputState lifecycle, credential write/resolve, connect_one/disconnect_one, _maybe_load_mcp_config startup merge, mcp-servers.json persistence, tool.installed/uninstalled events, SUPPRESSED status, post-connect doc refresh (SPEC-3B+) |
 
 ---
 
@@ -752,5 +829,6 @@ These are referenced in the architecture but not implemented:
 - **Workspace model** — shared souls for household/business multi-tenant scenarios
 - ~~**Per-space file storage** — agent-managed persistent files per context space~~ **COMPLETE (Phase 3A)** — FileService, four kernel tools (write/read/list/delete_file), soft delete, manifest in Living State
 - ~~**Per-space tool scoping** — MCP capabilities scoped per context space~~ **COMPLETE (Phase 3B)** — active_tools field, universal flag, system space, Gate 2 smart seeding, request_tool meta-tool
+- ~~**MCP Installation** — runtime install/uninstall of MCP capability servers~~ **COMPLETE (SPEC-3B+)** — SecureInputState credential handoff, connect_one/disconnect_one, mcp-servers.json persistence, startup merge flow, SUPPRESSED status, tool.installed/uninstalled events
 
 The current architecture has seams and reserved fields for all of these. None requires an architectural rewrite — they extend existing interfaces.

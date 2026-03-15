@@ -23,6 +23,11 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         setup_requires=["GOOGLE_OAUTH_CREDENTIALS_PATH"],
         server_name="google-calendar",
         universal=True,
+        requires_web_interface=True,
+        server_command="npx",
+        server_args=["@cocal/google-calendar-mcp"],
+        credentials_key="google-calendar",
+        env_template={"GOOGLE_OAUTH_CREDENTIALS": "{credentials}"},
         tool_effects={
             "get-current-time": "read",
             "list-events": "read",
@@ -48,6 +53,11 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         setup_hint="I can connect to your Gmail — I'll need access to your Google account.",
         setup_requires=["GOOGLE_OAUTH_CREDENTIALS_PATH"],
         server_name="gmail",
+        requires_web_interface=True,
+        server_command="",
+        server_args=[],
+        credentials_key="gmail",
+        env_template={},
         tool_effects={
             "list-messages": "read",
             "get-message": "read",

@@ -19,6 +19,7 @@ class CapabilityStatus(str, Enum):
     AVAILABLE = "available"        # Known, could be connected, not yet set up
     DISCOVERABLE = "discoverable"  # Exists in ecosystem, not configured (Phase 4)
     ERROR = "error"                # Was connected, currently failing
+    SUPPRESSED = "suppressed"      # Explicitly uninstalled by user — hidden from prompts
 
 
 @dataclass
@@ -41,6 +42,12 @@ class CapabilityInfo:
     universal: bool = False
     # If True, visible in all spaces without explicit activation (system defaults).
     # Set at registration/install time.
+    requires_web_interface: bool = False
+    # If True, cannot be installed via text/Discord — needs browser OAuth redirect.
+    server_command: str = ""           # e.g., "npx"
+    server_args: list[str] = field(default_factory=list)   # e.g., ["@cocal/google-calendar-mcp"]
+    credentials_key: str = ""         # e.g., "google-calendar" — key file name in secrets/
+    env_template: dict[str, str] = field(default_factory=dict)  # e.g., {"GOOGLE_OAUTH_CREDENTIALS": "{credentials}"}
 
 
 class CapabilityRegistry:

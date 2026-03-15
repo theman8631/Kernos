@@ -84,7 +84,8 @@ async def lifespan(app: FastAPI):
     reasoning = ReasoningService(provider, events, mcp_manager, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     app.state.handler = MessageHandler(
-        mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine
+        mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine,
+        secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"),
     )
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 

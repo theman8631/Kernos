@@ -10,3 +10,4 @@ build/
 credentials.json
 data/
 .claude/
+secrets/

@@ -1,6 +1,10 @@
+import json
 import logging
 import os
-from datetime import datetime, timezone
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from kernos.capability.client import MCPClientManager
 from kernos.capability.registry import CapabilityRegistry
@@ -78,6 +82,56 @@ _AUTH_CONTEXT: dict[str, str] = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_SECURE_API_TRIGGER = "secure api"
+_SECURE_INPUT_TIMEOUT_MINUTES = 10
+
+
+@dataclass
+class SecureInputState:
+    """Per-tenant state for secure credential input mode."""
+    capability_name: str
+    expires_at: datetime
+
+
+def _safe_tenant_name(tenant_id: str) -> str:
+    """Make tenant_id safe for filesystem use."""
+    return re.sub(r"[^\w.-]", "_", tenant_id)
+
+
+def resolve_mcp_credentials(
+    server_config: dict,
+    tenant_id: str,
+    secrets_dir: str,
+) -> dict[str, str]:
+    """Resolve credential references to actual values for MCP server env.
+
+    Reads the .key file from secrets/, injects into env_template.
+    Falls back to environment variable with same name if no key file found.
+    """
+    credentials_key = server_config.get("credentials_key", "")
+    env_template = server_config.get("env_template", {})
+    resolved: dict[str, str] = {}
+
+    credential_value = ""
+    if credentials_key:
+        secret_path = (
+            Path(secrets_dir) / _safe_tenant_name(tenant_id) / f"{credentials_key}.key"
+        )
+        if secret_path.exists():
+            credential_value = secret_path.read_text().strip()
+
+    for key, template in env_template.items():
+        if "{credentials}" in template:
+            if credential_value:
+                resolved[key] = template.replace("{credentials}", credential_value)
+            else:
+                resolved[key] = os.getenv(key, "")
+        else:
+            resolved[key] = template
+
+    return resolved
 
 
 def _format_contracts(rules: list[CovenantRule]) -> str:
@@ -231,6 +285,7 @@ class MessageHandler:
         reasoning: ReasoningService,
         registry: CapabilityRegistry,
         engine: TaskEngine,
+        secrets_dir: str = "",
     ) -> None:
         self.mcp = mcp
         self.conversations = conversations
@@ -242,6 +297,9 @@ class MessageHandler:
         self.registry = registry
         self.engine = engine
         self._router = LLMRouter(self.state, self.reasoning)
+        self._secrets_dir = secrets_dir or os.getenv("KERNOS_SECRETS_DIR", "./secrets")
+        self._secure_input_state: dict[str, SecureInputState] = {}
+        self._mcp_config_loaded: set[str] = set()
 
         from kernos.kernel.compaction import CompactionService
         from kernos.kernel.tokens import AnthropicTokenAdapter
@@ -280,6 +338,263 @@ class MessageHandler:
                 reasoning.set_retrieval(self._retrieval)
         except Exception as exc:
             logger.warning("Failed to initialize RetrievalService: %s", exc)
+
+    async def _get_system_space(self, tenant_id: str):
+        """Return the system context space for this tenant, or None."""
+        try:
+            spaces = await self.state.list_context_spaces(tenant_id)
+            for space in spaces:
+                if space.space_type == "system":
+                    return space
+        except Exception:
+            pass
+        return None
+
+    async def _write_capabilities_overview(
+        self, tenant_id: str, system_space_id: str
+    ) -> None:
+        """Write capabilities-overview.md to the system space — called after install/uninstall."""
+        if not getattr(self, "_files", None):
+            return
+        connected = self.registry.get_connected()
+        available = self.registry.get_available()
+
+        content = "# Connected Tools\n\n"
+        if connected:
+            for cap in connected:
+                universal_tag = " (available everywhere)" if cap.universal else ""
+                content += f"- **{cap.name}**{universal_tag}: {cap.description}\n"
+                if cap.tools:
+                    content += f"  Tools: {', '.join(cap.tools)}\n"
+        else:
+            content += "No tools connected yet.\n"
+
+        content += "\n# Available to Connect\n\n"
+        if available:
+            for cap in available:
+                content += f"- **{cap.name}**: {cap.description}\n"
+        else:
+            content += "No additional tools available.\n"
+
+        try:
+            await self._files.write_file(
+                tenant_id, system_space_id,
+                "capabilities-overview.md", content,
+                "What tools are connected and available — updated on changes",
+            )
+        except Exception as exc:
+            logger.warning("Failed to write capabilities-overview.md: %s", exc)
+
+    async def _infer_pending_capability(
+        self, tenant_id: str, conversation_id: str
+    ) -> str | None:
+        """Infer which capability is being set up from recent system space messages.
+
+        Scans the last 5 messages in the system space for capability name mentions.
+        Returns the capability name if found, None otherwise.
+        """
+        system_space = await self._get_system_space(tenant_id)
+        if not system_space:
+            return None
+
+        try:
+            recent = await self.conversations.get_space_thread(
+                tenant_id, conversation_id, system_space.id, max_messages=5
+            )
+        except Exception:
+            return None
+
+        available = self.registry.get_available()
+        for cap in available:
+            for msg in recent:
+                content = str(msg.get("content", "")).lower()
+                if cap.name.lower() in content or cap.display_name.lower() in content:
+                    return cap.name
+
+        return None
+
+    async def _store_credential(
+        self, tenant_id: str, capability_name: str, value: str
+    ) -> None:
+        """Store a credential in the secrets directory with restrictive permissions.
+
+        Secrets live OUTSIDE the data directory and are never readable by agents.
+        """
+        secrets_dir = Path(self._secrets_dir) / _safe_tenant_name(tenant_id)
+        secrets_dir.mkdir(parents=True, exist_ok=True)
+        secret_path = secrets_dir / f"{capability_name}.key"
+        secret_path.write_text(value.strip())
+        secret_path.chmod(0o600)
+        logger.info("Stored credential for %s/%s", tenant_id, capability_name)
+
+    async def _connect_after_credential(
+        self, tenant_id: str, capability_name: str
+    ) -> bool:
+        """Connect an MCP server after credentials have been stored."""
+        from mcp import StdioServerParameters
+        from kernos.capability.registry import CapabilityStatus
+
+        cap = self.registry.get(capability_name)
+        if not cap:
+            return False
+
+        resolved_env = resolve_mcp_credentials(
+            {"credentials_key": cap.credentials_key, "env_template": cap.env_template},
+            tenant_id,
+            self._secrets_dir,
+        )
+        params = StdioServerParameters(
+            command=cap.server_command,
+            args=list(cap.server_args),
+            env=resolved_env,
+        )
+        self.mcp.register_server(capability_name, params)
+        success = await self.mcp.connect_one(capability_name)
+
+        if success:
+            tools = self.mcp.get_tool_definitions().get(capability_name, [])
+            cap.status = CapabilityStatus.CONNECTED
+            cap.tools = [t["name"] for t in tools]
+
+            await self._persist_mcp_config(tenant_id)
+
+            system_space = await self._get_system_space(tenant_id)
+            if system_space:
+                await self._write_capabilities_overview(tenant_id, system_space.id)
+
+            try:
+                await emit_event(
+                    self.events, EventType.TOOL_INSTALLED, tenant_id, "mcp_installer",
+                    payload={
+                        "capability_name": capability_name,
+                        "tool_count": len(cap.tools),
+                        "universal": cap.universal,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit tool.installed: %s", exc)
+
+        return success
+
+    async def _persist_mcp_config(self, tenant_id: str) -> None:
+        """Write current MCP config to mcp-servers.json in the system space."""
+        from kernos.capability.registry import CapabilityStatus
+
+        system_space = await self._get_system_space(tenant_id)
+        if not system_space or not getattr(self, "_files", None):
+            return
+
+        config: dict = {"servers": {}, "uninstalled": []}
+        for cap in self.registry.get_all():
+            if cap.status == CapabilityStatus.CONNECTED and cap.server_name:
+                config["servers"][cap.name] = {
+                    "display_name": cap.display_name,
+                    "command": cap.server_command,
+                    "args": list(cap.server_args),
+                    "credentials_key": cap.credentials_key,
+                    "env_template": dict(cap.env_template),
+                    "universal": cap.universal,
+                    "tool_effects": dict(cap.tool_effects),
+                }
+            elif cap.status == CapabilityStatus.SUPPRESSED:
+                config["uninstalled"].append(cap.name)
+
+        try:
+            await self._files.write_file(
+                tenant_id, system_space.id,
+                "mcp-servers.json",
+                json.dumps(config, indent=2),
+                "MCP server configurations — managed by the system",
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist mcp config for %s: %s", tenant_id, exc)
+
+    async def _disconnect_capability(
+        self, tenant_id: str, capability_name: str
+    ) -> bool:
+        """Disconnect an MCP server and update all state."""
+        from kernos.capability.registry import CapabilityStatus
+
+        success = await self.mcp.disconnect_one(capability_name)
+        if success:
+            cap = self.registry.get(capability_name)
+            if cap:
+                cap.status = CapabilityStatus.SUPPRESSED
+                cap.tools = []
+
+            await self._persist_mcp_config(tenant_id)
+
+            system_space = await self._get_system_space(tenant_id)
+            if system_space:
+                await self._write_capabilities_overview(tenant_id, system_space.id)
+
+            try:
+                await emit_event(
+                    self.events, EventType.TOOL_UNINSTALLED, tenant_id, "mcp_installer",
+                    payload={"capability_name": capability_name},
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit tool.uninstalled: %s", exc)
+
+        return success
+
+    async def _maybe_load_mcp_config(self, tenant_id: str) -> None:
+        """Load persisted MCP config for this tenant (once per process lifetime per tenant).
+
+        Called after soul/space init so the system space is guaranteed to exist.
+        Suppresses uninstalled entries and connects any persisted servers.
+        """
+        from kernos.capability.registry import CapabilityStatus
+        from mcp import StdioServerParameters
+
+        if tenant_id in self._mcp_config_loaded:
+            return
+        self._mcp_config_loaded.add(tenant_id)
+
+        system_space = await self._get_system_space(tenant_id)
+        if not system_space or not getattr(self, "_files", None):
+            return
+
+        try:
+            config_raw = await self._files.read_file(
+                tenant_id, system_space.id, "mcp-servers.json"
+            )
+            if not config_raw or config_raw.startswith("Error:"):
+                return
+            config = json.loads(config_raw)
+        except Exception as exc:
+            logger.warning("Failed to load mcp-servers.json for %s: %s", tenant_id, exc)
+            return
+
+        # Suppress uninstalled entries
+        for name in config.get("uninstalled", []):
+            cap = self.registry.get(name)
+            if cap and cap.status != CapabilityStatus.CONNECTED:
+                cap.status = CapabilityStatus.SUPPRESSED
+
+        # Connect persisted servers not already connected
+        for name, server_config in config.get("servers", {}).items():
+            cap = self.registry.get(name)
+            if cap and cap.status == CapabilityStatus.CONNECTED:
+                continue  # Already connected at startup
+            resolved_env = resolve_mcp_credentials(
+                server_config, tenant_id, self._secrets_dir
+            )
+            self.mcp.register_server(
+                name,
+                StdioServerParameters(
+                    command=server_config.get("command", ""),
+                    args=list(server_config.get("args", [])),
+                    env=resolved_env,
+                ),
+            )
+            success = await self.mcp.connect_one(name)
+            if success:
+                tools = self.mcp.get_tool_definitions().get(name, [])
+                if cap:
+                    cap.status = CapabilityStatus.CONNECTED
+                    cap.tools = [t["name"] for t in tools]
+                logger.info("Loaded and connected %s from persisted config", name)
 
     async def _ensure_tenant_state(
         self, tenant_id: str, message: NormalizedMessage
@@ -338,34 +653,7 @@ class MessageHandler:
         if not registry:
             return
 
-        connected = registry.get_connected()
-        available = registry.get_available()
-
-        content = "# Connected Tools\n\n"
-        if connected:
-            for cap in connected:
-                universal_tag = " (available everywhere)" if cap.universal else ""
-                content += f"- **{cap.name}**{universal_tag}: {cap.description}\n"
-                if cap.tools:
-                    content += f"  Tools: {', '.join(cap.tools)}\n"
-        else:
-            content += "No tools connected yet.\n"
-
-        content += "\n# Available to Connect\n\n"
-        if available:
-            for cap in available:
-                content += f"- **{cap.name}**: {cap.description}\n"
-        else:
-            content += "No additional tools available.\n"
-
-        try:
-            await self._files.write_file(
-                tenant_id, system_space_id,
-                "capabilities-overview.md", content,
-                "What tools are connected and available — updated on changes",
-            )
-        except Exception as exc:
-            logger.warning("Failed to write capabilities-overview.md: %s", exc)
+        await self._write_capabilities_overview(tenant_id, system_space_id)
 
         how_to = """# How to Connect Tools
 
@@ -480,7 +768,21 @@ a tool in a specific space, just ask — I'll activate it.
                 status="active",
                 posture=(
                     "Precise and careful. Configuration changes affect the whole system. "
-                    "Confirm before modifying system settings or tool configurations."
+                    "Confirm before modifying system settings or tool configurations.\n\n"
+                    "TOOL CONNECTION:\n"
+                    "You can help users connect and manage their tools. When a user wants "
+                    "to connect a new tool:\n"
+                    "1. Identify the capability from the known catalog\n"
+                    "2. Explain what's needed (API key, account setup, etc.)\n"
+                    "3. Walk them through getting the credential\n"
+                    "4. For the credential handoff, instruct them: \"When you have your key "
+                    "ready, reply with exactly: secure api\"\n"
+                    "5. The system handles the rest — you'll be told if it succeeded\n\n"
+                    "NEVER ask users to paste API keys directly in conversation.\n"
+                    "ALWAYS use the 'secure api' flow for credentials.\n\n"
+                    "If a capability requires a web interface (requires_web_interface=True), "
+                    "explain that it can't be set up in this channel yet and will be available "
+                    "when the web interface ships."
                 ),
                 is_default=False,
                 created_at=now,
@@ -994,10 +1296,58 @@ a tool in a specific space, just ask — I'll activate it.
         tenant_id = derive_tenant_id(message)
         conversation_id = message.conversation_id
 
+        # --- SECURE INPUT INTERCEPT ---
+        # These paths return early without storing the message or calling the LLM.
+        if tenant_id in self._secure_input_state:
+            state = self._secure_input_state[tenant_id]
+            if datetime.now(timezone.utc) > state.expires_at:
+                del self._secure_input_state[tenant_id]
+                return (
+                    "The secure input session timed out after 10 minutes. "
+                    "Your message was processed normally (not stored as a credential). "
+                    "Say 'secure api' again when you're ready to send your key."
+                )
+            credential_value = message.content.strip()
+            cap_name = state.capability_name
+            del self._secure_input_state[tenant_id]
+            await self._store_credential(tenant_id, cap_name, credential_value)
+            success = await self._connect_after_credential(tenant_id, cap_name)
+            if success:
+                return (
+                    f"Key stored securely. {cap_name} is now connected! "
+                    f"You can start using it right away."
+                )
+            else:
+                return (
+                    f"Key stored, but I couldn't connect to {cap_name}. "
+                    f"The key might be invalid, or the service might be down. "
+                    f"Try again or check the key."
+                )
+
+        if message.content.strip().lower() == _SECURE_API_TRIGGER:
+            cap_name = await self._infer_pending_capability(tenant_id, conversation_id)
+            if not cap_name:
+                return (
+                    "I'm not sure which tool you're setting up. "
+                    "Head to system settings and start the connection process first."
+                )
+            self._secure_input_state[tenant_id] = SecureInputState(
+                capability_name=cap_name,
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=_SECURE_INPUT_TIMEOUT_MINUTES),
+            )
+            return (
+                f"Secure input mode active for {cap_name}. "
+                f"Your next message will NOT be seen by any agent — "
+                f"it will go directly to encrypted storage as your {cap_name} API key. "
+                f"Send your key now."
+            )
+        # --- END SECURE INPUT INTERCEPT ---
+
         # Steps 1–2: provision, load soul
         await self.tenants.get_or_create(tenant_id)
         await self._ensure_tenant_state(tenant_id, message)
         soul = await self._get_or_init_soul(tenant_id)
+        await self._maybe_load_mcp_config(tenant_id)
 
         # Step 2: Load recent history with full metadata (for router)
         recent_full = await self.conversations.get_recent_full(
