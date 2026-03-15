@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-14 (reflects Phase 2D complete state — Active Retrieval + NL Contract Parser)
+> **Last updated:** 2026-03-15 (reflects Phase 3B complete state — Per-Space Tool Scoping)
 
 ---
 
@@ -118,13 +118,14 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 22. Return response string to adapter
 
 **Key methods:**
-- `_get_or_init_soul()` — loads from State Store or creates new unhatched soul
+- `_get_or_init_soul()` — loads from State Store or creates new unhatched soul; auto-provisions Daily + System spaces on first call
 - `_post_response_soul_update()` — increments interactions, checks hatch, checks graduation
 - `_build_system_prompt()` — 9-layer assembly (includes cross-domain prefix, posture, scoped rules)
 - `_assemble_space_context()` — compaction-aware context assembly: index + cross-domain + compaction document + post-compaction messages; falls back to full thread when no compaction state
 - `_run_session_exit()` — updates space name/description after focus shift (async, >= 3 messages)
-- `_trigger_gate2()` — Gate 2 LLM call to evaluate and potentially create a new space (async)
-- `_enforce_space_cap()` — archives LRU non-default space when 40-space cap is hit
+- `_trigger_gate2()` — Gate 2 LLM call to evaluate and potentially create a new space; seeds `active_tools` from `recommended_tools` (async)
+- `_enforce_space_cap()` — archives LRU non-system, non-default space when 40-space cap is hit
+- `_write_system_docs()` — writes `capabilities-overview.md` and `how-to-connect-tools.md` to system space at creation (Phase 3B)
 
 ### Soul + Template System
 
@@ -187,9 +188,11 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Provider abstraction:** `AnthropicProvider` implements the provider interface. Model and API key are configuration, not hardcoded in the handler. Currently only Anthropic is configured. Adding providers means implementing the provider interface.
 
-**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the service checks for kernel-managed tools first (e.g., `remember`), then routes to MCPClientManager for MCP tools. Feeds the result back and continues until the LLM returns end_turn.
+**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the service checks for kernel-managed tools first, then routes to MCPClientManager for MCP tools. Feeds the result back and continues until the LLM returns end_turn.
 
-**Kernel tool routing (2D):** The `remember` tool is intercepted before MCPClientManager. `ReasoningRequest.active_space_id` provides the space context needed for retrieval. `set_retrieval()` wires the RetrievalService after construction (avoids circular imports).
+**Kernel tool routing:** Six kernel-managed tools (`remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`) are intercepted before MCPClientManager. `ReasoningRequest.active_space_id` provides the space context. `set_retrieval()`, `set_registry()`, and `set_state()` wire services after construction (avoids circular imports).
+
+**Structured trace logging:** INFO-level grep-able prefixes in the kernel layer: `ROUTE:` (routing decisions in handler), `TOOL_LOOP` (iteration + exit + exhaustion in reasoning), `KERNEL_TOOL` (kernel intercepts), `FILE_WRITE/READ/LIST/DELETE` (file operations in files.py), `REMEMBER` (retrieval calls in retrieval.py).
 
 ### Retrieval Service (2D)
 
@@ -233,7 +236,11 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 3. Connect MCP servers, discover tools
 4. Promote capabilities to CONNECTED if their server returns tools
 
-**System prompt integration:** `build_capability_prompt()` generates the CAPABILITIES section from live registry state. Connected capabilities listed with descriptions. Available capabilities listed with setup hints. Agent never claims a capability that isn't backed by a real connection.
+**CapabilityInfo fields:** name, description, status, tools (list of discovered MCP tools), `universal: bool` (Phase 3B — if True, visible in all spaces without explicit activation).
+
+**System prompt integration:** `build_capability_prompt(space=)` generates the CAPABILITIES section from live registry state, filtered to the space's visible capabilities. Connected capabilities listed with descriptions. Available capabilities listed with setup hints. Agent never claims a capability that isn't backed by a real connection.
+
+**Space-aware methods (Phase 3B):** `get_tools_for_space(space)` — MCP tools filtered to visible capabilities; `build_capability_prompt(space=)` — space-scoped capability section; `_visible_capability_names(space)` — core scoping logic (system: all; others: universal + active_tools).
 
 ### MCP Client Manager
 
@@ -283,7 +290,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `focus: str` — the single space ID the agent should focus on
 - `continuation: bool` — obvious short continuation (lol, ok, sounds good) → ride momentum, don't re-evaluate
 
-**Single-space tenant fast path:** When only one space (daily) exists, router returns immediately without calling the LLM. Zero cost, zero latency.
+**Single-space tenant fast path:** When only Daily + System exist (no user-created spaces), router returns immediately without calling the LLM. Zero cost, zero latency. System space is included in LLM routing candidates but excluded from the fast-path count — `non_system_spaces` drives the `<= 1` check.
 
 **Multi-space routing:** One Haiku call per message (~$0.001). Router sees: active space list with names + descriptions, last 15 messages with their timestamps and existing space_tags, temporal metadata (gap since last message), and the new message. Router produces structured JSON.
 
@@ -291,7 +298,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Gate 1 → Gate 2 (organic space creation):**
 - **Gate 1:** After each routing call, tags not matching known space IDs are counted as topic hints (`topic_hints.json`). At threshold (15 messages), Gate 2 fires asynchronously.
-- **Gate 2:** One LLM call (Haiku) evaluates whether the accumulated messages represent a real recurring domain or a one-off topic. If yes: creates a new ContextSpace with a generated name and description, emits `context.space.created`, clears the hint. If no: clears the hint to avoid re-triggering soon.
+- **Gate 2:** One LLM call (Haiku) evaluates whether the accumulated messages represent a real recurring domain or a one-off topic. If yes: creates a new ContextSpace with generated name and description, emits `context.space.created`, clears hint. Gate 2 schema includes `recommended_tools: list[str]` — capability names the LLM recommends for this domain. Recommended names that match CONNECTED capabilities are seeded into the new space's `active_tools`. If no: clears hint to avoid re-triggering soon.
 
 **LRU Sunset:** Hard cap of 40 active non-default spaces. When Gate 2 creates a space at the cap, the least recently used (by `last_active_at`) non-default space is archived — thread preserved on disk, removed from router's active list. Daily space is never archived.
 
@@ -351,6 +358,64 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Entity context injection:** Known entities for the tenant injected into the Tier 2 extraction prompt for pronoun/coreference resolution (~500 token budget). Helps the LLM identify "she" as Sarah Henderson when that entity already exists.
 
+### File Service (Phase 3A)
+
+**What it does:** Gives the agent persistent, per-space file storage. Files live inside a space and are accessible only within that space's context.
+
+**File:** `kernos/kernel/files.py` — `FileService` class, `FILE_TOOLS` list
+
+**Storage:** `{data_dir}/{tenant_id}/spaces/{space_id}/files/` — one file per name. Manifest tracked at `{space_id}/files/.manifest.json`.
+
+**Four kernel tools** (registered alongside `remember` — kernel-managed, not MCP):
+- `write_file` — create or overwrite a named file in the active space. Text-only; binary content rejected. Directory created lazily on first write.
+- `read_file` — read a file by name from the active space.
+- `list_files` — list all files and their descriptions from the manifest.
+- `delete_file` — soft-delete: moves to `{space_id}/files/.deleted/{name}_{timestamp}`, removes from manifest. Shadow archive — never physically destroyed.
+
+**Manifest:** `.manifest.json` injected into the Compaction Living State section on each compaction cycle. The agent's knowledge of what files exist persists across compaction boundaries.
+
+**Space isolation:** `FileService` is constructed with a `(tenant_id, space_id)` pair. Files are never visible across spaces.
+
+### System Space (Phase 3B)
+
+**What it is:** A singleton, always-present context space auto-provisioned alongside Daily at tenant initialization. Provides a dedicated home for system configuration and tool management.
+
+**Fields:** `space_type="system"`, `status="active"`, `is_default=False`. Created in `_get_or_init_soul()` if no system space exists for the tenant.
+
+**Pre-loaded documentation files** (written at creation):
+- `capabilities-overview.md` — what tools are connected and available. Updated on capability changes.
+- `how-to-connect-tools.md` — guide to connecting and managing capabilities.
+
+**LRU exemption:** `_enforce_space_cap()` filters `space_type != "system"` from LRU archiving candidates. System space is never archived.
+
+**Tool visibility:** System space ignores `active_tools` entirely — it always sees every CONNECTED capability plus all kernel tools.
+
+**Routing:** Included in the LLM router's active spaces list (its description provides the routing signal). Excluded from the `non_system_spaces` fast-path count.
+
+### Per-Space Tool Scoping (Phase 3B)
+
+**What it does:** Controls which MCP capabilities are visible per context space. The right tools appear in the right context.
+
+**`ContextSpace.active_tools: list[str]`** — list of capability names explicitly enabled for this space. Empty = system defaults (kernel tools only; no MCP tools unless `universal=True`).
+
+**`CapabilityInfo.universal: bool`** — if True, capability is visible in every space without explicit activation. `google-calendar` is `universal=True`.
+
+**`_visible_capability_names(space)`** — the core scoping function in `CapabilityRegistry`:
+- System space: all CONNECTED capabilities
+- Other spaces: universal CONNECTED capabilities + `active_tools` intersected with CONNECTED
+
+**`get_tools_for_space(space)`** — replaces `get_connected_tools()` in the handler. Returns MCP tool definitions filtered to the space's visible capabilities.
+
+**`build_capability_prompt(space=)`** — space-aware capability section for the system prompt. System space gets all; others get filtered.
+
+**`request_tool` meta-tool** — kernel-managed tool letting the agent activate capabilities for the current space:
+- **Exact match** → activate (append to `active_tools`, persist)
+- **Fuzzy match** (capability name or description contains the query string) → activate
+- **No match** → redirect to System space with explanation
+- Silent activation: no broadcast to user, just becomes available going forward
+
+**`_activate_tool_for_space()`** — appends capability name to `space.active_tools`, persists via `state.update_context_space()`. Only called when capability is CONNECTED.
+
 ---
 
 ## Data Structures
@@ -398,7 +463,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `conversations.json` — list of ConversationSummary
 - `entities.json` — list of EntityNode (Phase 2A)
 - `identity_edges.json` — list of IdentityEdge (Phase 2A)
-- `spaces.json` — list of ContextSpace (Phase 2B; daily space auto-created on soul init)
+- `spaces.json` — list of ContextSpace (Phase 2B; daily + system spaces auto-created on soul init)
 - `topic_hints.json` — `{hint_string: count}` for Gate 1 topic accumulation (Phase 2B-v2)
 - `embeddings.json` — map of entry_id → embedding vector (Phase 2A; separate from knowledge.json to avoid bloat)
 
@@ -411,6 +476,8 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 **EntityNode:** id, tenant_id, canonical_name, entity_type (person/organization/place/thing), aliases, relationship_type (client/friend/spouse/etc.), context_space, contact_phone, contact_email, contact_address, contact_website, active, created_at, last_seen.
 
 **IdentityEdge:** source_id, target_id, edge_type (SAME_AS/MAYBE_SAME_AS/ALIAS_OF), confidence, created_at, source. Stored per-tenant in `{tenant_id}/state/identity_edges.json`.
+
+**ContextSpace:** id, tenant_id, name, description, space_type (daily/domain/project/system), status (active/archived), posture, model_preference, is_default, created_at, last_active_at, max_file_size_bytes, max_space_bytes, `active_tools: list[str]` (Phase 3B — capability names explicitly enabled for this space).
 
 **ContractRule:** id, tenant_id, capability, rule_type (must/must_not/preference/escalation), description, active, source (default/user_stated/evolved), context_space (reserved, always None in Phase 1B).
 
@@ -481,6 +548,12 @@ Every tenant gets this directory tree on first contact:
 │           ├── active_document.md # Ledger + Living State
 │           ├── index.md           # Archive index (after rotation)
 │           └── archives/          # Sealed compaction documents
+├── spaces/
+│   └── {space_id}/
+│       └── files/                 # Per-space file storage (Phase 3A)
+│           ├── .manifest.json     # File manifest (name → description, size, timestamps)
+│           ├── {name}.md          # Files written by the agent
+│           └── .deleted/          # Shadow-archived deleted files
 ├── conversations/
 │   └── {conversation_id}.json     # Message history
 ├── events/
@@ -551,6 +624,7 @@ Every "delete" operation is a relocation. Archive paths exist from day one. `Con
 | `kernos-cli create-space <tenant_id> --name X` | Create a new context space manually (Phase 2B; spaces also self-create via Gate 2) |
 | `kernos-cli compaction <tenant_id>` | Per-space compaction state (compaction_number, tokens, ceiling, archives) |
 | `kernos-cli compaction <tenant_id> <space_id>` | Compaction state + first/last 10 lines of active document |
+| `kernos-cli files <tenant_id> <space_id>` | List files in a space with descriptions and sizes (Phase 3A) |
 | `kernos-cli tenants` | All known tenants |
 
 ---
@@ -581,7 +655,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-627 tests across 19 test files.
+747 tests across 21 test files.
 
 | File | What it covers |
 |---|---|
@@ -604,6 +678,8 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_compaction.py | Token adapters, CompactionState round-trip, document parsing, trigger logic, ceiling computation, compact() with mock LLM, rotation + archival, adaptive headroom, headroom estimation, event emission (45 tests) |
 | test_retrieval.py | Quality score ranking, knowledge search, entity traversal + SAME_AS merge, archive search, result formatting, token budget enforcement, foresight/space boosts, NL contract parser, kernel tool routing, template/prompt checks (50 tests) |
 | test_schema_foundation.py | Phase 2.0 schema models |
+| test_files.py | FileService CRUD, manifest tracking, soft delete, text-only enforcement, cross-space isolation, FILE_TOOLS definitions (Phase 3A) |
+| test_tool_scoping.py | CapabilityInfo.universal, _visible_capability_names, get_tools_for_space, build_capability_prompt(space=), active_tools persistence, request_tool (exact/fuzzy/not-installed), LRU exemption, connected capability helpers (36 tests, Phase 3B) |
 
 ---
 
@@ -636,7 +712,7 @@ Both entry points (Discord and FastAPI) follow the same initialization: create s
 
 ---
 
-## What Doesn't Exist Yet (Phase 2)
+## What Doesn't Exist Yet
 
 These are referenced in the architecture but not implemented:
 
@@ -651,5 +727,7 @@ These are referenced in the architecture but not implemented:
 - **Inline annotation** — memory cohort enriches messages with relevant context before the agent sees them
 - **Progressive autonomy** — behavioral contracts evolve from approval patterns (the Covenant Model)
 - **Workspace model** — shared souls for household/business multi-tenant scenarios
+- ~~**Per-space file storage** — agent-managed persistent files per context space~~ **COMPLETE (Phase 3A)** — FileService, four kernel tools (write/read/list/delete_file), soft delete, manifest in Living State
+- ~~**Per-space tool scoping** — MCP capabilities scoped per context space~~ **COMPLETE (Phase 3B)** — active_tools field, universal flag, system space, Gate 2 smart seeding, request_tool meta-tool
 
 The current architecture has seams and reserved fields for all of these. None requires an architectural rewrite — they extend existing interfaces.
