@@ -382,23 +382,29 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Entity context injection:** Known entities for the tenant injected into the Tier 2 extraction prompt for pronoun/coreference resolution (~500 token budget). Helps the LLM identify "she" as Sarah Henderson when that entity already exists.
 
-### Dispatch Interceptor (Phase 3D)
+### Dispatch Interceptor (Phase 3D / 3D-HOTFIX)
 
-**What it does:** Gates write/action tool calls before execution. Reads pass silently. Writes require either an explicit user instruction, a matching covenant rule, or user confirmation. The gate cannot be bypassed by model inference.
+**What it does:** Gates write/action tool calls before execution. Reads pass silently. Writes require either a matching covenant rule or explicit user instruction as judged by Haiku — or an approval token from prior confirmation. The gate cannot be bypassed by model inference. No keyword matching; Haiku is the sole correctness authority.
 
-**File:** `kernos/kernel/reasoning.py` — `GateResult` dataclass, gate methods on `ReasoningService`
+**File:** `kernos/kernel/reasoning.py` — `GateResult`, `ApprovalToken` dataclasses, gate methods on `ReasoningService`
 
-**Effect classification:** `_classify_tool_effect(tool_name, active_space)` → `"read"` (bypass), `"soft_write"` (gate), `"hard_write"` (gate), `"unknown"` (gate as hard_write). Kernel tools have hardcoded classifications. MCP tools use `tool_effects` from `CapabilityInfo`.
+**Effect classification:** `_classify_tool_effect(tool_name, active_space)` → `"read"` (bypass), `"soft_write"` (gate), `"hard_write"` (gate), `"unknown"` (gate). Kernel tools have hardcoded classifications. MCP tools use `tool_effects` from `CapabilityInfo`.
 
 **Four-step authorization:**
-0. **must_not covenant check** — `_has_prohibiting_covenant()`. Prohibitive rules block even explicit instructions. Structured data lookup against `CovenantRule.rule_type == "must_not"`, no LLM. Matches on capability name, tool name, or domain keywords.
-1. **Explicit instruction** — `_explicit_instruction_matches()`. Imperative verb + tool domain in user message. `TOOL_SIGNALS` dict maps tool names to signal phrases. Confirmation signals recognized when conversation shows a previously blocked action.
-2. **Permission override + covenant** — `_check_permission_or_covenant()`. Fast dict lookup on `TenantProfile.permission_overrides`, then one Haiku call checking if any covenant rule authorizes the action (YES/NO/AMBIGUOUS).
-3. **Ask user** — block and surface proposed action via `[SYSTEM] Action blocked` tool_result.
+0. **must_not covenant check** — `_has_prohibiting_covenant()` returns `str | None`. Structured lookup against `CovenantRule.rule_type == "must_not"`, no LLM. Returns the matching rule description (or `None` if no prohibition). Blocks unconditionally — even explicit user instructions cannot override a `must_not` rule.
+1. **Approval token check** — `_validate_approval_token()`. If `_approval_token` key was present in tool input (popped before gate), validate it: single-use, 5-minute TTL, tool name must match, MD5 hash of tool input must match. Allows if valid.
+2. **Permission override** — fast dict lookup on `TenantProfile.permission_overrides`. If the capability is set to `"always-allow"`, allow immediately.
+3. **Haiku authorization** — `complete_simple()` with `prefer_cheap=True`. Prompt includes: user's message, tool name, tool description (from `_get_tool_description()` via MCP manifest), action details, and active covenant rules. Haiku responds with `EXPLICIT` (user directly requested this), `AUTHORIZED` (a covenant rule covers it), or `DENIED`. Parsed with `"EXPLICIT" in answer` / `"AUTHORIZED" in answer` (contains check, not exact match). `max_tokens=64` to prevent truncation.
+
+**When blocked:** `_issue_approval_token()` creates a single-use `ApprovalToken` (token_id: uuid hex[:12], tool_input_hash: md5 hex[:8], 5-minute TTL). Included in `[SYSTEM] Action blocked` tool_result with instructions to re-submit the exact tool call with `_approval_token: '{token_id}'` in the tool input.
+
+**Tool description in prompt:** `_get_tool_description(tool_name)` queries `self._mcp.get_tools()` for the tool's description from the MCP manifest. Passed to Haiku so the gate works correctly for any future MCP tool without configuration changes.
+
+**Reason strings:** `"must_not_block — covenant rule '...' prohibits this"`, `"token_approved"`, `"permission_override"`, `"explicit_instruction"`, `"covenant_authorized"`, `"covenant_ambiguous (N rules evaluated, Haiku response: '...')"`, `"denied — user message does not request this action and no covenant matches"`.
 
 **GateResult:** `allowed: bool`, `reason: str`, `method: str`, `proposed_action: str`. Emitted in `DISPATCH_GATE` events.
 
-**Consolidation:** 3A's `_check_delete_allowed()` removed. `delete_file` signals moved to `TOOL_SIGNALS`. Same signals, same behavior, one code path.
+**Async client:** `ReasoningService` uses `anthropic.AsyncAnthropic` (not `Anthropic`). The sync client calls `time.sleep()` on 429 retries, blocking the asyncio event loop and causing Discord heartbeat failure. The async client is event-loop-safe.
 
 ### File Service (Phase 3A)
 
@@ -743,7 +749,7 @@ Every reasoning call is logged with: model, input tokens, output tokens, estimat
 | **Headroom estimation (Claude Haiku)** | **~$0.001** | **Once per Gate 2 space creation** |
 | **Archive retrieval (Claude Haiku × 2)** | **~$0.002** | **Per remember() call that matches an archive (index lookup + extraction)** |
 | **NL Contract Parser (Claude Haiku)** | **~$0.001** | **Per behavioral instruction detected in Tier 2** |
-| **Dispatch gate covenant check (Claude Haiku)** | **~$0.001** | **Per gated write tool call when no explicit instruction found (Step 2 only)** |
+| **Dispatch gate Haiku check (Claude Haiku)** | **~$0.001** | **Per gated write tool call (Step 3 — sole correctness check; always fires unless must_not blocks or token/override short-circuits)** |
 | Bootstrap consolidation | ~$0.02 | Once per tenant lifetime |
 | Voyage AI embeddings | ~$0.0001 per extraction | Every Tier 2 run (enhanced path only) |
 
@@ -778,7 +784,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_schema_foundation.py | Phase 2.0 schema models |
 | test_files.py | FileService CRUD, manifest tracking, soft delete, text-only enforcement, cross-space isolation, FILE_TOOLS definitions (Phase 3A) |
 | test_tool_scoping.py | CapabilityInfo.universal, _visible_capability_names, get_tools_for_space, build_capability_prompt(space=), active_tools persistence, request_tool (exact/fuzzy/not-installed), LRU exemption, connected capability helpers (36 tests, Phase 3B) |
-| test_dispatch_gate.py | GateResult, tool effect classification, explicit instruction matching, must_not covenant blocking, covenant authorization (YES/NO/AMBIGUOUS), permission overrides, gate integration, read bypass, unknown tool handling, delete_file consolidation, confirmation signals (55 tests, Phase 3D) |
+| test_dispatch_gate.py | GateResult, ApprovalToken, tool effect classification, Haiku authorization (EXPLICIT/AUTHORIZED/DENIED), must_not covenant blocking, approval token lifecycle (issue/validate/single-use/TTL/hash), permission overrides, gate integration, read bypass, unknown tool handling, no fast path / no TOOL_SIGNALS, Spanish instruction handling, tool description in prompt (Phase 3D / 3D-HOTFIX) |
 | test_mcp_install.py | SecureInputState lifecycle, credential write/resolve, connect_one/disconnect_one, _maybe_load_mcp_config startup merge, mcp-servers.json persistence, tool.installed/uninstalled events, SUPPRESSED status, post-connect doc refresh (SPEC-3B+) |
 
 ---
@@ -820,7 +826,7 @@ These are referenced in the architecture but not implemented:
 - **Awareness evaluator** — event-driven proactive notification system
 - **Consolidation daemon** — background pattern extraction and insight generation
 - ~~**Context space compaction** — structured history preservation replacing naive truncation~~ **COMPLETE (Phase 2C)** — two-layer compaction (Ledger + Living State), token tracking, domain-adaptive editorial judgment, rotation + archival
-- ~~**Dispatch Interceptor** — infrastructure-level behavioral contract enforcement~~ **COMPLETE (Phase 3D)** — gate in tool-use loop, must_not covenant pre-check, explicit instruction fast path, permission overrides, covenant authorization via Haiku, delete_file consolidated
+- ~~**Dispatch Interceptor** — infrastructure-level behavioral contract enforcement~~ **COMPLETE (Phase 3D / 3D-HOTFIX)** — gate in tool-use loop, must_not covenant pre-check, approval token (single-use), permission overrides, Haiku as sole correctness authority (EXPLICIT/AUTHORIZED/DENIED), tool description from MCP manifest, async Anthropic client, delete_file consolidated
 - **Multi-model routing** — Reasoning Service routes to different models by task type
 - ~~**Entity resolution** — knowledge graph with identity linking~~ **COMPLETE (Phase 2A)**
 - **Memory decay** — FSRS-based temporal confidence with lifecycle archetypes

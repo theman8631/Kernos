@@ -328,40 +328,22 @@ class TestFileToolsConstant:
 
 
 # ---------------------------------------------------------------------------
-# Delete principle enforcement (now via dispatch gate _explicit_instruction_matches)
+# Delete gate — enforcement now via Haiku (no keyword fast path)
 # ---------------------------------------------------------------------------
 
 
-class TestDeletePrincipleEnforcement:
-    def test_delete_allowed_with_delete_signal(self):
+class TestDeleteGateEnforcement:
+    def test_delete_file_classified_as_soft_write(self):
+        """delete_file is gated as soft_write — Haiku authorizes based on user message."""
         from kernos.kernel.reasoning import ReasoningService
         svc = ReasoningService.__new__(ReasoningService)
-        assert svc._explicit_instruction_matches("delete_file", {}, "delete old-draft.md") is True
+        svc._registry = None
+        assert svc._classify_tool_effect("delete_file", None) == "soft_write"
 
-    def test_delete_allowed_with_remove_signal(self):
+    def test_no_explicit_instruction_matches_method(self):
+        """_explicit_instruction_matches removed — Haiku is the sole authority."""
         from kernos.kernel.reasoning import ReasoningService
-        svc = ReasoningService.__new__(ReasoningService)
-        assert svc._explicit_instruction_matches("delete_file", {}, "please remove the file") is True
-
-    def test_delete_allowed_with_get_rid_of(self):
-        from kernos.kernel.reasoning import ReasoningService
-        svc = ReasoningService.__new__(ReasoningService)
-        assert svc._explicit_instruction_matches("delete_file", {}, "get rid of the old notes") is True
-
-    def test_delete_blocked_with_no_signal(self):
-        from kernos.kernel.reasoning import ReasoningService
-        svc = ReasoningService.__new__(ReasoningService)
-        assert svc._explicit_instruction_matches("delete_file", {}, "what is the weather today?") is False
-
-    def test_delete_blocked_with_innocent_message(self):
-        from kernos.kernel.reasoning import ReasoningService
-        svc = ReasoningService.__new__(ReasoningService)
-        assert svc._explicit_instruction_matches("delete_file", {}, "update my campaign notes") is False
-
-    def test_delete_allowed_case_insensitive(self):
-        from kernos.kernel.reasoning import ReasoningService
-        svc = ReasoningService.__new__(ReasoningService)
-        assert svc._explicit_instruction_matches("delete_file", {}, "DELETE the file") is True
+        assert not hasattr(ReasoningService, "_explicit_instruction_matches")
 
 
 # ---------------------------------------------------------------------------
@@ -390,14 +372,6 @@ class TestKernelToolRoutingFiles:
         # FileService is wired in — write goes to the actual file system
         result = await svc._files.write_file(TENANT, SPACE_A, "test.md", "hello", "desc")
         assert "Created" in result
-
-    async def test_delete_blocked_without_user_request(self, tmp_path):
-        svc, _ = self._make_reasoning(tmp_path)
-        assert not svc._explicit_instruction_matches("delete_file", {}, "what are my files?")
-
-    async def test_delete_allowed_with_user_request(self, tmp_path):
-        svc, _ = self._make_reasoning(tmp_path)
-        assert svc._explicit_instruction_matches("delete_file", {}, "delete campaign-notes.md")
 
     def test_kernel_tools_set_contains_all_file_tools(self):
         from kernos.kernel.reasoning import ReasoningService

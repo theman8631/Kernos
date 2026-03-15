@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** SPEC-3B+ COMPLETE — MCP Installation live-verified (13/13 steps). Secure credential handoff ("secure api" flow), CapabilityStatus.SUPPRESSED, connect_one/disconnect_one, mcp-servers.json persistence, startup merge, tool.installed/uninstalled events. 849 tests.
+**Status:** 3D HOTFIX COMPLETE — Dispatch gate redesigned: async Anthropic client (FIX 1), Haiku as sole authority with no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), detailed failure reasons + tool description in Haiku prompt (FIX 4). 851 tests.
 **Owner:** Founder / Architect
 **Action:** Decide next Phase 3 spec.
-**Tests:** 849
+**Tests:** 851
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -24,6 +24,7 @@
 | 3B | Per-Space Tool Scoping | COMPLETE | 2026-03-15 | System space auto-provisioned, active_tools on ContextSpace, universal flag on capabilities, space-aware build_capability_prompt() + get_tools_for_space(), Gate 2 seeding, request_tool kernel meta-tool, LRU exemption. 36 new tests. 747 total. |
 | 3B+ | MCP Installation | COMPLETE | 2026-03-15 | Secure "secure api" credential handoff, CapabilityStatus.SUPPRESSED, connect_one/disconnect_one, mcp-servers.json in system space, startup merge, tool.installed/uninstalled events, requires_web_interface flag. 47 new tests. 849 total. |
 | 3D | Dispatch Interceptor | COMPLETE | 2026-03-15 | Gate in tool-use loop, must_not covenants block before fast path, explicit instruction fast path, permission overrides + covenant authorization (Haiku), DISPATCH_GATE events, delete_file consolidated into universal gate. 55 new tests. 802 total. |
+| 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in Haiku prompt + detailed failure reasons (FIX 4). 851 tests. |
 
 ---
 
@@ -104,6 +105,21 @@ SPEC-3A complete. No active spec. Founder to decide next Phase 3 spec.
 ---
 
 ## Decisions Made
+
+### 2026-03-15: 3D HOTFIX — Dispatch Gate Redesign
+
+Four critical fixes shipped together after live testing revealed the gate failed on natural-language requests:
+
+- **FIX 1 — Async Anthropic client:** `anthropic.Anthropic` → `anthropic.AsyncAnthropic`. Sync client calls `time.sleep()` on 429 retries, blocking the asyncio event loop and causing Discord heartbeat failure → session invalidation.
+
+- **FIX 2 — Haiku as sole authority:** Removed the keyword fast path entirely (`_TOOL_SIGNALS`, `_explicit_instruction_matches`). The gate now has three steps: (0) must_not covenant check, (1) approval token check, (2) permission override, (3) Haiku answers EXPLICIT/AUTHORIZED/DENIED. No keyword list — Haiku handles all languages and natural-language phrasings. Tool description from MCP manifest passed to Haiku so the gate works for any future tool without configuration. max_tokens raised from 16 to 64 (was causing truncation).
+
+- **FIX 3 — ApprovalToken:** When the gate blocks, an `ApprovalToken` (UUID hex[:12], MD5 hash of tool_input) is issued and included in the [SYSTEM] message. Agent re-submits with `_approval_token: '{token_id}'` after user confirms. Token is single-use, 5-minute TTL, input-hash-verified.
+
+- **FIX 4 — Transparent failure reasons:** `must_not_block` includes rule description. DENIED with rules: `covenant_ambiguous (N rules evaluated, Haiku response: '...')`. DENIED with no rules: `denied — user message does not request this action and no covenant matches`.
+
+- **Modified files:** `kernos/kernel/reasoning.py`, `tests/test_dispatch_gate.py`, `tests/test_reasoning.py`, `tests/test_app.py`, `tests/test_files.py`
+- **Tests:** 851 total passing.
 
 ### 2026-03-15: SPEC-3B — Per-Space Tool Scoping — COMPLETE
 

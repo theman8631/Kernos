@@ -3,9 +3,11 @@
 The handler calls ``ReasoningService.reason()`` instead of importing any provider SDK.
 ReasoningService owns the full tool-use loop, event emission, and audit logging.
 """
+import hashlib
 import json
 import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -122,7 +124,7 @@ class AnthropicProvider(Provider):
     """Wraps the Anthropic SDK. Maps SDK exceptions to KERNOS exceptions."""
 
     def __init__(self, api_key: str) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.AsyncAnthropic(api_key=api_key)
 
     async def complete(
         self,
@@ -147,7 +149,7 @@ class AnthropicProvider(Provider):
             }
 
         try:
-            response = self._client.messages.create(**create_kwargs)
+            response = await self._client.messages.create(**create_kwargs)
         except anthropic.APITimeoutError as exc:
             raise ReasoningTimeoutError(str(exc)) from exc
         except anthropic.APIConnectionError as exc:
@@ -208,6 +210,21 @@ class GateResult:
                    # "covenant_denied", "covenant_ambiguous", "no_covenants", "no_authorization"
     method: str    # "fast_path", "always_allow", "haiku_check", "ask_user", "none"
     proposed_action: str = ""  # Human-readable description of what was blocked
+
+
+@dataclass
+class ApprovalToken:
+    """Single-use token issued when the dispatch gate blocks an action.
+
+    The agent re-submits the tool call with ``_approval_token: '{token_id}'``
+    in the tool input to bypass the gate after explicit user confirmation.
+    """
+
+    token_id: str          # uuid hex[:12]
+    tool_name: str
+    tool_input_hash: str   # md5 hex[:8] of tool_input (after popping _approval_token)
+    issued_at: datetime
+    used: bool = False
 
 
 @dataclass
@@ -272,6 +289,7 @@ class ReasoningService:
         self._files = None      # Set by handler after construction
         self._registry = None   # Set by handler after construction
         self._state = None      # Set by handler after construction
+        self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
 
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
@@ -331,41 +349,6 @@ class ReasoningService:
     # Dispatch Gate (SPEC-3D)
     # ---------------------------------------------------------------------------
 
-    _TOOL_SIGNALS: dict[str, list[str]] = {
-        # Calendar writes
-        "create-event": ["schedule", "book", "set up", "add to calendar", "make an appointment",
-                         "create event", "put on my calendar", "block time", "add meeting"],
-        "update-event": ["reschedule", "move", "change", "update event", "push back", "move to"],
-        "delete-event": ["cancel", "remove event", "delete event", "take off calendar"],
-        # Email writes
-        "send-email": ["send", "email", "write to", "reply to", "forward"],
-        "delete-email": ["delete email", "trash", "remove email"],
-        # File writes (kernel tools)
-        "write_file": ["create file", "write", "save", "draft"],
-        "delete_file": ["delete", "remove", "get rid of", "trash", "clean up",
-                        "clear out", "throw away", "discard", "drop", "nuke", "wipe", "erase"],
-    }
-
-    _CONFIRMATION_SIGNALS: list[str] = [
-        "yes", "go ahead", "do it", "proceed", "confirmed", "approve",
-        "that's fine", "ok", "sure", "yep", "yeah",
-    ]
-
-    # Phrases in an assistant message that indicate a previously blocked action
-    _BLOCKED_CONTEXT_INDICATORS: list[str] = [
-        "don't have permission",
-        "need your permission",
-        "should i go ahead",
-        "should i proceed",
-        "need explicit",
-        "haven't authorized",
-        "would you like me to",
-        "waiting for your",
-        "permission before",
-        "your approval",
-        "explicit instruction",
-    ]
-
     # Domain keywords for matching must_not covenants against tool names
     _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "create-event": ["calendar", "event", "schedule", "meeting", "appointment"],
@@ -383,15 +366,17 @@ class ReasoningService:
 
     async def _has_prohibiting_covenant(
         self, tool_name: str, tenant_id: str, active_space_id: str,
-    ) -> bool:
+    ) -> str | None:
         """Check if any must_not covenant rule prohibits this tool call.
 
         must_not rules override EVERYTHING — including explicit instructions.
         This runs BEFORE the fast path to prevent bypass.
         No LLM call — structured data lookup only.
+
+        Returns the matching rule's description if prohibited, None otherwise.
         """
         if not self._state:
-            return False
+            return None
         try:
             rules = await self._state.query_covenant_rules(
                 tenant_id,
@@ -400,7 +385,7 @@ class ReasoningService:
             )
         except Exception as exc:
             logger.warning("Gate: must_not covenant query failed: %s", exc)
-            return False
+            return None
 
         cap_name = self._get_capability_for_tool(tool_name)
         for rule in rules:
@@ -409,15 +394,15 @@ class ReasoningService:
             desc_lower = rule.description.lower()
             # Match on capability name
             if cap_name and cap_name.lower() in desc_lower:
-                return True
+                return rule.description
             # Match on tool name
             if tool_name.lower() in desc_lower:
-                return True
+                return rule.description
             # Match on domain keywords
             domain_keywords = self._get_domain_keywords(tool_name)
             if any(kw in desc_lower for kw in domain_keywords):
-                return True
-        return False
+                return rule.description
+        return None
 
     def _classify_tool_effect(self, tool_name: str, active_space: Any) -> str:
         """Classify a tool call's effect level.
@@ -455,45 +440,16 @@ class ReasoningService:
                 return cap.name
         return None
 
-    def _explicit_instruction_matches(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        user_message: str,
-        messages: list[dict] | None = None,
-    ) -> bool:
-        """Check if the user's current message directly authorizes this tool call.
-
-        Step 1 fast path — no LLM call. Checks:
-        1. Tool-specific instruction signals (imperative verb + domain)
-        2. Confirmation signals when context shows a previously blocked action
-        """
-        msg_lower = user_message.lower()
-
-        # Tool-specific signals
-        signals = self._TOOL_SIGNALS.get(tool_name, [])
-        if any(signal in msg_lower for signal in signals):
-            return True
-
-        # Universal confirmation: user confirms a previously blocked action
-        if messages and any(signal in msg_lower for signal in self._CONFIRMATION_SIGNALS):
-            # Look for the last assistant message in the conversation
-            for msg in reversed(messages[-6:]):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        # Content blocks
-                        content = " ".join(
-                            b.get("text", "") if isinstance(b, dict) else ""
-                            for b in content
-                        )
-                    if isinstance(content, str):
-                        content_lower = content.lower()
-                        if any(ind in content_lower for ind in self._BLOCKED_CONTEXT_INDICATORS):
-                            return True
-                    break  # Only check the most recent assistant message
-
-        return False
+    def _get_tool_description(self, tool_name: str) -> str:
+        """Return the tool's description from the MCP manifest, or empty string."""
+        if self._mcp:
+            try:
+                for tool in self._mcp.get_tools():
+                    if tool.get("name") == tool_name:
+                        return tool.get("description", "")
+            except Exception:
+                pass
+        return ""
 
     def _describe_action(self, tool_name: str, tool_input: dict) -> str:
         """Generate a human-readable description of a proposed tool call."""
@@ -522,83 +478,6 @@ class ReasoningService:
             return f"Write/update file: {name}"
         return f"Execute {tool_name} with {json.dumps(tool_input)[:200]}"
 
-    async def _check_permission_or_covenant(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        tenant_id: str,
-        active_space_id: str,
-    ) -> GateResult:
-        """Step 2: Permission override check (fast) then covenant authorization (Haiku).
-
-        Returns GateResult(allowed=True) if authorized, else False.
-        """
-        # Permission override — fast dict lookup
-        cap_name = self._get_capability_for_tool(tool_name)
-        if cap_name and self._state:
-            try:
-                tenant = await self._state.get_tenant_profile(tenant_id)
-                if tenant and tenant.permission_overrides:
-                    permission = tenant.permission_overrides.get(cap_name)
-                    if permission == "always-allow":
-                        return GateResult(
-                            allowed=True, reason="permission_override",
-                            method="always_allow",
-                        )
-            except Exception as exc:
-                logger.warning("Gate: permission check failed: %s", exc)
-
-        # Covenant rules — one Haiku call
-        if not self._state:
-            return GateResult(allowed=False, reason="no_covenants", method="none")
-
-        try:
-            rules = await self._state.query_covenant_rules(
-                tenant_id,
-                context_space_scope=[active_space_id, None],
-                active_only=True,
-            )
-        except Exception as exc:
-            logger.warning("Gate: covenant query failed: %s", exc)
-            return GateResult(allowed=False, reason="no_covenants", method="none")
-
-        if not rules:
-            return GateResult(allowed=False, reason="no_covenants", method="none")
-
-        action_desc = self._describe_action(tool_name, tool_input)
-        rules_text = "\n".join(
-            f"- [{r.rule_type}] {r.description} (scope: {r.context_space or 'global'})"
-            for r in rules
-        )
-
-        try:
-            result = await self.complete_simple(
-                system_prompt=(
-                    "You are checking whether a proposed agent action is authorized by "
-                    "any of the user's standing rules (covenants). "
-                    "Answer ONLY with: YES, NO, or AMBIGUOUS.\n"
-                    "YES = a rule explicitly covers this action.\n"
-                    "NO = no rule covers this action.\n"
-                    "AMBIGUOUS = a rule might cover this but the scope is unclear."
-                ),
-                user_content=(
-                    f"Proposed action: {action_desc}\n\n"
-                    f"Active covenant rules:\n{rules_text}"
-                ),
-                max_tokens=16,
-                prefer_cheap=True,
-            )
-        except Exception as exc:
-            logger.warning("Gate: covenant Haiku call failed: %s", exc)
-            return GateResult(allowed=False, reason="no_covenants", method="none")
-
-        answer = result.strip().upper()
-        if answer == "YES":
-            return GateResult(allowed=True, reason="covenant_authorized", method="haiku_check")
-
-        reason = "covenant_denied" if answer == "NO" else "covenant_ambiguous"
-        return GateResult(allowed=False, reason=reason, method="haiku_check")
-
     async def _gate_tool_call(
         self,
         tool_name: str,
@@ -608,42 +487,154 @@ class ReasoningService:
         tenant_id: str,
         active_space_id: str,
         messages: list[dict] | None = None,
+        approval_token_id: str | None = None,
     ) -> GateResult:
-        """Four-step authorization for write tool calls.
+        """Authorization gate for write tool calls.
 
-        Step 0: must_not covenant check — prohibitive rules block even explicit instructions
-        Step 1: Explicit instruction in current message (fast path, no LLM)
-        Step 2: Permission override or covenant authorization (one Haiku call)
-        Step 3: Ask user — block and surface proposed action
+        Step 0: must_not covenant check (structured lookup, no LLM)
+        Step 1: Approval token check (single-use token from prior blocked call)
+        Step 2: Permission override (always-allow setting)
+        Step 3: Haiku authorization — the sole correctness check (EXPLICIT/AUTHORIZED/DENIED)
         """
         # Step 0: must_not covenants override everything (no LLM — structured lookup)
-        if await self._has_prohibiting_covenant(tool_name, tenant_id, active_space_id):
+        prohibited_rule = await self._has_prohibiting_covenant(tool_name, tenant_id, active_space_id)
+        if prohibited_rule is not None:
             return GateResult(
                 allowed=False,
-                reason="covenant_prohibited",
+                reason=f"must_not_block — covenant rule '{prohibited_rule}' prohibits this",
                 method="must_not_block",
                 proposed_action=self._describe_action(tool_name, tool_input),
             )
 
-        # Step 1: Explicit instruction (fast path)
-        if self._explicit_instruction_matches(tool_name, tool_input, user_message, messages):
-            return GateResult(allowed=True, reason="explicit_instruction", method="fast_path")
+        # Step 1: Approval token check (user confirmed this specific action previously)
+        if approval_token_id and self._validate_approval_token(
+            approval_token_id, tool_name, tool_input
+        ):
+            logger.info("GATE: token_validated tool=%s token=%s", tool_name, approval_token_id)
+            return GateResult(allowed=True, reason="token_approved", method="token_check")
 
-        # Step 2: Permission override or covenant
-        auth = await self._check_permission_or_covenant(
-            tool_name, tool_input, tenant_id, active_space_id,
-        )
-        if auth.allowed:
-            return auth
+        # Step 2: Permission override (always-allow setting — fast lookup, no LLM)
+        cap_name = self._get_capability_for_tool(tool_name)
+        if cap_name and self._state:
+            try:
+                tenant = await self._state.get_tenant_profile(tenant_id)
+                if tenant and tenant.permission_overrides:
+                    if tenant.permission_overrides.get(cap_name) == "always-allow":
+                        return GateResult(
+                            allowed=True, reason="permission_override", method="always_allow",
+                        )
+            except Exception as exc:
+                logger.warning("Gate: permission check failed: %s", exc)
 
-        # Step 3: Block and ask user — preserve covenant reason if available
-        reason = auth.reason if auth.reason != "no_covenants" else "no_authorization"
+        # Step 3: Haiku is the sole correctness check.
+        # Passes tool description from MCP manifest so gate works for any future tool.
+        rules_text = "No standing covenant rules."
+        rules_count = 0
+        if self._state:
+            try:
+                rules = await self._state.query_covenant_rules(
+                    tenant_id,
+                    context_space_scope=[active_space_id, None],
+                    active_only=True,
+                )
+                if rules:
+                    rules_count = len(rules)
+                    rules_text = "\n".join(
+                        f"- [{r.rule_type}] {r.description} (scope: {r.context_space or 'global'})"
+                        for r in rules
+                    )
+            except Exception as exc:
+                logger.warning("Gate: covenant query failed: %s", exc)
+
+        action_desc = self._describe_action(tool_name, tool_input)
+        tool_description = self._get_tool_description(tool_name)
+        raw = ""
+        try:
+            raw = await self.complete_simple(
+                system_prompt=(
+                    "You are checking whether a proposed agent action is authorized. "
+                    "Consider: (1) the user's current message, and (2) any standing covenant rules. "
+                    "Answer ONLY with one word:\n"
+                    "EXPLICIT — the user directly asked for this action in their message\n"
+                    "AUTHORIZED — a covenant rule explicitly covers this action\n"
+                    "DENIED — neither the user's message nor any rule authorizes this"
+                ),
+                user_content=(
+                    f"User's message: {user_message}\n\n"
+                    f"Proposed action: {tool_name}\n"
+                    f"Tool description: {tool_description}\n"
+                    f"Action details: {action_desc}\n\n"
+                    f"Active covenant rules:\n{rules_text}"
+                ),
+                max_tokens=64,
+                prefer_cheap=True,
+            )
+        except Exception as exc:
+            logger.warning("Gate: Haiku authorization call failed: %s", exc)
+
+        answer = raw.strip().upper()
+        if "EXPLICIT" in answer:
+            return GateResult(allowed=True, reason="explicit_instruction", method="haiku_check")
+        if "AUTHORIZED" in answer:
+            return GateResult(allowed=True, reason="covenant_authorized", method="haiku_check")
+
+        # Blocked — include detailed reason
+        if rules_count > 0:
+            reason = (
+                f"covenant_ambiguous ({rules_count} rules evaluated, "
+                f"Haiku response: '{raw.strip()}')"
+            )
+        else:
+            reason = (
+                f"denied — user message does not request this action and no covenant matches"
+            )
         return GateResult(
             allowed=False,
             reason=reason,
             method="ask_user",
-            proposed_action=self._describe_action(tool_name, tool_input),
+            proposed_action=action_desc,
         )
+
+    def _issue_approval_token(self, tool_name: str, tool_input: dict) -> ApprovalToken:
+        """Issue a single-use approval token for a blocked tool call."""
+        token_id = uuid.uuid4().hex[:12]
+        input_hash = hashlib.md5(
+            json.dumps(tool_input, sort_keys=True).encode()
+        ).hexdigest()[:8]
+        token = ApprovalToken(
+            token_id=token_id,
+            tool_name=tool_name,
+            tool_input_hash=input_hash,
+            issued_at=datetime.now(timezone.utc),
+        )
+        self._approval_tokens[token_id] = token
+        return token
+
+    def _validate_approval_token(
+        self, token_id: str, tool_name: str, tool_input: dict
+    ) -> bool:
+        """Validate an approval token. Marks it used on success.
+
+        Returns True only if the token exists, is unused, is < 5 minutes old,
+        matches the tool name, and the tool_input hash matches.
+        """
+        token = self._approval_tokens.get(token_id)
+        if not token:
+            return False
+        if token.used:
+            return False
+        if token.tool_name != tool_name:
+            return False
+        age_seconds = (datetime.now(timezone.utc) - token.issued_at).total_seconds()
+        if age_seconds > 300:  # 5-minute TTL
+            return False
+        input_hash = hashlib.md5(
+            json.dumps(tool_input, sort_keys=True).encode()
+        ).hexdigest()[:8]
+        if token.tool_input_hash != input_hash:
+            return False
+        token.used = True
+        return True
 
     async def _handle_request_tool(
         self,
@@ -802,14 +793,19 @@ class ReasoningService:
                     iterations, block.name, block.name in self._KERNEL_TOOLS,
                 )
 
+                # Extract and clean tool_input — pop _approval_token before gate or exec
+                tool_input = dict(block.input or {})
+                approval_token_id = tool_input.pop("_approval_token", None)
+
                 # Dispatch Gate: classify and check write tools before execution
                 tool_effect = self._classify_tool_effect(block.name, request.active_space)
                 if tool_effect in ("soft_write", "hard_write", "unknown"):
                     gate_result = await self._gate_tool_call(
-                        block.name, block.input or {}, tool_effect,
+                        block.name, tool_input, tool_effect,
                         request.input_text, request.tenant_id,
                         request.active_space_id,
                         messages=request.messages,
+                        approval_token_id=approval_token_id,
                     )
 
                     try:
@@ -836,15 +832,17 @@ class ReasoningService:
                     )
 
                     if not gate_result.allowed:
+                        token = self._issue_approval_token(block.name, tool_input)
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
                             "content": (
                                 f"[SYSTEM] Action blocked by dispatch gate. "
                                 f"Proposed: {gate_result.proposed_action}. "
-                                f"No explicit instruction or standing rule authorizes this. "
-                                f"Ask the user for permission before proceeding. "
-                                f"If they confirm, you may offer to create a standing rule."
+                                f"Reason: {gate_result.reason}. "
+                                f"Approval token: {token.token_id}. "
+                                f"If the user confirms, re-submit this exact tool call with "
+                                f"_approval_token: '{token.token_id}' in the tool input."
                             ),
                         })
                         continue
@@ -858,7 +856,7 @@ class ReasoningService:
                         "reasoning_service",
                         payload={
                             "tool_name": block.name,
-                            "tool_input": block.input,
+                            "tool_input": tool_input,
                             "conversation_id": request.conversation_id,
                             "reasoning_event_id": rr_event.id if rr_event else None,
                         },
@@ -874,7 +872,7 @@ class ReasoningService:
                         "tenant_id": request.tenant_id,
                         "conversation_id": request.conversation_id,
                         "tool_name": block.name,
-                        "tool_input": block.input,
+                        "tool_input": tool_input,
                     },
                 )
 
@@ -885,7 +883,7 @@ class ReasoningService:
                         "KERNEL_TOOL name=%s space=%s",
                         block.name, request.active_space_id,
                     )
-                    tool_args = block.input or {}
+                    tool_args = tool_input
                     if block.name == "remember":
                         if self._retrieval:
                             try:
@@ -962,7 +960,7 @@ class ReasoningService:
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:
-                    result = await self._mcp.call_tool(block.name, block.input)
+                    result = await self._mcp.call_tool(block.name, tool_input)
                 tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
 
                 is_error = result.startswith("Tool error:") or result.startswith(

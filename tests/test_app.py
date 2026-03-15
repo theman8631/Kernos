@@ -30,8 +30,9 @@ def tc():
     """TestClient with Anthropic mocked and persistence using a temp directory."""
     tmpdir = tempfile.mkdtemp()
     try:
-        with patch("kernos.kernel.reasoning.anthropic.Anthropic") as mock_cls:
+        with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic") as mock_cls:
             mock_anthropic = MagicMock()
+            mock_anthropic.messages.create = AsyncMock()
             mock_cls.return_value = mock_anthropic
             with patch.dict(os.environ, {"KERNOS_DATA_DIR": tmpdir}):
                 with TestClient(app) as client:
@@ -49,7 +50,7 @@ def test_health(tc):
 
 def test_sms_inbound_returns_twiml(tc):
     client, mock_anthropic = tc
-    mock_anthropic.messages.create.return_value = _mock_text_response("Hi there!")
+    mock_anthropic.messages.create = AsyncMock(return_value=_mock_text_response("Hi there!"))
 
     response = client.post(
         "/sms/inbound",
@@ -70,7 +71,7 @@ def test_sms_inbound_returns_twiml(tc):
 def test_sms_inbound_error_returns_friendly_twiml(tc):
     """If the handler raises unexpectedly, the app returns friendly TwiML (not 500)."""
     client, mock_anthropic = tc
-    mock_anthropic.messages.create.side_effect = Exception("kaboom")
+    mock_anthropic.messages.create = AsyncMock(side_effect=Exception("kaboom"))
 
     response = client.post(
         "/sms/inbound",

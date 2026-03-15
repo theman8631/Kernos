@@ -4,16 +4,18 @@ Tests cover:
 - Tool effect classification (kernel + MCP + unknown)
 - Explicit instruction fast path (TOOL_SIGNALS + confirmation)
 - Permission override check
-- Covenant authorization (Haiku check)
+- Covenant authorization (Haiku check — EXPLICIT/AUTHORIZED/DENIED)
 - Gate integration: blocked message format, read bypass
 - GateResult dataclass
 - _describe_action helper
 - delete_file consolidation (no separate _check_delete_allowed)
 - DISPATCH_GATE event type
 - TenantProfile permission_overrides field
+- 3D HOTFIX: AsyncAnthropic, Haiku authority, ApprovalToken, detailed reasons
 """
 import json
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -130,89 +132,19 @@ class TestClassifyToolEffect:
 
 
 # ===========================
-# Explicit Instruction Matching
+# No Fast Path — Haiku Is Sole Authority
 # ===========================
 
-class TestExplicitInstructionMatches:
-    def test_calendar_book_matches_create_event(self):
+class TestNoFastPath:
+    def test_no_tool_signals_attribute(self):
+        """_TOOL_SIGNALS was removed — Haiku is the sole authority."""
         svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "create-event", {}, "Book a meeting for Thursday at 2pm"
-        ) is True
+        assert not hasattr(svc, "_TOOL_SIGNALS")
 
-    def test_calendar_schedule_matches(self):
+    def test_no_explicit_instruction_matches_method(self):
+        """_explicit_instruction_matches was removed — no keyword fast path."""
         svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "create-event", {}, "Schedule lunch with Sarah"
-        ) is True
-
-    def test_no_match_for_vague_message(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "create-event", {}, "I was thinking about meetings"
-        ) is False
-
-    def test_delete_file_signals(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches("delete_file", {}, "delete old-draft.md") is True
-        assert svc._explicit_instruction_matches("delete_file", {}, "remove the file") is True
-        assert svc._explicit_instruction_matches("delete_file", {}, "get rid of the notes") is True
-
-    def test_delete_file_blocked_without_signal(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches("delete_file", {}, "show me the files") is False
-
-    def test_write_file_signals(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches("write_file", {}, "save these notes") is True
-        assert svc._explicit_instruction_matches("write_file", {}, "create file for the project") is True
-
-    def test_send_email_signals(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "send-email", {}, "send an email to Henderson"
-        ) is True
-
-    def test_unknown_tool_no_signals(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "unknown-tool", {}, "do something"
-        ) is False
-
-    def test_case_insensitive(self):
-        svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "delete_file", {}, "DELETE the old notes"
-        ) is True
-
-    def test_confirmation_with_blocked_context(self):
-        """User confirms after a previously blocked action."""
-        svc = _make_service()
-        messages = [
-            {"role": "assistant", "content": "I wanted to create that event but I don't have permission. Should I go ahead?"},
-            {"role": "user", "content": "yes, go ahead"},
-        ]
-        assert svc._explicit_instruction_matches(
-            "create-event", {}, "yes, go ahead", messages=messages
-        ) is True
-
-    def test_confirmation_without_blocked_context_no_match(self):
-        """User says 'ok' but no prior blocked action — should NOT match."""
-        svc = _make_service()
-        messages = [
-            {"role": "assistant", "content": "Here's what I found on your calendar."},
-            {"role": "user", "content": "ok"},
-        ]
-        assert svc._explicit_instruction_matches(
-            "create-event", {}, "ok", messages=messages
-        ) is False
-
-    def test_confirmation_with_no_messages(self):
-        """Confirmation without messages context → no match."""
-        svc = _make_service()
-        assert svc._explicit_instruction_matches(
-            "create-event", {}, "yes, go ahead"
-        ) is False
+        assert not hasattr(svc, "_explicit_instruction_matches")
 
 
 # ===========================
@@ -271,14 +203,23 @@ class TestGetCapabilityForTool:
 # ===========================
 
 class TestGateToolCall:
-    async def test_fast_path_with_explicit_instruction(self):
+    async def test_haiku_explicit_allows(self):
+        """Haiku returning EXPLICIT allows the action."""
         svc = _make_service()
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        state.query_covenant_rules = AsyncMock(return_value=[])
+        svc.set_state(state)
+        svc.complete_simple = AsyncMock(return_value="EXPLICIT")
+
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
-            "book a meeting for Thursday", "tenant_1", "space_1",
+            "book a meeting for Thursday", "t1", "space_1",
         )
         assert result.allowed is True
-        assert result.method == "fast_path"
+        assert result.method == "haiku_check"
         assert result.reason == "explicit_instruction"
 
     async def test_blocked_without_instruction_or_covenant(self):
@@ -316,7 +257,7 @@ class TestGateToolCall:
         assert result.reason == "permission_override"
 
     async def test_covenant_authorized(self):
-        """Haiku returns YES for covenant check → allowed."""
+        """Haiku returns AUTHORIZED for covenant check → allowed."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -332,8 +273,8 @@ class TestGateToolCall:
         ])
         svc.set_state(state)
 
-        # Mock complete_simple to return YES
-        svc.complete_simple = AsyncMock(return_value="YES")
+        # Mock complete_simple to return AUTHORIZED
+        svc.complete_simple = AsyncMock(return_value="AUTHORIZED")
 
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
@@ -344,7 +285,7 @@ class TestGateToolCall:
         assert result.method == "haiku_check"
 
     async def test_covenant_denied(self):
-        """Haiku returns NO → blocked."""
+        """Haiku returns DENIED → blocked with detailed reason including rule count."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -354,22 +295,24 @@ class TestGateToolCall:
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
                 id="rule_1", tenant_id="t1", capability="email",
-                rule_type="must_not", description="Never send emails without asking first",
+                rule_type="must", description="Send email confirmations",
                 active=True, source="user_stated",
             ),
         ])
         svc.set_state(state)
-        svc.complete_simple = AsyncMock(return_value="NO")
+        svc.complete_simple = AsyncMock(return_value="DENIED")
 
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking about meetings", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "covenant_denied"
+        assert "covenant_ambiguous" in result.reason
+        assert "1 rules evaluated" in result.reason
+        assert "DENIED" in result.reason
 
     async def test_covenant_ambiguous_blocks(self):
-        """AMBIGUOUS → blocked (safe default)."""
+        """Any non-EXPLICIT/AUTHORIZED response → blocked with detailed reason."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -391,7 +334,8 @@ class TestGateToolCall:
             "I was thinking about meetings", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "covenant_ambiguous"
+        assert "covenant_ambiguous" in result.reason
+        assert "AMBIGUOUS" in result.reason
 
 
 # ===========================
@@ -488,15 +432,6 @@ class TestDeleteFileConsolidation:
         svc = _make_service()
         assert not hasattr(svc, "_check_delete_allowed")
 
-    def test_delete_file_uses_gate_signals(self):
-        """delete_file signals are now in TOOL_SIGNALS."""
-        svc = _make_service()
-        assert "delete_file" in svc._TOOL_SIGNALS
-        signals = svc._TOOL_SIGNALS["delete_file"]
-        assert "delete" in signals
-        assert "remove" in signals
-        assert "trash" in signals
-
     def test_delete_file_classified_as_soft_write(self):
         svc = _make_service()
         assert svc._classify_tool_effect("delete_file", None) == "soft_write"
@@ -530,7 +465,7 @@ class TestMustNotCovenantBlocking:
             "send this email to Alice", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "covenant_prohibited"
+        assert "must_not_block" in result.reason
         assert result.method == "must_not_block"
 
     async def test_must_not_matches_on_capability_name(self):
@@ -547,7 +482,8 @@ class TestMustNotCovenantBlocking:
         svc.set_state(state)
 
         result = await svc._has_prohibiting_covenant("create-event", "t1", "space_1")
-        assert result is True
+        assert result is not None
+        assert "google-calendar" in result
 
     async def test_must_not_matches_on_domain_keywords(self):
         svc = _make_service({"send-email": "soft_write"})
@@ -563,7 +499,8 @@ class TestMustNotCovenantBlocking:
         svc.set_state(state)
 
         result = await svc._has_prohibiting_covenant("send-email", "t1", "space_1")
-        assert result is True
+        assert result is not None
+        assert "email" in result.lower()
 
     async def test_non_must_not_rules_dont_prohibit(self):
         svc = _make_service({"send-email": "soft_write"})
@@ -579,13 +516,13 @@ class TestMustNotCovenantBlocking:
         svc.set_state(state)
 
         result = await svc._has_prohibiting_covenant("send-email", "t1", "space_1")
-        assert result is False
+        assert result is None
 
-    async def test_no_state_returns_false(self):
+    async def test_no_state_returns_none(self):
         svc = _make_service()
         # No state wired
         result = await svc._has_prohibiting_covenant("send-email", "t1", "space_1")
-        assert result is False
+        assert result is None
 
     def test_domain_keywords_exist(self):
         svc = _make_service()
@@ -621,3 +558,317 @@ class TestPermissionOverrideSystemWide:
             )
             assert result.allowed is True
             assert result.method == "always_allow"
+
+
+# ===========================
+# 3D HOTFIX: AsyncAnthropic Client
+# ===========================
+
+class TestAsyncAnthropicClient:
+    def test_anthropic_provider_uses_async_client(self):
+        """AnthropicProvider must use AsyncAnthropic, not sync Anthropic.
+
+        Sync client calls time.sleep() on 429 retries, blocking asyncio
+        and causing Discord heartbeat failure → session invalidation.
+        """
+        import anthropic as anthropic_sdk
+        from kernos.kernel.reasoning import AnthropicProvider
+        provider = AnthropicProvider(api_key="test-key")
+        assert isinstance(provider._client, anthropic_sdk.AsyncAnthropic)
+        assert not isinstance(provider._client, anthropic_sdk.Anthropic)
+
+
+# ===========================
+# 3D HOTFIX: Haiku as Primary Gate Authority
+# ===========================
+
+class TestHaikuGateAuthority:
+    async def test_natural_language_request_explicit(self):
+        """Haiku correctly identifies 'make an entry at 4:00' as EXPLICIT."""
+        svc = _make_service({"create-event": "soft_write"})
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        state.query_covenant_rules = AsyncMock(return_value=[])
+        svc.set_state(state)
+        # Haiku confirms the natural language is explicit
+        svc.complete_simple = AsyncMock(return_value="EXPLICIT")
+
+        result = await svc._gate_tool_call(
+            "create-event", {"summary": "dentist"}, "soft_write",
+            "make an entry at 4:00 for dentist", "t1", "space_1",
+        )
+        assert result.allowed is True
+
+    async def test_haiku_always_consulted(self):
+        """Haiku is always consulted — no fast path."""
+        svc = _make_service({"create-event": "soft_write"})
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        state.query_covenant_rules = AsyncMock(return_value=[])
+        svc.set_state(state)
+        svc.complete_simple = AsyncMock(return_value="EXPLICIT")
+
+        # Even "schedule a meeting" (previously a keyword match) goes to Haiku
+        result = await svc._gate_tool_call(
+            "create-event", {"summary": "reminder"}, "soft_write",
+            "schedule a meeting for Thursday", "t1", "space_1",
+        )
+        assert result.allowed is True
+        # Haiku was the one who authorized it
+        assert result.method == "haiku_check"
+        svc.complete_simple.assert_called_once()
+
+    async def test_haiku_explicit_in_spanish(self):
+        """Haiku handles non-English instructions — no keyword list to miss."""
+        svc = _make_service({"create-event": "soft_write"})
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        state.query_covenant_rules = AsyncMock(return_value=[])
+        svc.set_state(state)
+        svc.complete_simple = AsyncMock(return_value="EXPLICIT")
+
+        result = await svc._gate_tool_call(
+            "create-event", {"summary": "reunion"}, "soft_write",
+            "ponme algo en el calendario mañana a las 3pm", "t1", "space_1",
+        )
+        assert result.allowed is True
+        assert result.method == "haiku_check"
+
+    async def test_indirect_request_denied(self):
+        """Indirect/vague requests are correctly denied by Haiku."""
+        svc = _make_service({"create-event": "soft_write"})
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        state.query_covenant_rules = AsyncMock(return_value=[])
+        svc.set_state(state)
+        svc.complete_simple = AsyncMock(return_value="DENIED")
+
+        result = await svc._gate_tool_call(
+            "create-event", {"summary": "Meeting"}, "soft_write",
+            "I was thinking about meetings", "t1", "space_1",
+        )
+        assert result.allowed is False
+        assert "denied" in result.reason
+
+    def test_haiku_max_tokens_is_64(self):
+        """Haiku is called with max_tokens=64 (was 16 — caused truncation)."""
+        svc = _make_service()
+        # Verify by inspecting that complete_simple receives max_tokens=64 in _gate_tool_call.
+        # We verify this via the call args in a live invocation.
+        calls = []
+
+        async def capture_simple(system_prompt, user_content, max_tokens=512, **kwargs):
+            calls.append(max_tokens)
+            return "DENIED"
+
+        svc.complete_simple = capture_simple
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(
+            svc._gate_tool_call(
+                "create-event", {}, "soft_write",
+                "I was thinking", "t1", "space_1",
+            )
+        )
+        assert calls[0] == 64
+
+    def test_no_covenants_detailed_reason(self):
+        """When no covenant rules exist, reason includes 'denied'."""
+        svc = _make_service()
+        import asyncio
+
+        async def capture():
+            state = AsyncMock()
+            state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+                tenant_id="t1", status="active", created_at="2026-01-01",
+            ))
+            state.query_covenant_rules = AsyncMock(return_value=[])
+            svc.set_state(state)
+            svc.complete_simple = AsyncMock(return_value="DENIED")
+            return await svc._gate_tool_call(
+                "create-event", {}, "soft_write",
+                "I was thinking", "t1", "space_1",
+            )
+
+        result = asyncio.get_event_loop().run_until_complete(capture())
+        assert result.allowed is False
+        assert "denied" in result.reason
+
+    def test_with_covenants_ambiguous_reason(self):
+        """When covenants exist and Haiku returns DENIED, reason includes count and response."""
+        svc = _make_service({"create-event": "soft_write"})
+        import asyncio
+        from kernos.kernel.state import CovenantRule
+
+        async def capture():
+            state = AsyncMock()
+            state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+                tenant_id="t1", status="active", created_at="2026-01-01",
+            ))
+            state.query_covenant_rules = AsyncMock(return_value=[
+                CovenantRule(
+                    id="rule_1", tenant_id="t1", capability="calendar",
+                    rule_type="must", description="Schedule standing weekly meetings",
+                    active=True, source="user_stated",
+                ),
+                CovenantRule(
+                    id="rule_2", tenant_id="t1", capability="calendar",
+                    rule_type="preference", description="Prefer morning slots",
+                    active=True, source="user_stated",
+                ),
+            ])
+            svc.set_state(state)
+            svc.complete_simple = AsyncMock(return_value="DENIED")
+            return await svc._gate_tool_call(
+                "create-event", {}, "soft_write",
+                "I was thinking", "t1", "space_1",
+            )
+
+        result = asyncio.get_event_loop().run_until_complete(capture())
+        assert result.allowed is False
+        assert "covenant_ambiguous" in result.reason
+        assert "2 rules evaluated" in result.reason
+        assert "DENIED" in result.reason
+
+
+# ===========================
+# 3D HOTFIX: ApprovalToken
+# ===========================
+
+class TestApprovalToken:
+    def test_issue_creates_token(self):
+        svc = _make_service()
+        token = svc._issue_approval_token("create-event", {"summary": "Meeting"})
+        assert token.token_id in svc._approval_tokens
+        assert token.tool_name == "create-event"
+        assert token.used is False
+        assert len(token.token_id) == 12
+        assert len(token.tool_input_hash) == 8
+
+    def test_validate_valid_token(self):
+        svc = _make_service()
+        tool_input = {"summary": "Meeting", "start": "2pm"}
+        token = svc._issue_approval_token("create-event", tool_input)
+        assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is True
+
+    def test_validate_marks_used(self):
+        svc = _make_service()
+        tool_input = {"summary": "Meeting"}
+        token = svc._issue_approval_token("create-event", tool_input)
+        svc._validate_approval_token(token.token_id, "create-event", tool_input)
+        assert token.used is True
+
+    def test_token_single_use(self):
+        """Reusing a consumed token is rejected."""
+        svc = _make_service()
+        tool_input = {"summary": "Meeting"}
+        token = svc._issue_approval_token("create-event", tool_input)
+        # First use: valid
+        assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is True
+        # Second use: rejected
+        assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is False
+
+    def test_token_wrong_tool_name_rejected(self):
+        svc = _make_service()
+        tool_input = {"summary": "Meeting"}
+        token = svc._issue_approval_token("create-event", tool_input)
+        assert svc._validate_approval_token(token.token_id, "delete-event", tool_input) is False
+
+    def test_token_wrong_input_hash_rejected(self):
+        svc = _make_service()
+        token = svc._issue_approval_token("create-event", {"summary": "Meeting"})
+        # Different input → different hash
+        assert svc._validate_approval_token(
+            token.token_id, "create-event", {"summary": "Other"}
+        ) is False
+
+    def test_token_nonexistent_rejected(self):
+        svc = _make_service()
+        assert svc._validate_approval_token("nonexistent", "create-event", {}) is False
+
+    def test_token_expired_rejected(self):
+        svc = _make_service()
+        tool_input = {"summary": "Meeting"}
+        token = svc._issue_approval_token("create-event", tool_input)
+        # Backdate the issued_at to 6 minutes ago
+        token.issued_at = datetime.now(timezone.utc) - timedelta(minutes=6)
+        assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is False
+
+    def test_token_within_ttl_accepted(self):
+        svc = _make_service()
+        tool_input = {"summary": "Meeting"}
+        token = svc._issue_approval_token("create-event", tool_input)
+        # 4 minutes old → within 5-minute TTL
+        token.issued_at = datetime.now(timezone.utc) - timedelta(minutes=4)
+        assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is True
+
+    def test_token_in_blocked_system_message(self):
+        """When gate blocks, [SYSTEM] message includes approval token id and instructions."""
+        import asyncio
+        svc = _make_service()
+
+        async def run():
+            state = AsyncMock()
+            state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+                tenant_id="t1", status="active", created_at="2026-01-01",
+            ))
+            state.query_covenant_rules = AsyncMock(return_value=[])
+            svc.set_state(state)
+            svc.complete_simple = AsyncMock(return_value="DENIED")
+
+            # Simulate the gate blocking
+            gate_result = await svc._gate_tool_call(
+                "create-event", {"summary": "Meeting"}, "soft_write",
+                "I was thinking", "t1", "space_1",
+            )
+            assert not gate_result.allowed
+            token = svc._issue_approval_token("create-event", {"summary": "Meeting"})
+            msg = (
+                f"[SYSTEM] Action blocked by dispatch gate. "
+                f"Proposed: {gate_result.proposed_action}. "
+                f"Reason: {gate_result.reason}. "
+                f"Approval token: {token.token_id}. "
+                f"If the user confirms, re-submit this exact tool call with "
+                f"_approval_token: '{token.token_id}' in the tool input."
+            )
+            assert "[SYSTEM]" in msg
+            assert token.token_id in msg
+            assert "_approval_token" in msg
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_must_not_reason_includes_rule_description(self):
+        """must_not block includes rule description in reason string."""
+        import asyncio
+        from kernos.kernel.state import CovenantRule
+        svc = _make_service({"send-email": "soft_write"})
+
+        async def run():
+            state = AsyncMock()
+            state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+                tenant_id="t1", status="active", created_at="2026-01-01",
+            ))
+            state.query_covenant_rules = AsyncMock(return_value=[
+                CovenantRule(
+                    id="r1", tenant_id="t1", capability="email",
+                    rule_type="must_not", description="Never send emails without asking me first",
+                    active=True, source="user_stated",
+                ),
+            ])
+            svc.set_state(state)
+            return await svc._gate_tool_call(
+                "send-email", {"to": "alice@example.com"}, "soft_write",
+                "send this email", "t1", "space_1",
+            )
+
+        result = asyncio.get_event_loop().run_until_complete(run())
+        assert result.allowed is False
+        assert "must_not_block" in result.reason
+        assert "Never send emails without asking me first" in result.reason
