@@ -7,7 +7,7 @@
 A personal agentic operating system. Text a phone number, get agents working
 for you within an hour. No technical knowledge required.
 
-**Status:** Phase 3 in progress. 711 tests. SPEC-3A (Per-Space File System) complete.
+**Status:** Phase 3 in progress. 747 tests. SPEC-3A + 3B complete.
 Active planning in [Notion workspace](https://notion.so).
 
 ## Documentation

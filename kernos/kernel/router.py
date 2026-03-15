@@ -108,7 +108,8 @@ class LLMRouter:
         current_focus_id: the tenant's last_active_space_id (for continuation logic).
         """
         spaces = await self._state.list_context_spaces(tenant_id)
-        active_spaces = [s for s in spaces if s.status == "active"]
+        # Exclude system spaces from routing — they're not user-facing conversation targets
+        active_spaces = [s for s in spaces if s.status == "active" and s.space_type != "system"]
 
         # Single-space or no spaces: always daily, zero cost
         if not active_spaces or len(active_spaces) == 1:

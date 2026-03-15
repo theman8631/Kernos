@@ -78,6 +78,7 @@ def _load_covenant_rule(d: dict) -> CovenantRule:
 _CONTEXT_SPACE_FIELDS = {
     "id", "tenant_id", "name", "description", "space_type", "status",
     "posture", "model_preference", "created_at", "last_active_at", "is_default",
+    "max_file_size_bytes", "max_space_bytes", "active_tools",
 }
 
 
@@ -88,6 +89,8 @@ def _load_context_space(d: dict) -> ContextSpace:
     routing_entity_ids, suggestion_suppressed_until — all removed in v2.
     """
     filtered = {k: v for k, v in d.items() if k in _CONTEXT_SPACE_FIELDS}
+    if "active_tools" not in filtered:
+        filtered["active_tools"] = []
     return ContextSpace(**filtered)
 
 

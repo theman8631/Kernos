@@ -22,6 +22,7 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         setup_hint="I can connect to your Google Calendar — I'll need access to your Google account.",
         setup_requires=["GOOGLE_OAUTH_CREDENTIALS_PATH"],
         server_name="google-calendar",
+        universal=True,
         tool_effects={
             "get-current-time": "read",
             "list-events": "read",

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kernos.capability.client import MCPClientManager
+    from kernos.kernel.spaces import ContextSpace
 
 
 class CapabilityStatus(str, Enum):
@@ -37,6 +38,9 @@ class CapabilityInfo:
     tool_effects: dict[str, str] = field(default_factory=dict)
     # Maps tool_name → effect level: "read" | "soft_write" | "hard_write" | "unknown"
     # Tools not in this dict default to "unknown" (treated as hard_write by Dispatch Interceptor)
+    universal: bool = False
+    # If True, visible in all spaces without explicit activation (system defaults).
+    # Set at registration/install time.
 
 
 class CapabilityRegistry:
@@ -48,6 +52,7 @@ class CapabilityRegistry:
 
     def register(self, capability: CapabilityInfo) -> None:
         """Add or update a capability. Stores an independent copy."""
+        # TODO: call _update_capabilities_overview() on install/remove (3B+)
         self._capabilities[capability.name] = dataclasses.replace(
             capability,
             tools=list(capability.tools),
@@ -75,23 +80,96 @@ class CapabilityRegistry:
         return [c for c in self._capabilities.values() if c.category == category]
 
     def get_connected_tools(self) -> list[dict]:
-        """Aggregate tool definitions from all connected capabilities.
+        """Aggregate tool definitions from all connected capabilities (unfiltered).
 
-        Delegates to MCPClientManager. Returns same format as mcp.get_tools().
+        Use get_tools_for_space() instead when serving the message handler.
+        Kept for backward compatibility.
         """
         if self._mcp:
             return self._mcp.get_tools()
         return []
 
-    def build_capability_prompt(self) -> str:
-        """Build the CAPABILITIES section of the system prompt from registry data.
+    def get_connected_capability_names(self) -> list[str]:
+        """Names of all connected capabilities. Used by Gate 2 seeding."""
+        return [c.name for c in self.get_connected()]
 
-        Connected capabilities: listed with descriptions and tool instructions.
-        Available capabilities: listed with setup hints so the agent can offer them.
-        """
+    def get_capability_descriptions(self) -> str:
+        """Formatted descriptions of connected capabilities. Used by Gate 2 prompt."""
         connected = self.get_connected()
-        available = self.get_available()
+        if not connected:
+            return "No tools currently installed."
+        lines = []
+        for cap in connected:
+            lines.append(f"- {cap.name}: {cap.description}")
+        return "\n".join(lines)
 
+    def _visible_capability_names(self, space: "ContextSpace | None") -> set[str]:
+        """Which connected capability names are visible in this space.
+
+        System space: everything.
+        Space with active_tools: kernel defaults (always) + universal + explicitly listed.
+        Space with empty active_tools: universal only (kernel tools handled separately).
+        """
+        if space and space.space_type == "system":
+            return {c.name for c in self._capabilities.values() if c.status == CapabilityStatus.CONNECTED}
+
+        visible: set[str] = set()
+        for cap in self._capabilities.values():
+            if cap.status != CapabilityStatus.CONNECTED:
+                continue
+            if cap.universal:
+                visible.add(cap.name)
+        if space and space.active_tools:
+            for name in space.active_tools:
+                cap = self._capabilities.get(name)
+                if cap and cap.status == CapabilityStatus.CONNECTED:
+                    visible.add(name)
+        return visible
+
+    def get_tools_for_space(self, space: "ContextSpace | None" = None) -> list[dict]:
+        """Return MCP tool definitions visible for this space.
+
+        Replaces get_connected_tools() in the message handler — same format,
+        filtered by space visibility.
+        """
+        if not self._mcp:
+            return []
+
+        tool_defs_by_server = self._mcp.get_tool_definitions()
+        visible_names = self._visible_capability_names(space)
+
+        result = []
+        for cap_name in visible_names:
+            cap = self._capabilities.get(cap_name)
+            if not cap or cap.status != CapabilityStatus.CONNECTED:
+                continue
+            server_tools = tool_defs_by_server.get(cap.server_name, [])
+            result.extend(server_tools)
+        return result
+
+    def build_capability_prompt(self, space: "ContextSpace | None" = None) -> str:
+        """Build the CAPABILITIES section of the system prompt.
+
+        System space: all connected capabilities shown.
+        Other spaces: only visible capabilities shown (universal + active_tools).
+        AVAILABLE capabilities always shown so agent can offer setup.
+        """
+        if space and space.space_type == "system":
+            return self._build_prompt_for_capabilities(self.get_connected(), self.get_available())
+
+        visible_names = self._visible_capability_names(space)
+        visible_connected = [
+            c for c in self._capabilities.values()
+            if c.status == CapabilityStatus.CONNECTED and c.name in visible_names
+        ]
+        return self._build_prompt_for_capabilities(visible_connected, self.get_available())
+
+    def _build_prompt_for_capabilities(
+        self,
+        connected: list[CapabilityInfo],
+        available: list[CapabilityInfo],
+    ) -> str:
+        """Build the prompt string from capability lists."""
         if not connected and not available:
             return (
                 "CURRENT CAPABILITIES — only claim these:\n"

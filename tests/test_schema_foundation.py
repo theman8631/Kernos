@@ -873,12 +873,17 @@ async def test_handler_creates_daily_space_for_new_tenant(tmp_path):
     await handler._get_or_init_soul("t1")
 
     spaces = await store.list_context_spaces("t1")
-    assert len(spaces) == 1
-    daily = spaces[0]
+    # Now creates daily + system spaces
+    assert len(spaces) == 2
+    daily_spaces = [s for s in spaces if s.is_default]
+    assert len(daily_spaces) == 1
+    daily = daily_spaces[0]
     assert daily.is_default is True
     assert daily.space_type == "daily"
     assert daily.name == "Daily"
     assert daily.tenant_id == "t1"
+    system_spaces = [s for s in spaces if s.space_type == "system"]
+    assert len(system_spaces) == 1
 
 
 async def test_handler_does_not_duplicate_daily_space(tmp_path):
@@ -894,7 +899,7 @@ async def test_handler_does_not_duplicate_daily_space(tmp_path):
     await handler._get_or_init_soul("t1")  # second call
 
     spaces = await store.list_context_spaces("t1")
-    assert len(spaces) == 1  # still only one
+    assert len(spaces) == 2  # daily + system (no duplicates)
 
 
 # ---------------------------------------------------------------------------

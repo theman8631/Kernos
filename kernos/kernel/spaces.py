@@ -1,5 +1,5 @@
 """Context Space model for Phase 2 multi-context routing."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -14,7 +14,7 @@ class ContextSpace:
     tenant_id: str
     name: str
     description: str = ""            # Router uses this for routing decisions
-    space_type: str = "daily"        # "daily" | "project" | "domain" | "managed_resource"
+    space_type: str = "daily"        # "daily" | "project" | "domain" | "managed_resource" | "system"
     status: str = "active"           # "active" | "dormant" | "archived"
     posture: str = ""                # Plain English working style override
     model_preference: str = ""       # Reserved for Phase 3 quality/cost tiers
@@ -23,3 +23,7 @@ class ContextSpace:
     is_default: bool = False         # True only for the daily space
     max_file_size_bytes: int | None = None  # None = unlimited (enforcement reserved for 3B+)
     max_space_bytes: int | None = None      # None = unlimited (enforcement reserved for 3B+)
+    active_tools: list[str] = field(default_factory=list)
+    # Capability names explicitly activated for this space.
+    # Empty list = system defaults (kernel tools + universal MCP tools).
+    # System space (space_type == "system") ignores this — always sees everything.

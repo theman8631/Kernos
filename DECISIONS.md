@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** SPEC-3A COMPLETE. Tracing infrastructure in progress (ROUTE, TOOL_LOOP, KERNEL_TOOL, FILE_*, REMEMBER trace points). Phase 3 continuing.
+**Status:** SPEC-3B COMPLETE — Per-Space Tool Scoping live-verified (13/13 steps). System space, tool filtering, request_tool, 747 tests.
 **Owner:** Founder / Architect
 **Action:** Decide next Phase 3 spec.
-**Tests:** 711
+**Tests:** 747
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -21,6 +21,7 @@
 | ID | Spec | Status | Verified | Notes |
 |---|---|---|---|---|
 | 3A | Per-Space File System | COMPLETE | 2026-03-14 | Four kernel-managed file tools (write/read/list/delete), soft delete, manifest, compaction integration, Discord upload handling. 63 new tests. 711 total. |
+| 3B | Per-Space Tool Scoping | COMPLETE | 2026-03-15 | System space auto-provisioned, active_tools on ContextSpace, universal flag on capabilities, space-aware build_capability_prompt() + get_tools_for_space(), Gate 2 seeding, request_tool kernel meta-tool, LRU exemption. 36 new tests. 747 total. |
 
 ---
 
@@ -101,6 +102,16 @@ SPEC-3A complete. No active spec. Founder to decide next Phase 3 spec.
 ---
 
 ## Decisions Made
+
+### 2026-03-15: SPEC-3B — Per-Space Tool Scoping — COMPLETE
+
+- **What:** System space auto-provisioned at tenant init alongside Daily. `active_tools: list[str]` added to ContextSpace — empty = system defaults (kernel tools + universal MCP tools). `universal: bool` flag on CapabilityInfo — google-calendar set universal=True. `build_capability_prompt(space=)` and `get_tools_for_space(space=)` added to CapabilityRegistry for space-aware filtering. System space sees all tools; non-system spaces see only universal + explicitly activated. Gate 2 expanded schema includes `recommended_tools` — LLM seeds `active_tools` at space creation. `request_tool` kernel meta-tool: exact match, fuzzy match (string presence), not-installed redirect. `_activate_tool_for_space()` updates `active_tools` in state. LRU archiving exempts system space. Documentation files (`capabilities-overview.md`, `how-to-connect-tools.md`) written to system space at creation. Router excludes system space from routing candidates. Backward compat: existing spaces load with `active_tools=[]`.
+- **New files:** `tests/test_tool_scoping.py` (36 tests)
+- **Modified files:** `spaces.py` (active_tools field), `state_json.py` (_CONTEXT_SPACE_FIELDS updated, _load_context_space default), `capability/registry.py` (universal flag, space-aware methods), `capability/known.py` (universal=True for google-calendar), `kernel/reasoning.py` (REQUEST_TOOL, _KERNEL_TOOLS, _handle_request_tool, _activate_tool_for_space, set_registry, set_state), `messages/handler.py` (system space creation, _write_system_docs, LRU exemption, Gate 2 expansion, get_tools_for_space, build_capability_prompt(space=)), `kernel/router.py` (system space excluded from routing candidates)
+- **Tests:** 36 new tests in test_tool_scoping.py. Total: 747 passing.
+- **Live verified:** 13/13 steps passed. System space auto-created (space_5a7b039c). Both doc files present. request_tool intercepted and returned not-installed redirect. LRU exemption confirmed. All 6 existing spaces load with active_tools=[] (backward compat). See `tests/live/LIVE-TEST-3B.md`.
+- **Finding:** System space excluded from LLM router candidates — messages with "system settings" wording route to Daily/current space instead of System space. Low impact (kernel tools work anywhere); fix is adding System space to router's active_spaces list in a future pass.
+- **Full spec:** `specs/completed/SPEC-3B-TOOL-SCOPING.md`
 
 ### 2026-03-14: SPEC-3A — Per-Space File System — COMPLETE
 
@@ -296,4 +307,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-14 (SPEC-3A complete — 711 tests passing. Per-Space File System live-verified.)*
+*Last updated: 2026-03-15 (SPEC-3B complete — 747 tests passing. Per-Space Tool Scoping live-verified.)*

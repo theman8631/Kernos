@@ -258,6 +258,8 @@ class MessageHandler:
         self._files = FileService(os.getenv("KERNOS_DATA_DIR", "./data"))
         reasoning.set_files(self._files)
         self.compaction.set_files(self._files)
+        reasoning.set_registry(registry)
+        reasoning.set_state(state)
 
         # Wire up retrieval service for the `remember` kernel tool
         self._retrieval = None
@@ -326,6 +328,76 @@ class MessageHandler:
 
         logger.info("Provisioned state for new tenant: %s", tenant_id)
 
+    async def _write_system_docs(
+        self, tenant_id: str, system_space_id: str
+    ) -> None:
+        """Write capabilities-overview.md and how-to-connect-tools.md to the system space."""
+        if not getattr(self, "_files", None):
+            return
+        registry = getattr(self, "registry", None)
+        if not registry:
+            return
+
+        connected = registry.get_connected()
+        available = registry.get_available()
+
+        content = "# Connected Tools\n\n"
+        if connected:
+            for cap in connected:
+                universal_tag = " (available everywhere)" if cap.universal else ""
+                content += f"- **{cap.name}**{universal_tag}: {cap.description}\n"
+                if cap.tools:
+                    content += f"  Tools: {', '.join(cap.tools)}\n"
+        else:
+            content += "No tools connected yet.\n"
+
+        content += "\n# Available to Connect\n\n"
+        if available:
+            for cap in available:
+                content += f"- **{cap.name}**: {cap.description}\n"
+        else:
+            content += "No additional tools available.\n"
+
+        try:
+            await self._files.write_file(
+                tenant_id, system_space_id,
+                "capabilities-overview.md", content,
+                "What tools are connected and available — updated on changes",
+            )
+        except Exception as exc:
+            logger.warning("Failed to write capabilities-overview.md: %s", exc)
+
+        how_to = """# How to Connect Tools
+
+Tools extend what I can do — connect your calendar, email, documents,
+and more. Each tool is an MCP server that runs alongside the system.
+
+## What's Connected
+Check capabilities-overview.md for the current list, or just ask me
+"what tools do I have?"
+
+## Adding a New Tool
+To connect a new tool, tell me what you need:
+- "I need access to my Google Calendar"
+- "Can you connect to my email?"
+- "I need a tool for [description]"
+
+I'll walk you through the setup.
+
+## Tool Visibility
+Tools are available where they're useful. Your D&D space won't show
+invoice tools. Your Business space won't show game tools. If you need
+a tool in a specific space, just ask — I'll activate it.
+"""
+        try:
+            await self._files.write_file(
+                tenant_id, system_space_id,
+                "how-to-connect-tools.md", how_to.strip(),
+                "Guide to connecting and managing tools",
+            )
+        except Exception as exc:
+            logger.warning("Failed to write how-to-connect-tools.md: %s", exc)
+
     async def _get_or_init_soul(self, tenant_id: str) -> Soul:
         """Load the soul for this tenant, or initialize a new unhatched one.
 
@@ -391,6 +463,33 @@ class MessageHandler:
                 await self.compaction.save_state(tenant_id, daily_space.id, daily_comp)
             except Exception as exc:
                 logger.warning("Failed to init compaction state for daily space: %s", exc)
+
+        # Ensure a system context space exists — idempotent
+        spaces_now = await self.state.list_context_spaces(tenant_id)
+        if not any(s.space_type == "system" for s in spaces_now):
+            now = _now_iso()
+            system_space = ContextSpace(
+                id=f"space_{uuid.uuid4().hex[:8]}",
+                tenant_id=tenant_id,
+                name="System",
+                description=(
+                    "System configuration and management. Install and manage tools, "
+                    "view connected capabilities, get help with how the system works."
+                ),
+                space_type="system",
+                status="active",
+                posture=(
+                    "Precise and careful. Configuration changes affect the whole system. "
+                    "Confirm before modifying system settings or tool configurations."
+                ),
+                is_default=False,
+                created_at=now,
+                last_active_at=now,
+            )
+            await self.state.save_context_space(system_space)
+            logger.info("Created system context space for tenant: %s", tenant_id)
+            # Write documentation files to the system space
+            await self._write_system_docs(tenant_id, system_space.id)
 
         return soul
 
@@ -682,7 +781,7 @@ class MessageHandler:
     async def _enforce_space_cap(self, tenant_id: str) -> None:
         """Archive the least recently used space if at the active cap."""
         spaces = await self.state.list_context_spaces(tenant_id)
-        active = [s for s in spaces if s.status == "active" and not s.is_default]
+        active = [s for s in spaces if s.status == "active" and not s.is_default and s.space_type != "system"]
         if len(active) < ACTIVE_SPACE_CAP:
             return
         lru = sorted(active, key=lambda s: s.last_active_at)[0]
@@ -726,9 +825,14 @@ class MessageHandler:
                 "create_space": {"type": "boolean"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "reasoning": {"type": "string"}
+                "reasoning": {"type": "string"},
+                "recommended_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Capability names from the installed list that are relevant to this space",
+                },
             },
-            "required": ["create_space", "name", "description", "reasoning"],
+            "required": ["create_space", "name", "description", "reasoning", "recommended_tools"],
             "additionalProperties": False
         }
 
@@ -743,7 +847,11 @@ class MessageHandler:
                 ),
                 user_content=(
                     f"Topic hint: {topic_hint}\n\n"
-                    f"Messages about this topic:\n{formatted}"
+                    f"Messages about this topic:\n{formatted}\n\n"
+                    f"Installed tools available for activation:\n"
+                    f"{self.registry.get_capability_descriptions()}\n\n"
+                    f"Populate recommended_tools with capability names likely to be useful for this space. "
+                    f"Use exact capability names from the installed list above."
                 ),
                 output_schema=GATE2_SCHEMA,
                 max_tokens=256,
@@ -765,6 +873,17 @@ class MessageHandler:
                     is_default=False,
                 )
                 await self.state.save_context_space(new_space)
+
+                # Seed active_tools from Gate 2 recommendations
+                installed_names = set(self.registry.get_connected_capability_names())
+                recommended = parsed.get("recommended_tools", [])
+                seeded_tools = [t for t in recommended if t in installed_names]
+                if seeded_tools:
+                    new_space.active_tools = seeded_tools
+                    await self.state.update_context_space(
+                        tenant_id, new_space.id, {"active_tools": seeded_tools}
+                    )
+
                 await self.state.clear_topic_hint(tenant_id, topic_hint)
 
                 # Initialize compaction state for the new space
@@ -1023,15 +1142,16 @@ class MessageHandler:
             created_at=_now_iso(),
         )
 
-        tools = self.registry.get_connected_tools()
+        tools = self.registry.get_tools_for_space(active_space)
         # Add the kernel-managed `remember` tool when retrieval is available
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             tools = tools + [REMEMBER_TOOL]
         # Add kernel-managed file tools (always available)
         from kernos.kernel.files import FILE_TOOLS
-        tools = tools + FILE_TOOLS
-        capability_prompt = self.registry.build_capability_prompt()
+        from kernos.kernel.reasoning import REQUEST_TOOL
+        tools = tools + FILE_TOOLS + [REQUEST_TOOL]
+        capability_prompt = self.registry.build_capability_prompt(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
             tenant_id,

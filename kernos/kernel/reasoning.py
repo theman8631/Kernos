@@ -28,6 +28,38 @@ _SIMPLE_MODEL = "claude-sonnet-4-6"  # Used by complete_simple()
 _CHEAP_MODEL = "claude-haiku-4-5-20251001"  # Used by complete_simple() when prefer_cheap=True
 
 
+REQUEST_TOOL = {
+    "name": "request_tool",
+    "description": (
+        "Request activation of a tool capability for the current context space. "
+        "Use this when you need a tool that isn't currently available. "
+        "Describe what you need thoroughly — what the tool should do, why you need it, "
+        "and what context it's for. This helps the system find the right match."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "capability_name": {
+                "type": "string",
+                "description": (
+                    "The name of the capability to activate, if known. "
+                    "Use 'unknown' if you know what you need but not the exact name."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": (
+                    "Thorough description of what you need the tool to do. "
+                    "Be exhaustive — include the function needed, the context, "
+                    "and why it's needed. This helps match the right tool."
+                ),
+            },
+        },
+        "required": ["capability_name", "description"],
+    },
+}
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -225,6 +257,8 @@ class ReasoningService:
         self._audit = audit
         self._retrieval = None  # Set by handler after construction (avoids circular import)
         self._files = None      # Set by handler after construction
+        self._registry = None   # Set by handler after construction
+        self._state = None      # Set by handler after construction
 
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
@@ -233,6 +267,14 @@ class ReasoningService:
     def set_files(self, files: Any) -> None:
         """Wire up the file service for kernel tool routing."""
         self._files = files
+
+    def set_registry(self, registry: Any) -> None:
+        """Wire up the capability registry for request_tool routing."""
+        self._registry = registry
+
+    def set_state(self, state: Any) -> None:
+        """Wire up the state store for request_tool activation."""
+        self._state = state
 
     async def complete_simple(
         self,
@@ -270,7 +312,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool"}
 
     def _check_delete_allowed(self, user_message: str) -> bool:
         """Delete only allowed when the user explicitly requested it.
@@ -285,6 +327,79 @@ class ReasoningService:
         ]
         msg_lower = user_message.lower()
         return any(signal in msg_lower for signal in delete_signals)
+
+    async def _handle_request_tool(
+        self,
+        tenant_id: str,
+        space_id: str,
+        capability_name: str,
+        description: str,
+    ) -> str:
+        """Handle a request_tool call.
+
+        1. If capability_name matches an installed capability: activate silently
+        2. If capability_name is 'unknown': fuzzy match against registry using description
+        3. If not installed: direct user to system space
+        """
+        from kernos.capability.registry import CapabilityStatus
+
+        if not self._registry:
+            return "Tool registry is not available right now."
+
+        # Exact match (when capability_name is known)
+        if capability_name and capability_name != "unknown":
+            cap = self._registry.get(capability_name)
+            if cap and cap.status == CapabilityStatus.CONNECTED:
+                await self._activate_tool_for_space(tenant_id, space_id, capability_name)
+                tools = cap.tools
+                return (
+                    f"Activated '{cap.name}' for this space. "
+                    f"Available tools: {', '.join(tools)}. "
+                    f"These will be available in this space going forward."
+                )
+
+        # Fuzzy match — check if any capability name or tool name appears in description
+        desc_lower = description.lower()
+        # Sort: universal first (prefer broadly useful tools)
+        candidates = sorted(
+            [c for c in self._registry.get_all() if c.status == CapabilityStatus.CONNECTED],
+            key=lambda c: (not c.universal, c.name),
+        )
+        best_match = None
+        for cap in candidates:
+            if (cap.name.lower() in desc_lower or
+                    any(tool.lower() in desc_lower for tool in cap.tools)):
+                best_match = cap
+                break
+
+        if best_match:
+            await self._activate_tool_for_space(tenant_id, space_id, best_match.name)
+            tools = best_match.tools
+            return (
+                f"Found and activated '{best_match.name}' for this space. "
+                f"Available tools: {', '.join(tools)}. "
+                f"These will be available in this space going forward."
+            )
+
+        # Not installed
+        return (
+            f"I don't have a tool matching '{capability_name}' installed. "
+            f"To get new tools set up, go to the System space for installation. "
+            f"Want me to help you find the right tool there?"
+        )
+
+    async def _activate_tool_for_space(
+        self, tenant_id: str, space_id: str, capability_name: str
+    ) -> None:
+        """Add a capability to a space's active_tools list and persist."""
+        if not self._state:
+            return
+        space = await self._state.get_context_space(tenant_id, space_id)
+        if space and capability_name not in space.active_tools:
+            space.active_tools.append(capability_name)
+            await self._state.update_context_space(
+                tenant_id, space_id, {"active_tools": space.active_tools}
+            )
 
     async def reason(self, request: ReasoningRequest) -> ReasoningResult:
         """Run a full reasoning turn, including tool-use loop.
@@ -479,6 +594,13 @@ class ReasoningService:
                                 result = "File deletion failed — try again."
                         else:
                             result = "File system is not available right now."
+                    elif block.name == "request_tool":
+                        result = await self._handle_request_tool(
+                            request.tenant_id,
+                            request.active_space_id,
+                            tool_args.get("capability_name", "unknown"),
+                            tool_args.get("description", ""),
+                        )
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:
