@@ -335,7 +335,9 @@ class ReasoningService:
         )
         if response.stop_reason == "max_tokens":
             logger.warning("complete_simple: response truncated (max_tokens reached)")
-            return "{}"
+            if output_schema:
+                return "{}"
+            # Plain-text call: return whatever was generated (partial is better than "{}")
         if response.stop_reason == "refusal":
             logger.warning("complete_simple: response refused by model")
             return "{}"
@@ -549,6 +551,7 @@ class ReasoningService:
         action_desc = self._describe_action(tool_name, tool_input)
         tool_description = self._get_tool_description(tool_name)
         raw = ""
+        logger.info("GATE_HAIKU: max_tokens=128, has_schema=False, rules=%d", rules_count)
         try:
             raw = await self.complete_simple(
                 system_prompt=(
@@ -566,16 +569,17 @@ class ReasoningService:
                     f"Action details: {action_desc}\n\n"
                     f"Active covenant rules:\n{rules_text}"
                 ),
-                max_tokens=64,
+                max_tokens=128,
                 prefer_cheap=True,
             )
         except Exception as exc:
             logger.warning("Gate: Haiku authorization call failed: %s", exc)
+        logger.info("GATE_HAIKU: raw_response=%r", raw[:100])
 
-        answer = raw.strip().upper()
-        if "EXPLICIT" in answer:
+        first_word = raw.strip().split()[0].upper() if raw.strip() else ""
+        if first_word == "EXPLICIT":
             return GateResult(allowed=True, reason="explicit_instruction", method="haiku_check")
-        if "AUTHORIZED" in answer:
+        if first_word == "AUTHORIZED":
             return GateResult(allowed=True, reason="covenant_authorized", method="haiku_check")
 
         # Blocked — include detailed reason

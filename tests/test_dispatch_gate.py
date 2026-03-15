@@ -658,11 +658,9 @@ class TestHaikuGateAuthority:
         assert result.allowed is False
         assert "denied" in result.reason
 
-    def test_haiku_max_tokens_is_64(self):
-        """Haiku is called with max_tokens=64 (was 16 — caused truncation)."""
+    def test_haiku_max_tokens_is_128(self):
+        """Haiku is called with max_tokens=128 (bumped from 64 — Haiku adds explanation after answer)."""
         svc = _make_service()
-        # Verify by inspecting that complete_simple receives max_tokens=64 in _gate_tool_call.
-        # We verify this via the call args in a live invocation.
         calls = []
 
         async def capture_simple(system_prompt, user_content, max_tokens=512, **kwargs):
@@ -677,7 +675,7 @@ class TestHaikuGateAuthority:
                 "I was thinking", "t1", "space_1",
             )
         )
-        assert calls[0] == 64
+        assert calls[0] == 128
 
     def test_no_covenants_detailed_reason(self):
         """When no covenant rules exist, reason includes 'denied'."""
