@@ -108,14 +108,15 @@ class LLMRouter:
         current_focus_id: the tenant's last_active_space_id (for continuation logic).
         """
         spaces = await self._state.list_context_spaces(tenant_id)
-        # Exclude system spaces from routing — they're not user-facing conversation targets
-        active_spaces = [s for s in spaces if s.status == "active" and s.space_type != "system"]
+        active_spaces = [s for s in spaces if s.status == "active"]
+        # Non-system spaces: what the user actually works in day-to-day
+        non_system_spaces = [s for s in active_spaces if s.space_type != "system"]
 
-        # Single-space or no spaces: always daily, zero cost
-        if not active_spaces or len(active_spaces) == 1:
-            daily = next((s for s in active_spaces if s.is_default), None)
-            if not daily and active_spaces:
-                daily = active_spaces[0]
+        # If only Daily+System exist (no user-created spaces), skip LLM — always Daily
+        if len(non_system_spaces) <= 1:
+            daily = next((s for s in non_system_spaces if s.is_default), None)
+            if not daily and non_system_spaces:
+                daily = non_system_spaces[0]
             daily_id = daily.id if daily else ""
             return RouterResult(tags=[daily_id] if daily_id else [], focus=daily_id, continuation=False)
 
