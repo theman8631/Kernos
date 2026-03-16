@@ -387,6 +387,8 @@ class ReasoningService:
         for cap in self._registry.get_all():
             if tool_name in (cap.tools or []):
                 return cap.name
+            if tool_name in (cap.tool_effects or {}):
+                return cap.name
         return None
 
     def _get_tool_description(self, tool_name: str) -> str:
