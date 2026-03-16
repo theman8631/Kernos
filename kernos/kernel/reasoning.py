@@ -878,6 +878,21 @@ class ReasoningService:
         except Exception as exc:
             logger.warning("Failed to emit reasoning.response: %s", exc)
 
+        # Log what the model actually returned — before entering the tool-use loop.
+        # This is the key diagnostic: did the model produce tool_use blocks or just text?
+        _content_types = [block.type for block in response.content]
+        _text_preview = ""
+        for _b in response.content:
+            if _b.type == "text" and _b.text:
+                _text_preview = _b.text[:200]
+                break
+        logger.info(
+            "REASON_RESPONSE: stop=%s content_types=%s text_preview=%r",
+            response.stop_reason,
+            _content_types,
+            _text_preview,
+        )
+
         # --- Tool-use loop ---
         iterations = 0
         while (
@@ -1273,6 +1288,19 @@ class ReasoningService:
                     "(stop=%s, tool_count=%d). Response may be fabricated. "
                     "Response: %s",
                     response.stop_reason, len(tools), response_text[:200],
+                )
+                # Tag the response so future conversation context shows it was unreliable.
+                # This breaks the self-reinforcing loop where the model reads its own
+                # fabricated success and skips actually calling the tools on the next turn.
+                response_text = (
+                    "[SYSTEM NOTE: The following response was generated without actual "
+                    "tool execution. Any claims of tool use or results may be fabricated. "
+                    "The tools were not called.]\n\n"
+                    + response_text
+                )
+                logger.warning(
+                    "HALLUCINATION_TAGGED: response prefixed with unreliability notice "
+                    "for conversation history"
                 )
 
         return ReasoningResult(
