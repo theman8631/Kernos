@@ -382,29 +382,40 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Entity context injection:** Known entities for the tenant injected into the Tier 2 extraction prompt for pronoun/coreference resolution (~500 token budget). Helps the LLM identify "she" as Sarah Henderson when that entity already exists.
 
-### Dispatch Interceptor (Phase 3D / 3D-HOTFIX)
+### Dispatch Interceptor (Phase 3D / 3D-HOTFIX-v2)
 
-**What it does:** Gates write/action tool calls before execution. Reads pass silently. Writes require either a matching covenant rule or explicit user instruction as judged by Haiku — or an approval token from prior confirmation. The gate cannot be bypassed by model inference. No keyword matching; Haiku is the sole correctness authority.
+**What it does:** Gates write/action tool calls before execution. Reads pass silently. Writes go through a three-step authorization: two mechanical checks (no LLM), then a lightweight model evaluation. No keyword matching. No structured pre-checks for must_not. The model is the sole correctness authority.
 
-**File:** `kernos/kernel/reasoning.py` — `GateResult`, `ApprovalToken` dataclasses, gate methods on `ReasoningService`
+**File:** `kernos/kernel/reasoning.py` — `GateResult`, `ApprovalToken` dataclasses, `_gate_tool_call`, `_evaluate_gate` on `ReasoningService`
 
 **Effect classification:** `_classify_tool_effect(tool_name, active_space)` → `"read"` (bypass), `"soft_write"` (gate), `"hard_write"` (gate), `"unknown"` (gate). Kernel tools have hardcoded classifications. MCP tools use `tool_effects` from `CapabilityInfo`.
 
-**Four-step authorization:**
-0. **must_not covenant check** — `_has_prohibiting_covenant()` returns `str | None`. Structured lookup against `CovenantRule.rule_type == "must_not"`, no LLM. Returns the matching rule description (or `None` if no prohibition). Blocks unconditionally — even explicit user instructions cannot override a `must_not` rule.
-1. **Approval token check** — `_validate_approval_token()`. If `_approval_token` key was present in tool input (popped before gate), validate it: single-use, 5-minute TTL, tool name must match, MD5 hash of tool input must match. Allows if valid.
-2. **Permission override** — fast dict lookup on `TenantProfile.permission_overrides`. If the capability is set to `"always-allow"`, allow immediately.
-3. **Haiku authorization** — `complete_simple()` with `prefer_cheap=True`. Prompt includes: user's message, tool name, tool description (from `_get_tool_description()` via MCP manifest), action details, and active covenant rules. Haiku responds with `EXPLICIT` (user directly requested this), `AUTHORIZED` (a covenant rule covers it), or `DENIED`. Parsed with `"EXPLICIT" in answer` / `"AUTHORIZED" in answer` (contains check, not exact match). `max_tokens=64` to prevent truncation.
+**Three-step authorization:**
+1. **Approval token check** (mechanical) — If `_approval_token` present in tool input (popped before gate), validate: single-use, 5-minute TTL, tool name matches, MD5 hash of tool input matches. Allows if valid. Method: `"token"`.
+2. **Permission override** (mechanical, zero-cost) — Fast dict lookup on `TenantProfile.permission_overrides`. If capability is `"always-allow"`, execute immediately. No model call. Critical for high-volume automation (50 emails shouldn't trigger 50 model calls). Method: `"always_allow"`.
+3. **Model evaluation** (`_evaluate_gate`) — One `complete_simple(prefer_cheap=True)` call per write tool call. Sees: last 5 user turns (oldest→newest), agent's reasoning text (extracted from response before tool_use block), tool name + description (from MCP manifest), action details, all active covenant rules. Returns `EXPLICIT / AUTHORIZED / CONFLICT / DENIED`. First-word parsed. `max_tokens=128`. Method: `"model_check"`.
 
-**When blocked:** `_issue_approval_token()` creates a single-use `ApprovalToken` (token_id: uuid hex[:12], tool_input_hash: md5 hex[:8], 5-minute TTL). Included in `[SYSTEM] Action blocked` tool_result with instructions to re-submit the exact tool call with `_approval_token: '{token_id}'` in the tool input.
+**Model response types:**
+- `EXPLICIT` — user directly requested this action in recent messages → allowed
+- `AUTHORIZED` — a standing covenant rule covers this action → allowed
+- `CONFLICT` — user asked for it BUT a `must_not` rule also applies (user may be knowingly overriding) → blocked, surfaces tension, offers three options
+- `DENIED` — no request, no covenant → blocked
 
-**Tool description in prompt:** `_get_tool_description(tool_name)` queries `self._mcp.get_tools()` for the tool's description from the MCP manifest. Passed to Haiku so the gate works correctly for any future MCP tool without configuration changes.
+**CONFLICT system message:** Three options offered — (1) respect the rule, (2) one-time override with approval token, (3) update/remove the rule permanently. `conflicting_rule` field on `GateResult` names the specific must_not rule.
 
-**Reason strings:** `"must_not_block — covenant rule '...' prohibits this"`, `"token_approved"`, `"permission_override"`, `"explicit_instruction"`, `"covenant_authorized"`, `"covenant_ambiguous (N rules evaluated, Haiku response: '...')"`, `"denied — user message does not request this action and no covenant matches"`.
+**DENIED system message:** Asks user to confirm; provides approval token for re-submission; offers to create a standing rule.
 
-**GateResult:** `allowed: bool`, `reason: str`, `method: str`, `proposed_action: str`. Emitted in `DISPATCH_GATE` events.
+**Agent reasoning extraction:** Before the tool-use loop, text blocks from `response.content` preceding tool_use blocks are joined as `agent_reasoning`. Passed to `_evaluate_gate` so the model can check whether the agent's stated reasoning matches the user's actual messages.
 
-**Async client:** `ReasoningService` uses `anthropic.AsyncAnthropic` (not `Anthropic`). The sync client calls `time.sleep()` on 429 retries, blocking the asyncio event loop and causing Discord heartbeat failure. The async client is event-loop-safe.
+**Permission overrides are NOT in rules_text** — they bypass the model entirely in Step 2. Not surfaced to the model at all.
+
+**Tool description in prompt:** `_get_tool_description(tool_name)` queries `self._mcp.get_tools()`. Gate works for any future MCP tool without configuration.
+
+**Reason values:** `"token_approved"`, `"permission_override"`, `"explicit_instruction"`, `"covenant_authorized"`, `"covenant_conflict"`, `"denied"`.
+
+**GateResult:** `allowed: bool`, `reason: str`, `method: str`, `proposed_action: str`, `conflicting_rule: str`, `raw_response: str`. Emitted in `DISPATCH_GATE` events.
+
+**Async client:** `ReasoningService` uses `anthropic.AsyncAnthropic`. Sync client calls `time.sleep()` on 429 retries, blocking asyncio → Discord heartbeat failure.
 
 ### File Service (Phase 3A)
 
@@ -784,7 +795,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 | test_schema_foundation.py | Phase 2.0 schema models |
 | test_files.py | FileService CRUD, manifest tracking, soft delete, text-only enforcement, cross-space isolation, FILE_TOOLS definitions (Phase 3A) |
 | test_tool_scoping.py | CapabilityInfo.universal, _visible_capability_names, get_tools_for_space, build_capability_prompt(space=), active_tools persistence, request_tool (exact/fuzzy/not-installed), LRU exemption, connected capability helpers (36 tests, Phase 3B) |
-| test_dispatch_gate.py | GateResult, ApprovalToken, tool effect classification, Haiku authorization (EXPLICIT/AUTHORIZED/DENIED), must_not covenant blocking, approval token lifecycle (issue/validate/single-use/TTL/hash), permission overrides, gate integration, read bypass, unknown tool handling, no fast path / no TOOL_SIGNALS, Spanish instruction handling, tool description in prompt (Phase 3D / 3D-HOTFIX) |
+| test_dispatch_gate.py | GateResult (conflicting_rule, raw_response), ApprovalToken, tool effect classification, model authorization (EXPLICIT/AUTHORIZED/CONFLICT/DENIED), CONFLICT response with conflicting_rule, agent reasoning in prompt, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text), approval token lifecycle (issue/validate/single-use/TTL/hash), read bypass, no fast path / no TOOL_SIGNALS, Spanish instruction, first-word parser safety (Phase 3D / 3D-HOTFIX-v2) |
 | test_mcp_install.py | SecureInputState lifecycle, credential write/resolve, connect_one/disconnect_one, _maybe_load_mcp_config startup merge, mcp-servers.json persistence, tool.installed/uninstalled events, SUPPRESSED status, post-connect doc refresh (SPEC-3B+) |
 
 ---
@@ -826,7 +837,7 @@ These are referenced in the architecture but not implemented:
 - **Awareness evaluator** — event-driven proactive notification system
 - **Consolidation daemon** — background pattern extraction and insight generation
 - ~~**Context space compaction** — structured history preservation replacing naive truncation~~ **COMPLETE (Phase 2C)** — two-layer compaction (Ledger + Living State), token tracking, domain-adaptive editorial judgment, rotation + archival
-- ~~**Dispatch Interceptor** — infrastructure-level behavioral contract enforcement~~ **COMPLETE (Phase 3D / 3D-HOTFIX)** — gate in tool-use loop, must_not covenant pre-check, approval token (single-use), permission overrides, Haiku as sole correctness authority (EXPLICIT/AUTHORIZED/DENIED), tool description from MCP manifest, async Anthropic client, delete_file consolidated
+- ~~**Dispatch Interceptor** — infrastructure-level behavioral contract enforcement~~ **COMPLETE (Phase 3D / 3D-HOTFIX-v2)** — three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning + recent messages in model prompt, model as sole correctness authority (EXPLICIT/AUTHORIZED/CONFLICT/DENIED), permission_overrides as mechanical bypass, tool description from MCP manifest, async Anthropic client, delete_file consolidated
 - **Multi-model routing** — Reasoning Service routes to different models by task type
 - ~~**Entity resolution** — knowledge graph with identity linking~~ **COMPLETE (Phase 2A)**
 - **Memory decay** — FSRS-based temporal confidence with lifecycle archetypes

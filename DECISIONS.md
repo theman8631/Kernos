@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** 3D HOTFIX COMPLETE — Dispatch gate redesigned: async Anthropic client (FIX 1), Haiku as sole authority with no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), detailed failure reasons + tool description in Haiku prompt (FIX 4). 851 tests.
+**Status:** 3D-HOTFIX-v2 COMPLETE — Gate fully redesigned per spec: three-step (token → permission_override → model), CONFLICT response type, agent reasoning + recent messages in model prompt, permission_overrides are mechanical bypass (not in rules_text). 855 tests.
 **Owner:** Founder / Architect
-**Action:** Decide next Phase 3 spec.
-**Tests:** 851
+**Action:** Live test gate redesign. Decide next Phase 3 spec.
+**Tests:** 855
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -24,7 +24,8 @@
 | 3B | Per-Space Tool Scoping | COMPLETE | 2026-03-15 | System space auto-provisioned, active_tools on ContextSpace, universal flag on capabilities, space-aware build_capability_prompt() + get_tools_for_space(), Gate 2 seeding, request_tool kernel meta-tool, LRU exemption. 36 new tests. 747 total. |
 | 3B+ | MCP Installation | COMPLETE | 2026-03-15 | Secure "secure api" credential handoff, CapabilityStatus.SUPPRESSED, connect_one/disconnect_one, mcp-servers.json in system space, startup merge, tool.installed/uninstalled events, requires_web_interface flag. 47 new tests. 849 total. |
 | 3D | Dispatch Interceptor | COMPLETE | 2026-03-15 | Gate in tool-use loop, must_not covenants block before fast path, explicit instruction fast path, permission overrides + covenant authorization (Haiku), DISPATCH_GATE events, delete_file consolidated into universal gate. 55 new tests. 802 total. |
-| 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in Haiku prompt + detailed failure reasons (FIX 4). 851 tests. |
+| 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in model prompt + detailed failure reasons (FIX 4). 851 tests. |
+| 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-15 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). 855 tests. |
 
 ---
 
@@ -105,6 +106,31 @@ SPEC-3A complete. No active spec. Founder to decide next Phase 3 spec.
 ---
 
 ## Decisions Made
+
+### 2026-03-15: 3D-HOTFIX-v2 — Gate Full Redesign (spec-driven)
+
+Implemented `specs/3D-HOTFIX-GATE-REDESIGN.md` in full. The gate is now definitively correct.
+
+**Three-step gate:**
+- Step 1: Token check (mechanical — single-use ApprovalToken, 5-min TTL, input hash)
+- Step 2: Permission override (mechanical — `always-allow` bypasses model entirely; no LLM call; zero cost for high-volume automation)
+- Step 3: Model evaluation — sole correctness authority (EXPLICIT / AUTHORIZED / CONFLICT / DENIED)
+
+**New: CONFLICT response** — when user asks for an action AND a `must_not` rule applies but the user didn't address it. Agent surfaces three options: respect the rule, one-time override (with token), or update/remove the rule permanently.
+
+**New: Agent reasoning extraction** — text from the LLM's response before the tool_use block is extracted and passed to the model gate, so the gate can evaluate whether the agent's reasoning aligns with the user's actual request.
+
+**New: Recent messages context** — last 5 user turns from conversation history passed to model gate, so vague follow-up messages ("again?") are understood in context.
+
+**Parser:** First-word-only parsing. "DENIED\n\nThe EXPLICIT request..." → DENIED (not allowed). Prevents false approvals from verbose denial explanations.
+
+**Permission overrides:** NOT included in rules_text. They bypass the model as Step 2. This prevents 50 emails with `always-allow` from triggering 50 model calls.
+
+**Removed:** `_has_prohibiting_covenant`, `_get_domain_keywords`, `_DOMAIN_KEYWORDS`. The model handles must_not detection — no structured pre-check.
+
+- **Modified files:** `kernos/kernel/reasoning.py`, `tests/test_dispatch_gate.py`
+- **Spec moved to:** `specs/completed/3D-HOTFIX-GATE-REDESIGN.md`
+- **Tests:** 855 total passing.
 
 ### 2026-03-15: 3D HOTFIX — Dispatch Gate Redesign
 

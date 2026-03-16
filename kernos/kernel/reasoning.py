@@ -206,10 +206,12 @@ class GateResult:
     """The outcome of a dispatch gate check."""
 
     allowed: bool
-    reason: str    # "explicit_instruction", "permission_override", "covenant_authorized",
-                   # "covenant_denied", "covenant_ambiguous", "no_covenants", "no_authorization"
-    method: str    # "fast_path", "always_allow", "haiku_check", "ask_user", "none"
-    proposed_action: str = ""  # Human-readable description of what was blocked
+    reason: str    # "explicit_instruction", "covenant_authorized", "covenant_conflict", "denied",
+                   # "token_approved"
+    method: str    # "token", "model_check"
+    proposed_action: str = ""    # Human-readable description of what was blocked
+    conflicting_rule: str = ""   # For CONFLICT — which rule conflicts
+    raw_response: str = ""       # Full model response for logging
 
 
 @dataclass
@@ -348,63 +350,8 @@ class ReasoningService:
     _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool"}
 
     # ---------------------------------------------------------------------------
-    # Dispatch Gate (SPEC-3D)
+    # Dispatch Gate (3D-HOTFIX)
     # ---------------------------------------------------------------------------
-
-    # Domain keywords for matching must_not covenants against tool names
-    _DOMAIN_KEYWORDS: dict[str, list[str]] = {
-        "create-event": ["calendar", "event", "schedule", "meeting", "appointment"],
-        "update-event": ["calendar", "event", "schedule", "meeting"],
-        "delete-event": ["calendar", "event"],
-        "send-email": ["email", "mail", "message"],
-        "delete-email": ["email", "mail"],
-        "write_file": ["file", "write"],
-        "delete_file": ["file", "delete"],
-    }
-
-    def _get_domain_keywords(self, tool_name: str) -> list[str]:
-        """Return domain keywords for matching against covenant rule descriptions."""
-        return self._DOMAIN_KEYWORDS.get(tool_name, [])
-
-    async def _has_prohibiting_covenant(
-        self, tool_name: str, tenant_id: str, active_space_id: str,
-    ) -> str | None:
-        """Check if any must_not covenant rule prohibits this tool call.
-
-        must_not rules override EVERYTHING — including explicit instructions.
-        This runs BEFORE the fast path to prevent bypass.
-        No LLM call — structured data lookup only.
-
-        Returns the matching rule's description if prohibited, None otherwise.
-        """
-        if not self._state:
-            return None
-        try:
-            rules = await self._state.query_covenant_rules(
-                tenant_id,
-                context_space_scope=[active_space_id, None],
-                active_only=True,
-            )
-        except Exception as exc:
-            logger.warning("Gate: must_not covenant query failed: %s", exc)
-            return None
-
-        cap_name = self._get_capability_for_tool(tool_name)
-        for rule in rules:
-            if rule.rule_type != "must_not":
-                continue
-            desc_lower = rule.description.lower()
-            # Match on capability name
-            if cap_name and cap_name.lower() in desc_lower:
-                return rule.description
-            # Match on tool name
-            if tool_name.lower() in desc_lower:
-                return rule.description
-            # Match on domain keywords
-            domain_keywords = self._get_domain_keywords(tool_name)
-            if any(kw in desc_lower for kw in domain_keywords):
-                return rule.description
-        return None
 
     def _classify_tool_effect(self, tool_name: str, active_space: Any) -> str:
         """Classify a tool call's effect level.
@@ -490,48 +437,80 @@ class ReasoningService:
         active_space_id: str,
         messages: list[dict] | None = None,
         approval_token_id: str | None = None,
+        agent_reasoning: str = "",
     ) -> GateResult:
         """Authorization gate for write tool calls.
 
-        Step 0: must_not covenant check (structured lookup, no LLM)
-        Step 1: Approval token check (single-use token from prior blocked call)
-        Step 2: Permission override (always-allow setting)
-        Step 3: Haiku authorization — the sole correctness check (EXPLICIT/AUTHORIZED/DENIED)
-        """
-        # Step 0: must_not covenants override everything (no LLM — structured lookup)
-        prohibited_rule = await self._has_prohibiting_covenant(tool_name, tenant_id, active_space_id)
-        if prohibited_rule is not None:
-            return GateResult(
-                allowed=False,
-                reason=f"must_not_block — covenant rule '{prohibited_rule}' prohibits this",
-                method="must_not_block",
-                proposed_action=self._describe_action(tool_name, tool_input),
-            )
+        Step 1: Approval token check (mechanical — user confirmed this specific action)
+        Step 2: Permission override check (mechanical — capability set to always-allow)
+        Step 3: Model evaluation — the correctness check (EXPLICIT/AUTHORIZED/CONFLICT/DENIED)
 
+        Steps 1 and 2 are zero-cost mechanical bypasses. Step 3 is the only LLM call.
+        Permission overrides are NOT included in rules_text — they bypass the model entirely.
+        This ensures high-volume automation (50 emails, always-allow) doesn't trigger 50 model calls.
+        """
         # Step 1: Approval token check (user confirmed this specific action previously)
         if approval_token_id and self._validate_approval_token(
             approval_token_id, tool_name, tool_input
         ):
             logger.info("GATE: token_validated tool=%s token=%s", tool_name, approval_token_id)
-            return GateResult(allowed=True, reason="token_approved", method="token_check")
+            return GateResult(allowed=True, reason="token_approved", method="token")
 
-        # Step 2: Permission override (always-allow setting — fast lookup, no LLM)
+        # Step 2: Permission override (always-allow = zero-cost mechanical bypass, no model call)
         cap_name = self._get_capability_for_tool(tool_name)
         if cap_name and self._state:
             try:
                 tenant = await self._state.get_tenant_profile(tenant_id)
-                if tenant and tenant.permission_overrides:
-                    if tenant.permission_overrides.get(cap_name) == "always-allow":
-                        return GateResult(
-                            allowed=True, reason="permission_override", method="always_allow",
-                        )
+                if tenant and tenant.permission_overrides.get(cap_name) == "always-allow":
+                    logger.info("GATE: permission_override tool=%s cap=%s", tool_name, cap_name)
+                    return GateResult(allowed=True, reason="permission_override", method="always_allow")
             except Exception as exc:
-                logger.warning("Gate: permission check failed: %s", exc)
+                logger.warning("Gate: permission override check failed: %s", exc)
 
-        # Step 3: Haiku is the sole correctness check.
-        # Passes tool description from MCP manifest so gate works for any future tool.
+        # Step 3: Model evaluation — the only LLM call
+        return await self._evaluate_gate(
+            tool_name, tool_input, effect, messages, agent_reasoning, tenant_id, active_space_id,
+        )
+
+    async def _evaluate_gate(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        effect: str,
+        messages: list[dict] | None,
+        agent_reasoning: str,
+        tenant_id: str,
+        active_space_id: str,
+    ) -> GateResult:
+        """Step 2 of the dispatch gate: lightweight model evaluation.
+
+        One LLM call. Sees everything. Returns EXPLICIT / AUTHORIZED / CONFLICT / DENIED.
+        Permission overrides are included in rules_text so the model sees them too.
+        """
+        # Build recent_messages_text (last 5 user turns)
+        recent_messages_text = "No recent messages."
+        if messages:
+            user_msgs = [m for m in messages if m.get("role") == "user"][-5:]
+            if user_msgs:
+                lines = []
+                for m in user_msgs:
+                    content = m.get("content", "")
+                    if isinstance(content, str):
+                        lines.append(f'- "{content[:300]}"')
+                    elif isinstance(content, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                        if text:
+                            lines.append(f'- "{text[:300]}"')
+                if lines:
+                    recent_messages_text = "\n".join(lines)
+
+        # Build rules_text: covenant rules + permission_overrides as [always-allow] entries
         rules_text = "No standing covenant rules."
         rules_count = 0
+        must_not_rules: list[str] = []
         if self._state:
             try:
                 rules = await self._state.query_covenant_rules(
@@ -539,64 +518,88 @@ class ReasoningService:
                     context_space_scope=[active_space_id, None],
                     active_only=True,
                 )
-                if rules:
-                    rules_count = len(rules)
-                    rules_text = "\n".join(
+                rule_lines = []
+                for r in rules:
+                    rule_lines.append(
                         f"- [{r.rule_type}] {r.description} (scope: {r.context_space or 'global'})"
-                        for r in rules
                     )
+                    if r.rule_type == "must_not":
+                        must_not_rules.append(r.description)
+                if rule_lines:
+                    rules_count = len(rule_lines)
+                    rules_text = "\n".join(rule_lines)
             except Exception as exc:
                 logger.warning("Gate: covenant query failed: %s", exc)
 
         action_desc = self._describe_action(tool_name, tool_input)
         tool_description = self._get_tool_description(tool_name)
+
+        system_prompt = (
+            "You are a security gate checking whether an agent's proposed action is "
+            "authorized. You have access to the user's recent messages, the agent's "
+            "reasoning for the action, and the user's standing behavioral rules "
+            "(covenants).\n\n"
+            "Evaluate and answer with ONE of these words:\n\n"
+            "EXPLICIT — The user directly asked for this action in their recent messages.\n"
+            "AUTHORIZED — A standing covenant rule explicitly covers this action, and "
+            "the agent's reasoning is consistent with the evidence.\n"
+            "CONFLICT — The user asked for this action, BUT a restriction (must_not "
+            "rule) also applies. The user may be knowingly overriding the restriction. "
+            "Surface this tension to the user.\n"
+            "DENIED — The user did not ask for this, and no covenant authorizes it.\n\n"
+            "Important:\n"
+            "- If the user explicitly addresses a restriction (\"no need to review, "
+            "just send it\"), that is an override — return EXPLICIT, not CONFLICT.\n"
+            "- If the user asks for an action and a must_not rule exists but the user "
+            "did NOT address the restriction, return CONFLICT.\n"
+            "- If the agent's reasoning claims the user asked for something but the "
+            "recent messages don't support that claim, return DENIED.\n"
+            "- When in doubt, return DENIED. It is always safe to ask.\n\n"
+            "Answer with ONLY one word. Nothing else."
+        )
+        user_content = (
+            f"Recent user messages (oldest to newest):\n{recent_messages_text}\n\n"
+            f"Agent's reasoning for this action:\n{agent_reasoning}\n\n"
+            f"Proposed action: {tool_name}\n"
+            f"Tool description: {tool_description}\n"
+            f"Action details: {action_desc}\n\n"
+            f"Active covenant rules:\n{rules_text}"
+        )
+
         raw = ""
-        logger.info("GATE_HAIKU: max_tokens=128, has_schema=False, rules=%d", rules_count)
+        logger.info("GATE_MODEL: max_tokens=128, has_schema=False, rules=%d", rules_count)
         try:
             raw = await self.complete_simple(
-                system_prompt=(
-                    "You are checking whether a proposed agent action is authorized. "
-                    "Consider: (1) the user's current message, and (2) any standing covenant rules. "
-                    "Answer ONLY with one word:\n"
-                    "EXPLICIT — the user directly asked for this action in their message\n"
-                    "AUTHORIZED — a covenant rule explicitly covers this action\n"
-                    "DENIED — neither the user's message nor any rule authorizes this"
-                ),
-                user_content=(
-                    f"User's message: {user_message}\n\n"
-                    f"Proposed action: {tool_name}\n"
-                    f"Tool description: {tool_description}\n"
-                    f"Action details: {action_desc}\n\n"
-                    f"Active covenant rules:\n{rules_text}"
-                ),
+                system_prompt=system_prompt,
+                user_content=user_content,
                 max_tokens=128,
                 prefer_cheap=True,
             )
         except Exception as exc:
-            logger.warning("Gate: Haiku authorization call failed: %s", exc)
-        logger.info("GATE_HAIKU: raw_response=%r", raw[:100])
+            logger.warning("Gate: model evaluation failed: %s", exc)
+        logger.info("GATE_MODEL: raw_response=%r", raw[:200])
 
         first_word = raw.strip().split()[0].upper() if raw.strip() else ""
         if first_word == "EXPLICIT":
-            return GateResult(allowed=True, reason="explicit_instruction", method="haiku_check")
+            return GateResult(
+                allowed=True, reason="explicit_instruction", method="model_check",
+                raw_response=raw,
+            )
         if first_word == "AUTHORIZED":
-            return GateResult(allowed=True, reason="covenant_authorized", method="haiku_check")
-
-        # Blocked — include detailed reason
-        if rules_count > 0:
-            reason = (
-                f"covenant_ambiguous ({rules_count} rules evaluated, "
-                f"Haiku response: '{raw.strip()}')"
+            return GateResult(
+                allowed=True, reason="covenant_authorized", method="model_check",
+                raw_response=raw,
             )
-        else:
-            reason = (
-                f"denied — user message does not request this action and no covenant matches"
+        if first_word == "CONFLICT":
+            conflicting_rule = must_not_rules[0] if must_not_rules else ""
+            return GateResult(
+                allowed=False, reason="covenant_conflict", method="model_check",
+                proposed_action=action_desc, conflicting_rule=conflicting_rule, raw_response=raw,
             )
+        # DENIED or anything unexpected
         return GateResult(
-            allowed=False,
-            reason=reason,
-            method="ask_user",
-            proposed_action=action_desc,
+            allowed=False, reason="denied", method="model_check",
+            proposed_action=action_desc, raw_response=raw,
         )
 
     def _issue_approval_token(self, tool_name: str, tool_input: dict) -> ApprovalToken:
@@ -788,6 +791,11 @@ class ReasoningService:
             iterations += 1
             tool_results = []
 
+            # Extract agent reasoning: text blocks before any tool_use block
+            agent_reasoning = " ".join(
+                b.text for b in response.content if b.type == "text" and b.text
+            ).strip() or "No explicit reasoning provided."
+
             for block in response.content:
                 if block.type != "tool_use":
                     continue
@@ -810,6 +818,7 @@ class ReasoningService:
                         request.active_space_id,
                         messages=request.messages,
                         approval_token_id=approval_token_id,
+                        agent_reasoning=agent_reasoning,
                     )
 
                     try:
@@ -837,17 +846,32 @@ class ReasoningService:
 
                     if not gate_result.allowed:
                         token = self._issue_approval_token(block.name, tool_input)
+                        if gate_result.reason == "covenant_conflict":
+                            system_msg = (
+                                f"[SYSTEM] Action paused — conflict with standing rule. "
+                                f"Proposed: {gate_result.proposed_action}. "
+                                f"Conflicting rule: {gate_result.conflicting_rule}. "
+                                f"The user may be knowingly overriding this rule. "
+                                f"Ask for clarification. Offer three options: "
+                                f"(1) respect the rule, (2) override just this time with "
+                                f"_approval_token: '{token.token_id}', "
+                                f"(3) update or remove the rule permanently."
+                            )
+                        else:
+                            system_msg = (
+                                f"[SYSTEM] Action blocked — no authorization found. "
+                                f"Proposed: {gate_result.proposed_action}. "
+                                f"The user's recent messages do not request this action "
+                                f"and no covenant rule covers it. "
+                                f"Ask the user if they'd like you to proceed. "
+                                f"If they confirm, re-submit with "
+                                f"_approval_token: '{token.token_id}' in the tool input. "
+                                f"You may also offer to create a standing rule."
+                            )
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": (
-                                f"[SYSTEM] Action blocked by dispatch gate. "
-                                f"Proposed: {gate_result.proposed_action}. "
-                                f"Reason: {gate_result.reason}. "
-                                f"Approval token: {token.token_id}. "
-                                f"If the user confirms, re-submit this exact tool call with "
-                                f"_approval_token: '{token.token_id}' in the tool input."
-                            ),
+                            "content": system_msg,
                         })
                         continue
 
