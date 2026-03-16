@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** 3D-HOTFIX-v2 COMPLETE — Gate fully redesigned per spec: three-step (token → permission_override → model), CONFLICT response type, agent reasoning + recent messages in model prompt, permission_overrides are mechanical bypass (not in rules_text). 855 tests.
+**Status:** 3D-HOTFIX-v2 COMPLETE — Live test 14/14 PASS. Gate fully redesigned: three-step (token → permission_override → model), CONFLICT response type, per-tool-call agent reasoning, permission_overrides mechanical bypass. Bug fixed: _get_capability_for_tool now checks tool_effects. 855 tests.
 **Owner:** Founder / Architect
-**Action:** Live test gate redesign. Decide next Phase 3 spec.
+**Action:** Decide next Phase 3 spec.
 **Tests:** 855
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
@@ -25,7 +25,7 @@
 | 3B+ | MCP Installation | COMPLETE | 2026-03-15 | Secure "secure api" credential handoff, CapabilityStatus.SUPPRESSED, connect_one/disconnect_one, mcp-servers.json in system space, startup merge, tool.installed/uninstalled events, requires_web_interface flag. 47 new tests. 849 total. |
 | 3D | Dispatch Interceptor | COMPLETE | 2026-03-15 | Gate in tool-use loop, must_not covenants block before fast path, explicit instruction fast path, permission overrides + covenant authorization (Haiku), DISPATCH_GATE events, delete_file consolidated into universal gate. 55 new tests. 802 total. |
 | 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in model prompt + detailed failure reasons (FIX 4). 851 tests. |
-| 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-15 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). 855 tests. |
+| 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-16 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). Bug: _get_capability_for_tool checks tool_effects. Live test 14/14 PASS. 855 tests. |
 
 ---
 
