@@ -791,14 +791,23 @@ class ReasoningService:
             iterations += 1
             tool_results = []
 
-            # Extract agent reasoning: text blocks before any tool_use block
-            agent_reasoning = " ".join(
-                b.text for b in response.content if b.type == "text" and b.text
-            ).strip() or "No explicit reasoning provided."
+            # Build a per-tool-call index of agent reasoning.
+            # For each tool_use block: the most recent text block immediately before it.
+            # If there's no text block before a tool_use, use "No explicit reasoning provided."
+            _last_text = "No explicit reasoning provided."
+            _tool_reasoning: dict[str, str] = {}
+            for _b in response.content:
+                if _b.type == "text" and _b.text:
+                    _last_text = _b.text.strip() or "No explicit reasoning provided."
+                elif _b.type == "tool_use" and _b.id:
+                    _tool_reasoning[_b.id] = _last_text
+                    _last_text = "No explicit reasoning provided."  # reset for next tool call
 
             for block in response.content:
                 if block.type != "tool_use":
                     continue
+
+                agent_reasoning = _tool_reasoning.get(block.id or "", "No explicit reasoning provided.")
 
                 logger.info(
                     "TOOL_LOOP iter=%d tool=%s kernel=%s",
