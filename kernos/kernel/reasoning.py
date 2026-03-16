@@ -10,7 +10,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import anthropic
@@ -230,6 +230,22 @@ class ApprovalToken:
 
 
 @dataclass
+class PendingAction:
+    """A tool call blocked by the dispatch gate, awaiting user confirmation.
+
+    Stored on the ReasoningService keyed by tenant_id. The handler executes
+    confirmed actions after the agent signals [CONFIRM:N] in its response.
+    """
+
+    tool_name: str
+    tool_input: dict
+    proposed_action: str      # Human-readable description
+    conflicting_rule: str     # Populated for CONFLICT; empty for DENIED
+    gate_reason: str          # "covenant_conflict" or "denied"
+    expires_at: datetime      # 5 minutes from creation (UTC)
+
+
+@dataclass
 class ReasoningResult:
     """The outcome of a reasoning turn."""
 
@@ -292,6 +308,7 @@ class ReasoningService:
         self._registry = None   # Set by handler after construction
         self._state = None      # Set by handler after construction
         self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
+        self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
 
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
@@ -655,6 +672,60 @@ class ReasoningService:
         token.used = True
         return True
 
+    async def execute_tool(
+        self, tool_name: str, tool_input: dict, request: "ReasoningRequest"
+    ) -> str:
+        """Execute a tool call directly (used for confirmed pending actions).
+
+        Handles both kernel tools and MCP tools. Mirrors the routing in reason().
+        """
+        if tool_name in self._KERNEL_TOOLS:
+            if tool_name == "write_file":
+                if self._files:
+                    return await self._files.write_file(
+                        request.tenant_id,
+                        request.active_space_id,
+                        tool_input.get("name", ""),
+                        tool_input.get("content", ""),
+                        tool_input.get("description", ""),
+                    )
+                return "File system is not available."
+            elif tool_name == "read_file":
+                if self._files:
+                    return await self._files.read_file(
+                        request.tenant_id,
+                        request.active_space_id,
+                        tool_input.get("name", ""),
+                    )
+                return "File system is not available."
+            elif tool_name == "list_files":
+                if self._files:
+                    return await self._files.list_files(
+                        request.tenant_id,
+                        request.active_space_id,
+                    )
+                return "File system is not available."
+            elif tool_name == "delete_file":
+                if self._files:
+                    return await self._files.delete_file(
+                        request.tenant_id,
+                        request.active_space_id,
+                        tool_input.get("name", ""),
+                    )
+                return "File system is not available."
+            elif tool_name == "remember":
+                if self._retrieval:
+                    return await self._retrieval.search(
+                        request.tenant_id,
+                        tool_input.get("query", ""),
+                        request.active_space_id,
+                    )
+                return "Memory search is not available."
+            else:
+                return f"Kernel tool '{tool_name}' not handled."
+        else:
+            return await self._mcp.call_tool(tool_name, tool_input)
+
     async def _handle_request_tool(
         self,
         tenant_id: str,
@@ -879,27 +950,41 @@ class ReasoningService:
                     )
 
                     if not gate_result.allowed:
-                        token = self._issue_approval_token(block.name, tool_input)
+                        # Keep token for programmatic callers (Step 1 of the gate)
+                        self._issue_approval_token(block.name, tool_input)
+                        # Store PendingAction for kernel-owned replay
+                        tenant_id = request.tenant_id
+                        if tenant_id not in self._pending_actions:
+                            self._pending_actions[tenant_id] = []
+                        pending_idx = len(self._pending_actions[tenant_id])
+                        self._pending_actions[tenant_id].append(PendingAction(
+                            tool_name=block.name,
+                            tool_input=dict(tool_input),
+                            proposed_action=gate_result.proposed_action,
+                            conflicting_rule=gate_result.conflicting_rule,
+                            gate_reason=gate_result.reason,
+                            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                        ))
                         if gate_result.reason == "covenant_conflict":
                             system_msg = (
-                                f"[SYSTEM] Action paused — conflict with standing rule. "
+                                f"[SYSTEM] Action blocked — conflict with standing rule. "
                                 f"Proposed: {gate_result.proposed_action}. "
                                 f"Conflicting rule: {gate_result.conflicting_rule}. "
-                                f"The user may be knowingly overriding this rule. "
-                                f"Ask for clarification. Offer three options: "
-                                f"(1) respect the rule, (2) override just this time with "
-                                f"_approval_token: '{token.token_id}', "
-                                f"(3) update or remove the rule permanently."
+                                f"Pending action index: {pending_idx}. "
+                                f"Ask the user to confirm. If they confirm, include "
+                                f"[CONFIRM:{pending_idx}] in your response. "
+                                f"Also offer three options: "
+                                f"1. Respect the rule (don't do it). "
+                                f"2. Override this time (confirm the action). "
+                                f"3. Update the rule permanently."
                             )
                         else:
                             system_msg = (
                                 f"[SYSTEM] Action blocked — no authorization found. "
                                 f"Proposed: {gate_result.proposed_action}. "
-                                f"The user's recent messages do not request this action "
-                                f"and no covenant rule covers it. "
-                                f"Ask the user if they'd like you to proceed. "
-                                f"If they confirm, re-submit with "
-                                f"_approval_token: '{token.token_id}' in the tool input. "
+                                f"Pending action index: {pending_idx}. "
+                                f"Ask the user if they want to proceed. If they confirm, "
+                                f"include [CONFIRM:{pending_idx}] in your response. "
                                 f"You may also offer to create a standing rule."
                             )
                         tool_results.append({

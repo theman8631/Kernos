@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** 3D-HOTFIX-v2 COMPLETE — Live test 14/14 PASS. Gate fully redesigned: three-step (token → permission_override → model), CONFLICT response type, per-tool-call agent reasoning, permission_overrides mechanical bypass. Bug fixed: _get_capability_for_tool now checks tool_effects. 855 tests.
+**Status:** 3D-HOTFIX-CONFIRMATION-REDESIGN COMPLETE — Live test 13/14 PASS (1 SKIP — file already deleted). Kernel-owned replay replaces broken approval-token injection flow. Agent signals [CONFIRM:N]; kernel executes stored PendingAction. 869 tests.
 **Owner:** Founder / Architect
 **Action:** Decide next Phase 3 spec.
-**Tests:** 855
+**Tests:** 869
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -26,6 +26,7 @@
 | 3D | Dispatch Interceptor | COMPLETE | 2026-03-15 | Gate in tool-use loop, must_not covenants block before fast path, explicit instruction fast path, permission overrides + covenant authorization (Haiku), DISPATCH_GATE events, delete_file consolidated into universal gate. 55 new tests. 802 total. |
 | 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in model prompt + detailed failure reasons (FIX 4). 851 tests. |
 | 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-16 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). Bug: _get_capability_for_tool checks tool_effects. Live test 14/14 PASS. 855 tests. |
+| 3D-HOTFIX-CONFIRMATION | Kernel-Owned Confirmation Replay | COMPLETE | 2026-03-16 | PendingAction stored on ReasoningService when gate blocks. Agent signals [CONFIRM:N] in response; handler executes stored action, strips signal. Token mechanism preserved for programmatic callers. Bug found: [CONFIRM:0] appearing twice → dedup fix. Live test 13/14 PASS (1 SKIP). 869 tests. |
 
 ---
 
@@ -106,6 +107,26 @@ SPEC-3A complete. No active spec. Founder to decide next Phase 3 spec.
 ---
 
 ## Decisions Made
+
+### 2026-03-16: 3D-HOTFIX-CONFIRMATION — Kernel-Owned Confirmation Replay
+
+Root cause: the approval-token flow asked the LLM to remember hex strings and inject them into tool_input on the next turn. LLMs are bad at mechanical bookkeeping. The agent made fresh tool calls every time instead. Infinite loop.
+
+**Fix: kernel owns the replay.** Agent never touches tokens again.
+
+- **`PendingAction`** dataclass stored on `ReasoningService._pending_actions[tenant_id]` when the gate blocks. Fields: `tool_name`, `tool_input` (exact copy), `proposed_action`, `conflicting_rule`, `gate_reason`, `expires_at` (5 min TTL).
+- **[SYSTEM] messages** no longer contain token IDs. Instead: `Pending action index: N. If they confirm, include [CONFIRM:N] in your response.`
+- **`execute_tool()`** method on `ReasoningService` — handles both kernel tools and MCP tools. Called by handler during confirmation replay.
+- **Handler confirmation block** (after `reason()` returns): scans `response_text` for `[CONFIRM:N]` / `[CONFIRM:ALL]`, executes stored PendingActions, strips signals from text, appends results. If no signal: clears pending and logs `PENDING_CLEARED`.
+- **Deduplication fix:** agent sometimes included `[CONFIRM:0]` twice (natural reply + tool-path footnote). Added `idx not in actions_to_execute` guard to prevent double execution.
+- **Token mechanism preserved:** Step 1 of the gate still validates `_approval_token` for programmatic/API callers. Just not exposed in agent-facing messages.
+- **System prompt addition:** `operating_principles` in `template.py` explains `[CONFIRM:N]` protocol to the agent.
+
+**Live test finding:** Agent included `[CONFIRM:0]` in its response based solely on the system prompt instruction — no explicit user coaching. The full confirmation flow worked across two turns: agent asked user first (conservative), user confirmed, agent called tool, gate blocked with CONFLICT, agent included signal, handler executed delete.
+
+- **Modified files:** `kernos/kernel/reasoning.py`, `kernos/messages/handler.py`, `kernos/kernel/template.py`, `tests/test_dispatch_gate.py`
+- **Spec moved to:** `specs/completed/3D-HOTFIX-CONFIRMATION-REDESIGN.md`
+- **Tests:** 869 total passing.
 
 ### 2026-03-15: 3D-HOTFIX-v2 — Gate Full Redesign (spec-driven)
 
@@ -351,4 +372,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-15 (SPEC-3B complete — 747 tests passing. Per-Space Tool Scoping live-verified.)*
+*Last updated: 2026-03-16 (3D-HOTFIX-CONFIRMATION complete — 869 tests passing. Kernel-owned confirmation replay live-verified.)*

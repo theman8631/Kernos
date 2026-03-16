@@ -19,7 +19,7 @@ from kernos.kernel.exceptions import (
     ReasoningRateLimitError,
     ReasoningTimeoutError,
 )
-from kernos.kernel.reasoning import ReasoningRequest, ReasoningService
+from kernos.kernel.reasoning import PendingAction, ReasoningRequest, ReasoningService
 from kernos.kernel.projectors.coordinator import run_projectors
 from kernos.kernel.soul import Soul
 from kernos.kernel.task import Task, TaskType, generate_task_id
@@ -1559,6 +1559,56 @@ a tool in a specific space, just ask — I'll activate it.
         try:
             task = await self.engine.execute(task, request)
             response_text = task.result_text
+
+            # --- Kernel-owned confirmation replay ---
+            pending = self.reasoning._pending_actions.get(tenant_id)
+            if pending:
+                confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
+                matches = confirm_pattern.findall(response_text)
+                if matches:
+                    actions_to_execute: list[int] = []
+                    for match in matches:
+                        if match.upper() == "ALL":
+                            actions_to_execute = list(range(len(pending)))
+                            break
+                        else:
+                            idx = int(match)
+                            if 0 <= idx < len(pending) and idx not in actions_to_execute:
+                                actions_to_execute.append(idx)
+                    execution_results: list[str] = []
+                    for idx in actions_to_execute:
+                        action = pending[idx]
+                        if datetime.now(timezone.utc) < action.expires_at:
+                            try:
+                                result = await self.reasoning.execute_tool(
+                                    action.tool_name, action.tool_input, request
+                                )
+                                execution_results.append(f"✓ {action.proposed_action}: {result}")
+                                logger.info(
+                                    "CONFIRM_EXECUTE: tool=%s idx=%d", action.tool_name, idx
+                                )
+                            except Exception as exc:
+                                execution_results.append(
+                                    f"Failed: {action.proposed_action} ({exc})"
+                                )
+                                logger.warning(
+                                    "CONFIRM_EXECUTE_FAILED: tool=%s idx=%d error=%s",
+                                    action.tool_name, idx, exc,
+                                )
+                        else:
+                            execution_results.append(f"Expired: {action.proposed_action}")
+                            logger.warning(
+                                "CONFIRM_EXPIRED: tool=%s idx=%d", action.tool_name, idx
+                            )
+                    del self.reasoning._pending_actions[tenant_id]
+                    response_text = confirm_pattern.sub("", response_text).strip()
+                    if execution_results:
+                        response_text += "\n\n" + "\n".join(execution_results)
+                else:
+                    del self.reasoning._pending_actions[tenant_id]
+                    logger.info(
+                        "PENDING_CLEARED: tenant=%s reason=no_confirm_signal", tenant_id
+                    )
 
             # Tier 1 + Tier 2 projectors
             history = await self.conversations.get_recent(

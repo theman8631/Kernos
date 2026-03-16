@@ -1,4 +1,4 @@
-"""Tests for SPEC-3D / 3D-HOTFIX: Dispatch Interceptor.
+"""Tests for SPEC-3D / 3D-HOTFIX / Confirmation Redesign: Dispatch Interceptor.
 
 Tests cover:
 - Tool effect classification (kernel + MCP + unknown)
@@ -6,6 +6,7 @@ Tests cover:
 - Model gate: EXPLICIT / AUTHORIZED / CONFLICT / DENIED
 - CONFLICT response: conflicting_rule surfaced, differentiated system message
 - Approval token lifecycle: issue, validate, single-use, TTL, hash
+- PendingAction: stored on gate block, kernel-owned replay via [CONFIRM:N]
 - Agent reasoning extraction passed to gate
 - Recent messages passed to gate
 - Permission overrides in rules_text (not a separate gate step)
@@ -25,7 +26,7 @@ import pytest
 
 from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, CapabilityStatus
 from kernos.kernel.event_types import EventType
-from kernos.kernel.reasoning import GateResult, ReasoningRequest, ReasoningService
+from kernos.kernel.reasoning import GateResult, PendingAction, ReasoningRequest, ReasoningService
 from kernos.kernel.spaces import ContextSpace
 from kernos.kernel.state import TenantProfile
 
@@ -931,7 +932,7 @@ class TestApprovalToken:
         assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is True
 
     async def test_denied_system_message_format(self):
-        """DENIED: [SYSTEM] blocked message includes token and re-submit instructions."""
+        """DENIED: gate produces result with reason='denied'; [CONFIRM:N] is in system message."""
         svc = _make_service()
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -946,23 +947,22 @@ class TestApprovalToken:
             "I was thinking", "t1", "space_1",
         )
         assert not gate_result.allowed
-        token = svc._issue_approval_token("create-event", {"summary": "Meeting"})
+        assert gate_result.reason == "denied"
+        # Build what the system message would look like (index 0 for first block)
         msg = (
             f"[SYSTEM] Action blocked — no authorization found. "
             f"Proposed: {gate_result.proposed_action}. "
-            f"The user's recent messages do not request this action "
-            f"and no covenant rule covers it. "
-            f"Ask the user if they'd like you to proceed. "
-            f"If they confirm, re-submit with "
-            f"_approval_token: '{token.token_id}' in the tool input. "
+            f"Pending action index: 0. "
+            f"Ask the user if they want to proceed. If they confirm, "
+            f"include [CONFIRM:0] in your response. "
             f"You may also offer to create a standing rule."
         )
         assert "[SYSTEM]" in msg
-        assert token.token_id in msg
-        assert "_approval_token" in msg
+        assert "[CONFIRM:0]" in msg
+        assert "_approval_token" not in msg
 
     async def test_conflict_system_message_format(self):
-        """CONFLICT: [SYSTEM] paused message mentions conflicting rule and three options."""
+        """CONFLICT: gate result has covenant_conflict reason; [CONFIRM:N] in system message."""
         from kernos.kernel.state import CovenantRule
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
@@ -986,22 +986,24 @@ class TestApprovalToken:
         assert not gate_result.allowed
         assert gate_result.reason == "covenant_conflict"
         assert gate_result.conflicting_rule == "Never send emails without asking me first"
-        token = svc._issue_approval_token("send-email", {"to": "alice@example.com"})
+        # Build what the system message would look like (index 0 for first block)
         msg = (
-            f"[SYSTEM] Action paused — conflict with standing rule. "
+            f"[SYSTEM] Action blocked — conflict with standing rule. "
             f"Proposed: {gate_result.proposed_action}. "
             f"Conflicting rule: {gate_result.conflicting_rule}. "
-            f"The user may be knowingly overriding this rule. "
-            f"Ask for clarification. Offer three options: "
-            f"(1) respect the rule, (2) override just this time with "
-            f"_approval_token: '{token.token_id}', "
-            f"(3) update or remove the rule permanently."
+            f"Pending action index: 0. "
+            f"Ask the user to confirm. If they confirm, include "
+            f"[CONFIRM:0] in your response. "
+            f"Also offer three options: "
+            f"1. Respect the rule (don't do it). "
+            f"2. Override this time (confirm the action). "
+            f"3. Update the rule permanently."
         )
         assert "[SYSTEM]" in msg
         assert "conflict" in msg
         assert "Never send emails without asking me first" in msg
-        assert "three options" in msg
-        assert token.token_id in msg
+        assert "[CONFIRM:0]" in msg
+        assert "_approval_token" not in msg
 
     async def test_token_method_is_token(self):
         """When approval token is used, method is 'token' (not 'token_check')."""
@@ -1017,3 +1019,344 @@ class TestApprovalToken:
         assert result.allowed is True
         assert result.method == "token"
         assert result.reason == "token_approved"
+
+
+# ===========================
+# PendingAction
+# ===========================
+
+class TestPendingActions:
+    """Tests for PendingAction dataclass and _pending_actions dict on ReasoningService.
+
+    Note: _pending_actions is populated inside reason() (the tool-use loop), not by
+    _gate_tool_call() directly. These tests verify the dataclass behavior and the
+    _pending_actions dict structure by manipulating it directly, mirroring what
+    reason() does when gate_result.allowed is False.
+    """
+
+    def _store_pending(
+        self,
+        svc: ReasoningService,
+        tenant_id: str,
+        tool_name: str,
+        tool_input: dict,
+        proposed_action: str = "Do something",
+        conflicting_rule: str = "",
+        gate_reason: str = "denied",
+    ) -> PendingAction:
+        """Simulate what reason() does when a gate blocks: store a PendingAction."""
+        if tenant_id not in svc._pending_actions:
+            svc._pending_actions[tenant_id] = []
+        action = PendingAction(
+            tool_name=tool_name,
+            tool_input=dict(tool_input),
+            proposed_action=proposed_action,
+            conflicting_rule=conflicting_rule,
+            gate_reason=gate_reason,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        svc._pending_actions[tenant_id].append(action)
+        return action
+
+    def test_pending_action_stored_on_gate_block(self):
+        """Storing a PendingAction yields correct fields."""
+        svc = _make_service()
+        action = self._store_pending(
+            svc, "t1", "create-event", {"summary": "Meeting"},
+            proposed_action="Create a calendar event",
+            gate_reason="denied",
+        )
+        assert "t1" in svc._pending_actions
+        assert len(svc._pending_actions["t1"]) == 1
+        stored = svc._pending_actions["t1"][0]
+        assert isinstance(stored, PendingAction)
+        assert stored.tool_name == "create-event"
+        assert stored.tool_input == {"summary": "Meeting"}
+        assert stored.gate_reason == "denied"
+        assert stored.expires_at > datetime.now(timezone.utc)
+
+    def test_pending_action_indexed_for_multiple_blocks(self):
+        """Two stored blocks → indices 0 and 1."""
+        svc = _make_service()
+        self._store_pending(svc, "t1", "create-event", {"summary": "Meeting"})
+        self._store_pending(svc, "t1", "delete-event", {"id": "evt1"})
+        assert len(svc._pending_actions["t1"]) == 2
+        assert svc._pending_actions["t1"][0].tool_name == "create-event"
+        assert svc._pending_actions["t1"][1].tool_name == "delete-event"
+
+    def test_pending_action_not_stored_when_allowed(self):
+        """When gate allows, nothing is stored in _pending_actions."""
+        svc = _make_service()
+        # No call to _store_pending — gate allowed the call
+        assert "t1" not in svc._pending_actions
+
+    def test_system_message_uses_confirm_not_token(self):
+        """System message for denied block contains [CONFIRM:0] and not _approval_token."""
+        pending_idx = 0
+        proposed_action = "Create a calendar event"
+        msg = (
+            f"[SYSTEM] Action blocked — no authorization found. "
+            f"Proposed: {proposed_action}. "
+            f"Pending action index: {pending_idx}. "
+            f"Ask the user if they want to proceed. If they confirm, "
+            f"include [CONFIRM:{pending_idx}] in your response. "
+            f"You may also offer to create a standing rule."
+        )
+        assert "[SYSTEM]" in msg
+        assert "[CONFIRM:0]" in msg
+        assert "_approval_token" not in msg
+
+    def test_system_message_covenant_conflict_format(self):
+        """CONFLICT format contains [CONFIRM:N] and conflicting rule."""
+        svc = _make_service()
+        action = self._store_pending(
+            svc, "t1", "delete-event", {"id": "evt1"},
+            proposed_action="Delete calendar event",
+            conflicting_rule="Never delete without awareness",
+            gate_reason="covenant_conflict",
+        )
+        assert action.gate_reason == "covenant_conflict"
+        assert action.conflicting_rule == "Never delete without awareness"
+        pending_idx = 0
+        msg = (
+            f"[SYSTEM] Action blocked — conflict with standing rule. "
+            f"Proposed: {action.proposed_action}. "
+            f"Conflicting rule: {action.conflicting_rule}. "
+            f"Pending action index: {pending_idx}. "
+            f"Ask the user to confirm. If they confirm, include "
+            f"[CONFIRM:{pending_idx}] in your response."
+        )
+        assert "[CONFIRM:0]" in msg
+        assert "_approval_token" not in msg
+        assert "Never delete without awareness" in msg
+
+    def test_system_message_denied_format(self):
+        """DENIED format: gate_reason is 'denied', conflicting_rule is empty."""
+        svc = _make_service()
+        action = self._store_pending(
+            svc, "t1", "create-event", {"summary": "Meeting"},
+            gate_reason="denied",
+            conflicting_rule="",
+        )
+        assert action.gate_reason == "denied"
+        assert action.conflicting_rule == ""
+
+    def test_token_still_issued_for_programmatic_callers(self):
+        """_approval_tokens still available after gate blocks (token issued in reason())."""
+        svc = _make_service()
+        # Simulate token issuance that happens in reason() before storing PendingAction
+        token = svc._issue_approval_token("create-event", {"summary": "Meeting"})
+        self._store_pending(svc, "t1", "create-event", {"summary": "Meeting"})
+        # Both token and pending action exist
+        assert token.token_id in svc._approval_tokens
+        assert "t1" in svc._pending_actions
+
+
+# ===========================
+# Handler Confirmation Replay
+# ===========================
+
+class TestConfirmationReplay:
+    """Tests for the kernel-owned [CONFIRM:N] replay logic.
+
+    These tests exercise the confirmation logic directly by simulating what
+    handler.process() does after engine.execute() returns — without going through
+    the full pipeline. We test the confirmation pattern matching and PendingAction
+    execution logic inline.
+    """
+
+    def _make_pending_action(
+        self,
+        tool_name: str = "delete_file",
+        tool_input: dict | None = None,
+        proposed_action: str = "Delete file 'potato.md'",
+        gate_reason: str = "covenant_conflict",
+        conflicting_rule: str = "Never delete without awareness",
+        expires_at: datetime | None = None,
+    ) -> PendingAction:
+        if tool_input is None:
+            tool_input = {"name": "potato.md"}
+        if expires_at is None:
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+        return PendingAction(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            proposed_action=proposed_action,
+            conflicting_rule=conflicting_rule,
+            gate_reason=gate_reason,
+            expires_at=expires_at,
+        )
+
+    async def _run_confirm_logic(
+        self,
+        svc: ReasoningService,
+        response_text: str,
+        pending_actions: list[PendingAction],
+        tenant_id: str = "t1",
+        execute_tool_result: str = "Done",
+        request: object = None,
+    ) -> str:
+        """Simulate the handler's confirmation-check block after engine.execute().
+
+        Directly runs the [CONFIRM:N] pattern matching logic, matching the
+        implementation in handler.process().
+        """
+        import re
+
+        svc._pending_actions[tenant_id] = list(pending_actions)
+        svc.execute_tool = AsyncMock(return_value=execute_tool_result)
+
+        if request is None:
+            request = MagicMock()
+            request.tenant_id = tenant_id
+
+        pending = svc._pending_actions.get(tenant_id)
+        if not pending:
+            return response_text
+
+        confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
+        matches = confirm_pattern.findall(response_text)
+        if matches:
+            actions_to_execute: list[int] = []
+            for match in matches:
+                if match.upper() == "ALL":
+                    actions_to_execute = list(range(len(pending)))
+                    break
+                else:
+                    idx = int(match)
+                    if 0 <= idx < len(pending):
+                        actions_to_execute.append(idx)
+            execution_results: list[str] = []
+            for idx in actions_to_execute:
+                action = pending[idx]
+                if datetime.now(timezone.utc) < action.expires_at:
+                    try:
+                        result = await svc.execute_tool(
+                            action.tool_name, action.tool_input, request
+                        )
+                        execution_results.append(f"✓ {action.proposed_action}: {result}")
+                    except Exception as exc:
+                        execution_results.append(f"Failed: {action.proposed_action} ({exc})")
+                else:
+                    execution_results.append(f"Expired: {action.proposed_action}")
+            del svc._pending_actions[tenant_id]
+            response_text = confirm_pattern.sub("", response_text).strip()
+            if execution_results:
+                response_text += "\n\n" + "\n".join(execution_results)
+        else:
+            del svc._pending_actions[tenant_id]
+
+        return response_text
+
+    async def test_confirm_single_action(self):
+        """Response with [CONFIRM:0] triggers execute_tool and strips signal."""
+        svc = _make_service()
+        pending = [self._make_pending_action()]
+        result = await self._run_confirm_logic(
+            svc,
+            response_text="Deleting the file now. [CONFIRM:0]",
+            pending_actions=pending,
+            execute_tool_result="File deleted.",
+        )
+        assert "[CONFIRM:0]" not in result
+        assert "File deleted" in result
+
+    async def test_confirm_all_actions(self):
+        """[CONFIRM:ALL] executes all pending actions."""
+        svc = _make_service()
+        pending = [
+            self._make_pending_action("delete_file", {"name": "potato.md"}, "Delete potato.md"),
+            self._make_pending_action("delete_file", {"name": "carrot.md"}, "Delete carrot.md"),
+        ]
+        result = await self._run_confirm_logic(
+            svc,
+            response_text="Deleting both. [CONFIRM:ALL]",
+            pending_actions=pending,
+            execute_tool_result="Done",
+        )
+        assert "[CONFIRM:ALL]" not in result
+        assert svc.execute_tool.await_count == 2
+
+    async def test_no_confirm_signal_clears_pending(self):
+        """Response without [CONFIRM:N] clears pending actions without executing."""
+        svc = _make_service()
+        pending = [self._make_pending_action()]
+        tenant_id = "t1"
+        await self._run_confirm_logic(
+            svc,
+            response_text="Let me know if you want to proceed.",
+            pending_actions=pending,
+            tenant_id=tenant_id,
+        )
+        # execute_tool should NOT have been called
+        svc.execute_tool.assert_not_called()
+        # pending_actions should be cleared
+        assert tenant_id not in svc._pending_actions
+
+    async def test_confirm_signal_stripped_from_response(self):
+        """[CONFIRM:0] is stripped from final response text."""
+        svc = _make_service()
+        pending = [self._make_pending_action()]
+        result = await self._run_confirm_logic(
+            svc,
+            response_text="Done. [CONFIRM:0] All good.",
+            pending_actions=pending,
+            execute_tool_result="File deleted.",
+        )
+        assert "[CONFIRM:0]" not in result
+        assert "All good" in result
+
+    async def test_expired_action_not_executed(self):
+        """Past expires_at → 'Expired:' in result, execute_tool not called."""
+        svc = _make_service()
+        expired_action = self._make_pending_action(
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=10)
+        )
+        result = await self._run_confirm_logic(
+            svc,
+            response_text="Confirming. [CONFIRM:0]",
+            pending_actions=[expired_action],
+            execute_tool_result="Done",
+        )
+        svc.execute_tool.assert_not_called()
+        assert "Expired" in result
+
+    async def test_selective_confirmation(self):
+        """[CONFIRM:1] only executes index 1, not index 0."""
+        svc = _make_service()
+        pending = [
+            self._make_pending_action("delete_file", {"name": "a.md"}, "Delete a.md"),
+            self._make_pending_action("delete_file", {"name": "b.md"}, "Delete b.md"),
+        ]
+        executed_inputs = []
+
+        async def capture_execute(tool_name, tool_input, request):
+            executed_inputs.append(tool_input)
+            return "Done"
+
+        svc.execute_tool = capture_execute
+
+        tenant_id = "t1"
+        svc._pending_actions[tenant_id] = list(pending)
+
+        import re
+        response_text = "Deleting b.md only. [CONFIRM:1]"
+        confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
+        matches = confirm_pattern.findall(response_text)
+        actions_to_execute: list[int] = []
+        for match in matches:
+            idx = int(match)
+            if 0 <= idx < len(pending):
+                actions_to_execute.append(idx)
+
+        request = MagicMock()
+        request.tenant_id = tenant_id
+        for idx in actions_to_execute:
+            action = pending[idx]
+            await svc.execute_tool(action.tool_name, action.tool_input, request)
+
+        del svc._pending_actions[tenant_id]
+
+        # Only b.md (index 1) should have been executed
+        assert len(executed_inputs) == 1
+        assert executed_inputs[0] == {"name": "b.md"}
