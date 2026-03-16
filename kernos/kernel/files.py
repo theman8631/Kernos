@@ -6,7 +6,9 @@ kernel-managed tools: write_file, read_file, list_files, delete_file.
 """
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -237,15 +239,68 @@ class FileService:
     # --- Manifest CRUD ---
 
     async def _load_manifest(self, tenant_id: str, space_id: str) -> dict[str, str]:
-        """Load the file manifest for a space. Returns empty dict if not found."""
+        """Load the file manifest for a space.
+
+        On JSON parse failure: rebuilds the manifest from actual files on disk
+        (descriptions are lost but files are preserved). Logs a WARNING so the
+        corruption event is visible in logs.
+        """
         manifest_path = self._manifest_path(tenant_id, space_id)
         if not manifest_path.exists():
             return {}
         try:
             return json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to load manifest for %s/%s: %s", tenant_id, space_id, exc)
+            logger.warning(
+                "MANIFEST_CORRUPT: Failed to parse manifest for %s/%s: %s — "
+                "rebuilding from disk. Descriptions will be empty.",
+                tenant_id, space_id, exc,
+            )
+            return await self._rebuild_manifest(tenant_id, space_id)
+
+    async def _rebuild_manifest(
+        self, tenant_id: str, space_id: str
+    ) -> dict[str, str]:
+        """Rebuild manifest by scanning the files directory.
+
+        Called when the manifest JSON is corrupt. Descriptions are lost.
+        Writes the recovered manifest back to disk atomically.
+        """
+        files_dir = self._space_files_dir(tenant_id, space_id)
+        if not files_dir.exists():
             return {}
+        manifest: dict[str, str] = {}
+        for p in files_dir.iterdir():
+            if p.is_file() and not p.name.startswith("."):
+                manifest[p.name] = "(description unavailable — rebuilt after corruption)"
+        logger.warning(
+            "MANIFEST_REBUILD: recovered %d file(s) for %s/%s",
+            len(manifest), tenant_id, space_id,
+        )
+        manifest_path = self._manifest_path(tenant_id, space_id)
+        await self._write_manifest_atomic(manifest_path, manifest)
+        return manifest
+
+    def _write_manifest_atomic(self, manifest_path: Path, manifest: dict) -> None:
+        """Write manifest JSON atomically: temp file → os.replace.
+
+        Prevents partial writes from corrupting the manifest during
+        concurrent writes or process interruptions (e.g. 429 retry delays).
+        """
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=manifest_path.parent, suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(manifest, indent=2))
+            os.replace(tmp_path, str(manifest_path))
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     async def load_manifest(self, tenant_id: str, space_id: str) -> dict[str, str]:
         """Public alias for _load_manifest (used by CompactionService)."""
@@ -257,8 +312,7 @@ class FileService:
         manifest = await self._load_manifest(tenant_id, space_id)
         manifest[name] = description
         manifest_path = self._manifest_path(tenant_id, space_id)
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self._write_manifest_atomic(manifest_path, manifest)
 
     async def _remove_from_manifest(
         self, tenant_id: str, space_id: str, name: str
@@ -266,4 +320,4 @@ class FileService:
         manifest = await self._load_manifest(tenant_id, space_id)
         manifest.pop(name, None)
         manifest_path = self._manifest_path(tenant_id, space_id)
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self._write_manifest_atomic(manifest_path, manifest)

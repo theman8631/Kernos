@@ -541,23 +541,26 @@ class ReasoningService:
             "authorized. You have access to the user's recent messages, the agent's "
             "reasoning for the action, and the user's standing behavioral rules "
             "(covenants).\n\n"
-            "Evaluate and answer with ONE of these words:\n\n"
+            "Evaluate and answer with ONE of these:\n\n"
             "EXPLICIT — The user directly asked for this action in their recent messages.\n"
             "AUTHORIZED — A standing covenant rule explicitly covers this action, and "
             "the agent's reasoning is consistent with the evidence.\n"
-            "CONFLICT — The user asked for this action, BUT a restriction (must_not "
-            "rule) also applies. The user may be knowingly overriding the restriction. "
-            "Surface this tension to the user.\n"
+            "CONFLICT: <exact rule text> — The user asked for this action, BUT a "
+            "restriction (must_not rule) also applies. Copy the exact rule text after "
+            "the colon. The user may be knowingly overriding the restriction.\n"
             "DENIED — The user did not ask for this, and no covenant authorizes it.\n\n"
             "Important:\n"
             "- If the user explicitly addresses a restriction (\"no need to review, "
             "just send it\"), that is an override — return EXPLICIT, not CONFLICT.\n"
             "- If the user asks for an action and a must_not rule exists but the user "
-            "did NOT address the restriction, return CONFLICT.\n"
+            "did NOT address the restriction, return CONFLICT: <that rule's exact text>.\n"
+            "- Match the conflicting rule carefully — only flag a rule if it genuinely "
+            "applies to the proposed action. Do not flag unrelated rules.\n"
             "- If the agent's reasoning claims the user asked for something but the "
             "recent messages don't support that claim, return DENIED.\n"
             "- When in doubt, return DENIED. It is always safe to ask.\n\n"
-            "Answer with ONLY one word. Nothing else."
+            "For CONFLICT, use format: CONFLICT: <rule text>\n"
+            "For all others, answer with ONLY the one word."
         )
         user_content = (
             f"Recent user messages (oldest to newest):\n{recent_messages_text}\n\n"
@@ -569,19 +572,20 @@ class ReasoningService:
         )
 
         raw = ""
-        logger.info("GATE_MODEL: max_tokens=128, has_schema=False, rules=%d", rules_count)
+        logger.info("GATE_MODEL: max_tokens=256, has_schema=False, rules=%d", rules_count)
         try:
             raw = await self.complete_simple(
                 system_prompt=system_prompt,
                 user_content=user_content,
-                max_tokens=128,
+                max_tokens=256,
                 prefer_cheap=True,
             )
         except Exception as exc:
             logger.warning("Gate: model evaluation failed: %s", exc)
-        logger.info("GATE_MODEL: raw_response=%r", raw[:200])
+        logger.info("GATE_MODEL: raw_response=%r", raw[:300])
 
-        first_word = raw.strip().split()[0].upper() if raw.strip() else ""
+        stripped = raw.strip()
+        first_word = stripped.split()[0].upper() if stripped else ""
         if first_word == "EXPLICIT":
             return GateResult(
                 allowed=True, reason="explicit_instruction", method="model_check",
@@ -592,8 +596,14 @@ class ReasoningService:
                 allowed=True, reason="covenant_authorized", method="model_check",
                 raw_response=raw,
             )
-        if first_word == "CONFLICT":
-            conflicting_rule = must_not_rules[0] if must_not_rules else ""
+        if first_word.startswith("CONFLICT"):
+            # Extract rule text from "CONFLICT: <rule text>" format.
+            # Fall back to must_not_rules[0] if the model didn't include it.
+            conflicting_rule = ""
+            if ":" in stripped:
+                conflicting_rule = stripped.split(":", 1)[1].strip()
+            if not conflicting_rule:
+                conflicting_rule = must_not_rules[0] if must_not_rules else ""
             return GateResult(
                 allowed=False, reason="covenant_conflict", method="model_check",
                 proposed_action=action_desc, conflicting_rule=conflicting_rule, raw_response=raw,
@@ -749,9 +759,17 @@ class ReasoningService:
         except Exception as exc:
             logger.warning("Failed to emit reasoning.request: %s", exc)
 
+        # Estimate context size: rough token count of system prompt + messages.
+        # 1 token ≈ 4 chars is a reasonable approximation for English prose.
+        _ctx_chars = len(request.system_prompt) + sum(
+            len(m.get("content", "") if isinstance(m.get("content"), str)
+                else json.dumps(m.get("content", "")))
+            for m in messages
+        )
+        _ctx_tokens_est = _ctx_chars // 4
         logger.info(
-            "REASON_START: tool_count=%d max_tokens=%d msg_count=%d",
-            len(tools), request.max_tokens, len(messages),
+            "REASON_START: tool_count=%d max_tokens=%d msg_count=%d ctx_tokens_est=%d",
+            len(tools), request.max_tokens, len(messages), _ctx_tokens_est,
         )
 
         t0 = time.monotonic()

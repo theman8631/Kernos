@@ -531,6 +531,34 @@ class TestConflictResponse:
         )
         assert result.conflicting_rule == "Never send emails without asking me first"
 
+    async def test_conflict_colon_format_extracts_rule_from_response(self):
+        """CONFLICT: <rule text> format — rule extracted directly from model response."""
+        svc = _make_service({"send-email": "soft_write"})
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        from kernos.kernel.state import CovenantRule
+        state.query_covenant_rules = AsyncMock(return_value=[
+            CovenantRule(
+                id="r1", tenant_id="t1", capability="email",
+                rule_type="must_not", description="Never send emails without asking me first",
+                active=True, source="user_stated",
+            ),
+        ])
+        svc.set_state(state)
+        # Model returns the new colon format
+        svc.complete_simple = AsyncMock(
+            return_value="CONFLICT: Never send emails without asking me first"
+        )
+
+        result = await svc._gate_tool_call(
+            "send-email", {"to": "alice@example.com"}, "soft_write",
+            "send this email", "t1", "space_1",
+        )
+        assert result.reason == "covenant_conflict"
+        assert result.conflicting_rule == "Never send emails without asking me first"
+
     async def test_user_explicit_override_returns_explicit(self):
         """User explicitly overrides restriction ('no need to review, just send') → EXPLICIT."""
         svc = _make_service({"send-email": "soft_write"})
@@ -716,8 +744,8 @@ class TestModelGateAuthority:
         assert result.allowed is False
         assert result.reason == "denied"
 
-    def test_model_max_tokens_is_128(self):
-        """Model is called with max_tokens=128."""
+    def test_model_max_tokens_is_256(self):
+        """Model is called with max_tokens=256 (raised from 128 to fit CONFLICT: rule text)."""
         svc = _make_service()
         calls = []
 
@@ -733,7 +761,7 @@ class TestModelGateAuthority:
                 "I was thinking", "t1", "space_1",
             )
         )
-        assert calls[0] == 128
+        assert calls[0] == 256
 
     async def test_denied_reason_is_simple(self):
         """When DENIED, reason is simply 'denied'."""
