@@ -195,7 +195,7 @@ class ReasoningRequest:
     tools: list[dict]
     model: str
     trigger: str
-    max_tokens: int = 1024
+    max_tokens: int = 8192
     active_space_id: str = ""  # For kernel tool routing (e.g., remember)
     input_text: str = ""       # Current user message — used by dispatch gate
     active_space: Any = None   # ContextSpace | None — for gate tool effect classification
@@ -749,6 +749,11 @@ class ReasoningService:
         except Exception as exc:
             logger.warning("Failed to emit reasoning.request: %s", exc)
 
+        logger.info(
+            "REASON_START: tool_count=%d max_tokens=%d msg_count=%d",
+            len(tools), request.max_tokens, len(messages),
+        )
+
         t0 = time.monotonic()
         response = await self._provider.complete(
             model=request.model,
@@ -1120,6 +1125,13 @@ class ReasoningService:
             bool([b for b in response.content if b.type == "text"]),
         )
 
+        if response.stop_reason == "max_tokens":
+            logger.warning(
+                "RESPONSE_TRUNCATED: max_tokens=%d reached on iter=%d. "
+                "Tool calls may have been cut off. Consider raising max_tokens.",
+                request.max_tokens, iterations,
+            )
+
         if iterations >= self.MAX_TOOL_ITERATIONS:
             logger.warning("TOOL_LOOP EXHAUSTED after %d iterations", iterations)
             return ReasoningResult(
@@ -1138,6 +1150,27 @@ class ReasoningService:
             if text_parts
             else "I processed your request but don't have a text response. Try rephrasing?"
         )
+
+        # Hallucination check: agent claims tool use in text but no tool was actually called.
+        # This fires when stop_reason=end_turn AND iterations=0 AND response contains
+        # tool-claiming language. Most common cause: max_tokens truncation cut off tool_use
+        # blocks, or the model chose end_turn without generating tool_use content.
+        if iterations == 0 and response.stop_reason == "end_turn":
+            _TOOL_CLAIM_PHRASES = (
+                "used write_file", "used delete_file", "used read_file",
+                "used list_files", "used create-event", "used send-email",
+                "i created", "i deleted", "i wrote", "i've created", "i've deleted",
+                "i've written", "file created", "file deleted", "file written",
+                "done —", "done.", "✅",
+            )
+            rt_lower = response_text.lower()
+            if any(phrase in rt_lower for phrase in _TOOL_CLAIM_PHRASES):
+                logger.warning(
+                    "HALLUCINATION_CHECK: Agent claims tool use but iterations=0 "
+                    "(stop=%s, tool_count=%d). Response may be fabricated. "
+                    "Response: %s",
+                    response.stop_reason, len(tools), response_text[:200],
+                )
 
         return ReasoningResult(
             text=response_text,

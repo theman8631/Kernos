@@ -996,6 +996,19 @@ a tool in a specific space, just ask — I'll activate it.
         if not comp_state and not active_doc:
             recent_messages = self._truncate_to_budget(recent_messages, SPACE_THREAD_TOKEN_BUDGET)
 
+        # Sanitize: drop any trailing user messages (orphaned from a previous failed request).
+        # The Anthropic API requires alternating roles. If a rate limit or provider error
+        # prevented storing the assistant response, the thread ends with a stale user message
+        # that would create consecutive user messages when the current message is appended.
+        while recent_messages and recent_messages[-1]["role"] == "user":
+            logger.warning(
+                "ORPHANED_USER_MSG: dropping trailing user message from space thread "
+                "(no assistant response — likely a previous rate-limit or provider error). "
+                "Content: %.100s",
+                recent_messages[-1]["content"],
+            )
+            recent_messages.pop()
+
         return recent_messages, system_prefix
 
     async def _handle_file_upload(
