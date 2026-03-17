@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Testing session complete. 12 bugs found and fixed. 869 tests + testing patches. System functional (calendar, files, gate, confirmation all working).
+**Status:** Testing session complete (2026-03-15/16). 12 bugs found and fixed. 869+ tests. System functional.
 **Owner:** Architect / Founder
-**Action:** Begin 3C (Proactive Awareness) planning.
+**Action:** Begin 3C (Proactive Awareness) intent paragraph.
 **Tests:** 869+
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
@@ -27,7 +27,7 @@
 | 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in model prompt + detailed failure reasons (FIX 4). 851 tests. |
 | 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-16 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). Bug: _get_capability_for_tool checks tool_effects. Live test 14/14 PASS. 855 tests. |
 | 3D-HOTFIX-CONFIRMATION | Kernel-Owned Confirmation Replay | COMPLETE | 2026-03-16 | PendingAction stored on ReasoningService when gate blocks. Agent signals [CONFIRM:N] in response; handler executes stored action, strips signal. Token mechanism preserved for programmatic callers. Bug found: [CONFIRM:0] appearing twice → dedup fix. Live test 13/14 PASS (1 SKIP). 869 tests. |
-| Testing-Session | Live Testing Bugfixes | COMPLETE | 2026-03-16 | Async client (sync→AsyncAnthropic), gate redesign (keyword matching removed, lightweight model sole authority, CONFLICT response, agent reasoning extraction, recent messages in prompt, permission overrides mechanical bypass), hallucination detection (HALLUCINATION_CHECK + HALLUCINATION_TAGGED), max_tokens 1024→8192, orphaned user message cleanup, manifest atomic writes + recovery, CONFLICT rule identification, observability logging (LLM_REQUEST/LLM_RESPONSE/LLM_BLOCK, timestamps, full user messages). Google OAuth TTL fixed (published app). |
+| Testing-Session | Live Testing Bugfixes | COMPLETE | 2026-03-16 | Manifest atomic writes + recovery path. Gate CONFLICT identifies correct rule (model returns "CONFLICT: [rule text]"). Observability: LLM_REQUEST/LLM_RESPONSE/LLM_BLOCK logging, timestamps on all log lines, full user messages, ctx_tokens_est. Hallucination detection: HALLUCINATION_CHECK + HALLUCINATION_TAGGED. Google OAuth TTL fix (published app). |
 
 ---
 
@@ -108,6 +108,24 @@ SPEC-3A complete. No active spec. Founder to decide next Phase 3 spec.
 ---
 
 ## Decisions Made
+
+### DECISION: Gate design — keyword matching removed entirely
+**Date:** 2026-03-15
+**Context:** Live testing showed keyword fast path failed on natural language ("make an entry" not in signal list). Same pattern rejected for routing in Phase 2.
+**Decision:** All keyword matching removed from the gate. Lightweight model is sole authority. Works in any language, for any tool.
+**Source:** Kabe + Kit + Architect consensus.
+
+### DECISION: must_not evaluated by model, not structured lookup
+**Date:** 2026-03-15
+**Context:** Structured must_not check blocked user overrides ("no need to review just send it" couldn't override "don't send without review").
+**Decision:** must_not rules included in model's covenant list. Model evaluates in context. CONFLICT response for user-asked-but-rule-applies.
+**Source:** Kabe scenario analysis + Kit confirmation.
+
+### DECISION: Permission overrides are mechanical bypass before model
+**Date:** 2026-03-15
+**Context:** High-volume automation (50 auto-reply emails) shouldn't trigger 50 model calls.
+**Decision:** permission_overrides checked in Step 2 before model call. "always-allow" bypasses gate entirely. Not part of model's rules_text.
+**Source:** Kabe + Architect.
 
 ### 2026-03-16: 3D-HOTFIX-CONFIRMATION — Kernel-Owned Confirmation Replay
 
