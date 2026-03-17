@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** 3D-HOTFIX-CONFIRMATION-REDESIGN COMPLETE — Live test 13/14 PASS (1 SKIP — file already deleted). Kernel-owned replay replaces broken approval-token injection flow. Agent signals [CONFIRM:N]; kernel executes stored PendingAction. 869 tests.
-**Owner:** Founder / Architect
-**Action:** Decide next Phase 3 spec.
-**Tests:** 869
+**Status:** Testing session complete. 12 bugs found and fixed. 869 tests + testing patches. System functional (calendar, files, gate, confirmation all working).
+**Owner:** Architect / Founder
+**Action:** Begin 3C (Proactive Awareness) planning.
+**Tests:** 869+
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -27,6 +27,7 @@
 | 3D-HOTFIX | Dispatch Gate Redesign | COMPLETE | 2026-03-15 | Async Anthropic client (FIX 1), Haiku as sole authority — no keyword fast path (FIX 2), ApprovalToken single-use confirmation flow (FIX 3), tool description in model prompt + detailed failure reasons (FIX 4). 851 tests. |
 | 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-16 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). Bug: _get_capability_for_tool checks tool_effects. Live test 14/14 PASS. 855 tests. |
 | 3D-HOTFIX-CONFIRMATION | Kernel-Owned Confirmation Replay | COMPLETE | 2026-03-16 | PendingAction stored on ReasoningService when gate blocks. Agent signals [CONFIRM:N] in response; handler executes stored action, strips signal. Token mechanism preserved for programmatic callers. Bug found: [CONFIRM:0] appearing twice → dedup fix. Live test 13/14 PASS (1 SKIP). 869 tests. |
+| Testing-Session | Live Testing Bugfixes | COMPLETE | 2026-03-16 | Async client (sync→AsyncAnthropic), gate redesign (keyword matching removed, lightweight model sole authority, CONFLICT response, agent reasoning extraction, recent messages in prompt, permission overrides mechanical bypass), hallucination detection (HALLUCINATION_CHECK + HALLUCINATION_TAGGED), max_tokens 1024→8192, orphaned user message cleanup, manifest atomic writes + recovery, CONFLICT rule identification, observability logging (LLM_REQUEST/LLM_RESPONSE/LLM_BLOCK, timestamps, full user messages). Google OAuth TTL fixed (published app). |
 
 ---
 
@@ -372,4 +373,4 @@ Full specifications for completed phases have been moved to `specs/completed/` f
 
 ---
 
-*Last updated: 2026-03-16 (3D-HOTFIX-CONFIRMATION complete — 869 tests passing. Kernel-owned confirmation replay live-verified.)*
+*Last updated: 2026-03-16 (Testing session complete — 12 bugs fixed, 869+ tests. Begin 3C planning.)*

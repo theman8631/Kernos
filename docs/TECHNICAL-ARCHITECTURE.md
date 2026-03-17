@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-15 (reflects SPEC-3B+ complete state — MCP Installation)
+> **Last updated:** 2026-03-16 (reflects testing session complete — gate redesign, confirmation replay, hallucination detection, observability logging)
 
 ---
 
@@ -205,11 +205,27 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
 
-**Dispatch gate (3D):** Inserted between tool call proposal and execution. Classifies every tool call's effect level (`read` → bypass, `soft_write`/`hard_write`/`unknown` → gate). Four-step authorization: (0) `_has_prohibiting_covenant()` — must_not rules block even explicit instructions, no LLM; (1) `_explicit_instruction_matches()` — keyword matching against user message, no LLM; (2) `_check_permission_or_covenant()` — permission override lookup + one Haiku call against covenant rules; (3) ask user — block and surface proposed action. Blocked tool calls return a `[SYSTEM] Action blocked` tool_result so the model can explain to the user.
+**Dispatch gate (3D / 3D-HOTFIX-v2):** Inserted between tool call proposal and execution. Three-step authorization (token → permission_override → model). No keyword matching. No structured must_not pre-check. The model is the sole correctness authority. See Dispatch Interceptor section below for full details.
 
 **Kernel tool routing:** Six kernel-managed tools (`remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`) are intercepted before MCPClientManager. Read tools (`remember`, `list_files`, `read_file`, `request_tool`) bypass the gate. Write tools (`write_file`, `delete_file`) are gated through the dispatch interceptor. `set_retrieval()`, `set_registry()`, and `set_state()` wire services after construction (avoids circular imports).
 
-**Structured trace logging:** INFO-level grep-able prefixes in the kernel layer: `ROUTE:` (routing decisions in handler), `TOOL_LOOP` (iteration + exit + exhaustion in reasoning), `KERNEL_TOOL` (kernel intercepts), `GATE:` (dispatch gate decisions in reasoning), `FILE_WRITE/READ/LIST/DELETE` (file operations in files.py), `REMEMBER` (retrieval calls in retrieval.py).
+**Hallucination detection:** After `reason()` completes, if `iterations==0` and `stop_reason=="end_turn"` and the response text contains tool-claiming phrases (`"done —"`, `"i created"`, `"✅"`, etc.), `HALLUCINATION_CHECK` fires. The response is prefixed with `[SYSTEM NOTE: generated without actual tool execution]` before storage — breaking the self-reinforcing loop where the model reads its own fabricated success and skips retrying on the next turn.
+
+**Structured trace logging:** INFO-level grep-able prefixes. Timestamps on every line (`HH:MM:SS`). Prefixes:
+- `USER_MSG:` — full user message text + sender (handler, at routing time)
+- `ROUTE:` — routing decision: space, tags, confident, switched (handler)
+- `LLM_REQUEST:` — messages count, tools count, max_tokens (before every provider call)
+- `LLM_RESPONSE:` — stop_reason, content_types list (after every provider call)
+- `LLM_BLOCK:` — per-block detail: text (len + 300-char preview) or tool_use (name + 300-char input preview)
+- `REASON_START:` — tool_count, max_tokens, msg_count, ctx_tokens_est (reasoning service)
+- `TOOL_LOOP:` — iteration + exit + exhaustion (reasoning service)
+- `KERNEL_TOOL:` — kernel tool interceptions
+- `GATE:` — dispatch gate decisions (tool, effect, allowed, reason, method)
+- `GATE_MODEL:` — gate model call details (max_tokens, rules count, raw response)
+- `CONFIRM_EXECUTE:` / `PENDING_CLEARED:` — confirmation replay outcomes (handler)
+- `HALLUCINATION_CHECK:` / `HALLUCINATION_TAGGED:` — hallucination detection events
+- `FILE_WRITE/READ/LIST/DELETE:` — file operations (files.py)
+- `REMEMBER:` — retrieval calls (retrieval.py)
 
 ### Retrieval Service (2D)
 
@@ -382,30 +398,37 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Entity context injection:** Known entities for the tenant injected into the Tier 2 extraction prompt for pronoun/coreference resolution (~500 token budget). Helps the LLM identify "she" as Sarah Henderson when that entity already exists.
 
-### Dispatch Interceptor (Phase 3D / 3D-HOTFIX-v2)
+### Dispatch Interceptor (Phase 3D / 3D-HOTFIX-v2 / 3D-HOTFIX-CONFIRMATION)
 
 **What it does:** Gates write/action tool calls before execution. Reads pass silently. Writes go through a three-step authorization: two mechanical checks (no LLM), then a lightweight model evaluation. No keyword matching. No structured pre-checks for must_not. The model is the sole correctness authority.
 
-**File:** `kernos/kernel/reasoning.py` — `GateResult`, `ApprovalToken` dataclasses, `_gate_tool_call`, `_evaluate_gate` on `ReasoningService`
+**File:** `kernos/kernel/reasoning.py` — `GateResult`, `ApprovalToken`, `PendingAction` dataclasses, `_gate_tool_call`, `_evaluate_gate`, `execute_tool` on `ReasoningService`
 
 **Effect classification:** `_classify_tool_effect(tool_name, active_space)` → `"read"` (bypass), `"soft_write"` (gate), `"hard_write"` (gate), `"unknown"` (gate). Kernel tools have hardcoded classifications. MCP tools use `tool_effects` from `CapabilityInfo`.
 
 **Three-step authorization:**
-1. **Approval token check** (mechanical) — If `_approval_token` present in tool input (popped before gate), validate: single-use, 5-minute TTL, tool name matches, MD5 hash of tool input matches. Allows if valid. Method: `"token"`.
+1. **Approval token check** (mechanical, programmatic interface) — If `_approval_token` present in tool input (popped before gate), validate: single-use, 5-minute TTL, tool name matches, MD5 hash of tool input matches. Allows if valid. Method: `"token"`. Used by API/programmatic callers; not surfaced to the agent.
 2. **Permission override** (mechanical, zero-cost) — Fast dict lookup on `TenantProfile.permission_overrides`. If capability is `"always-allow"`, execute immediately. No model call. Critical for high-volume automation (50 emails shouldn't trigger 50 model calls). Method: `"always_allow"`.
-3. **Model evaluation** (`_evaluate_gate`) — One `complete_simple(prefer_cheap=True)` call per write tool call. Sees: last 5 user turns (oldest→newest), agent's reasoning text (extracted from response before tool_use block), tool name + description (from MCP manifest), action details, all active covenant rules. Returns `EXPLICIT / AUTHORIZED / CONFLICT / DENIED`. First-word parsed. `max_tokens=128`. Method: `"model_check"`.
+3. **Model evaluation** (`_evaluate_gate`) — One `complete_simple(prefer_cheap=True)` call per write tool call. Sees: last 5 user turns (oldest→newest), agent's reasoning text (extracted from response before tool_use block), tool name + description (from MCP manifest), action details, all active covenant rules. Returns `EXPLICIT / AUTHORIZED / CONFLICT / DENIED`. First-word parsed. `max_tokens=256`. Method: `"model_check"`.
 
 **Model response types:**
 - `EXPLICIT` — user directly requested this action in recent messages → allowed
 - `AUTHORIZED` — a standing covenant rule covers this action → allowed
-- `CONFLICT` — user asked for it BUT a `must_not` rule also applies (user may be knowingly overriding) → blocked, surfaces tension, offers three options
+- `CONFLICT` — user asked for it BUT a `must_not` rule also applies (user may be knowingly overriding) → blocked, surfaces tension
 - `DENIED` — no request, no covenant → blocked
 
-**CONFLICT system message:** Three options offered — (1) respect the rule, (2) one-time override with approval token, (3) update/remove the rule permanently. `conflicting_rule` field on `GateResult` names the specific must_not rule.
+**Kernel-owned confirmation replay (3D-HOTFIX-CONFIRMATION):** When the gate blocks, the kernel stores a `PendingAction` in `ReasoningService._pending_actions[tenant_id]`. The agent receives a `[SYSTEM]` message describing what was blocked, naming the pending action index, and instructing it to include `[CONFIRM:N]` in its response if the user confirms. The agent never re-submits tool calls or handles tokens — the kernel does the replay.
 
-**DENIED system message:** Asks user to confirm; provides approval token for re-submission; offers to create a standing rule.
+- `PendingAction` fields: `tool_name`, `tool_input` (exact copy), `proposed_action`, `conflicting_rule`, `gate_reason`, `expires_at` (5-minute TTL).
+- After `reason()` returns, the handler scans `response_text` for `[CONFIRM:N]` / `[CONFIRM:ALL]`. Matching indices are deduplicated, executed via `execute_tool()`, and their signals stripped from the response before delivery.
+- If the agent's response has no `[CONFIRM]` signal: pending actions are cleared immediately (user changed topic).
+- `execute_tool(tool_name, tool_input, request)` — routes to kernel tools (write_file, delete_file, etc.) or MCP; mirrors the dispatch in `reason()` but without the tool-use loop.
 
-**Agent reasoning extraction:** Before the tool-use loop, text blocks from `response.content` preceding tool_use blocks are joined as `agent_reasoning`. Passed to `_evaluate_gate` so the model can check whether the agent's stated reasoning matches the user's actual messages.
+**CONFLICT system message:** `[SYSTEM] Action blocked — conflict with standing rule. Proposed: {action}. Conflicting rule: {rule}. Pending action index: {N}. Ask the user to confirm. If they confirm, include [CONFIRM:{N}] in your response. Also offer three options: 1. Respect the rule. 2. Override this time. 3. Update the rule permanently.`
+
+**DENIED system message:** `[SYSTEM] Action blocked — no authorization found. Proposed: {action}. Pending action index: {N}. Ask the user if they want to proceed. If they confirm, include [CONFIRM:{N}] in your response.`
+
+**Agent reasoning extraction:** Text blocks from `response.content` preceding each tool_use block are extracted per-tool-call and passed to `_evaluate_gate`. Gate can check whether the agent's stated reasoning aligns with the user's actual request.
 
 **Permission overrides are NOT in rules_text** — they bypass the model entirely in Step 2. Not surfaced to the model at all.
 
