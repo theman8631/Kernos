@@ -1385,8 +1385,12 @@ a tool in a specific space, just ask — I'll activate it.
         )
 
         logger.info(
-            "ROUTE: msg=%s space=%s tags=%s confident=%s prev=%s switched=%s",
-            message.content[:60], active_space_id, router_result.tags,
+            "USER_MSG: sender=%s full_text=%r",
+            message.sender, message.content,
+        )
+        logger.info(
+            "ROUTE: space=%s tags=%s confident=%s prev=%s switched=%s",
+            active_space_id, router_result.tags,
             router_result.continuation, previous_space_id, space_switched,
         )
 

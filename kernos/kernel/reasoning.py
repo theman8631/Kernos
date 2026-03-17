@@ -843,6 +843,10 @@ class ReasoningService:
             len(tools), request.max_tokens, len(messages), _ctx_tokens_est,
         )
 
+        logger.info(
+            "LLM_REQUEST: messages=%d tools=%d max_tokens=%d",
+            len(messages), len(tools), request.max_tokens,
+        )
         t0 = time.monotonic()
         response = await self._provider.complete(
             model=request.model,
@@ -854,6 +858,23 @@ class ReasoningService:
         duration_ms = int((time.monotonic() - t0) * 1000)
         total_input_tokens += response.input_tokens
         total_output_tokens += response.output_tokens
+
+        logger.info(
+            "LLM_RESPONSE: stop_reason=%s content_types=%s",
+            response.stop_reason,
+            [b.type for b in response.content],
+        )
+        for _b in response.content:
+            if _b.type == "text":
+                logger.info(
+                    "LLM_BLOCK: type=text len=%d preview=%r",
+                    len(_b.text or ""), (_b.text or "")[:300],
+                )
+            elif _b.type == "tool_use":
+                logger.info(
+                    "LLM_BLOCK: type=tool_use name=%s input=%r",
+                    _b.name, str(_b.input)[:300],
+                )
 
         rr_event = None
         try:
@@ -1196,6 +1217,10 @@ class ReasoningService:
             except Exception as exc:
                 logger.warning("Failed to emit reasoning.request: %s", exc)
 
+            logger.info(
+                "LLM_REQUEST: messages=%d tools=%d max_tokens=%d",
+                len(messages), len(tools), request.max_tokens,
+            )
             t0 = time.monotonic()
             response = await self._provider.complete(
                 model=request.model,
@@ -1207,6 +1232,23 @@ class ReasoningService:
             duration_ms = int((time.monotonic() - t0) * 1000)
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens
+
+            logger.info(
+                "LLM_RESPONSE: stop_reason=%s content_types=%s",
+                response.stop_reason,
+                [b.type for b in response.content],
+            )
+            for _b in response.content:
+                if _b.type == "text":
+                    logger.info(
+                        "LLM_BLOCK: type=text len=%d preview=%r",
+                        len(_b.text or ""), (_b.text or "")[:300],
+                    )
+                elif _b.type == "tool_use":
+                    logger.info(
+                        "LLM_BLOCK: type=tool_use name=%s input=%r",
+                        _b.name, str(_b.input)[:300],
+                    )
 
             rr_event = None
             try:
