@@ -720,6 +720,73 @@ a tool in a specific space, just ask — I'll activate it.
         except Exception as exc:
             logger.warning("Failed to write kernos-reference.md: %s", exc)
 
+        how_i_work = """\
+# How I Work
+
+This is how things work behind the scenes. If you're curious about my architecture
+or want to understand what happens when you send me a message, here's the overview.
+
+## Message Routing
+Every message you send is routed to a **context space** by a lightweight model.
+Each space has its own conversation thread — your work discussions don't mix with
+personal conversations. You can have many spaces active at once.
+
+## Learning From Conversations
+After each response, a background process (Tier 2 extraction) pulls out knowledge,
+entities, and foresight signals from what we discussed. This is how I learn your
+preferences, remember people you mention, and notice upcoming deadlines. You don't
+need to tell me to remember things — I do it automatically.
+
+## Compaction (Persistent Memory)
+Periodically, older conversation history is summarized into a **Living State**
+document — a structured snapshot of what matters. This means I don't lose context
+even after long conversations. Older summaries are archived and indexed so I can
+search them when you ask about something from the past.
+
+## Proactive Awareness
+An awareness evaluator runs every 30 minutes, checking for time-sensitive signals
+worth surfacing — upcoming deadlines, expiring commitments, appointments. These
+appear naturally at the start of your next conversation. You can dismiss any
+signal you don't want to hear about using dismiss_whisper.
+
+## The Dispatch Gate
+Every time I'm about to take an action (send an email, create a calendar event,
+delete a file), a lightweight model checks whether it's authorized. It reads your
+recent messages, the proposed action, and your standing covenant rules. If the
+action is clearly what you asked for, it goes through. If there's a conflict with
+a rule or no clear authorization, I'll ask you first. When the gate blocks an
+action, I can execute it after you confirm.
+
+## Covenant Rules
+Your behavioral rules (like "never send emails without asking" or "always confirm
+before spending money") are automatically captured from our conversations. They
+shape how I act. You can view, edit, or remove them anytime — just ask me to show
+your rules.
+
+## Files
+Each context space has its own file storage. I can create, read, and manage text
+files that persist across sessions. Files are never permanently deleted — removes
+go to a shadow archive.
+
+## Memory Search
+The `remember` tool searches across your knowledge entries, entity records, and
+compaction archives. When you ask me to recall something, I search all of these
+sources and rank results by relevance and recency.
+
+## Tools
+I can connect to external services (calendar, email, web browser) through MCP
+tool servers. Each space has its own set of active tools. You can ask me what
+tools are available or request new ones.
+"""
+        try:
+            await self._files.write_file(
+                tenant_id, system_space_id,
+                "how-i-work.md", how_i_work.strip(),
+                "How Kernos works — read this when asked about architecture",
+            )
+        except Exception as exc:
+            logger.warning("Failed to write how-i-work.md: %s", exc)
+
     async def _get_or_init_soul(self, tenant_id: str) -> Soul:
         """Load the soul for this tenant, or initialize a new unhatched one.
 
