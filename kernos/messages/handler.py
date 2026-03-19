@@ -1046,24 +1046,7 @@ tools are available or request new ones.
                     f"{index_text}"
                 )
 
-        # 2. Cross-domain injections — last 5 turns from other spaces
-        cross = await self.conversations.get_cross_domain_messages(
-            tenant_id, conversation_id, active_space_id,
-            last_n_turns=CROSS_DOMAIN_INJECTION_TURNS,
-        )
-        if cross:
-            lines = []
-            for msg in cross:
-                role_label = "You" if msg["role"] == "assistant" else "User"
-                ts = msg.get("timestamp", "")
-                content = str(msg.get("content", ""))[:300]
-                lines.append(f"[{role_label}, {ts}]: {content}")
-            prefix_parts.append(
-                f"## Recent activity in other areas (background — read but do not dwell on):\n"
-                + "\n".join(lines)
-            )
-
-        # 2b. Proactive awareness — pending whispers for session-start injection
+        # 2. Proactive awareness — pending whispers for session-start injection
         awareness_block = await self._get_pending_awareness(tenant_id, active_space_id)
         if awareness_block:
             prefix_parts.append(awareness_block)
