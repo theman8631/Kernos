@@ -63,15 +63,17 @@ _RULE_TYPE_TO_ENFORCEMENT_TIER = {
 
 
 def _load_covenant_rule(d: dict) -> CovenantRule:
-    """Load CovenantRule from dict, migrating enforcement_tier from rule_type if absent.
+    """Load CovenantRule from dict, migrating fields from older formats.
 
-    Old contracts.json files don't have enforcement_tier — derive it from rule_type.
+    Old contracts.json files may lack enforcement_tier or superseded_by.
     """
     data = dict(d)
     if "enforcement_tier" not in data:
         data["enforcement_tier"] = _RULE_TYPE_TO_ENFORCEMENT_TIER.get(
             data.get("rule_type", ""), "confirm"
         )
+    if "superseded_by" not in data:
+        data["superseded_by"] = ""
     return CovenantRule(**data)
 
 
@@ -285,6 +287,8 @@ class JsonStateStore(StateStore):
             rule = _load_covenant_rule(d)
             if active_only and not rule.active:
                 continue
+            if active_only and rule.superseded_by:
+                continue
             if capability and rule.capability != capability:
                 continue
             if rule_type and rule.rule_type != rule_type:
@@ -305,6 +309,8 @@ class JsonStateStore(StateStore):
         for d in raw:
             rule = _load_covenant_rule(d)
             if active_only and not rule.active:
+                continue
+            if active_only and rule.superseded_by:
                 continue
             if capability and rule.capability not in (capability, "general"):
                 continue
@@ -516,6 +522,125 @@ class JsonStateStore(StateStore):
         hints = self._read_json(path, {})
         hints.pop(hint, None)
         self._write_json(path, hints)
+
+    # -----------------------------------------------------------------------
+    # Knowledge Foresight Query (Phase 3C)
+    # -----------------------------------------------------------------------
+
+    async def query_knowledge_by_foresight(
+        self,
+        tenant_id: str,
+        expires_before: str,
+        expires_after: str = "",
+        space_id: str = "",
+    ) -> "list[KnowledgeEntry]":
+        path = self._state_dir(tenant_id) / "knowledge.json"
+        raw = self._read_json(path, [])
+        results = []
+        for d in raw:
+            entry = _load_knowledge_entry(d)
+            if not entry.active:
+                continue
+            if not entry.foresight_signal or not entry.foresight_expires:
+                continue
+            if space_id and entry.context_space != space_id:
+                continue
+            # foresight_expires must be in (expires_after, expires_before]
+            fe = entry.foresight_expires
+            if expires_after and fe <= expires_after:
+                continue
+            if fe > expires_before:
+                continue
+            results.append(entry)
+        return results
+
+    # -----------------------------------------------------------------------
+    # Whispers and Suppressions (Phase 3C)
+    # -----------------------------------------------------------------------
+
+    def _awareness_dir(self, tenant_id: str) -> Path:
+        return self._data_dir / _safe_name(tenant_id) / "awareness"
+
+    async def save_whisper(self, tenant_id: str, whisper) -> None:
+        from kernos.kernel.awareness import Whisper
+        from dataclasses import asdict as _asdict
+        path = self._awareness_dir(tenant_id) / "whispers.json"
+        raw = self._read_json(path, [])
+        # Upsert by whisper_id
+        for i, d in enumerate(raw):
+            if d.get("whisper_id") == whisper.whisper_id:
+                raw[i] = _asdict(whisper)
+                self._write_json(path, raw)
+                return
+        raw.append(_asdict(whisper))
+        self._write_json(path, raw)
+
+    async def get_pending_whispers(self, tenant_id: str) -> list:
+        from kernos.kernel.awareness import Whisper
+        path = self._awareness_dir(tenant_id) / "whispers.json"
+        raw = self._read_json(path, [])
+        return [
+            Whisper(**d)
+            for d in raw
+            if not d.get("surfaced_at")
+        ]
+
+    async def mark_whisper_surfaced(self, tenant_id: str, whisper_id: str) -> None:
+        from datetime import datetime, timezone
+        path = self._awareness_dir(tenant_id) / "whispers.json"
+        raw = self._read_json(path, [])
+        for i, d in enumerate(raw):
+            if d.get("whisper_id") == whisper_id:
+                raw[i]["surfaced_at"] = datetime.now(timezone.utc).isoformat()
+                self._write_json(path, raw)
+                return
+
+    async def delete_whisper(self, tenant_id: str, whisper_id: str) -> None:
+        path = self._awareness_dir(tenant_id) / "whispers.json"
+        raw = self._read_json(path, [])
+        raw = [d for d in raw if d.get("whisper_id") != whisper_id]
+        self._write_json(path, raw)
+
+    async def save_suppression(self, tenant_id: str, entry) -> None:
+        from kernos.kernel.awareness import SuppressionEntry
+        from dataclasses import asdict as _asdict
+        path = self._awareness_dir(tenant_id) / "suppressions.json"
+        raw = self._read_json(path, [])
+        # Upsert by whisper_id
+        for i, d in enumerate(raw):
+            if d.get("whisper_id") == entry.whisper_id:
+                raw[i] = _asdict(entry)
+                self._write_json(path, raw)
+                return
+        raw.append(_asdict(entry))
+        self._write_json(path, raw)
+
+    async def get_suppressions(
+        self,
+        tenant_id: str,
+        knowledge_entry_id: str = "",
+        whisper_id: str = "",
+        foresight_signal: str = "",
+    ) -> list:
+        from kernos.kernel.awareness import SuppressionEntry
+        path = self._awareness_dir(tenant_id) / "suppressions.json"
+        raw = self._read_json(path, [])
+        results = []
+        for d in raw:
+            if knowledge_entry_id and d.get("knowledge_entry_id") != knowledge_entry_id:
+                continue
+            if whisper_id and d.get("whisper_id") != whisper_id:
+                continue
+            if foresight_signal and d.get("foresight_signal") != foresight_signal:
+                continue
+            results.append(SuppressionEntry(**d))
+        return results
+
+    async def delete_suppression(self, tenant_id: str, whisper_id: str) -> None:
+        path = self._awareness_dir(tenant_id) / "suppressions.json"
+        raw = self._read_json(path, [])
+        raw = [d for d in raw if d.get("whisper_id") != whisper_id]
+        self._write_json(path, raw)
 
     # -----------------------------------------------------------------------
     # Conversation Summaries

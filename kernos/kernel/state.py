@@ -206,6 +206,7 @@ class CovenantRule:
 
     # --- Versioning ---
     supersedes: str = ""
+    superseded_by: str = ""              # rule_id that replaced this, "user_removed", or "" (active)
     version: int = 1
 
     # --- Reserved for future phases ---
@@ -464,6 +465,67 @@ class StateStore(ABC):
     @abstractmethod
     async def clear_topic_hint(self, tenant_id: str, hint: str) -> None:
         """Clear a topic hint after space creation or expiration."""
+        ...
+
+    # Knowledge Foresight Query (Phase 3C: Proactive Awareness)
+    @abstractmethod
+    async def query_knowledge_by_foresight(
+        self,
+        tenant_id: str,
+        expires_before: str,
+        expires_after: str = "",
+        space_id: str = "",
+    ) -> list[KnowledgeEntry]:
+        """Return knowledge entries with active foresight signals expiring in the given window.
+
+        An entry is included if:
+        - foresight_signal is non-empty
+        - foresight_expires is non-empty
+        - foresight_expires falls within (expires_after, expires_before]
+        - The entry is active
+        """
+        ...
+
+    # Whispers and Suppressions (Phase 3C: Proactive Awareness)
+    @abstractmethod
+    async def save_whisper(self, tenant_id: str, whisper: "Whisper") -> None:
+        """Save a pending whisper to the queue."""
+        ...
+
+    @abstractmethod
+    async def get_pending_whispers(self, tenant_id: str) -> "list[Whisper]":
+        """Get all unsurfaced whispers for a tenant."""
+        ...
+
+    @abstractmethod
+    async def mark_whisper_surfaced(self, tenant_id: str, whisper_id: str) -> None:
+        """Mark a whisper as surfaced (set surfaced_at)."""
+        ...
+
+    @abstractmethod
+    async def delete_whisper(self, tenant_id: str, whisper_id: str) -> None:
+        """Delete a whisper from the pending queue. Used for queue bounding."""
+        ...
+
+    @abstractmethod
+    async def save_suppression(self, tenant_id: str, entry: "SuppressionEntry") -> None:
+        """Save a suppression entry."""
+        ...
+
+    @abstractmethod
+    async def get_suppressions(
+        self,
+        tenant_id: str,
+        knowledge_entry_id: str = "",
+        whisper_id: str = "",
+        foresight_signal: str = "",
+    ) -> "list[SuppressionEntry]":
+        """Get suppression entries, optionally filtered."""
+        ...
+
+    @abstractmethod
+    async def delete_suppression(self, tenant_id: str, whisper_id: str) -> None:
+        """Delete a suppression entry. Used when knowledge updates clear a suppression."""
         ...
 
     # Conversation Summaries

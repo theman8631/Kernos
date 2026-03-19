@@ -63,6 +63,127 @@ REQUEST_TOOL = {
 }
 
 
+READ_SOURCE_TOOL = {
+    "name": "read_source",
+    "description": (
+        "Read Kernos source code. Use when the user asks how something works "
+        "technically or wants to see implementation details. Only reads files "
+        "within the kernos/ package directory."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Relative path within the kernos/ package. "
+                    "Examples: 'kernel/awareness.py', 'kernel/reasoning.py', "
+                    "'messages/handler.py', 'capability/registry.py'"
+                ),
+            },
+            "section": {
+                "type": "string",
+                "description": (
+                    "Optional class or function name to extract. "
+                    "Examples: 'AwarenessEvaluator', 'run_time_pass', '_gate_tool_call'. "
+                    "If omitted, returns the full file."
+                ),
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _read_source(path: str, section: str = "") -> str:
+    """Read Kernos source code. Returns file contents or extracted section.
+
+    Security: only allows reads within the kernos/ package directory.
+    Rejects paths with '..', absolute paths, or paths outside kernos/.
+    """
+    import importlib
+    from pathlib import Path
+
+    # Security: reject absolute paths
+    if path.startswith("/") or path.startswith("\\"):
+        return "Error: Absolute paths are not allowed. Use a relative path like 'kernel/awareness.py'."
+
+    # Security: reject path traversal
+    if ".." in path:
+        return "Error: Path traversal ('..') is not allowed."
+
+    # Resolve kernos package root
+    kernos_root = Path(importlib.import_module("kernos").__file__).parent
+    target = (kernos_root / path).resolve()
+
+    # Security: ensure resolved path is within kernos/
+    if not str(target).startswith(str(kernos_root)):
+        return "Error: Path resolves outside the kernos/ package directory."
+
+    if not target.exists():
+        return f"Error: File not found: kernos/{path}"
+
+    if not target.is_file():
+        return f"Error: Not a file: kernos/{path}"
+
+    if target.suffix not in (".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml"):
+        return f"Error: Unsupported file type: {target.suffix}"
+
+    content = target.read_text(encoding="utf-8")
+
+    if not section:
+        # Cap at 500 lines for full files
+        lines = content.split("\n")
+        if len(lines) > 500:
+            return "\n".join(lines[:500]) + f"\n\n... (truncated — {len(lines)} total lines)"
+        return content
+
+    # Extract a class or function section
+    lines = content.split("\n")
+    start_idx = None
+    start_indent = None
+
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(f"class {section}") or stripped.startswith(f"def {section}"):
+            start_idx = i
+            start_indent = len(line) - len(stripped)
+            break
+        # Also match async def
+        if stripped.startswith(f"async def {section}"):
+            start_idx = i
+            start_indent = len(line) - len(stripped)
+            break
+
+    if start_idx is None:
+        return f"Error: Section '{section}' not found in kernos/{path}"
+
+    # Find end: next definition at same or lower indent level
+    result_lines = [lines[start_idx]]
+    for i in range(start_idx + 1, len(lines)):
+        line = lines[i]
+        if not line.strip():
+            result_lines.append(line)
+            continue
+        current_indent = len(line) - len(line.lstrip())
+        stripped = line.lstrip()
+        # Same-level or lower-level class/def = end of section
+        if current_indent <= start_indent and (
+            stripped.startswith("class ")
+            or stripped.startswith("def ")
+            or stripped.startswith("async def ")
+            or stripped.startswith("# ---")
+        ):
+            break
+        result_lines.append(line)
+
+    # Strip trailing blank lines
+    while result_lines and not result_lines[-1].strip():
+        result_lines.pop()
+
+    return "\n".join(result_lines)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -364,7 +485,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "manage_covenants"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -378,8 +499,8 @@ class ReasoningService:
         MCP tools use tool_effects from CapabilityInfo.
         Unknown defaults to "hard_write" (safe default).
         """
-        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool"}
-        _KERNEL_WRITES = {"write_file", "delete_file"}
+        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source"}
+        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants"}
 
         if tool_name in _KERNEL_READS:
             return "read"
@@ -721,6 +842,44 @@ class ReasoningService:
                         request.active_space_id,
                     )
                 return "Memory search is not available."
+            elif tool_name == "dismiss_whisper":
+                return await self._handle_dismiss_whisper(
+                    request.tenant_id,
+                    tool_input.get("whisper_id", ""),
+                    tool_input.get("reason", "user_dismissed"),
+                )
+            elif tool_name == "read_source":
+                return _read_source(
+                    tool_input.get("path", ""),
+                    tool_input.get("section", ""),
+                )
+            elif tool_name == "manage_covenants":
+                from kernos.kernel.covenant_manager import handle_manage_covenants
+                cov_action = tool_input.get("action", "list")
+                cov_result = await handle_manage_covenants(
+                    self._state,
+                    request.tenant_id,
+                    action=cov_action,
+                    rule_id=tool_input.get("rule_id", ""),
+                    new_description=tool_input.get("new_description", ""),
+                    show_all=tool_input.get("show_all", False),
+                )
+                if cov_action == "update" and "Updated" in cov_result:
+                    import asyncio, re
+                    from kernos.kernel.covenant_manager import validate_covenant_set
+                    id_match = re.search(r"new ID: (rule_\w+)", cov_result)
+                    new_id = id_match.group(1) if id_match else ""
+                    if new_id:
+                        asyncio.create_task(
+                            validate_covenant_set(
+                                state=self._state,
+                                events=self._events,
+                                reasoning_service=self,
+                                tenant_id=request.tenant_id,
+                                new_rule_id=new_id,
+                            )
+                        )
+                return cov_result
             else:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
@@ -798,6 +957,24 @@ class ReasoningService:
             await self._state.update_context_space(
                 tenant_id, space_id, {"active_tools": space.active_tools}
             )
+
+    async def _handle_dismiss_whisper(
+        self, tenant_id: str, whisper_id: str, reason: str = "user_dismissed"
+    ) -> str:
+        """Dismiss a whisper — update suppression to prevent re-surfacing."""
+        if not self._state:
+            return "State store is not available."
+        suppressions = await self._state.get_suppressions(
+            tenant_id, whisper_id=whisper_id
+        )
+        if suppressions:
+            s = suppressions[0]
+            s.resolution_state = "dismissed"
+            s.resolved_by = reason
+            s.resolved_at = datetime.now(timezone.utc).isoformat()
+            await self._state.save_suppression(tenant_id, s)
+            return f"Dismissed whisper {whisper_id}. Won't bring this up again."
+        return f"Whisper {whisper_id} not found in suppression registry."
 
     async def reason(self, request: ReasoningRequest) -> ReasoningResult:
         """Run a full reasoning turn, including tool-use loop.
@@ -1140,6 +1317,54 @@ class ReasoningService:
                             tool_args.get("capability_name", "unknown"),
                             tool_args.get("description", ""),
                         )
+                    elif block.name == "dismiss_whisper":
+                        try:
+                            result = await self._handle_dismiss_whisper(
+                                request.tenant_id,
+                                tool_args.get("whisper_id", ""),
+                                tool_args.get("reason", "user_dismissed"),
+                            )
+                        except Exception as exc:
+                            logger.warning("Kernel tool 'dismiss_whisper' failed: %s", exc)
+                            result = "Failed to dismiss whisper — try again."
+                    elif block.name == "read_source":
+                        result = _read_source(
+                            tool_args.get("path", ""),
+                            tool_args.get("section", ""),
+                        )
+                    elif block.name == "manage_covenants":
+                        try:
+                            from kernos.kernel.covenant_manager import handle_manage_covenants
+                            cov_action = tool_args.get("action", "list")
+                            result = await handle_manage_covenants(
+                                self._state,
+                                request.tenant_id,
+                                action=cov_action,
+                                rule_id=tool_args.get("rule_id", ""),
+                                new_description=tool_args.get("new_description", ""),
+                                show_all=tool_args.get("show_all", False),
+                            )
+                            # Fire post-write validation after update (not remove)
+                            if cov_action == "update" and "Updated" in result:
+                                import asyncio
+                                from kernos.kernel.covenant_manager import validate_covenant_set
+                                # Extract new_id from result text
+                                import re
+                                id_match = re.search(r"new ID: (rule_\w+)", result)
+                                new_id = id_match.group(1) if id_match else ""
+                                if new_id:
+                                    asyncio.create_task(
+                                        validate_covenant_set(
+                                            state=self._state,
+                                            events=self._events,
+                                            reasoning_service=self,
+                                            tenant_id=request.tenant_id,
+                                            new_rule_id=new_id,
+                                        )
+                                    )
+                        except Exception as exc:
+                            logger.warning("Kernel tool 'manage_covenants' failed: %s", exc)
+                            result = "Failed to manage covenants — try again."
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:

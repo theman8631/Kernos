@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-16 (reflects testing session complete — gate redesign, confirmation replay, hallucination detection, observability logging)
+> **Last updated:** 2026-03-18 (reflects SPEC-COVENANT-VALIDATION — LLM-based post-write validation, single creation path)
 
 ---
 
@@ -247,6 +247,26 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 **File:** `kernos/kernel/contract_parser.py`
 
 **Flow:** Tier 2 extraction detects `behavioral_instruction` category → coordinator fires `parse_behavioral_instruction()` → Haiku call with `CONTRACT_PARSER_SCHEMA` → creates CovenantRule with `source="user_stated"`. `must_not` rules get `enforcement_tier="confirm"`, others get `"silent"`. Global rules have `context_space=None`, space-scoped rules inherit the active space.
+
+### Covenant Management
+
+**What it does:** Dedup, contradiction detection, and user-facing management of covenant rules. Prevents duplicate rules, resolves MUST/MUST_NOT contradictions (newer rule wins), and provides the `manage_covenants` kernel tool.
+
+**File:** `kernos/kernel/covenant_manager.py`
+
+**Single creation path:** Tier 2 extraction is the sole creator of covenant rules from conversation. The agent does NOT create rules — it manages existing ones via `manage_covenants` (list/remove/update only).
+
+**Post-write LLM validation** (`validate_covenant_set()`): After every rule write (creation or update), a single Haiku call validates the full active set. Returns MERGE (auto-resolve duplicates), CONFLICT (create whisper for user resolution — never auto-resolved), REWRITE (auto-improve wording), or NO_ISSUES. Fire-and-forget async — never blocks the user response.
+
+**Startup migration** (`run_covenant_cleanup()`): Zero-LLM-cost word overlap (>0.80) dedup + cross-type contradiction (>0.70) detection. Runs once per tenant per process.
+
+**Events:** `covenant.rule.merged`, `covenant.rule.replaced`, `covenant.contradiction.detected`.
+
+**`superseded_by` field on CovenantRule:** `""` = active, `"user_removed"` = user removed via tool, `"rule_xxx"` = replaced by newer rule. Superseded rules excluded from system prompt, gate, and tool listing (unless `show_all=True`).
+
+**`manage_covenants` kernel tool:** Actions: `list` (show active rules with IDs), `remove` (soft-remove), `update` (create new rule, supersede old). Classified as `soft_write` (gate evaluates all calls).
+
+**Startup migration (`run_covenant_cleanup`):** Runs once per tenant per process. Deduplicates existing rules (keeps newest in each group), resolves MUST/MUST_NOT contradictions (newer wins). Log prefix: `COVENANT_CLEANUP:`.
 
 ### Capability Registry
 
@@ -551,6 +571,73 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **`_activate_tool_for_space()`** — appends capability name to `space.active_tools`, persists via `state.update_context_space()`. Only called when capability is CONNECTED.
 
+### Web Browser (Lightpanda MCP)
+
+**What it does:** Provides web browsing capability via the Lightpanda open-source headless browser. The agent can visit URLs, read page content, extract structured data, follow links, and execute JavaScript.
+
+**Binary:** `~/bin/lightpanda` (or `LIGHTPANDA_PATH` env var). v0.2.6, x86_64 Linux only — ARM deployment requires an alternative browser backend.
+
+**MCP server:** Lightpanda has a native MCP server built into the binary. Started with `lightpanda mcp` over stdio. No Chrome/Puppeteer/Playwright dependency.
+
+**Capability registration:** `name="web-browser"`, `server_name="lightpanda"`, `category="search"`, `universal=True` (available in all spaces).
+
+**Tools (7):**
+- `goto` (read) — navigate to URL, load page in memory
+- `markdown` (read) — get page content as markdown (accepts optional URL)
+- `links` (read) — extract all links from page
+- `semantic_tree` (read) — simplified semantic DOM tree for AI reasoning
+- `interactiveElements` (read) — extract interactive elements (forms, buttons)
+- `structuredData` (read) — extract JSON-LD, OpenGraph, etc.
+- `evaluate` (soft_write) — execute JavaScript in page context (gated by dispatch interceptor)
+
+**Gate behavior:** All tools except `evaluate` are "read" → bypass dispatch gate entirely. `evaluate` is "soft_write" → requires explicit user instruction to proceed.
+
+**Registry fix:** `CapabilityRegistry.get_by_server_name()` added to handle capability name ("web-browser") != MCP server name ("lightpanda") mismatch in the startup promotion loop.
+
+### Proactive Awareness (SPEC-3C)
+
+**What it does:** Makes Kernos proactive — surfacing time-sensitive signals at conversation start without the user asking. The system notices upcoming deadlines, appointments, and expiring commitments from the knowledge store and tells the user at the next natural moment.
+
+**AwarenessEvaluator** (`kernos/kernel/awareness.py`): Background kernel process running on a periodic timer (default 30 min, configurable via `KERNOS_AWARENESS_INTERVAL`). Produces `Whisper` objects by checking knowledge entries with active foresight signals.
+
+- **Time pass** (`run_time_pass()`): Queries `query_knowledge_by_foresight()` for entries where `foresight_expires` falls within the next 48 hours. Pure datetime comparisons, no LLM calls. Assigns `delivery_class`: "stage" (<12h) or "ambient" (12-48h).
+- **Suppression check** (`_is_suppressed()`): Keyed to `knowledge_entry_id`. If a whisper for this knowledge entry has been surfaced, dismissed, or acted on, suppress. Prevents nagging.
+- **Queue bounding** (`_enforce_queue_bound()`): Max 10 pending whispers per tenant. Priority: stage before ambient, newest first. Excess silently dropped.
+- **Cleanup** (`_cleanup_old_suppressions()`): Removes suppression entries older than 7 days. Runs each evaluator cycle.
+
+**Whisper dataclass**: `whisper_id`, `insight_text`, `delivery_class` ("stage"|"ambient"), `source_space_id`, `target_space_id`, `supporting_evidence`, `reasoning_trace`, `knowledge_entry_id`, `foresight_signal`, `created_at`, `surfaced_at`.
+
+**SuppressionEntry dataclass**: `whisper_id`, `knowledge_entry_id`, `foresight_signal`, `created_at`, `resolution_state` ("surfaced"|"dismissed"|"acted_on"|"resolved"), `resolved_by`, `resolved_at`.
+
+**Session-start injection** (`_get_pending_awareness()` in handler): At conversation start, pending whispers for the active space are formatted as a `## Proactive awareness` block injected into the system prompt (between cross-domain injections and compaction document). Whispers are marked as surfaced and suppression entries created.
+
+**`dismiss_whisper` kernel tool**: Read-effect tool (no dispatch gate). Updates suppression to "dismissed" with `resolved_by` reason. Registered in `KERNEL_TOOLS` and classified as "read" effect.
+
+**Suppression clearing**: When Tier 2 extraction updates a knowledge entry (`classification == "UPDATE"`), suppressions keyed to that entry with `resolution_state == "surfaced"` are deleted. This allows the evaluator to re-surface with updated content.
+
+**Event type**: `PROACTIVE_INSIGHT` ("proactive.insight") — emitted when a whisper is queued. Payload: `whisper_id`, `insight_text`, `delivery_class`, `source_space_id`, `knowledge_entry_id`, `reasoning_trace`.
+
+**Storage**: `data/{tenant_id}/awareness/whispers.json` and `data/{tenant_id}/awareness/suppressions.json`. Atomic writes via filelock.
+
+**Evaluator lifecycle**: Started in `discord_bot.py` after handler init. Stored as `handler._evaluator`. Stopped on shutdown.
+
+**Tracing prefix**: `AWARENESS:` — all evaluator log lines use this prefix.
+
+### Self-Knowledge Reference System
+
+**What it does:** Enables the agent to understand and explain its own architecture. Three layers: a reference document for conceptual understanding, a source code introspection tool for implementation details, and a maintenance discipline to keep the reference current.
+
+**Layer 1: `kernos-reference.md`** — Written to the system space at tenant provisioning (alongside `how-to-connect-tools.md` and `capabilities-overview.md`). Covers all major components in 3-5 sentences each with file paths. The agent reads this when users ask conceptual questions.
+
+**Layer 2: `read_source` kernel tool** — Reads files within the `kernos/` package directory. Takes a relative `path` (e.g., "kernel/awareness.py") and optional `section` (class or function name to extract). Security: rejects absolute paths, path traversal (`..`), and paths outside kernos/. Full files truncated at 500 lines. Classified as "read" effect — no dispatch gate.
+
+**Layer 3: Post-implementation checklist** — Every spec that ships should update `kernos-reference.md` in `kernos/messages/reference.py` to reflect new or changed components. This keeps the reference current.
+
+**Files:**
+- `kernos/messages/reference.py` — `KERNOS_REFERENCE` content string
+- `kernos/kernel/reasoning.py` — `READ_SOURCE_TOOL` definition, `_read_source()` function
+- `kernos/messages/handler.py` — provisioning call in `_write_system_docs()`
+
 ---
 
 ## Data Structures
@@ -579,6 +666,7 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 - Dispatch: dispatch.gate (Phase 3D — tool_name, effect, allowed, reason, method)
 - Capabilities: capability.connected, capability.disconnected, capability.error
 - MCP Installation: tool.installed (payload: capability_name, tool_count, universal), tool.uninstalled (payload: capability_name) (SPEC-3B+)
+- Proactive Awareness: proactive.insight (payload: whisper_id, insight_text, delivery_class, source_space_id, knowledge_entry_id, reasoning_trace) (SPEC-3C)
 - Tenant: tenant.provisioned
 - System: system.started, system.stopped, handler.error
 
@@ -598,6 +686,8 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 - `knowledge.json` — list of KnowledgeEntry
 - `contracts.json` — list of ContractRule
 - `conversations.json` — list of ConversationSummary
+- `{data_dir}/{tenant_id}/awareness/whispers.json` — pending Whisper queue (SPEC-3C)
+- `{data_dir}/{tenant_id}/awareness/suppressions.json` — SuppressionEntry registry (SPEC-3C)
 - `entities.json` — list of EntityNode (Phase 2A)
 - `identity_edges.json` — list of IdentityEdge (Phase 2A)
 - `spaces.json` — list of ContextSpace (Phase 2B; daily + system spaces auto-created on soul init)

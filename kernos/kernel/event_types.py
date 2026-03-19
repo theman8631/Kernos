@@ -54,6 +54,9 @@ class EventType(str, Enum):
     COVENANT_RULE_REGRESSED = "covenant.rule.regressed"
     COVENANT_RULE_CREATED = "covenant.rule.created"
     COVENANT_RULE_UPDATED = "covenant.rule.updated"
+    COVENANT_RULE_MERGED = "covenant.rule.merged"
+    COVENANT_RULE_REPLACED = "covenant.rule.replaced"
+    COVENANT_CONTRADICTION_DETECTED = "covenant.contradiction.detected"
 
     # --- Phase 2: Entity resolution (Pillar A) ---
     ENTITY_CREATED = "entity.created"
@@ -84,3 +87,8 @@ class EventType(str, Enum):
     # Payload: capability_name, tool_count, universal
     TOOL_UNINSTALLED = "tool.uninstalled"
     # Payload: capability_name
+
+    # --- Phase 3C: Proactive Awareness ---
+    PROACTIVE_INSIGHT = "proactive.insight"
+    # Payload: whisper_id, insight_text, delivery_class, source_space_id,
+    #          target_space_id, knowledge_entry_id, reasoning_trace

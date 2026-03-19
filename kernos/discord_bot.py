@@ -71,6 +71,22 @@ async def on_ready():
             "GOOGLE_OAUTH_CREDENTIALS_PATH not set — calendar tools unavailable"
         )
 
+    lightpanda_path = os.getenv("LIGHTPANDA_PATH", os.path.expanduser("~/bin/lightpanda"))
+    if Path(lightpanda_path).is_file():
+        mcp_manager.register_server(
+            "lightpanda",
+            StdioServerParameters(
+                command=lightpanda_path,
+                args=["mcp"],
+            ),
+        )
+    else:
+        logger.warning(
+            "Lightpanda binary not found at %s — web browser tools unavailable. "
+            "Set LIGHTPANDA_PATH or install to ~/bin/lightpanda",
+            lightpanda_path,
+        )
+
     await mcp_manager.connect_all()
 
     conversations = JsonConversationStore(data_dir)
@@ -82,7 +98,7 @@ async def on_ready():
     for cap in KNOWN_CAPABILITIES:
         registry.register(dataclasses.replace(cap))
     for server_name, tools in mcp_manager.get_tool_definitions().items():
-        cap = registry.get(server_name)
+        cap = registry.get(server_name) or registry.get_by_server_name(server_name)
         if cap:
             cap.status = CapabilityStatus.CONNECTED
             cap.tools = [t["name"] for t in tools]
@@ -94,6 +110,26 @@ async def on_ready():
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
+
+    # Start awareness evaluator for proactive insights (Phase 3C)
+    from kernos.kernel.awareness import AwarenessEvaluator
+    evaluator = AwarenessEvaluator(
+        state=state,
+        events=events,
+        interval_seconds=int(os.getenv("KERNOS_AWARENESS_INTERVAL", "1800")),
+    )
+    # Determine tenant_id for evaluator — use the first known tenant
+    # In single-tenant mode, this is the only tenant
+    tenant_dirs = [d for d in Path(data_dir).iterdir() if d.is_dir() and (d / "state").exists()]
+    if tenant_dirs:
+        # Reconstruct tenant_id from directory name (reverse of _safe_name)
+        evaluator_tenant = tenant_dirs[0].name.replace("_", ":", 1)
+        await evaluator.start(evaluator_tenant)
+        handler._evaluator = evaluator
+        logger.info("AwarenessEvaluator started for tenant=%s", evaluator_tenant)
+    else:
+        handler._evaluator = None
+        logger.info("No tenants found — AwarenessEvaluator not started")
 
 
 DISCORD_MAX_LENGTH = 2000

@@ -159,15 +159,8 @@ async def _run_tier2_with_behavioral_detection(
         if not recent_entries:
             return
 
-        from kernos.kernel.contract_parser import (
-            parse_behavioral_instruction,
-            compute_word_overlap,
-            RULE_DEDUP_THRESHOLD,
-        )
-
-        # Load existing user-stated rules for dedup
-        existing_rules = await state.get_contract_rules(tenant_id, active_only=True)
-        existing_user_rules = [r for r in existing_rules if r.source == "user_stated"]
+        from kernos.kernel.contract_parser import classify_and_parse
+        from kernos.kernel.covenant_manager import validate_covenant_set
 
         for entry in recent_entries:
             # Only process entries created in the last minute (from this extraction run)
@@ -180,25 +173,42 @@ async def _run_tier2_with_behavioral_detection(
             except (ValueError, TypeError):
                 continue
 
-            rule = await parse_behavioral_instruction(
+            parse_result = await classify_and_parse(
                 reasoning_service, entry.content, active_space,
             )
-            if rule:
-                # Dedup: skip if word overlap with any existing rule >= threshold
-                is_dup = any(
-                    compute_word_overlap(rule.description, existing.description)
-                    >= RULE_DEDUP_THRESHOLD
-                    for existing in existing_user_rules
-                )
-                if is_dup:
-                    logger.info(
-                        "Skipping duplicate rule: %s", rule.description[:60],
-                    )
-                    continue
 
+            # Automation rules → store as standing_order knowledge entry, not a covenant
+            if parse_result.instruction_type == "automation_rule":
+                from kernos.kernel.state import KnowledgeEntry, _knowledge_id
+                standing_order = KnowledgeEntry(
+                    id=_knowledge_id(),
+                    tenant_id=tenant_id,
+                    category="standing_order",
+                    subject="automation",
+                    content=parse_result.standing_order or entry.content,
+                    confidence="stated",
+                    source_event_id="",
+                    source_description="tier2_automation_rule",
+                    created_at=now.isoformat(),
+                    last_referenced=now.isoformat(),
+                    tags=["standing_order", "automation"],
+                    active=True,
+                    lifecycle_archetype="structural",
+                    context_space=active_space_id,
+                )
+                await state.add_knowledge(standing_order)
+                logger.info(
+                    "STANDING_ORDER: stored automation rule as knowledge: %r",
+                    parse_result.standing_order[:80],
+                )
+                continue
+
+            rule = parse_result.rule
+            if rule:
                 rule.tenant_id = tenant_id
+
+                # Write the rule
                 await state.add_contract_rule(rule)
-                existing_user_rules.append(rule)  # Track for intra-batch dedup
                 try:
                     await emit_event(
                         events,
@@ -214,6 +224,17 @@ async def _run_tier2_with_behavioral_detection(
                     )
                 except Exception as exc:
                     logger.warning("Failed to emit covenant.rule.created: %s", exc)
+
+                # Post-write validation (async, non-blocking)
+                asyncio.create_task(
+                    validate_covenant_set(
+                        state=state,
+                        events=events,
+                        reasoning_service=reasoning_service,
+                        tenant_id=tenant_id,
+                        new_rule_id=rule.id,
+                    )
+                )
 
     except Exception as exc:
         logger.warning("Behavioral instruction detection failed: %s", exc)

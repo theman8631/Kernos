@@ -91,4 +91,37 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
             "fetch": "read",
         },
     ),
+    # Lightpanda: open-source headless browser with native MCP server.
+    # Binary: ~/bin/lightpanda (or LIGHTPANDA_PATH env var).
+    # Architecture: x86_64 Linux only. If deploying to ARM (Pi, Graviton),
+    # this MCP will need a different browser backend.
+    # GitHub: https://github.com/lightpanda-io/browser
+    CapabilityInfo(
+        name="web-browser",
+        display_name="Web Browser",
+        description=(
+            "Search the web, look things up, find current information, "
+            "read pages, and extract structured data. "
+            "Use this when the user asks you to search for something, "
+            "look something up, check current prices/news/weather, "
+            "or find any information on the internet. "
+            "Navigate to a search engine or relevant site, read with "
+            "the markdown tool, and answer the question."
+        ),
+        category="search",
+        status=CapabilityStatus.AVAILABLE,
+        setup_hint="I can browse the web for you — no setup needed.",
+        setup_requires=[],
+        server_name="lightpanda",
+        tool_effects={
+            "goto": "read",
+            "markdown": "read",
+            "semantic_tree": "read",
+            "interactiveElements": "read",
+            "structuredData": "read",
+            "links": "read",
+            "evaluate": "soft_write",  # JS execution — gate it
+        },
+        universal=True,  # Available in all context spaces
+    ),
 ]

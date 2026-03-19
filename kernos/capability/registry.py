@@ -70,6 +70,13 @@ class CapabilityRegistry:
         """Get a specific capability by name."""
         return self._capabilities.get(name)
 
+    def get_by_server_name(self, server_name: str) -> CapabilityInfo | None:
+        """Get a capability by its MCP server_name field."""
+        for cap in self._capabilities.values():
+            if cap.server_name == server_name:
+                return cap
+        return None
+
     def get_all(self) -> list[CapabilityInfo]:
         """All known capabilities, any status."""
         return list(self._capabilities.values())

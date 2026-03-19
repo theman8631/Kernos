@@ -671,6 +671,21 @@ async def _write_entry_enhanced(
                 supersedes=target_id,
                 storage_strength=old_entry.storage_strength + 1.0,
             )
+            # Phase 3C: knowledge changed — clear suppressions so evaluator
+            # can re-surface with updated content
+            try:
+                suppressions = await state.get_suppressions(
+                    tenant_id, knowledge_entry_id=target_id
+                )
+                for s in suppressions:
+                    if s.resolution_state == "surfaced":
+                        await state.delete_suppression(tenant_id, s.whisper_id)
+                        logger.info(
+                            "AWARENESS: cleared suppression whisper=%s reason=knowledge_updated",
+                            s.whisper_id,
+                        )
+            except Exception as exc:
+                logger.warning("Failed to clear suppressions for knowledge update: %s", exc)
         await state.save_knowledge_entry(entry)
         await embedding_store.save(tenant_id, entry.id, candidate_embedding)
         existing_hashes.add(h)

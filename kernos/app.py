@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     for cap in KNOWN_CAPABILITIES:
         registry.register(dataclasses.replace(cap))
     for server_name, tools in mcp_manager.get_tool_definitions().items():
-        cap = registry.get(server_name)
+        cap = registry.get(server_name) or registry.get_by_server_name(server_name)
         if cap:
             cap.status = CapabilityStatus.CONNECTED
             cap.tools = [t["name"] for t in tools]

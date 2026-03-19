@@ -783,65 +783,10 @@ class TestRuleDedup:
         assert compute_word_overlap("", "something") == 0.0
         assert compute_word_overlap("something", "") == 0.0
 
-    async def test_coordinator_skips_duplicate_rule(self):
-        """When an existing rule has >= 0.8 word overlap, skip creation."""
+    async def test_coordinator_writes_rule_and_fires_validation(self):
+        """New rule is written immediately, then validation fires async."""
         from kernos.kernel.projectors.coordinator import _run_tier2_with_behavioral_detection
         from kernos.kernel.state import CovenantRule
-
-        state = AsyncMock()
-        events = AsyncMock()
-        reasoning = AsyncMock()
-
-        # Existing rule
-        existing_rule = CovenantRule(
-            id="rule_existing",
-            tenant_id="test-tenant",
-            rule_type="must_not",
-            description="Never contact Henderson without asking first",
-            capability="general",
-            active=True,
-            source="user_stated",
-            context_space=None,
-            created_at=_now_iso(),
-            updated_at=_now_iso(),
-        )
-        state.get_contract_rules = AsyncMock(return_value=[existing_rule])
-
-        # New behavioral_instruction entry with near-identical content
-        entry = _make_entry(
-            subject="behavioral_instruction",
-            content="Never contact Henderson without checking first",
-        )
-        state.query_knowledge = AsyncMock(return_value=[entry])
-
-        # Parser returns a rule with similar description
-        reasoning.complete_simple = AsyncMock(return_value=json.dumps({
-            "rule_type": "must_not",
-            "description": "Never contact Henderson without checking first",
-            "capability": "general",
-            "is_global": False,
-            "reasoning": "Restriction on contacting Henderson",
-        }))
-
-        # Mock Tier 2 extraction to be a no-op
-        with patch("kernos.kernel.projectors.coordinator.run_tier2_extraction", new_callable=AsyncMock):
-            await _run_tier2_with_behavioral_detection(
-                recent_turns=[],
-                soul=MagicMock(),
-                state=state,
-                events=events,
-                reasoning_service=reasoning,
-                tenant_id="test-tenant",
-                active_space_id="",
-                active_space=None,
-            )
-
-        # add_contract_rule should NOT have been called (duplicate)
-        state.add_contract_rule.assert_not_called()
-
-    async def test_coordinator_creates_non_duplicate_rule(self):
-        """When no existing rule overlaps, creation proceeds."""
-        from kernos.kernel.projectors.coordinator import _run_tier2_with_behavioral_detection
 
         state = AsyncMock()
         events = AsyncMock()
@@ -876,7 +821,7 @@ class TestRuleDedup:
                 active_space=None,
             )
 
-        # Rule should have been created
+        # Rule should have been created (write first, validate after)
         state.add_contract_rule.assert_called_once()
 
 

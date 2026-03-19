@@ -300,6 +300,7 @@ class MessageHandler:
         self._secrets_dir = secrets_dir or os.getenv("KERNOS_SECRETS_DIR", "./secrets")
         self._secure_input_state: dict[str, SecureInputState] = {}
         self._mcp_config_loaded: set[str] = set()
+        self._covenant_cleanup_done: set[str] = set()
 
         from kernos.kernel.compaction import CompactionService
         from kernos.kernel.tokens import AnthropicTokenAdapter
@@ -538,6 +539,29 @@ class MessageHandler:
 
         return success
 
+    async def _maybe_run_covenant_cleanup(self, tenant_id: str) -> None:
+        """Run one-time covenant dedup/contradiction cleanup per tenant per process."""
+        if tenant_id in self._covenant_cleanup_done:
+            return
+        self._covenant_cleanup_done.add(tenant_id)
+
+        try:
+            from kernos.kernel.covenant_manager import run_covenant_cleanup
+            embedding_service = None
+            if self._retrieval:
+                embedding_service = getattr(self._retrieval, '_embedding_service', None)
+            stats = await run_covenant_cleanup(
+                self.state, tenant_id,
+                embedding_service=embedding_service,
+            )
+            if stats["deduped"] or stats["contradictions_resolved"]:
+                logger.info(
+                    "COVENANT_CLEANUP: tenant=%s deduped=%d contradictions=%d",
+                    tenant_id, stats["deduped"], stats["contradictions_resolved"],
+                )
+        except Exception as exc:
+            logger.warning("Covenant cleanup failed for %s: %s", tenant_id, exc)
+
     async def _maybe_load_mcp_config(self, tenant_id: str) -> None:
         """Load persisted MCP config for this tenant (once per process lifetime per tenant).
 
@@ -685,6 +709,16 @@ a tool in a specific space, just ask — I'll activate it.
             )
         except Exception as exc:
             logger.warning("Failed to write how-to-connect-tools.md: %s", exc)
+
+        try:
+            from kernos.messages.reference import KERNOS_REFERENCE
+            await self._files.write_file(
+                tenant_id, system_space_id,
+                "kernos-reference.md", KERNOS_REFERENCE.strip(),
+                "Kernos architecture quick reference — how the system works",
+            )
+        except Exception as exc:
+            logger.warning("Failed to write kernos-reference.md: %s", exc)
 
     async def _get_or_init_soul(self, tenant_id: str) -> Soul:
         """Load the soul for this tenant, or initialize a new unhatched one.
@@ -962,6 +996,11 @@ a tool in a specific space, just ask — I'll activate it.
                 + "\n".join(lines)
             )
 
+        # 2b. Proactive awareness — pending whispers for session-start injection
+        awareness_block = await self._get_pending_awareness(tenant_id, active_space_id)
+        if awareness_block:
+            prefix_parts.append(awareness_block)
+
         # 3. Compaction document (Ledger -> Living State)
         active_doc = await self.compaction.load_document(tenant_id, active_space_id)
         if active_doc:
@@ -1010,6 +1049,68 @@ a tool in a specific space, just ask — I'll activate it.
             recent_messages.pop()
 
         return recent_messages, system_prefix
+
+    async def _get_pending_awareness(self, tenant_id: str, active_space_id: str) -> str:
+        """Get pending whispers formatted for the agent's context."""
+        from kernos.kernel.awareness import SuppressionEntry
+
+        whispers = await self.state.get_pending_whispers(tenant_id)
+
+        if not whispers:
+            return ""
+
+        # Filter to whispers targeting this space or with no space target
+        relevant = [
+            w for w in whispers
+            if w.target_space_id == active_space_id
+            or w.target_space_id == ""
+            or w.source_space_id == active_space_id
+        ]
+
+        if not relevant:
+            return ""
+
+        # Sort: stage before ambient
+        relevant.sort(key=lambda w: 0 if w.delivery_class == "stage" else 1)
+
+        lines = ["## Proactive awareness (surface naturally — do not dump as a list)"]
+        lines.append("")
+        lines.append(
+            "The following signals were detected since the last conversation. "
+            "Weave relevant ones into your response naturally. "
+            "If the user asks why you're mentioning something, you can draw "
+            "on the reasoning trace."
+        )
+        lines.append("")
+
+        for w in relevant:
+            lines.append(f"- [{w.delivery_class.upper()}] (id: {w.whisper_id}) {w.insight_text}")
+            lines.append(f"  Reasoning: {w.reasoning_trace}")
+            lines.append("")
+
+        lines.append(
+            "If the user says they already know about something or don't want "
+            "to hear about it, use dismiss_whisper(whisper_id) to suppress it."
+        )
+
+        # Mark as surfaced and create suppression entries
+        for w in relevant:
+            w.surfaced_at = datetime.now(timezone.utc).isoformat()
+            await self.state.mark_whisper_surfaced(tenant_id, w.whisper_id)
+
+            suppression = SuppressionEntry(
+                whisper_id=w.whisper_id,
+                knowledge_entry_id=w.knowledge_entry_id,
+                foresight_signal=w.foresight_signal,
+                created_at=w.created_at,
+                resolution_state="surfaced",
+            )
+            await self.state.save_suppression(tenant_id, suppression)
+
+        logger.info("AWARENESS: injected whispers=%d for space=%s",
+                     len(relevant), active_space_id)
+
+        return "\n".join(lines)
 
     async def _handle_file_upload(
         self,
@@ -1361,6 +1462,7 @@ a tool in a specific space, just ask — I'll activate it.
         await self._ensure_tenant_state(tenant_id, message)
         soul = await self._get_or_init_soul(tenant_id)
         await self._maybe_load_mcp_config(tenant_id)
+        await self._maybe_run_covenant_cleanup(tenant_id)
 
         # Step 2: Load recent history with full metadata (for router)
         recent_full = await self.conversations.get_recent_full(
@@ -1516,8 +1618,10 @@ a tool in a specific space, just ask — I'll activate it.
             tools = tools + [REMEMBER_TOOL]
         # Add kernel-managed file tools (always available)
         from kernos.kernel.files import FILE_TOOLS
-        from kernos.kernel.reasoning import REQUEST_TOOL
-        tools = tools + FILE_TOOLS + [REQUEST_TOOL]
+        from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL
+        from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
+        from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
+        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_SOURCE_TOOL, MANAGE_COVENANTS_TOOL]
         capability_prompt = self.registry.build_capability_prompt(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
