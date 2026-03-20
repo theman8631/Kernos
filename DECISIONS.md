@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Testing session complete (2026-03-15/16). 12 bugs found and fixed. 869+ tests. System functional.
-**Owner:** Architect / Founder
-**Action:** Begin 3C (Proactive Awareness) intent paragraph.
-**Tests:** 869+
+**Status:** Phase 3 core COMPLETE. 1039 tests. 3J (docs), 3L (error surfacing), 3I (soul retirement), covenant system, prompt caching all shipped.
+**Owner:** Founder / Architect
+**Action:** 3K (unified capability registry) in Kit review. 3E (trigger system) design next.
+**Tests:** 1039
 **Planning:** All roadmap planning is in Notion. This file is the execution bridge only.
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who: Founder / Architect / Claude Code), Action (the single next thing to do). If you're opening this file and wondering what to do, start here.
@@ -28,6 +28,13 @@
 | 3D-HOTFIX-v2 | Gate Full Redesign (spec-driven) | COMPLETE | 2026-03-16 | Three-step gate (token → permission_override → model), CONFLICT response type, agent reasoning extraction, recent messages in prompt, permission_overrides as mechanical bypass (not in rules_text). Bug: _get_capability_for_tool checks tool_effects. Live test 14/14 PASS. 855 tests. |
 | 3D-HOTFIX-CONFIRMATION | Kernel-Owned Confirmation Replay | COMPLETE | 2026-03-16 | PendingAction stored on ReasoningService when gate blocks. Agent signals [CONFIRM:N] in response; handler executes stored action, strips signal. Token mechanism preserved for programmatic callers. Bug found: [CONFIRM:0] appearing twice → dedup fix. Live test 13/14 PASS (1 SKIP). 869 tests. |
 | Testing-Session | Live Testing Bugfixes | COMPLETE | 2026-03-16 | Manifest atomic writes + recovery path. Gate CONFLICT identifies correct rule (model returns "CONFLICT: [rule text]"). Observability: LLM_REQUEST/LLM_RESPONSE/LLM_BLOCK logging, timestamps on all log lines, full user messages, ctx_tokens_est. Hallucination detection: HALLUCINATION_CHECK + HALLUCINATION_TAGGED. Google OAuth TTL fix (published app). |
+| 3C | Proactive Awareness | COMPLETE | 2026-03-18 | Time pass, whisper injection, dismiss tool. Lazy per-tenant evaluator start. 57 tests. |
+| 3F | Filesystem MCP + Developer Mode | COMPLETE | 2026-03-19 | read_source, read_soul/update_soul, developer_mode flag on TenantProfile. |
+| 3I | Soul Retirement + Clean Hatch | COMPLETE | 2026-03-19 | SOUL.md deleted. read_soul/update_soul → soul.json. Bootstrap prompt updated. /wipe ephemeral. |
+| 3J | Self-Documentation | COMPLETE | 2026-03-19 | 19 docs/ files. read_doc kernel tool. System prompt slimmed to DOCS_HINT. |
+| 3L | Error Surfacing | COMPLETE | 2026-03-20 | ErrorBuffer collects WARNING/ERROR. Injects into system prompt when developer_mode=True. 12 tests. |
+| Covenants | Covenant Manager + Validation + Classification | COMPLETE | 2026-03-18 | manage_covenants tool. LLM validation via Haiku. Instruction classification (behavioral vs standing orders). |
+| Bugfixes | Date injection, prompt caching, token audit | COMPLETE | 2026-03-20 | Current date in system prompt. Provider-aware prompt caching. Tool token breakdown in logs. |
 
 ---
 

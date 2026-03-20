@@ -31,7 +31,8 @@ def test_soul_defaults():
     assert soul.bootstrap_graduated is False
     assert soul.interaction_count == 0
     assert soul.user_name == ""
-    assert soul.agent_name == ""
+    assert soul.agent_name == "Kernos"
+    assert soul.emoji == "🜁"
 
 
 def test_soul_tenant_id_required():

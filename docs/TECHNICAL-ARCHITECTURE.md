@@ -887,7 +887,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 ## Test Coverage
 
-849 tests across 23 test files.
+1039 tests across 25+ test files.
 
 | File | What it covers |
 |---|---|
