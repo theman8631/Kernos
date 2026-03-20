@@ -44,6 +44,70 @@ from kernos.persistence import AuditStore, ConversationStore, TenantStore, deriv
 
 logger = logging.getLogger(__name__)
 
+_MAX_ERROR_BUFFER = 20
+
+
+class ErrorBuffer:
+    """Collects WARNING/ERROR log entries for developer mode error surfacing.
+
+    Per-tenant buffer. Only captures kernos.* loggers. Ephemeral — in-memory only.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, list[str]] = {}
+        self._dropped: dict[str, int] = {}
+        self._handler = _ErrorBufferLogHandler(self)
+        # Attach to the kernos root logger
+        kernos_logger = logging.getLogger("kernos")
+        kernos_logger.addHandler(self._handler)
+        self._current_tenant_id: str = ""
+
+    def set_tenant(self, tenant_id: str) -> None:
+        """Set which tenant is currently being processed."""
+        self._current_tenant_id = tenant_id
+        self._handler._current_tenant_id = tenant_id
+
+    def collect(self, tenant_id: str, entry: str) -> None:
+        """Add an error entry to the buffer."""
+        entries = self._entries.setdefault(tenant_id, [])
+        if len(entries) >= _MAX_ERROR_BUFFER:
+            self._dropped[tenant_id] = self._dropped.get(tenant_id, 0) + 1
+        else:
+            entries.append(entry)
+
+    def drain(self, tenant_id: str) -> str:
+        """Pop all pending errors for a tenant, formatted as a block. Returns '' if none."""
+        entries = self._entries.pop(tenant_id, [])
+        dropped = self._dropped.pop(tenant_id, 0)
+        if not entries:
+            return ""
+        lines = ["[DEVELOPER: Errors since last message]"]
+        if dropped:
+            lines.append(f"({dropped} earlier errors omitted)")
+        lines.extend(entries)
+        lines.append(
+            "\nThese are internal system errors visible because developer mode is enabled. "
+            "You can discuss them, diagnose them (read_doc or read_source), or ignore them."
+        )
+        lines.append("[END DEVELOPER]")
+        return "\n".join(lines)
+
+
+class _ErrorBufferLogHandler(logging.Handler):
+    """Logging handler that feeds WARNING+ entries into ErrorBuffer."""
+
+    def __init__(self, buffer: ErrorBuffer) -> None:
+        super().__init__(level=logging.WARNING)
+        self._buffer = buffer
+        self._current_tenant_id: str = ""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._current_tenant_id and record.name.startswith("kernos."):
+            ts = self.format(record) if self.formatter else record.getMessage()
+            entry = f"{record.levelname} {record.name}: {record.getMessage()}"
+            self._buffer.collect(self._current_tenant_id, entry)
+
+
 _MODEL = "claude-sonnet-4-6"
 _PROVIDER = "anthropic"
 
@@ -206,8 +270,10 @@ def _build_system_prompt(
     if cross_domain_prefix:
         parts.append(cross_domain_prefix)
 
-    # 1. Operating principles
-    parts.append(template.operating_principles)
+    # 1. Operating principles + current date
+    current_dt = datetime.now(timezone.utc)
+    date_line = f"Current date and time: {current_dt.strftime('%A, %B %d, %Y %I:%M %p UTC')}"
+    parts.append(f"{date_line}\n\n{template.operating_principles}")
 
     # 2. Agent identity / personality
     agent_name = soul.agent_name or "Kernos"
@@ -259,7 +325,11 @@ def _build_system_prompt(
     # 7. Capabilities
     parts.append(capability_prompt)
 
-    # 8. Bootstrap prompt — only while the soul hasn't graduated
+    # 8. Docs hint — agent self-knowledge via read_doc()
+    from kernos.messages.reference import DOCS_HINT
+    parts.append(DOCS_HINT)
+
+    # 9. Bootstrap prompt — only while the soul hasn't graduated
     if not soul.bootstrap_graduated:
         parts.append(template.bootstrap_prompt)
 
@@ -301,6 +371,8 @@ class MessageHandler:
         self._secure_input_state: dict[str, SecureInputState] = {}
         self._mcp_config_loaded: set[str] = set()
         self._covenant_cleanup_done: set[str] = set()
+        self._evaluators: dict[str, "AwarenessEvaluator"] = {}  # per-tenant evaluators
+        self._error_buffer = ErrorBuffer()
 
         from kernos.kernel.compaction import CompactionService
         from kernos.kernel.tokens import AnthropicTokenAdapter
@@ -539,6 +611,22 @@ class MessageHandler:
 
         return success
 
+    async def _maybe_start_evaluator(self, tenant_id: str) -> None:
+        """Start an AwarenessEvaluator for this tenant (once per process per tenant)."""
+        if tenant_id in self._evaluators:
+            return
+        try:
+            from kernos.kernel.awareness import AwarenessEvaluator
+            evaluator = AwarenessEvaluator(
+                state=self.state,
+                events=self.events,
+                interval_seconds=int(os.getenv("KERNOS_AWARENESS_INTERVAL", "1800")),
+            )
+            await evaluator.start(tenant_id)
+            self._evaluators[tenant_id] = evaluator
+        except Exception as exc:
+            logger.warning("Failed to start AwarenessEvaluator for %s: %s", tenant_id, exc)
+
     async def _maybe_run_covenant_cleanup(self, tenant_id: str) -> None:
         """Run one-time covenant dedup/contradiction cleanup per tenant per process."""
         if tenant_id in self._covenant_cleanup_done:
@@ -670,7 +758,12 @@ class MessageHandler:
     async def _write_system_docs(
         self, tenant_id: str, system_space_id: str
     ) -> None:
-        """Write capabilities-overview.md and how-to-connect-tools.md to the system space."""
+        """Write capabilities-overview.md to the system space.
+
+        Self-knowledge docs (how-i-work.md, kernos-reference.md, how-to-connect-tools.md)
+        are deprecated — replaced by docs/ + read_doc() (SPEC-3J).
+        Only capabilities-overview.md remains (dynamically updated on install/uninstall).
+        """
         if not getattr(self, "_files", None):
             return
         registry = getattr(self, "registry", None)
@@ -678,114 +771,6 @@ class MessageHandler:
             return
 
         await self._write_capabilities_overview(tenant_id, system_space_id)
-
-        how_to = """# How to Connect Tools
-
-Tools extend what I can do — connect your calendar, email, documents,
-and more. Each tool is an MCP server that runs alongside the system.
-
-## What's Connected
-Check capabilities-overview.md for the current list, or just ask me
-"what tools do I have?"
-
-## Adding a New Tool
-To connect a new tool, tell me what you need:
-- "I need access to my Google Calendar"
-- "Can you connect to my email?"
-- "I need a tool for [description]"
-
-I'll walk you through the setup.
-
-## Tool Visibility
-Tools are available where they're useful. Your D&D space won't show
-invoice tools. Your Business space won't show game tools. If you need
-a tool in a specific space, just ask — I'll activate it.
-"""
-        try:
-            await self._files.write_file(
-                tenant_id, system_space_id,
-                "how-to-connect-tools.md", how_to.strip(),
-                "Guide to connecting and managing tools",
-            )
-        except Exception as exc:
-            logger.warning("Failed to write how-to-connect-tools.md: %s", exc)
-
-        try:
-            from kernos.messages.reference import KERNOS_REFERENCE
-            await self._files.write_file(
-                tenant_id, system_space_id,
-                "kernos-reference.md", KERNOS_REFERENCE.strip(),
-                "Kernos architecture quick reference — how the system works",
-            )
-        except Exception as exc:
-            logger.warning("Failed to write kernos-reference.md: %s", exc)
-
-        how_i_work = """\
-# How I Work
-
-This is how things work behind the scenes. If you're curious about my architecture
-or want to understand what happens when you send me a message, here's the overview.
-
-## Message Routing
-Every message you send is routed to a **context space** by a lightweight model.
-Each space has its own conversation thread — your work discussions don't mix with
-personal conversations. You can have many spaces active at once.
-
-## Learning From Conversations
-After each response, a background process (Tier 2 extraction) pulls out knowledge,
-entities, and foresight signals from what we discussed. This is how I learn your
-preferences, remember people you mention, and notice upcoming deadlines. You don't
-need to tell me to remember things — I do it automatically.
-
-## Compaction (Persistent Memory)
-Periodically, older conversation history is summarized into a **Living State**
-document — a structured snapshot of what matters. This means I don't lose context
-even after long conversations. Older summaries are archived and indexed so I can
-search them when you ask about something from the past.
-
-## Proactive Awareness
-An awareness evaluator runs every 30 minutes, checking for time-sensitive signals
-worth surfacing — upcoming deadlines, expiring commitments, appointments. These
-appear naturally at the start of your next conversation. You can dismiss any
-signal you don't want to hear about using dismiss_whisper.
-
-## The Dispatch Gate
-Every time I'm about to take an action (send an email, create a calendar event,
-delete a file), a lightweight model checks whether it's authorized. It reads your
-recent messages, the proposed action, and your standing covenant rules. If the
-action is clearly what you asked for, it goes through. If there's a conflict with
-a rule or no clear authorization, I'll ask you first. When the gate blocks an
-action, I can execute it after you confirm.
-
-## Covenant Rules
-Your behavioral rules (like "never send emails without asking" or "always confirm
-before spending money") are automatically captured from our conversations. They
-shape how I act. You can view, edit, or remove them anytime — just ask me to show
-your rules.
-
-## Files
-Each context space has its own file storage. I can create, read, and manage text
-files that persist across sessions. Files are never permanently deleted — removes
-go to a shadow archive.
-
-## Memory Search
-The `remember` tool searches across your knowledge entries, entity records, and
-compaction archives. When you ask me to recall something, I search all of these
-sources and rank results by relevance and recency.
-
-## Tools
-I can connect to external services (calendar, email, web browser) through MCP
-tool servers. Each space has its own set of active tools. You can ask me what
-tools are available or request new ones.
-"""
-        try:
-            await self._files.write_file(
-                tenant_id, system_space_id,
-                "how-i-work.md", how_i_work.strip(),
-                "How Kernos works — read this when asked about architecture",
-            )
-        except Exception as exc:
-            logger.warning("Failed to write how-i-work.md: %s", exc)
 
     async def _get_or_init_soul(self, tenant_id: str) -> Soul:
         """Load the soul for this tenant, or initialize a new unhatched one.
@@ -1460,6 +1445,9 @@ tools are available or request new ones.
         tenant_id = derive_tenant_id(message)
         conversation_id = message.conversation_id
 
+        # Set current tenant for error buffer collection
+        self._error_buffer.set_tenant(tenant_id)
+
         # --- SECURE INPUT INTERCEPT ---
         # These paths return early without storing the message or calling the LLM.
         if tenant_id in self._secure_input_state:
@@ -1513,6 +1501,7 @@ tools are available or request new ones.
         soul = await self._get_or_init_soul(tenant_id)
         await self._maybe_load_mcp_config(tenant_id)
         await self._maybe_run_covenant_cleanup(tenant_id)
+        await self._maybe_start_evaluator(tenant_id)
 
         # Step 2: Load recent history with full metadata (for router)
         recent_full = await self.conversations.get_recent_full(
@@ -1668,10 +1657,10 @@ tools are available or request new ones.
             tools = tools + [REMEMBER_TOOL]
         # Add kernel-managed file tools (always available)
         from kernos.kernel.files import FILE_TOOLS
-        from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL
+        from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
-        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_SOURCE_TOOL, MANAGE_COVENANTS_TOOL]
+        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL]
         capability_prompt = self.registry.build_capability_prompt(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
@@ -1693,6 +1682,13 @@ tools are available or request new ones.
             cross_domain_prefix=cross_domain_prefix,
             user_knowledge_entries=user_knowledge_entries,
         )
+
+        # Developer mode: inject pending errors into system prompt
+        tenant_profile = await self.state.get_tenant_profile(tenant_id)
+        if tenant_profile and getattr(tenant_profile, 'developer_mode', False):
+            error_block = self._error_buffer.drain(tenant_id)
+            if error_block:
+                system_prompt = system_prompt + "\n\n" + error_block
 
         # Step 10: Build messages array from space thread + current user message
         # Prepend upload notifications so the agent knows files arrived

@@ -1,9 +1,12 @@
 """Tests for Kernos Self-Knowledge Reference System.
 
 Covers: read_source tool (security, file reading, section extraction),
-kernos-reference.md provisioning, and tool registration.
+read_soul / update_soul tools (state-store backed), kernos-reference.md
+provisioning, tool registration, soul defaults, bootstrap prompt, and
+two-layer identity architecture.
 """
 import json
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,9 +14,15 @@ import pytest
 
 from kernos.kernel.reasoning import (
     READ_SOURCE_TOOL,
+    READ_SOUL_TOOL,
+    UPDATE_SOUL_TOOL,
     ReasoningService,
     _read_source,
+    _SOUL_UPDATABLE_FIELDS,
 )
+from kernos.kernel.soul import Soul
+from kernos.kernel.state_json import JsonStateStore
+from kernos.kernel.template import PRIMARY_TEMPLATE
 
 
 # ---------------------------------------------------------------------------
@@ -173,75 +182,115 @@ class TestReadSourceToolDefinition:
 # ---------------------------------------------------------------------------
 
 
-class TestKernosReference:
-    def test_reference_content_exists(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert len(KERNOS_REFERENCE) > 1000
+class TestDocsHint:
+    def test_docs_hint_exists(self):
+        from kernos.messages.reference import DOCS_HINT
+        assert len(DOCS_HINT) > 100
 
-    def test_covers_context_spaces(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Context Spaces" in KERNOS_REFERENCE
-
-    def test_covers_memory_knowledge(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Memory & Knowledge" in KERNOS_REFERENCE
-
-    def test_covers_entities(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Entities" in KERNOS_REFERENCE
-
-    def test_covers_compaction(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Compaction" in KERNOS_REFERENCE
-
-    def test_covers_covenant_rules(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Covenant Rules" in KERNOS_REFERENCE
-
-    def test_covers_dispatch_gate(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Dispatch Gate" in KERNOS_REFERENCE
-
-    def test_covers_proactive_awareness(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Proactive Awareness" in KERNOS_REFERENCE
-
-    def test_covers_files(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "## Files" in KERNOS_REFERENCE
-
-    def test_covers_mcp_tools(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "MCP Tools" in KERNOS_REFERENCE
-
-    def test_covers_event_stream(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Event Stream" in KERNOS_REFERENCE
-
-    def test_covers_web_browser(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Web Browser" in KERNOS_REFERENCE
-
-    def test_covers_read_source(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "read_source" in KERNOS_REFERENCE
-
-    def test_covers_retrieval(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "Retrieval" in KERNOS_REFERENCE or "Remember" in KERNOS_REFERENCE
-
-    def test_kernel_tools_table(self):
-        from kernos.messages.reference import KERNOS_REFERENCE
-        assert "dismiss_whisper" in KERNOS_REFERENCE
-        assert "remember" in KERNOS_REFERENCE
-        assert "write_file" in KERNOS_REFERENCE
+    def test_docs_hint_references_key_sections(self):
+        from kernos.messages.reference import DOCS_HINT
+        assert "capabilities/" in DOCS_HINT
+        assert "behaviors/" in DOCS_HINT
+        assert "architecture/" in DOCS_HINT
+        assert "identity/" in DOCS_HINT
 
 
-class TestReferenceProvisioning:
-    """Test that kernos-reference.md is written during system space provisioning."""
+class TestDocsDirectory:
+    """Verify docs/ directory structure exists with expected files."""
 
-    async def test_write_system_docs_includes_reference(self, tmp_path):
-        """Verify _write_system_docs writes kernos-reference.md."""
+    def test_index_exists(self):
+        from pathlib import Path
+        docs = Path(__file__).parent.parent / "docs"
+        assert (docs / "index.md").exists()
+
+    def test_architecture_docs_exist(self):
+        from pathlib import Path
+        docs = Path(__file__).parent.parent / "docs" / "architecture"
+        for name in ["overview.md", "context-spaces.md", "memory.md", "soul.md", "event-stream.md"]:
+            assert (docs / name).exists(), f"Missing: architecture/{name}"
+
+    def test_capabilities_docs_exist(self):
+        from pathlib import Path
+        docs = Path(__file__).parent.parent / "docs" / "capabilities"
+        for name in ["overview.md", "calendar.md", "web-browsing.md", "file-system.md", "memory-tools.md", "sms.md"]:
+            assert (docs / name).exists(), f"Missing: capabilities/{name}"
+
+    def test_behaviors_docs_exist(self):
+        from pathlib import Path
+        docs = Path(__file__).parent.parent / "docs" / "behaviors"
+        for name in ["covenants.md", "dispatch-gate.md", "proactive-awareness.md", "instruction-types.md"]:
+            assert (docs / name).exists(), f"Missing: behaviors/{name}"
+
+    def test_identity_docs_exist(self):
+        from pathlib import Path
+        docs = Path(__file__).parent.parent / "docs" / "identity"
+        for name in ["who-you-are.md", "soul-system.md", "onboarding.md"]:
+            assert (docs / name).exists(), f"Missing: identity/{name}"
+
+    def test_roadmap_docs_exist(self):
+        from pathlib import Path
+        docs = Path(__file__).parent.parent / "docs" / "roadmap"
+        for name in ["vision.md", "whats-next.md", "future.md"]:
+            assert (docs / name).exists(), f"Missing: roadmap/{name}"
+
+
+class TestReadDocTool:
+    """Test the read_doc kernel tool."""
+
+    def test_tool_definition(self):
+        from kernos.kernel.reasoning import READ_DOC_TOOL
+        assert READ_DOC_TOOL["name"] == "read_doc"
+        assert "path" in READ_DOC_TOOL["input_schema"]["properties"]
+
+    def test_in_kernel_tools(self):
+        assert "read_doc" in ReasoningService._KERNEL_TOOLS
+
+    def test_classified_as_read(self):
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        assert r._classify_tool_effect("read_doc", None) == "read"
+
+    def test_read_index(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("index.md")
+        assert "Kernos" in result
+        assert "Error" not in result
+
+    def test_read_nested_doc(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("capabilities/web-browsing.md")
+        assert "browser" in result.lower() or "Browser" in result
+        assert "Error" not in result
+
+    def test_reject_path_traversal(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("../secrets/api.key")
+        assert "Error" in result
+
+    def test_reject_absolute_path(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("/etc/passwd")
+        assert "Error" in result
+
+    def test_nonexistent_shows_available(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("nonexistent.md")
+        assert "Error" in result
+        assert "Available docs" in result
+
+    def test_read_vision(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("roadmap/vision.md")
+        assert "personal intelligence" in result.lower()
+
+
+class TestSystemSpaceProvisioningSlimmed:
+    """Verify _write_system_docs only writes capabilities-overview.md."""
+
+    async def test_only_capabilities_overview(self, tmp_path):
         from kernos.kernel.files import FileService
         from kernos.capability.registry import CapabilityRegistry
 
@@ -252,19 +301,372 @@ class TestReferenceProvisioning:
         handler._files = files
         handler.registry = registry
 
-        # Bind the real method
         from kernos.messages.handler import MessageHandler
         handler._write_system_docs = MessageHandler._write_system_docs.__get__(handler)
         handler._write_capabilities_overview = MessageHandler._write_capabilities_overview.__get__(handler)
 
         await handler._write_system_docs("test_tenant", "space_sys_test")
 
-        # Check all three docs exist
         files_dir = tmp_path / "test_tenant" / "spaces" / "space_sys_test" / "files"
-        assert (files_dir / "how-to-connect-tools.md").exists()
-        assert (files_dir / "kernos-reference.md").exists()
+        assert (files_dir / "capabilities-overview.md").exists()
+        # Deprecated files should NOT be written
+        assert not (files_dir / "how-to-connect-tools.md").exists()
+        assert not (files_dir / "kernos-reference.md").exists()
+        assert not (files_dir / "how-i-work.md").exists()
 
-        ref_content = (files_dir / "kernos-reference.md").read_text()
-        assert "Kernos Architecture Reference" in ref_content
-        assert "Context Spaces" in ref_content
-        assert "read_source" in ref_content
+
+# ---------------------------------------------------------------------------
+# read_soul / update_soul
+# ---------------------------------------------------------------------------
+
+
+class TestReadSoul:
+    """read_soul returns soul.json fields via state store."""
+
+    async def test_read_soul_returns_soul_fields(self, tmp_path):
+        """Call read_soul. Verify it returns soul.json fields (agent_name, emoji, etc.)."""
+        store = JsonStateStore(str(tmp_path))
+        soul = Soul(tenant_id="t1", agent_name="Rex", emoji="🔥", personality_notes="bold")
+        await store.save_soul(soul)
+
+        # Wire up a ReasoningService with state
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(store)
+
+        # Simulate read_soul via execute_tool
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+        result = await r.execute_tool("read_soul", {}, request)
+        parsed = json.loads(result)
+        assert parsed["agent_name"] == "Rex"
+        assert parsed["emoji"] == "🔥"
+        assert parsed["personality_notes"] == "bold"
+        assert parsed["tenant_id"] == "t1"
+
+    async def test_read_soul_no_soul_found(self):
+        """read_soul returns error when no soul exists."""
+        state = AsyncMock()
+        state.get_soul.return_value = None
+
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(state)
+
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+        result = await r.execute_tool("read_soul", {}, request)
+        assert "No soul found" in result
+
+
+class TestUpdateSoul:
+    """update_soul accepts field name + value, writes to soul.json."""
+
+    async def test_update_agent_name(self, tmp_path):
+        """Call update_soul to change agent_name to 'Rex'. Call read_soul. Verify."""
+        store = JsonStateStore(str(tmp_path))
+        soul = Soul(tenant_id="t1")
+        await store.save_soul(soul)
+
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(store)
+
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+
+        # Update
+        result = await r.execute_tool("update_soul", {"field": "agent_name", "value": "Rex"}, request)
+        assert "Updated" in result
+        assert "Rex" in result
+
+        # Read back
+        result = await r.execute_tool("read_soul", {}, request)
+        parsed = json.loads(result)
+        assert parsed["agent_name"] == "Rex"
+
+        # Verify soul.json on disk
+        disk_data = json.loads((tmp_path / "t1" / "state" / "soul.json").read_text())
+        assert disk_data["agent_name"] == "Rex"
+
+    async def test_reject_hatched_update(self, tmp_path):
+        """Call update_soul to change hatched. Verify it returns an error."""
+        store = JsonStateStore(str(tmp_path))
+        soul = Soul(tenant_id="t1")
+        await store.save_soul(soul)
+
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(store)
+
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+        result = await r.execute_tool("update_soul", {"field": "hatched", "value": "true"}, request)
+        assert "Cannot update" in result
+
+    async def test_reject_interaction_count_update(self, tmp_path):
+        """Call update_soul to change interaction_count. Verify it returns an error."""
+        store = JsonStateStore(str(tmp_path))
+        soul = Soul(tenant_id="t1")
+        await store.save_soul(soul)
+
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(store)
+
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+        result = await r.execute_tool("update_soul", {"field": "interaction_count", "value": "99"}, request)
+        assert "Cannot update" in result
+
+    async def test_reject_bootstrap_graduated_update(self, tmp_path):
+        """bootstrap_graduated is not updatable via update_soul."""
+        store = JsonStateStore(str(tmp_path))
+        soul = Soul(tenant_id="t1")
+        await store.save_soul(soul)
+
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(store)
+
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+        result = await r.execute_tool("update_soul", {"field": "bootstrap_graduated", "value": "true"}, request)
+        assert "Cannot update" in result
+
+    async def test_reject_user_name_update(self, tmp_path):
+        """user_name is not updatable via update_soul."""
+        store = JsonStateStore(str(tmp_path))
+        soul = Soul(tenant_id="t1")
+        await store.save_soul(soul)
+
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        r.set_state(store)
+
+        from kernos.kernel.reasoning import ReasoningRequest
+        request = ReasoningRequest(
+            tenant_id="t1", conversation_id="c1", system_prompt="",
+            messages=[], tools=[], model="test", trigger="test",
+        )
+        result = await r.execute_tool("update_soul", {"field": "user_name", "value": "Bob"}, request)
+        assert "Cannot update" in result
+
+
+class TestSoulToolDefinitions:
+    def test_read_soul_tool_shape(self):
+        assert READ_SOUL_TOOL["name"] == "read_soul"
+        schema = READ_SOUL_TOOL["input_schema"]
+        assert schema["required"] == []
+
+    def test_update_soul_tool_shape(self):
+        assert UPDATE_SOUL_TOOL["name"] == "update_soul"
+        schema = UPDATE_SOUL_TOOL["input_schema"]
+        assert "field" in schema["properties"]
+        assert "value" in schema["properties"]
+        assert schema["required"] == ["field", "value"]
+
+    def test_read_soul_in_kernel_tools(self):
+        assert "read_soul" in ReasoningService._KERNEL_TOOLS
+
+    def test_update_soul_in_kernel_tools(self):
+        assert "update_soul" in ReasoningService._KERNEL_TOOLS
+
+    def test_read_soul_classified_as_read(self):
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        assert r._classify_tool_effect("read_soul", None) == "read"
+
+    def test_update_soul_classified_as_soft_write(self):
+        provider = MagicMock()
+        events = MagicMock()
+        mcp = MagicMock()
+        audit = MagicMock()
+        r = ReasoningService(provider, events, mcp, audit)
+        assert r._classify_tool_effect("update_soul", None) == "soft_write"
+
+
+class TestDeveloperModeField:
+    def test_default_false(self):
+        from kernos.kernel.state import TenantProfile
+        tp = TenantProfile(tenant_id="t1", status="active", created_at="2026-01-01T00:00:00Z")
+        assert tp.developer_mode is False
+
+    def test_set_true(self):
+        from kernos.kernel.state import TenantProfile
+        tp = TenantProfile(tenant_id="t1", status="active", created_at="2026-01-01T00:00:00Z", developer_mode=True)
+        assert tp.developer_mode is True
+
+
+class TestDocsCoverSoul:
+    def test_soul_doc_exists(self):
+        from pathlib import Path
+        soul_doc = Path(__file__).parent.parent / "docs" / "architecture" / "soul.md"
+        assert soul_doc.exists()
+
+    def test_soul_doc_covers_tools(self):
+        from kernos.kernel.reasoning import _read_doc
+        result = _read_doc("architecture/soul.md")
+        assert "read_soul" in result
+        assert "update_soul" in result
+
+
+# ---------------------------------------------------------------------------
+# Two-Layer Identity spec tests
+# ---------------------------------------------------------------------------
+
+
+class TestSoulDefaults:
+    """Spec tests: soul defaults and migration."""
+
+    def test_new_soul_has_default_name(self):
+        """Create new tenant. Verify soul has agent_name='Kernos'."""
+        soul = Soul(tenant_id="new_t")
+        assert soul.agent_name == "Kernos"
+
+    def test_new_soul_has_default_emoji(self):
+        """Create new tenant. Verify soul has emoji='🜁'."""
+        soul = Soul(tenant_id="new_t")
+        assert soul.emoji == "🜁"
+
+    async def test_migration_backfills_empty_name(self, tmp_path):
+        """Load soul.json with agent_name=''. Verify backfilled to 'Kernos'."""
+        store = JsonStateStore(str(tmp_path))
+        # Write a soul with empty agent_name directly to disk
+        state_dir = tmp_path / "t_migrate" / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "soul.json").write_text(json.dumps({
+            "tenant_id": "t_migrate",
+            "agent_name": "",
+            "emoji": "",
+            "personality_notes": "",
+            "user_name": "",
+            "user_context": "",
+            "communication_style": "",
+            "hatched": False,
+            "hatched_at": "",
+            "interaction_count": 0,
+            "bootstrap_graduated": False,
+            "bootstrap_graduated_at": "",
+        }))
+        soul = await store.get_soul("t_migrate")
+        assert soul is not None
+        assert soul.agent_name == "Kernos"
+        assert soul.emoji == "🜁"
+
+        # Verify migration persisted to disk
+        disk_data = json.loads((state_dir / "soul.json").read_text())
+        assert disk_data["agent_name"] == "Kernos"
+        assert disk_data["emoji"] == "🜁"
+
+
+class TestBootstrapPrompt:
+    """Spec tests: bootstrap prompt content."""
+
+    def test_contains_you_are_kernos(self):
+        """Build system prompt for unhatched tenant. Assert contains 'You are Kernos'."""
+        assert "You are Kernos" in PRIMARY_TEMPLATE.bootstrap_prompt
+
+    def test_contains_dont_narrate(self):
+        """Assert bootstrap contains 'Don't narrate your own state'."""
+        assert "Don't narrate your own state" in PRIMARY_TEMPLATE.bootstrap_prompt
+
+    def test_no_you_just_came_online(self):
+        """Assert bootstrap_prompt does NOT contain 'You just came online'."""
+        assert "You just came online" not in PRIMARY_TEMPLATE.bootstrap_prompt
+
+    def test_bootstrap_in_system_prompt_for_unhatched(self):
+        """Build system prompt for unhatched tenant. Assert bootstrap content present."""
+        from kernos.messages.handler import _build_system_prompt
+        from kernos.messages.models import NormalizedMessage, AuthLevel
+        from datetime import datetime, timezone
+
+        soul = Soul(tenant_id="t1", bootstrap_graduated=False)
+        msg = NormalizedMessage(
+            content="hello",
+            sender="+15555550100",
+            platform="sms",
+            conversation_id="c1",
+            sender_auth_level=AuthLevel.owner_verified,
+            timestamp=datetime.now(timezone.utc),
+            platform_capabilities=[],
+            tenant_id="t1",
+        )
+        prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
+        assert "You are Kernos" in prompt
+        assert "Don't narrate your own state" in prompt
+
+
+class TestNoSoulMd:
+    """Spec test: SOUL.md must not appear in system prompt or codebase references."""
+
+    def test_soul_md_not_in_codebase(self):
+        """SOUL.md file should not exist in repo root."""
+        from pathlib import Path
+        soul_path = Path(__file__).parent.parent / "SOUL.md"
+        assert not soul_path.exists(), "SOUL.md should have been deleted"
+
+    def test_system_prompt_no_soul_md_content(self):
+        """Build system prompt for any tenant. Assert SOUL.md content does not appear."""
+        from kernos.messages.handler import _build_system_prompt
+        from kernos.messages.models import NormalizedMessage, AuthLevel
+        from datetime import datetime, timezone
+
+        soul = Soul(tenant_id="t1", bootstrap_graduated=True, user_name="Test")
+        msg = NormalizedMessage(
+            content="hello",
+            sender="+15555550100",
+            platform="sms",
+            conversation_id="c1",
+            sender_auth_level=AuthLevel.owner_verified,
+            timestamp=datetime.now(timezone.utc),
+            platform_capabilities=[],
+            tenant_id="t1",
+        )
+        prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
+        # SOUL.md contained distinctive phrases that should not appear
+        assert "SOUL.md" not in prompt
+        assert "Kabe built me" not in prompt
+        assert "Trust Kabe completely" not in prompt

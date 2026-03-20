@@ -63,6 +63,69 @@ REQUEST_TOOL = {
 }
 
 
+READ_DOC_TOOL = {
+    "name": "read_doc",
+    "description": (
+        "Read Kernos documentation. Use when you need to understand a capability, "
+        "behavior, or how the system works. Your docs are at docs/ — read the "
+        "relevant section to answer accurately. "
+        "Examples: 'index.md', 'capabilities/web-browsing.md', 'behaviors/covenants.md', "
+        "'architecture/memory.md', 'identity/who-you-are.md', 'roadmap/vision.md'"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": (
+                    "Path relative to docs/. "
+                    "Examples: 'index.md', 'capabilities/web-browsing.md', "
+                    "'behaviors/covenants.md', 'architecture/context-spaces.md'"
+                ),
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _read_doc(path: str) -> str:
+    """Read a Kernos documentation file from docs/.
+
+    Security: only allows reads within the docs/ directory.
+    Rejects paths with '..', absolute paths, or paths outside docs/.
+    """
+    from pathlib import Path
+
+    if path.startswith("/") or path.startswith("\\"):
+        return "Error: Absolute paths are not allowed. Use a relative path like 'capabilities/web-browsing.md'."
+
+    if ".." in path:
+        return "Error: Path traversal ('..') is not allowed."
+
+    # Resolve docs/ root relative to the repo
+    import importlib
+    kernos_root = Path(importlib.import_module("kernos").__file__).parent
+    docs_root = kernos_root.parent / "docs"
+    target = (docs_root / path).resolve()
+
+    if not str(target).startswith(str(docs_root.resolve())):
+        return "Error: Path resolves outside the docs/ directory."
+
+    if not target.exists():
+        # List available files to help the agent find the right one
+        available = []
+        for f in sorted(docs_root.rglob("*.md")):
+            available.append(str(f.relative_to(docs_root)))
+        hint = "\n".join(f"  - {a}" for a in available[:30])
+        return f"Error: File not found: docs/{path}\n\nAvailable docs:\n{hint}"
+
+    if not target.is_file():
+        return f"Error: Not a file: docs/{path}"
+
+    return target.read_text(encoding="utf-8")
+
+
 READ_SOURCE_TOOL = {
     "name": "read_source",
     "description": (
@@ -93,6 +156,51 @@ READ_SOURCE_TOOL = {
         "required": ["path"],
     },
 }
+
+
+READ_SOUL_TOOL = {
+    "name": "read_soul",
+    "description": (
+        "Read your own identity — who you are, your personality, your relationship "
+        "with this user. Use this when you want to understand or verify your own state."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+
+UPDATE_SOUL_TOOL = {
+    "name": "update_soul",
+    "description": (
+        "Update your own identity — name, emoji, personality notes, communication "
+        "style. Use when the user asks you to change something about yourself, or "
+        "when you and the user agree on a change."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "field": {
+                "type": "string",
+                "description": (
+                    "The soul field to update. Allowed: agent_name, emoji, "
+                    "personality_notes, communication_style."
+                ),
+            },
+            "value": {
+                "type": "string",
+                "description": "The new value for the field.",
+            },
+        },
+        "required": ["field", "value"],
+    },
+}
+
+
+# Allowed fields for update_soul — lifecycle and user fields are read-only
+_SOUL_UPDATABLE_FIELDS = {"agent_name", "emoji", "personality_notes", "communication_style"}
 
 
 def _read_source(path: str, section: str = "") -> str:
@@ -212,6 +320,8 @@ class ProviderResponse:
     stop_reason: str
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +366,30 @@ class AnthropicProvider(Provider):
         max_tokens: int,
         output_schema: dict | None = None,
     ) -> ProviderResponse:
+        # Apply prompt caching: cache_control on system prompt and last tool
+        cached_system = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+        cached_tools = list(tools) if tools else []
+        if cached_tools:
+            cached_tools[-1] = {
+                **cached_tools[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+
         create_kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": cached_system,
             "messages": messages,
         }
-        if tools:
-            create_kwargs["tools"] = tools
+        if cached_tools:
+            create_kwargs["tools"] = cached_tools
         if output_schema:
             create_kwargs["output_config"] = {
                 "format": {"type": "json_schema", "schema": output_schema}
@@ -292,11 +418,17 @@ class AnthropicProvider(Provider):
             )
             for block in response.content
         ]
+
+        cache_write = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+
         return ProviderResponse(
             content=content,
             stop_reason=response.stop_reason,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
         )
 
 
@@ -485,13 +617,13 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "manage_covenants"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
     # ---------------------------------------------------------------------------
 
-    def _classify_tool_effect(self, tool_name: str, active_space: Any) -> str:
+    def _classify_tool_effect(self, tool_name: str, active_space: Any, tool_input: dict[str, Any] | None = None) -> str:
         """Classify a tool call's effect level.
 
         Returns: "read", "soft_write", "hard_write", or "unknown"
@@ -499,11 +631,15 @@ class ReasoningService:
         MCP tools use tool_effects from CapabilityInfo.
         Unknown defaults to "hard_write" (safe default).
         """
-        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source"}
-        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants"}
+        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul"}
+        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul"}
 
         if tool_name in _KERNEL_READS:
             return "read"
+        # manage_covenants: "list" is a read; other actions are writes
+        if tool_name == "manage_covenants":
+            action = (tool_input or {}).get("action", "list")
+            return "read" if action == "list" else "soft_write"
         if tool_name in _KERNEL_WRITES:
             return "soft_write"
 
@@ -853,6 +989,32 @@ class ReasoningService:
                     tool_input.get("path", ""),
                     tool_input.get("section", ""),
                 )
+            elif tool_name == "read_doc":
+                return _read_doc(tool_input.get("path", ""))
+            elif tool_name == "read_soul":
+                if self._state:
+                    soul = await self._state.get_soul(request.tenant_id)
+                    if soul:
+                        from dataclasses import asdict
+                        return json.dumps(asdict(soul), indent=2)
+                    return "No soul found for this tenant."
+                return "State store is not available."
+            elif tool_name == "update_soul":
+                if self._state:
+                    field = tool_input.get("field", "")
+                    value = tool_input.get("value", "")
+                    if field not in _SOUL_UPDATABLE_FIELDS:
+                        return (
+                            f"Cannot update '{field}'. Only these fields can be updated: "
+                            f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
+                        )
+                    soul = await self._state.get_soul(request.tenant_id)
+                    if not soul:
+                        return "No soul found for this tenant."
+                    setattr(soul, field, value)
+                    await self._state.save_soul(soul)
+                    return f"Updated {field} to: {value}"
+                return "State store is not available."
             elif tool_name == "manage_covenants":
                 from kernos.kernel.covenant_manager import handle_manage_covenants
                 cov_action = tool_input.get("action", "list")
@@ -1007,18 +1169,33 @@ class ReasoningService:
         except Exception as exc:
             logger.warning("Failed to emit reasoning.request: %s", exc)
 
-        # Estimate context size: rough token count of system prompt + messages.
+        # Estimate context size: rough token count of system prompt + messages + tools.
         # 1 token ≈ 4 chars is a reasonable approximation for English prose.
+        _tool_chars = sum(len(json.dumps(t)) for t in tools)
         _ctx_chars = len(request.system_prompt) + sum(
             len(m.get("content", "") if isinstance(m.get("content"), str)
                 else json.dumps(m.get("content", "")))
             for m in messages
         )
-        _ctx_tokens_est = _ctx_chars // 4
+        _ctx_tokens_est = (_ctx_chars + _tool_chars) // 4
+        _tool_sizes = [(t.get("name", "?"), len(json.dumps(t))) for t in tools]
+        _tool_sizes.sort(key=lambda x: x[1], reverse=True)
+        _top3 = ", ".join(f"{name}={chars//4}tok" for name, chars in _tool_sizes[:3])
         logger.info(
-            "REASON_START: tool_count=%d max_tokens=%d msg_count=%d ctx_tokens_est=%d",
+            "REASON_START: tool_count=%d max_tokens=%d msg_count=%d "
+            "ctx_tokens_est=%d (msg=%d tools=%d) top_tools=[%s]",
             len(tools), request.max_tokens, len(messages), _ctx_tokens_est,
+            _ctx_chars // 4, _tool_chars // 4, _top3,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            for t in tools:
+                _t_json = json.dumps(t)
+                logger.debug(
+                    "TOOL_SIZE: name=%s tokens_est=%d chars=%d",
+                    t.get("name", "unknown"),
+                    len(_t_json) // 4,
+                    len(_t_json),
+                )
 
         logger.info(
             "LLM_REQUEST: messages=%d tools=%d max_tokens=%d",
@@ -1041,6 +1218,12 @@ class ReasoningService:
             response.stop_reason,
             [b.type for b in response.content],
         )
+        if response.cache_creation_input_tokens or response.cache_read_input_tokens:
+            logger.info(
+                "CACHE: write=%d read=%d",
+                response.cache_creation_input_tokens,
+                response.cache_read_input_tokens,
+            )
         for _b in response.content:
             if _b.type == "text":
                 logger.info(
@@ -1128,7 +1311,7 @@ class ReasoningService:
                 approval_token_id = tool_input.pop("_approval_token", None)
 
                 # Dispatch Gate: classify and check write tools before execution
-                tool_effect = self._classify_tool_effect(block.name, request.active_space)
+                tool_effect = self._classify_tool_effect(block.name, request.active_space, tool_input)
                 if tool_effect in ("soft_write", "hard_write", "unknown"):
                     gate_result = await self._gate_tool_call(
                         block.name, tool_input, tool_effect,
@@ -1332,6 +1515,37 @@ class ReasoningService:
                             tool_args.get("path", ""),
                             tool_args.get("section", ""),
                         )
+                    elif block.name == "read_doc":
+                        result = _read_doc(tool_args.get("path", ""))
+                    elif block.name == "read_soul":
+                        if self._state:
+                            soul = await self._state.get_soul(request.tenant_id)
+                            if soul:
+                                from dataclasses import asdict
+                                result = json.dumps(asdict(soul), indent=2)
+                            else:
+                                result = "No soul found for this tenant."
+                        else:
+                            result = "State store is not available."
+                    elif block.name == "update_soul":
+                        if self._state:
+                            field = tool_args.get("field", "")
+                            value = tool_args.get("value", "")
+                            if field not in _SOUL_UPDATABLE_FIELDS:
+                                result = (
+                                    f"Cannot update '{field}'. Only these fields can be updated: "
+                                    f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
+                                )
+                            else:
+                                soul = await self._state.get_soul(request.tenant_id)
+                                if not soul:
+                                    result = "No soul found for this tenant."
+                                else:
+                                    setattr(soul, field, value)
+                                    await self._state.save_soul(soul)
+                                    result = f"Updated {field} to: {value}"
+                        else:
+                            result = "State store is not available."
                     elif block.name == "manage_covenants":
                         try:
                             from kernos.kernel.covenant_manager import handle_manage_covenants
@@ -1463,6 +1677,12 @@ class ReasoningService:
                 response.stop_reason,
                 [b.type for b in response.content],
             )
+            if response.cache_creation_input_tokens or response.cache_read_input_tokens:
+                logger.info(
+                    "CACHE: write=%d read=%d",
+                    response.cache_creation_input_tokens,
+                    response.cache_read_input_tokens,
+                )
             for _b in response.content:
                 if _b.type == "text":
                     logger.info(

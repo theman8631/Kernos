@@ -35,7 +35,7 @@ These are non-negotiable. Violating any of these is a build failure regardless o
 - Run the acceptance criteria listed in the Active Spec. All must pass.
 - Run `pytest` — all tests green.
 - Verify architectural constraints (especially import isolation — grep for it).
-- Update `kernos/messages/reference.py` (`KERNOS_REFERENCE`) to reflect any new or changed components from this spec. The agent's self-knowledge reference must stay current.
+- Update the relevant `docs/` section to reflect any new or changed components from this spec. The docs are the canonical reference for how the system works.
 - Do NOT update DECISIONS.md status yourself. The founder and architect handle that.
 
 ## Code Style

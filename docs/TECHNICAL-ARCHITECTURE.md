@@ -4,7 +4,7 @@
 >
 > **Update discipline:** Update this document whenever a spec is completed and changes the architecture. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-03-18 (reflects SPEC-COVENANT-VALIDATION — LLM-based post-write validation, single creation path)
+> **Last updated:** 2026-03-19 (reflects SPEC-3J Self-Documentation — docs/ as source of truth, read_doc tool, system space docs deprecated)
 
 ---
 
@@ -623,20 +623,24 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **Tracing prefix**: `AWARENESS:` — all evaluator log lines use this prefix.
 
-### Self-Knowledge Reference System
+### Self-Documentation (SPEC-3J)
 
-**What it does:** Enables the agent to understand and explain its own architecture. Three layers: a reference document for conceptual understanding, a source code introspection tool for implementation details, and a maintenance discipline to keep the reference current.
+**What it does:** Enables the agent to understand and explain its own architecture. The canonical reference is `docs/` — a nested directory of markdown files covering architecture, capabilities, behaviors, identity, and roadmap. Three consumers: the agent (reads docs via `read_doc` tool), developers (reads docs in the repo), and users (same docs published as web reference when the web UI ships).
 
-**Layer 1: `kernos-reference.md`** — Written to the system space at tenant provisioning (alongside `how-to-connect-tools.md` and `capabilities-overview.md`). Covers all major components in 3-5 sentences each with file paths. The agent reads this when users ask conceptual questions.
+**`read_doc(path)` kernel tool** — reads files from `docs/`. Always available, read-effect (no gate, not developer-mode-gated). Security: rejects path traversal and absolute paths. On file-not-found, lists available docs to help the agent navigate.
 
-**Layer 2: `read_source` kernel tool** — Reads files within the `kernos/` package directory. Takes a relative `path` (e.g., "kernel/awareness.py") and optional `section` (class or function name to extract). Security: rejects absolute paths, path traversal (`..`), and paths outside kernos/. Full files truncated at 500 lines. Classified as "read" effect — no dispatch gate.
+**`read_source(path, section)` kernel tool** — reads source code from `kernos/`. For implementation-level questions. Section extraction for class/function focus. Read-effect.
 
-**Layer 3: Post-implementation checklist** — Every spec that ships should update `kernos-reference.md` in `kernos/messages/reference.py` to reflect new or changed components. This keeps the reference current.
+**System prompt** — contains a slim docs directory hint ("Your documentation is in docs/. Use read_doc(path) to look up...") instead of the full reference blob. Operating principles, covenants, and capabilities remain in-prompt.
+
+**System space docs deprecated** — `how-i-work.md`, `kernos-reference.md`, `how-to-connect-tools.md` no longer provisioned for new tenants. Only `capabilities-overview.md` remains (dynamically updated on install/uninstall).
+
+**Post-implementation standard** — every spec that ships MUST update the relevant `docs/` section.
 
 **Files:**
-- `kernos/messages/reference.py` — `KERNOS_REFERENCE` content string
-- `kernos/kernel/reasoning.py` — `READ_SOURCE_TOOL` definition, `_read_source()` function
-- `kernos/messages/handler.py` — provisioning call in `_write_system_docs()`
+- `docs/` — full documentation tree (index.md, architecture/, capabilities/, behaviors/, identity/, roadmap/)
+- `kernos/kernel/reasoning.py` — `READ_DOC_TOOL`, `_read_doc()`, `READ_SOURCE_TOOL`, `_read_source()`
+- `kernos/messages/reference.py` — thin `DOCS_HINT` for system prompt
 
 ---
 

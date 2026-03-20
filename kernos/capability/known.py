@@ -80,16 +80,22 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
     CapabilityInfo(
         name="web-search",
         display_name="Web Search",
-        description="Search the internet for current information",
+        description=(
+            "Search the web for current information. Returns structured results "
+            "(title, URL, snippet) for any query. Use this when the user asks "
+            "you to search for something, find current prices, news, or facts. "
+            "For reading a full page in depth, pair with the web browser."
+        ),
         category="search",
         status=CapabilityStatus.AVAILABLE,
         setup_hint="I can add web search — want me to set that up?",
-        setup_requires=[],
-        server_name="",
+        setup_requires=["BRAVE_API_KEY"],
+        server_name="brave-search",
         tool_effects={
-            "search": "read",
-            "fetch": "read",
+            "brave_web_search": "read",
+            "brave_local_search": "read",
         },
+        universal=True,
     ),
     # Lightpanda: open-source headless browser with native MCP server.
     # Binary: ~/bin/lightpanda (or LIGHTPANDA_PATH env var).
@@ -100,13 +106,11 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         name="web-browser",
         display_name="Web Browser",
         description=(
-            "Search the web, look things up, find current information, "
-            "read pages, and extract structured data. "
-            "Use this when the user asks you to search for something, "
-            "look something up, check current prices/news/weather, "
-            "or find any information on the internet. "
-            "Navigate to a search engine or relevant site, read with "
-            "the markdown tool, and answer the question."
+            "Browse the web — navigate to a URL and read its contents. "
+            "Use this to fetch full page content, follow links, or read a specific site. "
+            "For finding information across the web, pair with web-search: "
+            "search to find the right page, then browser to read it in depth. "
+            "If web-search is unavailable, use goto on a search engine directly."
         ),
         category="search",
         status=CapabilityStatus.AVAILABLE,

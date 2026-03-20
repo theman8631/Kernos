@@ -64,6 +64,7 @@ class TenantProfile:
     # Maps capability_name → "ask" | "always-allow"
     # Default (not in dict) = "ask" (gate fires)
     # "always-allow" → bypass gate for all write tools in this capability
+    developer_mode: bool = False
 
 
 # ---------------------------------------------------------------------------

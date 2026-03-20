@@ -76,6 +76,17 @@ async def build_handler():
             ),
         )
 
+    brave_api_key = os.getenv("BRAVE_API_KEY", "")
+    if brave_api_key:
+        mcp_manager.register_server(
+            "brave-search",
+            StdioServerParameters(
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-brave-search"],
+                env={"BRAVE_API_KEY": brave_api_key},
+            ),
+        )
+
     lightpanda_path = os.getenv("LIGHTPANDA_PATH", os.path.expanduser("~/bin/lightpanda"))
     if Path(lightpanda_path).is_file():
         mcp_manager.register_server(

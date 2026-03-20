@@ -155,7 +155,18 @@ class JsonStateStore(StateStore):
         data = self._read_json(path, None)
         if data is None:
             return None
-        return Soul(**data)
+        # Migration: backfill empty defaults from older soul.json files
+        migrated = False
+        if not data.get("agent_name"):
+            data["agent_name"] = "Kernos"
+            migrated = True
+        if not data.get("emoji"):
+            data["emoji"] = "🜁"
+            migrated = True
+        soul = Soul(**data)
+        if migrated:
+            self._write_json(path, asdict(soul))
+        return soul
 
     async def save_soul(self, soul: Soul) -> None:
         path = self._state_dir(soul.tenant_id) / "soul.json"

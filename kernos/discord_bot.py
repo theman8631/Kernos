@@ -1,8 +1,13 @@
+import json
 import logging
 import os
+import shutil
 from pathlib import Path
 
+import sys
+
 import discord
+from discord import app_commands
 from dotenv import load_dotenv
 from mcp import StdioServerParameters
 
@@ -32,7 +37,79 @@ logger = logging.getLogger(__name__)
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 adapter = DiscordAdapter()
+
+OWNER_USER_ID = 364303223047323649
+_PENDING_CONFIRMATION_PATH = Path("/tmp/kernos_pending_confirmation.json")
+
+
+def _write_pending_confirmation(channel_id: int, message: str) -> None:
+    """Write a pending confirmation file for the new process to pick up."""
+    _PENDING_CONFIRMATION_PATH.write_text(
+        json.dumps({"channel_id": channel_id, "message": message})
+    )
+
+
+@tree.command(name="restart", description="Restart the Kernos bot")
+async def restart_command(interaction: discord.Interaction) -> None:
+    if interaction.user.id != OWNER_USER_ID:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    logger.info("Restart requested by %s", interaction.user)
+    await interaction.response.send_message("Restarting Kernos...")
+    _write_pending_confirmation(interaction.channel_id, "\u2705 Restarted successfully.")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+@tree.command(name="wipe", description="Wipe all data and start fresh (factory reset)")
+async def wipe_command(interaction: discord.Interaction) -> None:
+    global handler
+
+    if interaction.user.id != OWNER_USER_ID:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    data_dir = Path(os.getenv("KERNOS_DATA_DIR", "./data"))
+
+    await interaction.response.send_message(
+        "Wiping all data (factory reset) and restarting...", ephemeral=True
+    )
+    _write_pending_confirmation(interaction.channel_id, "\u2705 Wiped and restarted. Fresh start.")
+
+    # 1. Null the handler so on_message rejects new messages during wipe.
+    current_handler = handler
+    handler = None
+
+    # 2. Stop the awareness evaluator — it writes to data/ on a timer.
+    if current_handler and getattr(current_handler, "_evaluator", None):
+        try:
+            await current_handler._evaluator.stop()
+            logger.info("Wipe: awareness evaluator stopped")
+        except Exception as exc:
+            logger.warning("Wipe: failed to stop evaluator: %s", exc)
+
+    # 3. Disconnect MCP servers — release file handles and child processes.
+    if current_handler and current_handler.mcp:
+        try:
+            await current_handler.mcp.disconnect_all()
+            logger.info("Wipe: MCP servers disconnected")
+        except Exception as exc:
+            logger.warning("Wipe: failed to disconnect MCP: %s", exc)
+
+    # 4. Delete everything inside data/ — produces a truly blank state.
+    #    .env and secrets/ live outside data/ so they are never touched.
+    #    All tenant data (conversations, state, events, spaces, awareness,
+    #    compaction, audit, archive) lives under data/{tenant_id}/.
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
+        logger.info("Wipe: removed %s", data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Wipe: recreated empty %s", data_dir)
+
+    # 5. Restart the process — all in-memory state is discarded.
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 
 # None until on_ready completes MCP setup.
 handler: MessageHandler | None = None
@@ -70,6 +147,19 @@ async def on_ready():
         logger.warning(
             "GOOGLE_OAUTH_CREDENTIALS_PATH not set — calendar tools unavailable"
         )
+
+    brave_api_key = os.getenv("BRAVE_API_KEY", "")
+    if brave_api_key:
+        mcp_manager.register_server(
+            "brave-search",
+            StdioServerParameters(
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-brave-search"],
+                env={"BRAVE_API_KEY": brave_api_key},
+            ),
+        )
+    else:
+        logger.warning("BRAVE_API_KEY not set — web search tools unavailable")
 
     lightpanda_path = os.getenv("LIGHTPANDA_PATH", os.path.expanduser("~/bin/lightpanda"))
     if Path(lightpanda_path).is_file():
@@ -111,25 +201,22 @@ async def on_ready():
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 
-    # Start awareness evaluator for proactive insights (Phase 3C)
-    from kernos.kernel.awareness import AwarenessEvaluator
-    evaluator = AwarenessEvaluator(
-        state=state,
-        events=events,
-        interval_seconds=int(os.getenv("KERNOS_AWARENESS_INTERVAL", "1800")),
-    )
-    # Determine tenant_id for evaluator — use the first known tenant
-    # In single-tenant mode, this is the only tenant
-    tenant_dirs = [d for d in Path(data_dir).iterdir() if d.is_dir() and (d / "state").exists()]
-    if tenant_dirs:
-        # Reconstruct tenant_id from directory name (reverse of _safe_name)
-        evaluator_tenant = tenant_dirs[0].name.replace("_", ":", 1)
-        await evaluator.start(evaluator_tenant)
-        handler._evaluator = evaluator
-        logger.info("AwarenessEvaluator started for tenant=%s", evaluator_tenant)
-    else:
-        handler._evaluator = None
-        logger.info("No tenants found — AwarenessEvaluator not started")
+    # Send pending confirmation from a prior /restart or /wipe
+    if _PENDING_CONFIRMATION_PATH.is_file():
+        try:
+            pending = json.loads(_PENDING_CONFIRMATION_PATH.read_text())
+            channel = await client.fetch_channel(pending["channel_id"])
+            await channel.send(pending["message"])
+            logger.info("Sent pending confirmation to channel %s", pending["channel_id"])
+            _PENDING_CONFIRMATION_PATH.unlink()
+        except Exception as exc:
+            logger.warning("Failed to send pending confirmation: %s", exc)
+
+    # AwarenessEvaluator starts lazily per-tenant on first message
+    # (handler._maybe_start_evaluator). No startup guessing needed.
+
+    await tree.sync()
+    logger.info("Slash commands synced")
 
 
 DISCORD_MAX_LENGTH = 2000

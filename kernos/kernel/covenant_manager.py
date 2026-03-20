@@ -89,6 +89,7 @@ VALIDATION_SCHEMA = {
                     "suggested_description": {"type": "string"},
                 },
                 "required": ["type"],
+                "additionalProperties": False,
             },
         },
     },
