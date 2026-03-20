@@ -2,11 +2,13 @@
 
 Capabilities are external tools that Kernos connects to via the Model Context Protocol (MCP). Each capability is an MCP server that the system connects to, discovers tools from, and routes tool calls through.
 
-## Unified Capability Model
+## Unified Capability Registry
 
-All capabilities — pre-installed defaults and user-added tools — are managed through the same mechanism. The only difference between a default capability (like Google Calendar) and one the user adds later is that defaults come pre-installed. The user or agent can disable any capability, default or otherwise. All capabilities appear in one unified management list.
+All capabilities — pre-installed defaults and user-added tools — live in one registry with the same enable/disable mechanics. There is no "built-in" vs "external" distinction. Everything is an MCP server. Everything can be enabled, disabled, installed, or removed through the same `manage_tools` interface.
 
-There is no "built-in" vs "external" distinction. Everything is an MCP server. Everything can be enabled, disabled, installed, or uninstalled through the same interface.
+The only difference between a pre-installed capability (like Google Calendar) and one the user adds later is the `source` field:
+- **default** — shipped with Kernos, cannot be removed (only disabled)
+- **user** — installed at runtime, can be fully removed
 
 ## Pre-Installed Capabilities
 
@@ -21,6 +23,26 @@ These come ready to connect:
 
 **Universal** means the capability is available in every context space by default. Non-universal capabilities must be activated per-space.
 
+## Capability Status
+
+Each capability has a status:
+
+- **AVAILABLE** — registered but not connected
+- **CONNECTED** — connected and tools discovered (enabled)
+- **DISABLED** — MCP server still running, but tools hidden from the agent. Re-enable is instant.
+- **ERROR** — connection failed
+- **SUPPRESSED** — user removed (config preserved)
+
+## Managing Capabilities
+
+The `manage_tools` kernel tool provides a unified interface:
+
+- **list** — show all capabilities with source and status
+- **enable** — re-enable a disabled capability (instant, no reconnection)
+- **disable** — hide capability tools from the agent (MCP server stays warm)
+- **install** — add a new MCP server
+- **remove** — uninstall a user-added capability (pre-installed defaults can only be disabled)
+
 ## How Connection Works
 
 1. **Registration** — capabilities are registered in the `CapabilityRegistry` with server command, args, and credentials requirements.
@@ -28,16 +50,14 @@ These come ready to connect:
 3. **Tool Discovery** — each MCP server exposes a set of tools. These are added to the tool list available to the agent.
 4. **Credential Setup** — some capabilities require API keys or OAuth tokens. The secure credential handoff intercepts the next user message as a secret (never entering the LLM context) and uses it to connect.
 
-## Runtime Install/Uninstall
+## Disable vs Remove
 
-Users can add new MCP servers at runtime:
+- **Disable**: MCP server process keeps running. Tools are hidden from the agent's tool list. Re-enable restores tools instantly with no reconnection needed.
+- **Remove**: MCP server is disconnected. Only works for user-installed capabilities. Pre-installed defaults cannot be removed, only disabled.
 
-- Tell the agent what tool you need ("I need access to my Notion")
-- The agent uses `request_tool` to search for or activate a capability
-- If a new MCP server needs to be installed, the system handles connection and tool discovery
-- Configuration is persisted in `mcp-servers.json` in the system space
+## Startup Migration
 
-Uninstalling suppresses a capability (status becomes `SUPPRESSED`) — configuration is preserved for potential re-enable.
+When new pre-installed capabilities are added to the manifest (`known.py`), existing tenants see them as "available" on their next interaction. No manual migration needed.
 
 ## Tool Scoping
 
@@ -58,21 +78,13 @@ Every tool call is classified by its effect level:
 
 Effect classifications come from `tool_effects` on each `CapabilityInfo`, or default to `hard_write` if unknown.
 
-## Capability Status
-
-Each capability has a status:
-
-- **AVAILABLE** — registered but not connected
-- **CONNECTED** — connected and tools discovered
-- **ERROR** — connection failed
-- **SUPPRESSED** — user uninstalled (config preserved)
-
 ## Code Locations
 
 | Component | Path |
 |-----------|------|
 | CapabilityRegistry | `kernos/capability/registry.py` |
 | MCPClientManager | `kernos/capability/client.py` |
-| Known capabilities catalog | `kernos/capability/known.py` |
+| Pre-installed capabilities manifest | `kernos/capability/known.py` |
 | Tool scoping | `kernos/capability/registry.py` (get_tools_for_space) |
+| manage_tools kernel tool | `kernos/kernel/reasoning.py` |
 | Runtime install flow | `kernos/messages/handler.py` |

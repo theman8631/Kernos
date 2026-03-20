@@ -126,6 +126,35 @@ def _read_doc(path: str) -> str:
     return target.read_text(encoding="utf-8")
 
 
+MANAGE_TOOLS_TOOL = {
+    "name": "manage_tools",
+    "description": (
+        "Manage your capabilities — list, enable, disable, install, or remove tools. "
+        "Use 'list' to see all available capabilities and their status. "
+        "Use 'enable' or 'disable' to toggle capabilities on or off. "
+        "Use 'install' to add a new MCP server. "
+        "Use 'remove' to uninstall a user-added capability "
+        "(defaults can only be disabled, not removed)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "enable", "disable", "install", "remove"],
+                "description": "The action to perform.",
+            },
+            "capability": {
+                "type": "string",
+                "description": "The capability name (required for enable/disable/remove).",
+            },
+        },
+        "required": ["action"],
+        "additionalProperties": False,
+    },
+}
+
+
 READ_SOURCE_TOOL = {
     "name": "read_source",
     "description": (
@@ -562,6 +591,7 @@ class ReasoningService:
         self._state = None      # Set by handler after construction
         self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
         self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
+        self._tools_changed: bool = False  # Set by manage_tools; handler checks post-reasoning
 
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
@@ -617,7 +647,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -632,12 +662,16 @@ class ReasoningService:
         Unknown defaults to "hard_write" (safe default).
         """
         _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul"}
-        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul"}
+        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_tools"}
 
         if tool_name in _KERNEL_READS:
             return "read"
         # manage_covenants: "list" is a read; other actions are writes
         if tool_name == "manage_covenants":
+            action = (tool_input or {}).get("action", "list")
+            return "read" if action == "list" else "soft_write"
+        # manage_tools: "list" is a read; other actions are writes
+        if tool_name == "manage_tools":
             action = (tool_input or {}).get("action", "list")
             return "read" if action == "list" else "soft_write"
         if tool_name in _KERNEL_WRITES:
@@ -1042,6 +1076,12 @@ class ReasoningService:
                             )
                         )
                 return cov_result
+            elif tool_name == "manage_tools":
+                return await self._handle_manage_tools(
+                    request.tenant_id,
+                    tool_input.get("action", "list"),
+                    tool_input.get("capability", ""),
+                )
             else:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
@@ -1119,6 +1159,95 @@ class ReasoningService:
             await self._state.update_context_space(
                 tenant_id, space_id, {"active_tools": space.active_tools}
             )
+
+    async def _handle_manage_tools(
+        self, tenant_id: str, action: str, capability: str
+    ) -> str:
+        """Handle the manage_tools kernel tool."""
+        from kernos.capability.registry import CapabilityStatus
+
+        if not self._registry:
+            return "Tool registry is not available right now."
+
+        if action == "list":
+            caps = self._registry.get_all()
+            if not caps:
+                return "No capabilities registered."
+            lines = ["Capabilities:"]
+            for cap in sorted(caps, key=lambda c: c.name):
+                lines.append(
+                    f"- {cap.name} ({cap.display_name}): "
+                    f"status={cap.status.value}, source={cap.source}"
+                )
+            return "\n".join(lines)
+
+        if action == "enable":
+            if not capability:
+                return "Error: 'capability' is required for enable."
+            cap = self._registry.get(capability)
+            if not cap:
+                return f"Error: Capability '{capability}' not found."
+            if cap.status == CapabilityStatus.CONNECTED:
+                return f"'{capability}' is already enabled."
+            if cap.status != CapabilityStatus.DISABLED:
+                return (
+                    f"Cannot enable '{capability}' — current status is "
+                    f"'{cap.status.value}'. Only disabled capabilities can be enabled."
+                )
+            self._registry.enable(capability)
+            self._tools_changed = True
+            return f"Enabled '{capability}'. Its tools are now visible."
+
+        if action == "disable":
+            if not capability:
+                return "Error: 'capability' is required for disable."
+            cap = self._registry.get(capability)
+            if not cap:
+                return f"Error: Capability '{capability}' not found."
+            if cap.status == CapabilityStatus.DISABLED:
+                return f"'{capability}' is already disabled."
+            if cap.status != CapabilityStatus.CONNECTED:
+                return (
+                    f"Cannot disable '{capability}' — current status is "
+                    f"'{cap.status.value}'. Only connected capabilities can be disabled."
+                )
+            self._registry.disable(capability)
+            self._tools_changed = True
+            return (
+                f"Disabled '{capability}'. Its tools are now hidden from the tool list. "
+                f"The server is still running — re-enable will be instant."
+            )
+
+        if action == "install":
+            if not capability:
+                return "Error: 'capability' is required for install."
+            # Route through request_tool for existing flow
+            return await self._handle_request_tool(
+                tenant_id, "", capability, f"Install {capability}"
+            )
+
+        if action == "remove":
+            if not capability:
+                return "Error: 'capability' is required for remove."
+            cap = self._registry.get(capability)
+            if not cap:
+                return f"Error: Capability '{capability}' not found."
+            if cap.source == "default":
+                return (
+                    f"Cannot remove '{capability}' — it's a pre-installed default. "
+                    f"Use disable instead to hide it from the tool list."
+                )
+            # User-installed: disconnect and suppress
+            if self._mcp and cap.status in (
+                CapabilityStatus.CONNECTED, CapabilityStatus.DISABLED
+            ):
+                await self._mcp.disconnect_one(cap.server_name or capability)
+            cap.status = CapabilityStatus.SUPPRESSED
+            cap.tools = []
+            self._tools_changed = True
+            return f"Removed '{capability}'. It has been uninstalled."
+
+        return f"Unknown action: '{action}'. Use list, enable, disable, install, or remove."
 
     async def _handle_dismiss_whisper(
         self, tenant_id: str, whisper_id: str, reason: str = "user_dismissed"
@@ -1579,6 +1708,16 @@ class ReasoningService:
                         except Exception as exc:
                             logger.warning("Kernel tool 'manage_covenants' failed: %s", exc)
                             result = "Failed to manage covenants — try again."
+                    elif block.name == "manage_tools":
+                        try:
+                            result = await self._handle_manage_tools(
+                                request.tenant_id,
+                                tool_args.get("action", "list"),
+                                tool_args.get("capability", ""),
+                            )
+                        except Exception as exc:
+                            logger.warning("Kernel tool 'manage_tools' failed: %s", exc)
+                            result = "Failed to manage tools — try again."
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:

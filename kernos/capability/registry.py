@@ -20,6 +20,7 @@ class CapabilityStatus(str, Enum):
     DISCOVERABLE = "discoverable"  # Exists in ecosystem, not configured (Phase 4)
     ERROR = "error"                # Was connected, currently failing
     SUPPRESSED = "suppressed"      # Explicitly uninstalled by user — hidden from prompts
+    DISABLED = "disabled"          # MCP server still running, but hidden from LLM tool list
 
 
 @dataclass
@@ -39,6 +40,7 @@ class CapabilityInfo:
     tool_effects: dict[str, str] = field(default_factory=dict)
     # Maps tool_name → effect level: "read" | "soft_write" | "hard_write" | "unknown"
     # Tools not in this dict default to "unknown" (treated as hard_write by Dispatch Interceptor)
+    source: str = "default"        # "default" (from known.py) or "user" (installed at runtime)
     universal: bool = False
     # If True, visible in all spaces without explicit activation (system defaults).
     # Set at registration/install time.
@@ -89,6 +91,34 @@ class CapabilityRegistry:
         """Capabilities that could be connected but aren't yet."""
         return [c for c in self._capabilities.values() if c.status == CapabilityStatus.AVAILABLE]
 
+    def get_disabled(self) -> list[CapabilityInfo]:
+        """Capabilities that are disabled (MCP warm, hidden from LLM)."""
+        return [c for c in self._capabilities.values() if c.status == CapabilityStatus.DISABLED]
+
+    def disable(self, name: str) -> bool:
+        """Disable a capability — hide from LLM but keep MCP warm.
+
+        Returns True if the capability was found and disabled.
+        Only CONNECTED capabilities can be disabled.
+        """
+        cap = self._capabilities.get(name)
+        if not cap or cap.status != CapabilityStatus.CONNECTED:
+            return False
+        cap.status = CapabilityStatus.DISABLED
+        return True
+
+    def enable(self, name: str) -> bool:
+        """Re-enable a disabled capability — restore to CONNECTED instantly.
+
+        Returns True if the capability was found and re-enabled.
+        Only DISABLED capabilities can be enabled this way.
+        """
+        cap = self._capabilities.get(name)
+        if not cap or cap.status != CapabilityStatus.DISABLED:
+            return False
+        cap.status = CapabilityStatus.CONNECTED
+        return True
+
     def get_by_category(self, category: str) -> list[CapabilityInfo]:
         """All capabilities in a category, any status."""
         return [c for c in self._capabilities.values() if c.category == category]
@@ -120,12 +150,16 @@ class CapabilityRegistry:
     def _visible_capability_names(self, space: "ContextSpace | None") -> set[str]:
         """Which connected capability names are visible in this space.
 
-        System space: everything.
+        System space: everything connected and not disabled.
         Space with active_tools: kernel defaults (always) + universal + explicitly listed.
         Space with empty active_tools: universal only (kernel tools handled separately).
+        Disabled capabilities are always excluded — MCP stays warm but tools hidden.
         """
         if space and space.space_type == "system":
-            return {c.name for c in self._capabilities.values() if c.status == CapabilityStatus.CONNECTED}
+            return {
+                c.name for c in self._capabilities.values()
+                if c.status == CapabilityStatus.CONNECTED
+            }
 
         visible: set[str] = set()
         for cap in self._capabilities.values():
@@ -166,17 +200,22 @@ class CapabilityRegistry:
 
         System space: all connected capabilities shown.
         Other spaces: only visible capabilities shown (universal + active_tools).
-        AVAILABLE capabilities always shown so agent can offer setup.
+        AVAILABLE (not disabled) capabilities shown so agent can offer setup.
+        Disabled capabilities excluded from both connected and available lists.
         """
+        available = [
+            c for c in self._capabilities.values()
+            if c.status == CapabilityStatus.AVAILABLE
+        ]
         if space and space.space_type == "system":
-            return self._build_prompt_for_capabilities(self.get_connected(), self.get_available())
+            return self._build_prompt_for_capabilities(self.get_connected(), available)
 
         visible_names = self._visible_capability_names(space)
         visible_connected = [
             c for c in self._capabilities.values()
             if c.status == CapabilityStatus.CONNECTED and c.name in visible_names
         ]
-        return self._build_prompt_for_capabilities(visible_connected, self.get_available())
+        return self._build_prompt_for_capabilities(visible_connected, available)
 
     def _build_prompt_for_capabilities(
         self,

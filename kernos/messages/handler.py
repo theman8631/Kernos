@@ -557,9 +557,9 @@ class MessageHandler:
         if not system_space or not getattr(self, "_files", None):
             return
 
-        config: dict = {"servers": {}, "uninstalled": []}
+        config: dict = {"servers": {}, "uninstalled": [], "disabled": []}
         for cap in self.registry.get_all():
-            if cap.status == CapabilityStatus.CONNECTED and cap.server_name:
+            if cap.status in (CapabilityStatus.CONNECTED, CapabilityStatus.DISABLED) and cap.server_name:
                 config["servers"][cap.name] = {
                     "display_name": cap.display_name,
                     "command": cap.server_command,
@@ -568,9 +568,12 @@ class MessageHandler:
                     "env_template": dict(cap.env_template),
                     "universal": cap.universal,
                     "tool_effects": dict(cap.tool_effects),
+                    "source": cap.source,
                 }
-            elif cap.status == CapabilityStatus.SUPPRESSED:
+            if cap.status == CapabilityStatus.SUPPRESSED:
                 config["uninstalled"].append(cap.name)
+            elif cap.status == CapabilityStatus.DISABLED:
+                config["disabled"].append(cap.name)
 
         try:
             await self._files.write_file(
@@ -684,6 +687,22 @@ class MessageHandler:
             if cap and cap.status != CapabilityStatus.CONNECTED:
                 cap.status = CapabilityStatus.SUPPRESSED
 
+        # Restore disabled state for capabilities that are connected but user disabled
+        for name in config.get("disabled", []):
+            cap = self.registry.get(name)
+            if cap and cap.status == CapabilityStatus.CONNECTED:
+                cap.status = CapabilityStatus.DISABLED
+
+        # Migration: check for new defaults in known.py not yet in tenant config
+        # These appear as "available" — the user can enable them via manage_tools
+        known_in_config = set(config.get("servers", {}).keys()) | set(config.get("uninstalled", [])) | set(config.get("disabled", []))
+        for cap in self.registry.get_all():
+            if cap.source == "default" and cap.name not in known_in_config:
+                logger.info(
+                    "New default capability '%s' available for tenant %s",
+                    cap.name, tenant_id,
+                )
+
         # Connect persisted servers not already connected
         for name, server_config in config.get("servers", {}).items():
             cap = self.registry.get(name)
@@ -706,6 +725,8 @@ class MessageHandler:
                 if cap:
                     cap.status = CapabilityStatus.CONNECTED
                     cap.tools = [t["name"] for t in tools]
+                    if server_config.get("source"):
+                        cap.source = server_config["source"]
                 logger.info("Loaded and connected %s from persisted config", name)
 
     async def _ensure_tenant_state(
@@ -1657,10 +1678,10 @@ class MessageHandler:
             tools = tools + [REMEMBER_TOOL]
         # Add kernel-managed file tools (always available)
         from kernos.kernel.files import FILE_TOOLS
-        from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL
+        from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_TOOLS_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
-        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL]
+        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL, MANAGE_TOOLS_TOOL]
         capability_prompt = self.registry.build_capability_prompt(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
@@ -1763,6 +1784,17 @@ class MessageHandler:
                     logger.info(
                         "PENDING_CLEARED: tenant=%s reason=no_confirm_signal", tenant_id
                     )
+
+            # Persist tool config if manage_tools changed capability state
+            if self.reasoning._tools_changed:
+                self.reasoning._tools_changed = False
+                try:
+                    await self._persist_mcp_config(tenant_id)
+                    system_space = await self._get_system_space(tenant_id)
+                    if system_space:
+                        await self._write_capabilities_overview(tenant_id, system_space.id)
+                except Exception as exc:
+                    logger.warning("Failed to persist tools config after manage_tools: %s", exc)
 
             # Tier 1 + Tier 2 projectors
             history = await self.conversations.get_recent(
