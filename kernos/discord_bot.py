@@ -222,7 +222,20 @@ async def on_ready():
             name="sms", display_name="Twilio SMS", platform="sms",
             can_send_outbound=True, channel_target=owner_phone,
         )
-        logger.info("SMS channel registered (outbound to %s)", owner_phone)
+
+        # Start SMS polling for inbound messages (no webhook needed)
+        from kernos.sms_poller import SMSPoller
+        sms_poller = SMSPoller(
+            adapter=sms_adapter, handler=handler,
+            account_sid=twilio_sid, auth_token=twilio_token,
+            twilio_number=twilio_phone,
+            interval=float(os.getenv("KERNOS_SMS_POLL_INTERVAL", "5")),
+        )
+        await sms_poller.start()
+        logger.info(
+            "SMS channel registered — polling interval=%ss, outbound to %s",
+            sms_poller._interval, owner_phone,
+        )
 
     # CLI is always registered but can't push
     handler.register_channel(

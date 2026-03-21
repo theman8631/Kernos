@@ -4,29 +4,41 @@ Bidirectional SMS via Twilio. A2P registration approved. Both inbound (user text
 
 ## Status
 
-Live. Adapter at `kernos/messages/adapters/twilio_sms.py`. Inbound via Twilio webhooks. Outbound via Twilio REST API (`send_outbound`).
+Live. No public server required — inbound SMS uses polling, not webhooks.
+
+## How It Works
+
+**Inbound:** The `SMSPoller` runs inside the Discord bot process, checking Twilio every 5 seconds for new messages. When an SMS arrives, it's normalized, processed through the handler (same as Discord messages), and the response is sent back via Twilio REST API.
+
+**Outbound:** `send_outbound()` on the Twilio adapter sends SMS via the REST API. Used by `handler.send_outbound()` for kernel-initiated messages.
 
 ## Setup
 
-Requires environment variables:
-- `TWILIO_ACCOUNT_SID` — Twilio account SID
-- `TWILIO_AUTH_TOKEN` — Twilio auth token
-- `TWILIO_PHONE_NUMBER` — the Twilio number to send from
-- `OWNER_PHONE_NUMBER` — the owner's phone number
-- `AUTHORIZED_NUMBERS` — comma-separated list of authorized phone numbers (replaces single owner for multi-member)
+Add to `.env`:
+```
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token_here
+TWILIO_PHONE_NUMBER=+1XXXXXXXXXX
+OWNER_PHONE_NUMBER=+1XXXXXXXXXX
+AUTHORIZED_NUMBERS=+1XXXXXXXXXX,+1YYYYYYYYYY
+KERNOS_SMS_POLL_INTERVAL=5          # optional, default 5 seconds
+```
+
+No webhook URL, no public server, no ngrok needed.
 
 ## Phone Authorization
 
-Only numbers in `AUTHORIZED_NUMBERS` (plus the owner number) can interact. Unauthorized numbers receive a rejection message.
-
-## Outbound Messaging
-
-Kernos can send SMS unprompted via `handler.send_outbound()`. The Twilio REST client runs in a thread to avoid blocking the async loop.
-
-## Platform Context
-
-When communicating via SMS, the agent keeps responses very short — a few sentences max unless the user asks for detail.
+Only numbers in `AUTHORIZED_NUMBERS` (plus the owner number) can interact. Unauthorized numbers receive "This number is not authorized."
 
 ## Channel Status
 
 Appears in `manage_channels list` as "Twilio SMS" with `can_send_outbound = True`.
+
+## Code Locations
+
+| Component | Path |
+|-----------|------|
+| TwilioSMSAdapter | `kernos/messages/adapters/twilio_sms.py` |
+| SMSPoller | `kernos/sms_poller.py` |
+| Startup wiring | `kernos/discord_bot.py` (on_ready) |
+| Webhook path (cloud) | `kernos/app.py` |
