@@ -51,6 +51,7 @@ The kernel (`kernos/kernel/`) owns all state and intelligence infrastructure:
 - **Graceful errors.** Every failure mode produces a friendly user-facing response.
 - **Prompt caching.** The Anthropic provider applies `cache_control: ephemeral` to the system prompt and tool definitions. After the first turn, these are served from cache at 1/10th token cost, dramatically reducing rate limit pressure.
 - **Developer mode error surfacing.** When `developer_mode` is on, WARNING/ERROR logs from `kernos.*` are collected and injected into the system prompt so the agent can see and discuss them.
+- **State mutation logging.** Every state write (soul, knowledge, covenants, capabilities) logs with `source` and `trigger` at INFO level. Prefixes: `SOUL_WRITE:`, `KNOW_WRITE:`, `COVENANT_WRITE:`, `CAP_WRITE:`.
 
 ## Code Locations
 

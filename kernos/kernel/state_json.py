@@ -168,9 +168,11 @@ class JsonStateStore(StateStore):
             self._write_json(path, asdict(soul))
         return soul
 
-    async def save_soul(self, soul: Soul) -> None:
+    async def save_soul(self, soul: Soul, *, source: str = "", trigger: str = "") -> None:
         path = self._state_dir(soul.tenant_id) / "soul.json"
         self._write_json(path, asdict(soul))
+        if source:
+            logger.info("SOUL_WRITE: source=%s trigger=%s tenant=%s", source, trigger, soul.tenant_id)
 
     # -----------------------------------------------------------------------
     # Tenant Profile

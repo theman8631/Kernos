@@ -1046,7 +1046,7 @@ class ReasoningService:
                     if not soul:
                         return "No soul found for this tenant."
                     setattr(soul, field, value)
-                    await self._state.save_soul(soul)
+                    await self._state.save_soul(soul, source="update_soul", trigger=f"{field}={value}")
                     return f"Updated {field} to: {value}"
                 return "State store is not available."
             elif tool_name == "manage_covenants":
@@ -1671,7 +1671,7 @@ class ReasoningService:
                                     result = "No soul found for this tenant."
                                 else:
                                     setattr(soul, field, value)
-                                    await self._state.save_soul(soul)
+                                    await self._state.save_soul(soul, source="update_soul", trigger=f"{field}={value}")
                                     result = f"Updated {field} to: {value}"
                         else:
                             result = "State store is not available."
@@ -1897,8 +1897,7 @@ class ReasoningService:
 
         # Hallucination check: agent claims tool use in text but no tool was actually called.
         # This fires when stop_reason=end_turn AND iterations=0 AND response contains
-        # tool-claiming language. Most common cause: max_tokens truncation cut off tool_use
-        # blocks, or the model chose end_turn without generating tool_use content.
+        # tool-claiming language. Instead of tagging, retry with a corrective message.
         if iterations == 0 and response.stop_reason == "end_turn":
             _TOOL_CLAIM_PHRASES = (
                 "used write_file", "used delete_file", "used read_file",
@@ -1911,23 +1910,87 @@ class ReasoningService:
             if any(phrase in rt_lower for phrase in _TOOL_CLAIM_PHRASES):
                 logger.warning(
                     "HALLUCINATION_CHECK: Agent claims tool use but iterations=0 "
-                    "(stop=%s, tool_count=%d). Response may be fabricated. "
-                    "Response: %s",
+                    "(stop=%s, tool_count=%d). Retrying with correction. "
+                    "Original: %s",
                     response.stop_reason, len(tools), response_text[:200],
                 )
-                # Tag the response so future conversation context shows it was unreliable.
-                # This breaks the self-reinforcing loop where the model reads its own
-                # fabricated success and skips actually calling the tools on the next turn.
-                response_text = (
-                    "[SYSTEM NOTE: The following response was generated without actual "
-                    "tool execution. Any claims of tool use or results may be fabricated. "
-                    "The tools were not called.]\n\n"
-                    + response_text
+                original_preview = response_text[:200]
+
+                # Retry: inject corrective system message and re-call
+                corrective = (
+                    "[SYSTEM: Your previous response claimed to perform an action but no "
+                    "tool was called. Do NOT claim actions were completed without actually "
+                    "calling the tool. If you need to call a tool, call it. If you cannot "
+                    "perform the action, say so honestly.]"
                 )
-                logger.warning(
-                    "HALLUCINATION_TAGGED: response prefixed with unreliability notice "
-                    "for conversation history"
-                )
+                retry_messages = list(messages) + [
+                    {"role": "assistant", "content": response_text},
+                    {"role": "user", "content": corrective},
+                ]
+                try:
+                    retry_response = await self._provider.complete(
+                        model=request.model,
+                        system=request.system_prompt,
+                        messages=retry_messages,
+                        tools=tools,
+                        max_tokens=request.max_tokens,
+                    )
+                    total_input_tokens += retry_response.input_tokens
+                    total_output_tokens += retry_response.output_tokens
+
+                    # Check if retry also hallucinates
+                    retry_has_tool_use = any(
+                        b.type == "tool_use" for b in retry_response.content
+                    )
+                    retry_text_parts = [
+                        b.text for b in retry_response.content if b.type == "text"
+                    ]
+                    retry_text = "".join(retry_text_parts) if retry_text_parts else ""
+                    retry_lower = retry_text.lower()
+                    retry_hallucinated = (
+                        not retry_has_tool_use
+                        and any(phrase in retry_lower for phrase in _TOOL_CLAIM_PHRASES)
+                    )
+
+                    if retry_hallucinated:
+                        # Both attempts failed — give up honestly
+                        response_text = (
+                            "I tried to do that but wasn't able to execute the action. "
+                            "Can you try asking again?"
+                        )
+                        logger.warning(
+                            "HALLUCINATION_RETRY: both attempts fabricated. "
+                            "original=%r retry=%r",
+                            original_preview, retry_text[:200],
+                        )
+                    elif retry_has_tool_use:
+                        # Retry triggered tool use — let the tool loop handle it
+                        # This is a simplified path: we log success but can't re-enter
+                        # the tool loop here. Use the retry text as-is.
+                        response_text = retry_text or response_text
+                        logger.info(
+                            "HALLUCINATION_RETRY: retry triggered tool_use, "
+                            "using retry text. original=%r",
+                            original_preview,
+                        )
+                    else:
+                        # Retry gave an honest response without claiming tool use
+                        response_text = retry_text
+                        logger.info(
+                            "HALLUCINATION_RETRY: retry succeeded (honest response). "
+                            "original=%r",
+                            original_preview,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "HALLUCINATION_RETRY: retry failed (%s), using tagged original",
+                        exc,
+                    )
+                    response_text = (
+                        "[SYSTEM NOTE: The following response was generated without actual "
+                        "tool execution. Any claims of tool use or results may be fabricated.]\n\n"
+                        + response_text
+                    )
 
         return ReasoningResult(
             text=response_text,

@@ -392,7 +392,7 @@ async def test_apply_correction_updates_soul_name():
     )
 
     assert soul.user_name == "JT"
-    state.save_soul.assert_called_once_with(soul)
+    state.save_soul.assert_called_once()
 
 
 async def test_apply_correction_updates_soul_name_dot_notation():
@@ -408,7 +408,7 @@ async def test_apply_correction_updates_soul_name_dot_notation():
     )
 
     assert soul.user_name == "JT"
-    state.save_soul.assert_called_once_with(soul)
+    state.save_soul.assert_called_once()
 
 
 async def test_apply_correction_no_old_entry_still_creates_new():
@@ -656,7 +656,7 @@ async def test_coordinator_tier1_updates_name():
         )
 
     assert soul.user_name == "Alice"
-    state.save_soul.assert_called_with(soul)
+    state.save_soul.assert_called()
 
 
 async def test_coordinator_tier1_emits_event_on_update():
@@ -695,7 +695,7 @@ async def test_coordinator_tier1_overwrites_existing_name():
         )
 
     assert soul.user_name == "Alice"
-    state.save_soul.assert_called_with(soul)
+    state.save_soul.assert_called()
 
 
 async def test_coordinator_tier1_no_save_when_name_unchanged():

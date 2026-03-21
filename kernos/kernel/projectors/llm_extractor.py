@@ -779,7 +779,7 @@ async def _apply_correction(
     field_lower = field.lower()
     if field_lower in ("user_name", "name", "user.name", "username") and new_value:
         soul.user_name = new_value
-        await state.save_soul(soul)
+        await state.save_soul(soul, source="tier2_correction", trigger=f"user_name={new_value}")
 
     try:
         await emit_event(

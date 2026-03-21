@@ -804,7 +804,7 @@ class MessageHandler:
         soul = await self.state.get_soul(tenant_id)
         if soul is None:
             soul = Soul(tenant_id=tenant_id)
-            await self.state.save_soul(soul)
+            await self.state.save_soul(soul, source="soul_init", trigger="new_tenant")
             logger.info("Initialized new soul for tenant: %s", tenant_id)
 
         # Ensure a daily context space exists — idempotent
@@ -1007,7 +1007,7 @@ class MessageHandler:
                 soul.interaction_count,
             )
 
-        await self.state.save_soul(soul)
+        await self.state.save_soul(soul, source="handler_process", trigger="interaction_count_update")
 
     def _truncate_to_budget(self, messages: list[dict], budget_tokens: int) -> list[dict]:
         """Drop oldest messages to fit within token budget. 4 chars ≈ 1 token."""

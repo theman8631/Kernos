@@ -5,9 +5,12 @@ Tier 2 — Available: Known capability, not yet connected. Agent can offer setup
 Tier 3 — Discoverable: Exists in ecosystem. Phase 4 — not implemented.
 """
 import dataclasses
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from kernos.capability.client import MCPClientManager
@@ -105,6 +108,7 @@ class CapabilityRegistry:
         if not cap or cap.status != CapabilityStatus.CONNECTED:
             return False
         cap.status = CapabilityStatus.DISABLED
+        logger.info("CAP_WRITE: name=%s action=DISABLE source=registry", name)
         return True
 
     def enable(self, name: str) -> bool:
@@ -117,6 +121,7 @@ class CapabilityRegistry:
         if not cap or cap.status != CapabilityStatus.DISABLED:
             return False
         cap.status = CapabilityStatus.CONNECTED
+        logger.info("CAP_WRITE: name=%s action=ENABLE source=registry", name)
         return True
 
     def get_by_category(self, category: str) -> list[CapabilityInfo]:

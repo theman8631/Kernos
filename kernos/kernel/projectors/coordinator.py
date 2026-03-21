@@ -59,7 +59,7 @@ async def run_projectors(
         updated_fields.append("communication_style")
 
     if soul_updated:
-        await state.save_soul(soul)
+        await state.save_soul(soul, source="tier1_extraction", trigger=f"fields={updated_fields}")
         try:
             await emit_event(
                 events,

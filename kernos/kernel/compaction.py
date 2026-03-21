@@ -754,5 +754,5 @@ class CompactionService:
         )
 
         soul.personality_notes = result.strip()
-        await self.state.save_soul(soul)
+        await self.state.save_soul(soul, source="compaction_rotation", trigger="personality_evolution")
         logger.info("Personality evolved for tenant %s on rotation", tenant_id)
