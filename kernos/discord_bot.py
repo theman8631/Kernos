@@ -201,6 +201,35 @@ async def on_ready():
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 
+    # Register adapters and channels for outbound messaging
+    adapter.set_client(client)
+    handler.register_adapter("discord", adapter)
+    handler.register_channel(
+        name="discord", display_name="Discord", platform="discord",
+        can_send_outbound=True, channel_target="",  # Updated per-message
+    )
+
+    # Register SMS channel if Twilio credentials are configured
+    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+    twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_phone = os.getenv("TWILIO_PHONE_NUMBER", "")
+    if twilio_sid and twilio_token and twilio_phone:
+        from kernos.messages.adapters.twilio_sms import TwilioSMSAdapter
+        sms_adapter = TwilioSMSAdapter()
+        handler.register_adapter("sms", sms_adapter)
+        owner_phone = os.getenv("OWNER_PHONE_NUMBER", "")
+        handler.register_channel(
+            name="sms", display_name="Twilio SMS", platform="sms",
+            can_send_outbound=True, channel_target=owner_phone,
+        )
+        logger.info("SMS channel registered (outbound to %s)", owner_phone)
+
+    # CLI is always registered but can't push
+    handler.register_channel(
+        name="cli", display_name="CLI Terminal", platform="cli",
+        can_send_outbound=False,
+    )
+
     # Send pending confirmation from a prior /restart or /wipe
     if _PENDING_CONFIRMATION_PATH.is_file():
         try:

@@ -1,22 +1,32 @@
 # SMS (Twilio)
 
-SMS connectivity via Twilio. The adapter exists and A2P registration is approved.
+Bidirectional SMS via Twilio. A2P registration approved. Both inbound (user texts Kernos) and outbound (Kernos texts user) are supported.
 
-## Current Status
+## Status
 
-The Twilio SMS adapter (`kernos/messages/adapters/twilio_adapter.py`) is implemented. It receives incoming SMS via Twilio webhooks and normalizes them to `NormalizedMessage`. Outbound messaging is not yet active — the agent cannot currently initiate SMS conversations.
+Live. Adapter at `kernos/messages/adapters/twilio_sms.py`. Inbound via Twilio webhooks. Outbound via Twilio REST API (`send_outbound`).
 
-## What It Enables
+## Setup
 
-- Users can text a phone number and interact with Kernos via SMS
-- Messages are kept very short (SMS platform context enforces concise responses)
-- Full feature parity with Discord — same handler, same kernel, same tools
+Requires environment variables:
+- `TWILIO_ACCOUNT_SID` — Twilio account SID
+- `TWILIO_AUTH_TOKEN` — Twilio auth token
+- `TWILIO_PHONE_NUMBER` — the Twilio number to send from
+- `OWNER_PHONE_NUMBER` — the owner's phone number
+- `AUTHORIZED_NUMBERS` — comma-separated list of authorized phone numbers (replaces single owner for multi-member)
+
+## Phone Authorization
+
+Only numbers in `AUTHORIZED_NUMBERS` (plus the owner number) can interact. Unauthorized numbers receive a rejection message.
+
+## Outbound Messaging
+
+Kernos can send SMS unprompted via `handler.send_outbound()`. The Twilio REST client runs in a thread to avoid blocking the async loop.
 
 ## Platform Context
 
 When communicating via SMS, the agent keeps responses very short — a few sentences max unless the user asks for detail.
 
-## Planned
+## Channel Status
 
-- Outbound messaging (agent-initiated SMS to the user)
-- Channel selection for notifications (SMS vs Discord based on urgency and context)
+Appears in `manage_channels list` as "Twilio SMS" with `can_send_outbound = True`.

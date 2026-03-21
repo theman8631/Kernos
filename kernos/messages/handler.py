@@ -373,6 +373,10 @@ class MessageHandler:
         self._covenant_cleanup_done: set[str] = set()
         self._evaluators: dict[str, "AwarenessEvaluator"] = {}  # per-tenant evaluators
         self._error_buffer = ErrorBuffer()
+        self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
+        from kernos.kernel.channels import ChannelRegistry
+        self._channel_registry = ChannelRegistry()
+        reasoning._channel_registry = self._channel_registry
 
         from kernos.kernel.compaction import CompactionService
         from kernos.kernel.tokens import AnthropicTokenAdapter
@@ -629,6 +633,79 @@ class MessageHandler:
             self._evaluators[tenant_id] = evaluator
         except Exception as exc:
             logger.warning("Failed to start AwarenessEvaluator for %s: %s", tenant_id, exc)
+
+    def register_adapter(self, platform: str, adapter: "BaseAdapter") -> None:
+        """Register a platform adapter for outbound messaging."""
+        from kernos.kernel.channels import ChannelInfo
+        self._adapters[platform] = adapter
+
+    def register_channel(
+        self, name: str, display_name: str, platform: str,
+        can_send_outbound: bool, channel_target: str = "",
+        status: str = "connected", source: str = "default",
+    ) -> None:
+        """Register a communication channel in the channel registry."""
+        from kernos.kernel.channels import ChannelInfo
+        self._channel_registry.register(ChannelInfo(
+            name=name,
+            display_name=display_name,
+            status=status,
+            source=source,
+            can_send_outbound=can_send_outbound,
+            channel_target=channel_target,
+            platform=platform,
+        ))
+
+    def _resolve_member(self, tenant_id: str, platform: str, sender: str) -> str:
+        """Resolve a sender identity signal to a member_id.
+
+        For now: single member per instance = owner.
+        Future: lookup in members table by identity signal.
+        """
+        return f"member:{tenant_id}:owner"
+
+    async def send_outbound(
+        self, tenant_id: str, member_id: str,
+        channel_name: str | None, message: str,
+    ) -> bool:
+        """Send an unprompted message to the user on a specific or default channel.
+
+        Returns True if sent, False on failure.
+        """
+        from kernos.kernel.channels import ChannelInfo
+
+        if channel_name:
+            ch = self._channel_registry.get(channel_name)
+        else:
+            # Pick most recently used outbound-capable channel
+            capable = self._channel_registry.get_outbound_capable()
+            ch = capable[0] if capable else None
+
+        if not ch:
+            logger.warning(
+                "OUTBOUND: no channel available tenant=%s member=%s channel=%s",
+                tenant_id, member_id, channel_name,
+            )
+            return False
+
+        if ch.status != "connected":
+            logger.warning(
+                "OUTBOUND: channel=%s not connected (status=%s)",
+                ch.name, ch.status,
+            )
+            return False
+
+        adapter = self._adapters.get(ch.platform)
+        if not adapter:
+            logger.warning("OUTBOUND: no adapter for platform=%s", ch.platform)
+            return False
+
+        success = await adapter.send_outbound(tenant_id, ch.channel_target, message)
+        logger.info(
+            "OUTBOUND: channel=%s target=%s tenant=%s member=%s length=%d success=%s",
+            ch.name, ch.channel_target, tenant_id, member_id, len(message), success,
+        )
+        return success
 
     async def _maybe_run_covenant_cleanup(self, tenant_id: str) -> None:
         """Run one-time covenant dedup/contradiction cleanup per tenant per process."""
@@ -1469,6 +1546,13 @@ class MessageHandler:
         # Set current tenant for error buffer collection
         self._error_buffer.set_tenant(tenant_id)
 
+        # Resolve member_id for cross-channel continuity
+        message.member_id = self._resolve_member(tenant_id, message.platform, message.sender)
+
+        # Update channel target with most recent conversation_id (for outbound)
+        if message.platform == "discord":
+            self._channel_registry.update_target("discord", message.conversation_id)
+
         # --- SECURE INPUT INTERCEPT ---
         # These paths return early without storing the message or calling the LLM.
         if tenant_id in self._secure_input_state:
@@ -1681,7 +1765,8 @@ class MessageHandler:
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_TOOLS_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
-        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL, MANAGE_TOOLS_TOOL]
+        from kernos.kernel.channels import MANAGE_CHANNELS_TOOL
+        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL, MANAGE_TOOLS_TOOL, MANAGE_CHANNELS_TOOL]
         capability_prompt = self.registry.build_capability_prompt(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(

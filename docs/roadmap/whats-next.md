@@ -5,8 +5,8 @@ Decided next steps. These are committed directions, not speculation.
 ## Unified Trigger System
 Time-based, event-based, and state-based conditions that fire actions. This replaces ad-hoc scheduling with a single trigger model. Standing orders (currently stored as knowledge entries) will execute through this system.
 
-## Outbound Messaging
-The agent reaches the user unprompted — notifications, reminders, proactive updates. Includes `notify_via` channel selection (SMS vs Discord based on urgency and user preferences).
+## Outbound Messaging — SHIPPED (3E-A)
+The plumbing is live: `handler.send_outbound()` pushes messages on any connected channel (Discord, SMS). Channel registry tracks available channels. `manage_channels` kernel tool for enable/disable. Next: wire awareness whispers to outbound delivery, `notify_via` preference for channel selection.
 
 ## manage_schedule Tool
 Unified trigger management tool for the agent. Create, view, edit, and delete scheduled actions and event-triggered automations.

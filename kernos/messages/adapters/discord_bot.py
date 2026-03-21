@@ -28,6 +28,11 @@ class DiscordAdapter(BaseAdapter):
     def __init__(self) -> None:
         self._owner_id = os.getenv("DISCORD_OWNER_ID", "")
         self._tenant_id = os.getenv("OWNER_PHONE_NUMBER", "")
+        self._client: discord.Client | None = None
+
+    def set_client(self, client: discord.Client) -> None:
+        """Set the Discord client after bot connection. Called in on_ready."""
+        self._client = client
 
     def inbound(self, raw_request: discord.Message) -> NormalizedMessage:  # type: ignore[override]
         """Translate a discord.Message into a NormalizedMessage."""
@@ -72,3 +77,27 @@ class DiscordAdapter(BaseAdapter):
         SMS-optimised responses are well under that.
         """
         return response
+
+    async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> bool:
+        """Send an unprompted message to a Discord channel."""
+        if not self._client:
+            logger.warning("OUTBOUND: discord send failed — client not connected")
+            return False
+        try:
+            channel = await self._client.fetch_channel(int(channel_target))
+            await channel.send(message)
+            logger.info(
+                "OUTBOUND: channel=discord target=%s tenant=%s length=%d success=True",
+                channel_target, tenant_id, len(message),
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "OUTBOUND: channel=discord target=%s tenant=%s success=False error=%s",
+                channel_target, tenant_id, exc,
+            )
+            return False
+
+    @property
+    def can_send_outbound(self) -> bool:
+        return self._client is not None

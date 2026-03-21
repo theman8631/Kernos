@@ -589,6 +589,7 @@ class ReasoningService:
         self._files = None      # Set by handler after construction
         self._registry = None   # Set by handler after construction
         self._state = None      # Set by handler after construction
+        self._channel_registry = None  # Set by handler after construction
         self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
         self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
         self._tools_changed: bool = False  # Set by manage_tools; handler checks post-reasoning
@@ -647,7 +648,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools", "manage_channels"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -661,7 +662,7 @@ class ReasoningService:
         MCP tools use tool_effects from CapabilityInfo.
         Unknown defaults to "hard_write" (safe default).
         """
-        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul"}
+        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
         _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_tools"}
 
         if tool_name in _KERNEL_READS:
@@ -672,6 +673,10 @@ class ReasoningService:
             return "read" if action == "list" else "soft_write"
         # manage_tools: "list" is a read; other actions are writes
         if tool_name == "manage_tools":
+            action = (tool_input or {}).get("action", "list")
+            return "read" if action == "list" else "soft_write"
+        # manage_channels: "list" is a read; other actions are writes
+        if tool_name == "manage_channels":
             action = (tool_input or {}).get("action", "list")
             return "read" if action == "list" else "soft_write"
         if tool_name in _KERNEL_WRITES:
@@ -1082,6 +1087,15 @@ class ReasoningService:
                     tool_input.get("action", "list"),
                     tool_input.get("capability", ""),
                 )
+            elif tool_name == "manage_channels":
+                from kernos.kernel.channels import handle_manage_channels
+                if self._channel_registry:
+                    return handle_manage_channels(
+                        self._channel_registry,
+                        tool_input.get("action", "list"),
+                        tool_input.get("channel", ""),
+                    )
+                return "Channel registry is not available."
             else:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
@@ -1718,6 +1732,16 @@ class ReasoningService:
                         except Exception as exc:
                             logger.warning("Kernel tool 'manage_tools' failed: %s", exc)
                             result = "Failed to manage tools — try again."
+                    elif block.name == "manage_channels":
+                        from kernos.kernel.channels import handle_manage_channels
+                        if self._channel_registry:
+                            result = handle_manage_channels(
+                                self._channel_registry,
+                                tool_args.get("action", "list"),
+                                tool_args.get("channel", ""),
+                            )
+                        else:
+                            result = "Channel registry is not available."
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:
