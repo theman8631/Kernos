@@ -625,7 +625,7 @@ async def _remove_covenant(state: StateStore, tenant_id: str, rule_id: str) -> s
         tenant_id, rule_id,
         {"superseded_by": "user_removed", "updated_at": _now_iso()},
     )
-    logger.info("COVENANT_REMOVE: rule=%s desc=%r", rule_id, target.description[:80])
+    logger.info("COVENANT_REMOVE: rule=%s desc=%r", rule_id, target.description)
     return f"Removed rule '{rule_id}': {target.description}"
 
 

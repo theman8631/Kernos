@@ -590,6 +590,8 @@ class ReasoningService:
         self._registry = None   # Set by handler after construction
         self._state = None      # Set by handler after construction
         self._channel_registry = None  # Set by handler after construction
+        self._trigger_store = None     # Set by handler after construction
+        self._handler = None           # Set by handler after construction (for schedule tool)
         self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
         self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
         self._tools_changed: bool = False  # Set by manage_tools; handler checks post-reasoning
@@ -648,7 +650,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools", "manage_channels"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools", "manage_channels", "manage_schedule"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -679,6 +681,15 @@ class ReasoningService:
         if tool_name == "manage_channels":
             action = (tool_input or {}).get("action", "list")
             return "read" if action == "list" else "soft_write"
+        # manage_schedule: "list" is read; "create" with notify is read (reminders always OK);
+        # "create" with tool_call and other actions are soft_write
+        if tool_name == "manage_schedule":
+            action = (tool_input or {}).get("action", "list")
+            if action == "list":
+                return "read"
+            if action == "create" and (tool_input or {}).get("action_type") == "notify":
+                return "read"
+            return "soft_write"
         if tool_name in _KERNEL_WRITES:
             return "soft_write"
 
@@ -1096,6 +1107,27 @@ class ReasoningService:
                         tool_input.get("channel", ""),
                     )
                 return "Channel registry is not available."
+            elif tool_name == "manage_schedule":
+                from kernos.kernel.scheduler import handle_manage_schedule
+                if self._trigger_store:
+                    return await handle_manage_schedule(
+                        self._trigger_store,
+                        request.tenant_id,
+                        member_id=request.active_space_id,  # placeholder
+                        space_id=request.active_space_id,
+                        action=tool_input.get("action", "list"),
+                        trigger_id=tool_input.get("trigger_id", ""),
+                        description=tool_input.get("description", ""),
+                        when=tool_input.get("when", ""),
+                        action_type=tool_input.get("action_type", "notify"),
+                        message=tool_input.get("message", ""),
+                        tool_name=tool_input.get("tool_name", ""),
+                        tool_args=tool_input.get("tool_args"),
+                        notify_via=tool_input.get("notify_via", ""),
+                        delivery_class=tool_input.get("delivery_class", "stage"),
+                        recurrence=tool_input.get("recurrence", ""),
+                    )
+                return "Scheduler is not available."
             else:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
@@ -1742,6 +1774,28 @@ class ReasoningService:
                             )
                         else:
                             result = "Channel registry is not available."
+                    elif block.name == "manage_schedule":
+                        from kernos.kernel.scheduler import handle_manage_schedule
+                        if self._trigger_store:
+                            result = await handle_manage_schedule(
+                                self._trigger_store,
+                                request.tenant_id,
+                                member_id=request.active_space_id,
+                                space_id=request.active_space_id,
+                                action=tool_args.get("action", "list"),
+                                trigger_id=tool_args.get("trigger_id", ""),
+                                description=tool_args.get("description", ""),
+                                when=tool_args.get("when", ""),
+                                action_type=tool_args.get("action_type", "notify"),
+                                message=tool_args.get("message", ""),
+                                tool_name=tool_args.get("tool_name", ""),
+                                tool_args=tool_args.get("tool_args"),
+                                notify_via=tool_args.get("notify_via", ""),
+                                delivery_class=tool_args.get("delivery_class", "stage"),
+                                recurrence=tool_args.get("recurrence", ""),
+                            )
+                        else:
+                            result = "Scheduler is not available."
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:

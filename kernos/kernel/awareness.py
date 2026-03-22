@@ -113,20 +113,27 @@ class AwarenessEvaluator:
         self,
         state: StateStore,
         events: EventStream,
-        interval_seconds: int = 1800,  # 30 minutes default
+        interval_seconds: int = 1800,  # 30 minutes default for awareness pass
+        trigger_interval_seconds: int = 60,  # 60 seconds for trigger evaluation
+        trigger_store=None,  # TriggerStore — set for scheduler support
+        handler=None,  # MessageHandler — set for scheduler outbound delivery
     ) -> None:
         self._state = state
         self._events = events
         self._interval = interval_seconds
+        self._trigger_interval = trigger_interval_seconds
+        self._trigger_store = trigger_store
+        self._handler = handler
         self._running = False
         self._task: asyncio.Task | None = None
+        self._awareness_tick_count = 0
 
     async def start(self, tenant_id: str) -> None:
         """Start the periodic evaluator for a tenant."""
         self._running = True
         self._task = asyncio.create_task(self._run_loop(tenant_id))
-        logger.info("AWARENESS: evaluator started for tenant=%s interval=%ds",
-                     tenant_id, self._interval)
+        logger.info("AWARENESS: evaluator started for tenant=%s awareness=%ds triggers=%ds",
+                     tenant_id, self._interval, self._trigger_interval)
 
     async def stop(self) -> None:
         """Stop the evaluator."""
@@ -141,15 +148,41 @@ class AwarenessEvaluator:
         logger.info("AWARENESS: evaluator stopped")
 
     async def _run_loop(self, tenant_id: str) -> None:
-        """Main loop — run evaluations on interval."""
+        """Main loop — tick every trigger_interval seconds.
+
+        Awareness pass runs every N ticks (where N = awareness_interval / trigger_interval).
+        Trigger evaluation runs every tick.
+        """
+        awareness_every_n = max(1, self._interval // self._trigger_interval)
+
         while self._running:
-            try:
-                await self._evaluate(tenant_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error("AwarenessEvaluator error: %s", e)
-            await asyncio.sleep(self._interval)
+            self._awareness_tick_count += 1
+
+            # Phase 1: Awareness pass (runs every Nth tick)
+            if self._awareness_tick_count >= awareness_every_n:
+                self._awareness_tick_count = 0
+                try:
+                    await self._evaluate(tenant_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("AwarenessEvaluator error: %s", e)
+
+            # Phase 2: Trigger evaluation (runs every tick)
+            if self._trigger_store and self._handler:
+                try:
+                    from kernos.kernel.scheduler import evaluate_triggers
+                    fired = await evaluate_triggers(
+                        self._trigger_store, tenant_id, self._handler,
+                    )
+                    if fired:
+                        logger.info("TRIGGER_EVAL: tenant=%s fired=%d", tenant_id, fired)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Trigger evaluation error: %s", e)
+
+            await asyncio.sleep(self._trigger_interval)
 
     async def _evaluate(self, tenant_id: str) -> None:
         """Run all evaluation passes for a tenant."""

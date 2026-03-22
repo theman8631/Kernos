@@ -68,7 +68,7 @@ class FactDeduplicator:
         existing = await self._get_comparison_candidates(tenant_id, candidate)
         if not existing:
             logger.info(
-                "Fact dedup: ADD (no existing, candidate=%s)", candidate.content[:80]
+                "Fact dedup: ADD (no existing, candidate=%s)", candidate.content
             )
             return "ADD", None
 
@@ -84,14 +84,14 @@ class FactDeduplicator:
         if zone == "NOOP":
             logger.info(
                 "Fact dedup: NOOP (sim=%.3f, candidate=%s, target=%s)",
-                similarity, candidate.content[:80], target_id,
+                similarity, candidate.content, target_id,
             )
             return "NOOP", target_id
 
         elif zone == "ADD":
             logger.info(
                 "Fact dedup: ADD (sim=%.3f, candidate=%s)",
-                similarity, candidate.content[:80],
+                similarity, candidate.content,
             )
             return "ADD", None
 
@@ -99,7 +99,7 @@ class FactDeduplicator:
             if self._reasoning is None or target_id is None:
                 logger.info(
                     "Fact dedup: ADD/ambiguous no-LLM (sim=%.3f, candidate=%s)",
-                    similarity, candidate.content[:80],
+                    similarity, candidate.content,
                 )
                 return "ADD", None
 
@@ -113,7 +113,7 @@ class FactDeduplicator:
 
             logger.info(
                 "Fact dedup: %s/LLM (sim=%.3f, candidate=%s, target=%s, reason=%s)",
-                classification, similarity, candidate.content[:80],
+                classification, similarity, candidate.content,
                 llm_target, result.get("reasoning", "")[:80],
             )
 

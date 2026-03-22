@@ -380,6 +380,11 @@ class MessageHandler:
         self._channel_registry = ChannelRegistry()
         reasoning._channel_registry = self._channel_registry
 
+        from kernos.kernel.scheduler import TriggerStore
+        self._trigger_store = TriggerStore(os.getenv("KERNOS_DATA_DIR", "./data"))
+        reasoning._trigger_store = self._trigger_store
+        reasoning._handler = self
+
         from kernos.kernel.compaction import CompactionService
         from kernos.kernel.tokens import AnthropicTokenAdapter
         self.compaction = CompactionService(
@@ -621,7 +626,12 @@ class MessageHandler:
         return success
 
     async def _maybe_start_evaluator(self, tenant_id: str) -> None:
-        """Start an AwarenessEvaluator for this tenant (once per process per tenant)."""
+        """Start an AwarenessEvaluator for this tenant (once per process per tenant).
+
+        The evaluator runs two phases:
+        - Awareness pass (whispers from foresight signals) — every 1800s
+        - Trigger evaluation (scheduled actions) — every 60s
+        """
         if tenant_id in self._evaluators:
             return
         try:
@@ -630,6 +640,9 @@ class MessageHandler:
                 state=self.state,
                 events=self.events,
                 interval_seconds=int(os.getenv("KERNOS_AWARENESS_INTERVAL", "1800")),
+                trigger_interval_seconds=int(os.getenv("KERNOS_TRIGGER_INTERVAL", "60")),
+                trigger_store=self._trigger_store,
+                handler=self,
             )
             await evaluator.start(tenant_id)
             self._evaluators[tenant_id] = evaluator
@@ -1768,7 +1781,8 @@ class MessageHandler:
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
         from kernos.kernel.channels import MANAGE_CHANNELS_TOOL
-        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL, MANAGE_TOOLS_TOOL, MANAGE_CHANNELS_TOOL]
+        from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
+        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL, MANAGE_TOOLS_TOOL, MANAGE_CHANNELS_TOOL, MANAGE_SCHEDULE_TOOL]
         capability_prompt = self.registry.build_capability_prompt(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
@@ -1797,6 +1811,19 @@ class MessageHandler:
             error_block = self._error_buffer.drain(tenant_id)
             if error_block:
                 system_prompt = system_prompt + "\n\n" + error_block
+
+        # Check for pending trigger deliveries that failed outbound
+        try:
+            pending_triggers = await self._trigger_store.list_all(tenant_id)
+            for trig in pending_triggers:
+                if trig.pending_delivery:
+                    upload_notifications.append(
+                        f"[Scheduled action result — {trig.action_description}]: {trig.pending_delivery}"
+                    )
+                    trig.pending_delivery = ""
+                    await self._trigger_store.save(trig)
+        except Exception:
+            pass
 
         # Step 10: Build messages array from space thread + current user message
         # Prepend upload notifications so the agent knows files arrived
