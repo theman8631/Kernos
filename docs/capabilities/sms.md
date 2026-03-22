@@ -44,5 +44,5 @@ Appears in `manage_channels list` as "Twilio SMS" with `can_send_outbound = True
 |-----------|------|
 | TwilioSMSAdapter | `kernos/messages/adapters/twilio_sms.py` |
 | SMSPoller | `kernos/sms_poller.py` |
-| Startup wiring | `kernos/discord_bot.py` (on_ready) |
+| Startup wiring | `kernos/server.py` (on_ready) |
 | Webhook path (cloud) | `kernos/app.py` |

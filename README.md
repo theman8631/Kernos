@@ -72,8 +72,8 @@ Edit `.env` and fill in:
 ### 3. Run
 
 ```bash
-# Discord bot (primary)
-python kernos/discord_bot.py
+# Kernos server (Discord + SMS + awareness)
+python kernos/server.py
 
 # Or via FastAPI (for SMS webhook)
 uvicorn kernos.app:app --reload --port 8000

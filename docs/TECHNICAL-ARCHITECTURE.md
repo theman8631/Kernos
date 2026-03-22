@@ -73,7 +73,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `kernos/messages/adapters/discord_bot.py` — Discord adapter
 - `kernos/messages/adapters/twilio_sms.py` — Twilio SMS adapter
 - `kernos/messages/adapters/base.py` — Base adapter interface
-- `kernos/discord_bot.py` — Discord bot entry point
+- `kernos/server.py` — main server entry point (Discord, SMS polling, awareness, channels)
 
 **Isolation principle:** Adapters know about their platform. They know nothing about the handler, the kernel, reasoning, or any other adapter. The handler knows nothing about adapters. They communicate exclusively through NormalizedMessage.
 
@@ -284,7 +284,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - ERROR — was connected, currently failing
 - SUPPRESSED — user explicitly uninstalled. Hidden from catalog and capability prompt but can be reinstalled.
 
-**Runtime initialization** (in `app.py` / `discord_bot.py`):
+**Runtime initialization** (in `app.py` / `server.py`):
 1. Load KNOWN_CAPABILITIES as AVAILABLE
 2. Register MCP servers (currently only Google Calendar)
 3. Connect MCP servers, discover tools
@@ -619,7 +619,7 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **Storage**: `data/{tenant_id}/awareness/whispers.json` and `data/{tenant_id}/awareness/suppressions.json`. Atomic writes via filelock.
 
-**Evaluator lifecycle**: Started in `discord_bot.py` after handler init. Stored as `handler._evaluator`. Stopped on shutdown.
+**Evaluator lifecycle**: Started lazily per-tenant in handler on first message. Stored as `handler._evaluator`. Stopped on shutdown.
 
 **Tracing prefix**: `AWARENESS:` — all evaluator log lines use this prefix.
 
@@ -921,7 +921,7 @@ Model pricing is maintained in `kernos/kernel/events.py` → `MODEL_PRICING`.
 
 | Entry point | File | Purpose |
 |---|---|---|
-| Discord bot | `kernos/discord_bot.py` | Primary live testing channel |
+| Kernos server | `kernos/server.py` | Primary entry point |
 | FastAPI app | `kernos/app.py` | HTTP server with Twilio webhook |
 | CLI | `kernos/cli.py` | Inspection and debugging |
 

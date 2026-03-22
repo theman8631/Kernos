@@ -47,7 +47,7 @@ Uses `filelock` for single-process safety. Not safe for multi-worker (the abstra
 
 - `conversation_id` and `platform` belong in **payload only** — never in metadata.
 - `metadata` is empty `{}` on handler-emitted events (no cross-cutting context yet).
-- Startup events: `system.started` emitted by app lifespan + discord_bot on_ready; `capability.connected`/`capability.error` emitted by `MCPClientManager.connect_all()` under tenant `"system"`.
+- Startup events: `system.started` emitted by app lifespan + server on_ready; `capability.connected`/`capability.error` emitted by `MCPClientManager.connect_all()` under tenant `"system"`.
 
 ## Cost Tracking
 

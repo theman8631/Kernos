@@ -6,7 +6,7 @@ Kernos is a three-layer system: adapters, handler, and kernel.
 
 Adapters convert platform-specific messages into a `NormalizedMessage` — a common format with sender ID, content, platform name, conversation ID, and auth level. Currently shipped:
 
-- **Discord adapter** (`kernos/discord_bot.py`) — handles Discord messages, text file attachments, and bot lifecycle.
+- **Kernos server** (`kernos/server.py`) — main entry point. Runs Discord adapter, SMS polling, awareness evaluator, channel registry, and full handler stack.
 - **SMS adapter** (`kernos/messages/adapters/twilio_adapter.py`) — receives Twilio webhooks, normalizes SMS messages.
 
 Adapters know nothing about the handler or kernel. The handler knows nothing about adapters. They share only the `NormalizedMessage` model. This isolation is an architectural constraint — never violated.
@@ -62,7 +62,7 @@ All adapters resolve to the same instance via `KERNOS_INSTANCE_ID` env var. When
 | Component | Path |
 |-----------|------|
 | Message Handler | `kernos/messages/handler.py` |
-| Discord Adapter | `kernos/discord_bot.py` |
+| Kernos Server | `kernos/server.py` |
 | SMS Adapter | `kernos/messages/adapters/twilio_adapter.py` |
 | Reasoning Service | `kernos/kernel/reasoning.py` |
 | Event Stream | `kernos/kernel/events.py`, `kernos/kernel/event_types.py` |

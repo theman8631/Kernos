@@ -34,7 +34,7 @@ def _setup_logging(quiet: bool) -> None:
 
 
 async def build_handler():
-    """Construct the full handler stack — same as discord_bot.py."""
+    """Construct the full handler stack — same as server.py."""
     from mcp import StdioServerParameters
 
     from kernos.capability.client import MCPClientManager
@@ -64,7 +64,7 @@ async def build_handler():
 
     mcp_manager = MCPClientManager(events=events)
 
-    # Register MCP servers (same as discord_bot.py)
+    # Register MCP servers (same as server.py)
     credentials_path = os.getenv("GOOGLE_OAUTH_CREDENTIALS_PATH", "")
     if credentials_path:
         mcp_manager.register_server(

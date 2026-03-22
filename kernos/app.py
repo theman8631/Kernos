@@ -1,7 +1,7 @@
 """Kernos FastAPI server — webhook-based SMS inbound.
 
 This is the cloud deployment path for receiving SMS via Twilio webhooks.
-For local/development use, SMS inbound uses polling via SMSPoller in discord_bot.py.
+For local/development use, SMS inbound uses polling via SMSPoller in server.py.
 Run this when deploying to a server with a public URL.
 
     uvicorn kernos.app:app --host 0.0.0.0 --port 8000

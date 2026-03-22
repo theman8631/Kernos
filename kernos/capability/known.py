@@ -2,7 +2,7 @@
 
 Adding a new capability to KERNOS:
 1. Add a CapabilityInfo entry here with status=AVAILABLE
-2. Add the MCP server registration in app.py / discord_bot.py (if a server exists)
+2. Add the MCP server registration in app.py / server.py (if a server exists)
 3. The registry handles the rest — system prompt, State Store, CLI
 """
 

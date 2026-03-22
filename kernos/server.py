@@ -132,7 +132,7 @@ async def on_ready():
 
     try:
         await emit_event(
-            events, EventType.SYSTEM_STARTED, "system", "discord_bot", payload={}
+            events, EventType.SYSTEM_STARTED, "system", "server", payload={}
         )
     except Exception as exc:
         logger.warning("Failed to emit system.started: %s", exc)
