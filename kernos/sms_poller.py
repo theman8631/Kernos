@@ -19,7 +19,7 @@ class SMSPoller:
         account_sid: str,
         auth_token: str,
         twilio_number: str,
-        interval: float = 5.0,
+        interval: float = 30.0,
     ) -> None:
         self._adapter = adapter
         self._handler = handler
@@ -60,14 +60,25 @@ class SMSPoller:
     async def _check_messages(self) -> None:
         from twilio.rest import Client as TwilioClient
 
-        twilio_client = TwilioClient(self._account_sid, self._auth_token)
+        # Silence Twilio/HTTP library noise during routine polling
+        _noisy_loggers = ["twilio", "urllib3", "httpx"]
+        _saved = {n: logging.getLogger(n).level for n in _noisy_loggers}
+        for n in _noisy_loggers:
+            logging.getLogger(n).setLevel(logging.ERROR)
 
-        # Fetch recent inbound messages (sync — run in thread)
-        messages = await asyncio.to_thread(
-            twilio_client.messages.list,
-            to=self._twilio_number,
-            date_sent_after=self._last_check,
-        )
+        try:
+            twilio_client = TwilioClient(self._account_sid, self._auth_token)
+
+            # Fetch recent inbound messages (sync — run in thread)
+            messages = await asyncio.to_thread(
+                twilio_client.messages.list,
+                to=self._twilio_number,
+                date_sent_after=self._last_check,
+            )
+        finally:
+            # Restore logger levels after the Twilio API call
+            for n, level in _saved.items():
+                logging.getLogger(n).setLevel(level)
 
         for msg in messages:
             if msg.sid in self._processed_sids:

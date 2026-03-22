@@ -53,6 +53,10 @@ The kernel (`kernos/kernel/`) owns all state and intelligence infrastructure:
 - **Developer mode error surfacing.** When `developer_mode` is on, WARNING/ERROR logs from `kernos.*` are collected and injected into the system prompt so the agent can see and discuss them.
 - **State mutation logging.** Every state write (soul, knowledge, covenants, capabilities) logs with `source` and `trigger` at INFO level. Prefixes: `SOUL_WRITE:`, `KNOW_WRITE:`, `COVENANT_WRITE:`, `CAP_WRITE:`.
 
+## Instance Identity
+
+All adapters resolve to the same instance via `KERNOS_INSTANCE_ID` env var. When set, every adapter (Discord, SMS, CLI) uses it as the `tenant_id` — same soul, same knowledge, same spaces regardless of which channel the message arrives on. Without it, each adapter derives its own tenant_id (backward compatible but creates separate instances per channel).
+
 ## Code Locations
 
 | Component | Path |

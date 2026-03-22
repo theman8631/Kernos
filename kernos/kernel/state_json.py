@@ -97,21 +97,26 @@ def _load_context_space(d: dict) -> ContextSpace:
 
 
 def _load_knowledge_entry(d: dict) -> KnowledgeEntry:
-    """Load KnowledgeEntry from dict, applying durability → lifecycle_archetype migration.
+    """Load KnowledgeEntry from dict, applying migrations for missing fields.
 
-    Old JSON files have `durability` but no `lifecycle_archetype`. New entries have
-    `lifecycle_archetype` set. This function ensures both load correctly.
+    Handles: durability → lifecycle_archetype, multi-member fields (V1 defaults).
     """
     data = dict(d)
     if not data.get("lifecycle_archetype"):
         durability = data.get("durability", "")
         data["lifecycle_archetype"] = _durability_to_archetype(durability)
-        # Also migrate foresight_expires from expires_at durability
         if (
             durability.startswith("expires_at:")
             and not data.get("foresight_expires")
         ):
             data["foresight_expires"] = durability[len("expires_at:"):]
+    # Multi-member foundation defaults (V1)
+    if "owner_member_id" not in data:
+        data["owner_member_id"] = ""
+    if "sensitivity" not in data:
+        data["sensitivity"] = "open"
+    if "visible_to" not in data:
+        data["visible_to"] = None
     return KnowledgeEntry(**data)
 
 

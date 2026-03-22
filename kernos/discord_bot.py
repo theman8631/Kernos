@@ -118,7 +118,13 @@ handler: MessageHandler | None = None
 @client.event
 async def on_ready():
     global handler
-    logger.info("Discord bot connected as %s", client.user)
+    logger.info("Starting Kernos server")
+    instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
+    if instance_id:
+        logger.info("INSTANCE: id=%s (from KERNOS_INSTANCE_ID)", instance_id)
+    else:
+        logger.info("INSTANCE: id derived per-adapter (set KERNOS_INSTANCE_ID for cross-channel identity)")
+    logger.info("Discord adapter connected as %s", client.user)
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
     events = JsonEventStream(data_dir)
@@ -229,7 +235,7 @@ async def on_ready():
             adapter=sms_adapter, handler=handler,
             account_sid=twilio_sid, auth_token=twilio_token,
             twilio_number=twilio_phone,
-            interval=float(os.getenv("KERNOS_SMS_POLL_INTERVAL", "5")),
+            interval=float(os.getenv("KERNOS_SMS_POLL_INTERVAL", "30")),
         )
         await sms_poller.start()
         logger.info(

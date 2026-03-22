@@ -27,7 +27,7 @@ class DiscordAdapter(BaseAdapter):
 
     def __init__(self) -> None:
         self._owner_id = os.getenv("DISCORD_OWNER_ID", "")
-        self._tenant_id = os.getenv("OWNER_PHONE_NUMBER", "")
+        self._tenant_id = os.getenv("KERNOS_INSTANCE_ID", os.getenv("OWNER_PHONE_NUMBER", ""))
         self._client: discord.Client | None = None
 
     def set_client(self, client: discord.Client) -> None:

@@ -16,6 +16,10 @@ Live. No public server required — inbound SMS uses polling, not webhooks.
 
 Add to `.env`:
 ```
+# Instance identity — same instance across Discord + SMS
+KERNOS_INSTANCE_ID=discord:364303223047323649
+
+# Twilio credentials
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=your_auth_token_here
 TWILIO_PHONE_NUMBER=+1XXXXXXXXXX

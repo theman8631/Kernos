@@ -6,7 +6,7 @@ Decided next steps. These are committed directions, not speculation.
 Time-based, event-based, and state-based conditions that fire actions. This replaces ad-hoc scheduling with a single trigger model. Standing orders (currently stored as knowledge entries) will execute through this system.
 
 ## Outbound Messaging — SHIPPED (3E-A)
-The plumbing is live: `handler.send_outbound()` pushes messages on any connected channel (Discord, SMS). Channel registry tracks available channels. `manage_channels` kernel tool for enable/disable. Next: wire awareness whispers to outbound delivery, `notify_via` preference for channel selection.
+The plumbing is live: `handler.send_outbound()` pushes messages on any connected channel (Discord, SMS). Channel registry tracks available channels. `manage_channels` kernel tool for enable/disable. `KERNOS_INSTANCE_ID` unifies identity across channels. Multi-member foundation fields on KnowledgeEntry (owner_member_id, sensitivity, visible_to). Next: wire awareness whispers to outbound delivery, `notify_via` preference for channel selection.
 
 ## manage_schedule Tool
 Unified trigger management tool for the agent. Create, view, edit, and delete scheduled actions and event-triggered automations.

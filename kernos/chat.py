@@ -411,10 +411,13 @@ def main() -> None:
     _setup_logging(args.quiet)
 
     # Determine tenant
+    instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
     if args.new:
         tenant_id = args.new if ":" in args.new else f"cli:{args.new}"
     elif args.tenant:
         tenant_id = args.tenant
+    elif instance_id:
+        tenant_id = instance_id
     else:
         tenant_id = _pick_tenant_interactive()
 

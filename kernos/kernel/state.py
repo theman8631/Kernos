@@ -123,6 +123,11 @@ class KnowledgeEntry:
     context_space: str = ""          # Reserved for context spaces (empty = global)
     salience: float = 0.5            # Initial importance weight (0.0-1.0)
 
+    # --- Multi-member foundation (V1: defaults, V2: populated) ---
+    owner_member_id: str = ""        # Who contributed this. Empty = instance owner.
+    sensitivity: str = "open"        # "open" | "contextual" | "personal" | "classified"
+    visible_to: list[str] | None = None  # None = follow sensitivity default. List = only these member_ids.
+
 
 # ---------------------------------------------------------------------------
 # Retrieval strength — computed at read time, never stored

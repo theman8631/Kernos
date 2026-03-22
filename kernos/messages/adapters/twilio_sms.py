@@ -68,9 +68,8 @@ class TwilioSMSAdapter(BaseAdapter):
             else AuthLevel.unknown
         )
 
-        # Phase 1A: single-tenant. tenant_id is the owner's phone number.
-        # Phase 1B will replace this with a database lookup keyed to tenant record.
-        tenant_id = self._owner_phone
+        # Instance identity: KERNOS_INSTANCE_ID overrides per-adapter derivation
+        tenant_id = os.getenv("KERNOS_INSTANCE_ID", self._owner_phone)
 
         # conversation_id is per-sender — SMS has no thread concept beyond who's talking.
         conversation_id = sender
