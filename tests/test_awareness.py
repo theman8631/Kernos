@@ -19,6 +19,7 @@ from kernos.kernel.awareness import (
     AwarenessEvaluator,
     SuppressionEntry,
     Whisper,
+    _hours_until_foresight,
     generate_whisper_id,
 )
 from kernos.kernel.event_types import EventType
@@ -915,3 +916,199 @@ class TestAtomicPersistence:
         assert path.exists()
         data = json.loads(path.read_text())
         assert len(data) == 1
+
+
+# ---------------------------------------------------------------------------
+# Interrupt Delivery (Whisper Spectrum)
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptClassification:
+    """Whispers with foresight_expires < 2 hours get delivery_class='interrupt'."""
+
+    async def test_under_2_hours_is_interrupt(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        entry = _make_knowledge_entry(
+            foresight_expires=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        )
+        await store.add_knowledge(entry)
+
+        evaluator = AwarenessEvaluator(store, events)
+        whispers = await evaluator.run_time_pass("test_tenant")
+        assert len(whispers) == 1
+        assert whispers[0].delivery_class == "interrupt"
+
+    async def test_6_hours_is_stage(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        entry = _make_knowledge_entry(
+            foresight_expires=(datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+        )
+        await store.add_knowledge(entry)
+
+        evaluator = AwarenessEvaluator(store, events)
+        whispers = await evaluator.run_time_pass("test_tenant")
+        assert len(whispers) == 1
+        assert whispers[0].delivery_class == "stage"
+
+    async def test_36_hours_is_ambient(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        entry = _make_knowledge_entry(
+            foresight_expires=(datetime.now(timezone.utc) + timedelta(hours=36)).isoformat()
+        )
+        await store.add_knowledge(entry)
+
+        evaluator = AwarenessEvaluator(store, events)
+        whispers = await evaluator.run_time_pass("test_tenant")
+        assert len(whispers) == 1
+        assert whispers[0].delivery_class == "ambient"
+
+
+class TestInterruptPush:
+    """Interrupt whispers are pushed via send_outbound."""
+
+    async def test_interrupt_pushed_via_outbound(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        evaluator = AwarenessEvaluator(store, events, handler=handler)
+
+        whisper = _make_whisper(delivery_class="interrupt")
+        pushed = await evaluator._push_interrupt("test_tenant", whisper)
+
+        assert pushed is True
+        handler.send_outbound.assert_called_once()
+
+    async def test_interrupt_push_fail_returns_false(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=False)
+
+        evaluator = AwarenessEvaluator(store, events, handler=handler)
+
+        whisper = _make_whisper(delivery_class="interrupt")
+        pushed = await evaluator._push_interrupt("test_tenant", whisper)
+
+        assert pushed is False
+
+    async def test_interrupt_suppressed_when_user_active(self, tmp_path):
+        """If user messaged < 5 min ago, interrupt is downgraded to stage."""
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+
+        # Create a space with recent last_active_at
+        from kernos.kernel.spaces import ContextSpace
+        space = ContextSpace(
+            id="space_daily",
+            tenant_id="test_tenant",
+            name="Daily",
+            last_active_at=datetime.now(timezone.utc).isoformat(),
+            is_default=True,
+        )
+        await store.save_context_space(space)
+
+        evaluator = AwarenessEvaluator(store, events, handler=handler)
+        whisper = _make_whisper(delivery_class="interrupt")
+        pushed = await evaluator._push_interrupt("test_tenant", whisper)
+
+        # Should be suppressed — user is active
+        assert pushed is False
+        assert whisper.delivery_class == "stage"
+        handler.send_outbound.assert_not_called()
+
+    async def test_no_handler_returns_false(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+
+        evaluator = AwarenessEvaluator(store, events, handler=None)
+        whisper = _make_whisper(delivery_class="interrupt")
+        pushed = await evaluator._push_interrupt("test_tenant", whisper)
+
+        assert pushed is False
+
+
+class TestHoursUntilForesight:
+    """Helper to extract hours remaining from whisper evidence."""
+
+    def test_parses_expires_from_evidence(self):
+        future = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        w = _make_whisper()
+        w.supporting_evidence = [f"Expires: {future}"]
+        hours = _hours_until_foresight(w)
+        assert hours is not None
+        assert 2.5 < hours < 3.5
+
+    def test_no_expires_returns_none(self):
+        w = _make_whisper()
+        w.supporting_evidence = ["No relevant data"]
+        assert _hours_until_foresight(w) is None
+
+
+class TestWhisperNotifyVia:
+    """Whisper has notify_via field."""
+
+    def test_default_empty(self):
+        w = _make_whisper()
+        assert w.notify_via == ""
+
+    def test_set_channel(self):
+        w = _make_whisper()
+        w.notify_via = "discord"
+        assert w.notify_via == "discord"
+
+
+class TestEvaluateWithInterrupt:
+    """_evaluate() pushes interrupt whispers immediately."""
+
+    async def test_interrupt_pushed_during_evaluate(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        # Create entry expiring in 1 hour (interrupt threshold)
+        entry = _make_knowledge_entry(
+            foresight_expires=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        )
+        await store.add_knowledge(entry)
+
+        evaluator = AwarenessEvaluator(store, events, handler=handler)
+        await evaluator._evaluate("test_tenant")
+
+        # Should have been pushed, not queued
+        handler.send_outbound.assert_called_once()
+        # Should NOT be in pending queue (it was delivered)
+        pending = await store.get_pending_whispers("test_tenant")
+        assert len(pending) == 0
+
+    async def test_stage_queued_not_pushed(self, tmp_path):
+        store = JsonStateStore(tmp_path)
+        events = JsonEventStream(tmp_path)
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+
+        # 6 hours = stage, not interrupt
+        entry = _make_knowledge_entry(
+            foresight_expires=(datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+        )
+        await store.add_knowledge(entry)
+
+        evaluator = AwarenessEvaluator(store, events, handler=handler)
+        await evaluator._evaluate("test_tenant")
+
+        # Stage should be queued, NOT pushed
+        handler.send_outbound.assert_not_called()
+        pending = await store.get_pending_whispers("test_tenant")
+        assert len(pending) == 1
+        assert pending[0].delivery_class == "stage"

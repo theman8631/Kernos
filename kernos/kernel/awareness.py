@@ -43,7 +43,7 @@ class Whisper:
 
     whisper_id: str              # Unique ID: "wsp_{timestamp}_{rand4}"
     insight_text: str            # Natural language framing for the agent
-    delivery_class: str          # "stage" or "ambient" (no "interrupt" in 3C)
+    delivery_class: str          # "ambient", "stage", or "interrupt"
     source_space_id: str         # Context space where the signal originated
     target_space_id: str         # Where to deliver (usually source; cross-domain = active space)
     supporting_evidence: list[str]  # Underlying data for follow-up questions
@@ -52,6 +52,7 @@ class Whisper:
     foresight_signal: str        # Raw signal from the knowledge entry (stable — used for suppression matching)
     created_at: str              # ISO 8601 UTC
     surfaced_at: str = ""        # When the agent actually received it (empty = pending)
+    notify_via: str = ""         # Channel preference. Empty = most recently used.
 
 
 @dataclass
@@ -95,6 +96,22 @@ DISMISS_WHISPER_TOOL = {
         "required": ["whisper_id"],
     },
 }
+
+
+def _hours_until_foresight(whisper: "Whisper") -> float | None:
+    """Extract hours remaining from a whisper's supporting evidence.
+
+    Returns None if foresight_expires cannot be determined.
+    """
+    for ev in whisper.supporting_evidence:
+        if ev.startswith("Expires: "):
+            try:
+                expires_dt = datetime.fromisoformat(ev[9:])
+                now = datetime.now(timezone.utc)
+                return (expires_dt - now).total_seconds() / 3600
+            except (ValueError, TypeError):
+                pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +168,16 @@ class AwarenessEvaluator:
         """Main loop — tick every trigger_interval seconds.
 
         Awareness pass runs every N ticks (where N = awareness_interval / trigger_interval).
+        Fast-path interrupt check runs every 300s / trigger_interval ticks.
         Trigger evaluation runs every tick.
         """
         awareness_every_n = max(1, self._interval // self._trigger_interval)
+        interrupt_check_every_n = max(1, 300 // self._trigger_interval)  # ~5 minutes
+        _interrupt_tick_count = 0
 
         while self._running:
             self._awareness_tick_count += 1
+            _interrupt_tick_count += 1
 
             # Phase 1: Awareness pass (runs every Nth tick)
             if self._awareness_tick_count >= awareness_every_n:
@@ -167,6 +188,17 @@ class AwarenessEvaluator:
                     raise
                 except Exception as e:
                     logger.error("AwarenessEvaluator error: %s", e)
+
+            # Phase 1b: Fast-path interrupt check (every ~5 minutes)
+            # Re-evaluates pending whispers for interrupt promotion + delivers interrupts.
+            if _interrupt_tick_count >= interrupt_check_every_n:
+                _interrupt_tick_count = 0
+                try:
+                    await self._interrupt_check(tenant_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error("Interrupt check error: %s", e)
 
             # Phase 2: Trigger evaluation (runs every tick)
             if self._trigger_store and self._handler:
@@ -195,7 +227,13 @@ class AwarenessEvaluator:
                             whisper.whisper_id, whisper.insight_text[:80])
                 continue
 
-            # Save to pending queue
+            # Interrupt whispers: push immediately via outbound if handler is available
+            if whisper.delivery_class == "interrupt" and self._handler:
+                pushed = await self._push_interrupt(tenant_id, whisper)
+                if pushed:
+                    continue  # Delivered — don't queue for session-start injection
+
+            # Save to pending queue (ambient, stage, or failed interrupt)
             await self._state.save_whisper(tenant_id, whisper)
 
             # Emit audit event
@@ -251,7 +289,12 @@ class AwarenessEvaluator:
                 continue
             hours_remaining = (expires_dt - now).total_seconds() / 3600
 
-            delivery_class = "stage" if hours_remaining < 12 else "ambient"
+            if hours_remaining < 2:
+                delivery_class = "interrupt"
+            elif hours_remaining < 12:
+                delivery_class = "stage"
+            else:
+                delivery_class = "ambient"
 
             whisper = Whisper(
                 whisper_id=generate_whisper_id(),
@@ -355,6 +398,162 @@ class AwarenessEvaluator:
                 return True
 
         return False
+
+    async def _push_interrupt(self, tenant_id: str, whisper: Whisper) -> bool:
+        """Push an interrupt whisper via outbound messaging.
+
+        Returns True if successfully delivered (or suppressed because user is active).
+        Returns False if outbound failed (whisper should be queued for session-start).
+        """
+        if not self._handler:
+            return False
+
+        # Check: is user currently active? If so, let stage handle it.
+        try:
+            spaces = await self._state.list_context_spaces(tenant_id)
+            now = datetime.now(timezone.utc)
+            user_active = False
+            for space in spaces:
+                if space.last_active_at:
+                    try:
+                        last_active = datetime.fromisoformat(space.last_active_at)
+                        if (now - last_active).total_seconds() < 300:  # 5 minutes
+                            user_active = True
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+            if user_active:
+                # User is active — downgrade to stage, session-start will catch it
+                whisper.delivery_class = "stage"
+                logger.info(
+                    "WHISPER_SUPPRESS_ACTIVE: id=%s downgraded to stage (user active)",
+                    whisper.whisper_id,
+                )
+                return False  # Queue for session-start injection
+        except Exception as exc:
+            logger.warning("Interrupt active check failed: %s", exc)
+
+        # Push via outbound
+        success = await self._handler.send_outbound(
+            tenant_id=tenant_id,
+            member_id="",  # V1: owner
+            channel_name=whisper.notify_via or None,
+            message=whisper.insight_text,
+        )
+
+        if success:
+            # Store in conversation history
+            await self._store_whisper_message(tenant_id, whisper)
+
+            # Mark surfaced + create suppression
+            await self._state.mark_whisper_surfaced(tenant_id, whisper.whisper_id)
+            suppression = SuppressionEntry(
+                whisper_id=whisper.whisper_id,
+                knowledge_entry_id=whisper.knowledge_entry_id,
+                foresight_signal=whisper.foresight_signal,
+                created_at=whisper.created_at,
+                resolution_state="surfaced",
+            )
+            await self._state.save_suppression(tenant_id, suppression)
+
+            logger.info(
+                "WHISPER_PUSH: id=%s class=interrupt channel=%s",
+                whisper.whisper_id, whisper.notify_via or "default",
+            )
+            return True
+        else:
+            # Outbound failed — keep as pending for retry or session-start
+            logger.warning(
+                "WHISPER_PUSH_FAILED: id=%s, keeping as pending",
+                whisper.whisper_id,
+            )
+            return False
+
+    async def _interrupt_check(self, tenant_id: str) -> None:
+        """Fast-path interrupt check — promote pending whispers to interrupt if threshold crossed.
+
+        Runs every ~5 minutes. Lightweight: reads pending whispers, checks timestamps,
+        promotes if needed. No LLM call.
+        """
+        pending = await self._state.get_pending_whispers(tenant_id)
+        promoted = 0
+
+        for whisper in pending:
+            if whisper.delivery_class == "interrupt":
+                # Already interrupt but not yet pushed — try again
+                if self._handler:
+                    pushed = await self._push_interrupt(tenant_id, whisper)
+                    if pushed:
+                        # Remove from pending since it was delivered
+                        await self._state.delete_whisper(tenant_id, whisper.whisper_id)
+                        promoted += 1
+                continue
+
+            # Check if this whisper should be promoted to interrupt
+            # Parse foresight_expires from supporting evidence
+            hours_remaining = _hours_until_foresight(whisper)
+            if hours_remaining is not None and hours_remaining < 2:
+                whisper.delivery_class = "interrupt"
+                if self._handler:
+                    pushed = await self._push_interrupt(tenant_id, whisper)
+                    if pushed:
+                        await self._state.delete_whisper(tenant_id, whisper.whisper_id)
+                        promoted += 1
+                    else:
+                        # Save updated delivery_class even if push failed
+                        await self._state.save_whisper(tenant_id, whisper)
+                else:
+                    await self._state.save_whisper(tenant_id, whisper)
+                promoted += 1
+
+        if promoted:
+            logger.info("INTERRUPT_CHECK: tenant=%s promoted=%d", tenant_id, promoted)
+
+    async def _store_whisper_message(self, tenant_id: str, whisper: Whisper) -> None:
+        """Store pushed whisper in conversation history so the agent sees it."""
+        if not self._handler or not hasattr(self._handler, "conversations"):
+            return
+
+        # Find the most recent conversation for this tenant
+        conversation_id = ""
+        try:
+            conversations = await self._state.list_conversations(tenant_id, active_only=True, limit=1)
+            if conversations:
+                conversation_id = conversations[0].conversation_id
+        except Exception:
+            pass
+
+        if not conversation_id:
+            logger.warning(
+                "WHISPER_HISTORY: no conversation found for tenant=%s, skipping",
+                tenant_id,
+            )
+            return
+
+        try:
+            space_id = whisper.target_space_id or whisper.source_space_id or ""
+            entry = {
+                "role": "assistant",
+                "content": f"[WHISPER] {whisper.insight_text}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "platform": "awareness",
+                "tenant_id": tenant_id,
+                "conversation_id": conversation_id,
+                "space_tags": [space_id] if space_id else None,
+            }
+            await self._handler.conversations.append(
+                tenant_id, conversation_id, entry,
+            )
+            logger.info(
+                "WHISPER_HISTORY: stored [WHISPER] message for whisper=%s in space=%s",
+                whisper.whisper_id, space_id or "general",
+            )
+        except Exception as exc:
+            logger.warning(
+                "WHISPER_HISTORY: failed to store message for whisper=%s: %s",
+                whisper.whisper_id, exc,
+            )
 
     async def _cleanup_old_suppressions(self, tenant_id: str) -> None:
         """Remove suppression entries older than 7 days."""
