@@ -191,7 +191,7 @@ def test_system_prompt_includes_operating_principles():
     rules = default_contract_rules("t1", now)
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, rules)
     assert "INTENT OVER INSTRUCTION" in prompt
-    assert "CONSERVATIVE BY DEFAULT" in prompt
+    assert "ACTIONS REQUIRE TOOL CALLS" in prompt
 
 
 def test_system_prompt_includes_bootstrap_when_not_graduated():

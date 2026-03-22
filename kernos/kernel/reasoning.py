@@ -616,7 +616,7 @@ class ReasoningService:
         self,
         system_prompt: str,
         user_content: str,
-        max_tokens: int = 512,
+        max_tokens: int = 1024,
         prefer_cheap: bool = False,
         output_schema: dict | None = None,
     ) -> str:
@@ -638,8 +638,18 @@ class ReasoningService:
             max_tokens=max_tokens,
             output_schema=output_schema,
         )
+        # Log token usage on every simple completion
+        logger.info(
+            "SIMPLE_RESPONSE: tokens_in=%d tokens_out=%d truncated=%s",
+            response.input_tokens, response.output_tokens,
+            response.stop_reason == "max_tokens",
+        )
         if response.stop_reason == "max_tokens":
-            logger.warning("complete_simple: response truncated (max_tokens reached)")
+            text_preview = "".join(b.text for b in response.content if b.type == "text")
+            logger.warning(
+                "complete_simple: response truncated (max_tokens=%d) preview=%s",
+                max_tokens, text_preview[:200],
+            )
             if output_schema:
                 return "{}"
             # Plain-text call: return whatever was generated (partial is better than "{}")
@@ -681,13 +691,11 @@ class ReasoningService:
         if tool_name == "manage_channels":
             action = (tool_input or {}).get("action", "list")
             return "read" if action == "list" else "soft_write"
-        # manage_schedule: "list" and "create" are read (reminders always OK, tool_call
-        # authorization happens at fire time via covenants); other actions are soft_write
+        # manage_schedule: all actions are read bypass. The gate only matters for
+        # the scheduled ACTION at fire time (via covenants), not for managing the
+        # schedule itself. The user explicitly asked to create/remove/pause — that's the intent.
         if tool_name == "manage_schedule":
-            action = (tool_input or {}).get("action", "list")
-            if action in ("list", "create"):
-                return "read"
-            return "soft_write"
+            return "read"
         if tool_name in _KERNEL_WRITES:
             return "soft_write"
 
@@ -894,12 +902,12 @@ class ReasoningService:
         )
 
         raw = ""
-        logger.info("GATE_MODEL: max_tokens=256, has_schema=False, rules=%d", rules_count)
+        logger.info("GATE_MODEL: max_tokens=512, has_schema=False, rules=%d", rules_count)
         try:
             raw = await self.complete_simple(
                 system_prompt=system_prompt,
                 user_content=user_content,
-                max_tokens=256,
+                max_tokens=512,
                 prefer_cheap=True,
             )
         except Exception as exc:
@@ -1117,6 +1125,7 @@ class ReasoningService:
                         trigger_id=tool_input.get("trigger_id", ""),
                         description=tool_input.get("description", ""),
                         reasoning_service=self,
+                        conversation_id=request.conversation_id,
                     )
                 return "Scheduler is not available."
             else:
@@ -1380,8 +1389,9 @@ class ReasoningService:
         total_output_tokens += response.output_tokens
 
         logger.info(
-            "LLM_RESPONSE: stop_reason=%s content_types=%s",
+            "LLM_RESPONSE: stop_reason=%s tokens_in=%d tokens_out=%d content_types=%s",
             response.stop_reason,
+            response.input_tokens, response.output_tokens,
             [b.type for b in response.content],
         )
         if response.cache_creation_input_tokens or response.cache_read_input_tokens:
@@ -1475,6 +1485,12 @@ class ReasoningService:
                 # Extract and clean tool_input — pop _approval_token before gate or exec
                 tool_input = dict(block.input or {})
                 approval_token_id = tool_input.pop("_approval_token", None)
+
+                # Console logging: every tool call the agent makes
+                logger.info(
+                    "AGENT_ACTION: tool=%s input=%s",
+                    block.name, json.dumps(tool_input)[:200],
+                )
 
                 # Dispatch Gate: classify and check write tools before execution
                 tool_effect = self._classify_tool_effect(block.name, request.active_space, tool_input)
@@ -1777,6 +1793,7 @@ class ReasoningService:
                                 trigger_id=tool_args.get("trigger_id", ""),
                                 description=tool_args.get("description", ""),
                                 reasoning_service=self,
+                                conversation_id=request.conversation_id,
                             )
                         else:
                             result = "Scheduler is not available."
@@ -1788,6 +1805,12 @@ class ReasoningService:
 
                 is_error = result.startswith("Tool error:") or result.startswith(
                     "Calendar tool error:"
+                )
+
+                # Console logging: tool result
+                logger.info(
+                    "AGENT_RESULT: tool=%s success=%s preview=%s",
+                    block.name, not is_error, result[:100],
                 )
 
                 # Emit tool.result
@@ -1958,114 +1981,259 @@ class ReasoningService:
         )
 
         # Hallucination check: agent claims tool use in text but no tool was actually called.
-        # Drop the hallucinated response, retry clean from the user's last message.
+        # Private coaching model: inject the hallucinated response + correction into context,
+        # let the agent see its own failure and retry. Up to 3 attempts before informing user.
         if iterations == 0 and response.stop_reason == "end_turn":
             _TOOL_CLAIM_PHRASES = (
+                # Agent claims it used a specific tool
                 "used write_file", "used delete_file", "used read_file",
                 "used list_files", "used create-event", "used send-email",
-                "i created", "i deleted", "i wrote", "i've created", "i've deleted",
-                "i've written", "file created", "file deleted", "file written",
-                "done —", "done.", "✅",
-                "scheduled", "set a reminder", "i've scheduled", "reminder set",
+                "used manage_schedule", "used remember",
+                # Agent claims it performed an action (subject + past tense)
+                "i created", "i deleted", "i wrote", "i removed",
+                "i've created", "i've deleted", "i've written", "i've removed",
+                "i scheduled", "i've scheduled", "i set a reminder",
                 "i've set a reminder", "i'll remind",
+                # Completion claims at start of response
+                "done —", "✅",
+                # Schedule-specific: agent describes timing of a future action
+                "scheduled —", "fires at",
+                "incoming at", "coming at", "will fire at",
+                "set for", "reminder set", "you'll get",
+                "heads up at", "alert at", "notification at",
+                "locked in", "lands at", "queued for",
+                "on its way", "will arrive at", "dropping at",
             )
             rt_lower = response_text.lower()
-            if any(phrase in rt_lower for phrase in _TOOL_CLAIM_PHRASES):
+
+            # Pattern-based detection: if the user's message implied an action request
+            # and the agent responded with text-only (no tool call), check via Haiku.
+            # This catches novel phrasing that the phrase list misses.
+            _phrase_match = any(phrase in rt_lower for phrase in _TOOL_CLAIM_PHRASES)
+            if not _phrase_match and request.input_text:
+                # Check if user message was an action request and response looks like
+                # a completion claim (short response mentioning a time)
+                _ACTION_REQUEST_SIGNALS = (
+                    "remind", "schedule", "set a", "create a", "send a",
+                    "send me", "delete", "remove", "write a", "save",
+                    "remember", "tell me to", "notify me",
+                    "in 2 min", "in 5 min", "in 10 min", "in an hour",
+                    "in 1 hour", "in 30 min", "in 15 min",
+                    "tomorrow at", "every morning", "every day",
+                )
+                _input_lower = request.input_text.lower()
+                _user_wants_action = any(
+                    sig in _input_lower for sig in _ACTION_REQUEST_SIGNALS
+                )
+                # Short response (< 200 chars) to an action request with no tool call
+                # is suspicious — likely a hallucinated completion
+                if _user_wants_action and len(response_text) < 200:
+                    import re
+                    # Check if response contains a time reference (HH:MM pattern)
+                    _has_time = bool(re.search(r'\d{1,2}:\d{2}', response_text))
+                    if _has_time:
+                        _phrase_match = True
+                        logger.info(
+                            "HALLUCINATION_PATTERN: short response with time to action "
+                            "request, no tool call. input=%r response=%r",
+                            request.input_text[:100], response_text[:100],
+                        )
+
+            if _phrase_match:
+                original_preview = response_text[:200]
                 logger.warning(
                     "HALLUCINATION_CHECK: Agent claims tool use but iterations=0 "
-                    "(stop=%s, tool_count=%d). Dropping and retrying clean. "
+                    "(stop=%s, tool_count=%d). Starting coaching loop. "
                     "Original: %s",
-                    response.stop_reason, len(tools), response_text[:200],
+                    response.stop_reason, len(tools), original_preview,
                 )
-                original_preview = response_text[:200]
 
-                # Retry: clean messages (drop hallucinated response) + corrective instruction
-                corrective_system = (
-                    request.system_prompt + "\n\n"
-                    "[SYSTEM: You must use the appropriate tool to perform actions. "
-                    "Do not claim to have done something without calling the tool.]"
-                )
+                # Analyze why this hallucination occurred (cheap Haiku call for diagnostics)
                 try:
-                    retry_response = await self._provider.complete(
-                        model=request.model,
-                        system=corrective_system,
-                        messages=messages,  # Original messages — no hallucinated content
-                        tools=tools,
-                        max_tokens=request.max_tokens,
+                    _user_msg = request.input_text[:200] if request.input_text else "(unknown)"
+                    # Find which tool was likely intended from the hallucinated text
+                    _expected_tool = "unknown"
+                    for _phrase, _tool in (
+                        ("schedul", "manage_schedule"), ("remind", "manage_schedule"),
+                        ("calendar", "create-event"), ("event", "create-event"),
+                        ("email", "send-email"), ("file", "write_file"),
+                        ("remember", "remember"),
+                    ):
+                        if _phrase in rt_lower:
+                            _expected_tool = _tool
+                            break
+                    # Count prior successful calls to this tool in session
+                    _prior_calls = sum(
+                        1 for m in messages
+                        if m.get("role") == "assistant"
+                        and isinstance(m.get("content"), list)
+                        and any(
+                            b.get("type") == "tool_use" and b.get("name") == _expected_tool
+                            for b in m["content"]
+                            if isinstance(b, dict)
+                        )
                     )
-                    total_input_tokens += retry_response.input_tokens
-                    total_output_tokens += retry_response.output_tokens
-
-                    retry_has_tool_use = any(
-                        b.type == "tool_use" for b in retry_response.content
+                    _analysis = await self.complete_simple(
+                        system_prompt=(
+                            "You are analyzing why an LLM agent generated text "
+                            "instead of calling a tool. Be specific about what "
+                            "in the context most likely caused this."
+                        ),
+                        user_content=(
+                            f"The agent was asked: {_user_msg}\n"
+                            f"Available tool: {_expected_tool}\n"
+                            f"Instead of calling the tool, it generated: "
+                            f"'{original_preview}'\n"
+                            f"Conversation had {len(messages)} messages. "
+                            f"Prior successful calls to this tool in session: "
+                            f"{_prior_calls}\n"
+                            f"Analyze the most likely cause in 1-2 sentences."
+                        ),
+                        max_tokens=256,
+                        prefer_cheap=True,
                     )
-                    retry_text_parts = [
-                        b.text for b in retry_response.content if b.type == "text"
-                    ]
-                    retry_text = "".join(retry_text_parts) if retry_text_parts else ""
+                    total_input_tokens += 0  # Already counted in complete_simple
+                    logger.info(
+                        "HALLUCINATION_ANALYSIS: tool=%s attempt=1 prior_calls=%d analysis=%s",
+                        _expected_tool, _prior_calls, _analysis[:200],
+                    )
+                except Exception as _exc:
+                    logger.warning("HALLUCINATION_ANALYSIS: failed: %s", _exc)
 
-                    if retry_has_tool_use:
-                        # Retry wants to call tools — execute them through the tool loop
-                        tool_results = []
-                        for block in retry_response.content:
-                            if block.type != "tool_use":
-                                continue
-                            tool_input_r = dict(block.input or {})
-                            tool_input_r.pop("_approval_token", None)
-                            logger.info(
-                                "HALLUCINATION_RETRY: executing tool=%s",
-                                block.name,
-                            )
-                            try:
-                                if block.name in self._KERNEL_TOOLS:
-                                    result = await self.execute_tool(
-                                        block.name, tool_input_r, request,
-                                    )
-                                else:
-                                    result = await self._mcp.call_tool(
-                                        block.name, tool_input_r,
-                                    )
-                                tool_results.append(result)
-                                iterations += 1
-                            except Exception as exc:
-                                logger.warning(
-                                    "HALLUCINATION_RETRY: tool %s failed: %s",
-                                    block.name, exc,
-                                )
+                # Private coaching loop — up to 3 total attempts (original was #1)
+                _MAX_COACHING_ATTEMPTS = 3
+                _coaching_messages = list(messages)  # Copy — don't mutate original
+                _hallucinated_text = response_text
+                _coaching_succeeded = False
 
-                        response_text = retry_text or "Done."
-                        logger.info(
-                            "HALLUCINATION_RETRY: executed %d tool(s). original=%r",
-                            len(tool_results), original_preview,
+                for _attempt in range(2, _MAX_COACHING_ATTEMPTS + 1):
+                    remaining = _MAX_COACHING_ATTEMPTS - _attempt
+                    # Inject the hallucinated response + correction into context
+                    _coaching_messages.append({
+                        "role": "assistant",
+                        "content": _hallucinated_text,
+                    })
+                    if _attempt == 2:
+                        correction = (
+                            "[SYSTEM] Your response was not delivered to the user because "
+                            "you described completing an action without calling the required "
+                            "tool. The message was not sent.\n\n"
+                            "To schedule something, call:\n"
+                            'manage_schedule({"action": "create", "description": "..."})\n\n'
+                            "To create a calendar event, call create-event.\n"
+                            "To remember something, call remember.\n\n"
+                            "Repeat your response and call the appropriate tool.\n"
+                            "You have 2 remaining attempts before the user is informed "
+                            "of a failure."
                         )
-
-                    elif any(phrase in retry_text.lower() for phrase in _TOOL_CLAIM_PHRASES):
-                        # Retry also hallucinated — give up honestly
-                        response_text = (
-                            "I tried to do that but wasn't able to execute the action. "
-                            "Can you try asking again?"
-                        )
-                        logger.warning(
-                            "HALLUCINATION_RETRY: both attempts fabricated. "
-                            "original=%r retry=%r",
-                            original_preview, retry_text[:200],
-                        )
-
                     else:
-                        # Retry gave an honest response
-                        response_text = retry_text
-                        logger.info(
-                            "HALLUCINATION_RETRY: honest response. original=%r",
-                            original_preview,
+                        correction = (
+                            "[SYSTEM] Second attempt also failed. You have 1 remaining "
+                            "attempt. You MUST generate a tool_use block. Do not respond "
+                            "with text describing the action."
                         )
+                    _coaching_messages.append({
+                        "role": "user",
+                        "content": correction,
+                    })
 
-                except Exception as exc:
-                    logger.warning(
-                        "HALLUCINATION_RETRY: retry failed (%s), honest fallback",
-                        exc,
+                    logger.info(
+                        "HALLUCINATION_COACHING: attempt=%d/%d injecting correction",
+                        _attempt, _MAX_COACHING_ATTEMPTS,
                     )
+
+                    try:
+                        retry_response = await self._provider.complete(
+                            model=request.model,
+                            system=request.system_prompt,
+                            messages=_coaching_messages,
+                            tools=tools,
+                            max_tokens=request.max_tokens,
+                        )
+                        total_input_tokens += retry_response.input_tokens
+                        total_output_tokens += retry_response.output_tokens
+
+                        retry_has_tool_use = any(
+                            b.type == "tool_use" for b in retry_response.content
+                        )
+                        retry_text_parts = [
+                            b.text for b in retry_response.content if b.type == "text"
+                        ]
+                        retry_text = "".join(retry_text_parts) if retry_text_parts else ""
+
+                        if retry_has_tool_use:
+                            # Success — execute the tool calls
+                            tool_results = []
+                            for block in retry_response.content:
+                                if block.type != "tool_use":
+                                    continue
+                                tool_input_r = dict(block.input or {})
+                                tool_input_r.pop("_approval_token", None)
+                                logger.info(
+                                    "HALLUCINATION_COACHING: attempt=%d executing tool=%s",
+                                    _attempt, block.name,
+                                )
+                                try:
+                                    if block.name in self._KERNEL_TOOLS:
+                                        result = await self.execute_tool(
+                                            block.name, tool_input_r, request,
+                                        )
+                                    else:
+                                        result = await self._mcp.call_tool(
+                                            block.name, tool_input_r,
+                                        )
+                                    tool_results.append(result)
+                                    iterations += 1
+                                except Exception as exc:
+                                    logger.warning(
+                                        "HALLUCINATION_COACHING: tool %s failed: %s",
+                                        block.name, exc,
+                                    )
+
+                            response_text = retry_text or "Done."
+                            _coaching_succeeded = True
+                            logger.info(
+                                "HALLUCINATION_COACHING: attempt=%d SUCCESS, "
+                                "executed %d tool(s). original=%r",
+                                _attempt, len(tool_results), original_preview,
+                            )
+                            break
+
+                        # Check if this attempt also hallucinated
+                        retry_lower = retry_text.lower()
+                        if any(phrase in retry_lower for phrase in _TOOL_CLAIM_PHRASES):
+                            _hallucinated_text = retry_text
+                            logger.warning(
+                                "HALLUCINATION_COACHING: attempt=%d still hallucinating. "
+                                "preview=%r",
+                                _attempt, retry_text[:200],
+                            )
+                            continue  # Try again with this failure in context too
+
+                        # Text-only response, no hallucination claims but no tool call
+                        _hallucinated_text = retry_text
+                        logger.warning(
+                            "HALLUCINATION_COACHING: attempt=%d text-only (no tool call). "
+                            "preview=%r",
+                            _attempt, retry_text[:200],
+                        )
+                        continue  # Keep trying
+
+                    except Exception as exc:
+                        logger.warning(
+                            "HALLUCINATION_COACHING: attempt=%d provider error: %s",
+                            _attempt, exc,
+                        )
+                        break  # Don't retry on provider errors
+
+                if not _coaching_succeeded:
                     response_text = (
-                        "I wasn't able to complete that action. Can you try again?"
+                        "I'm having trouble executing that action right now. "
+                        "Can you try asking again?"
+                    )
+                    logger.warning(
+                        "HALLUCINATION_FAILED: attempts=%d original=%r",
+                        _MAX_COACHING_ATTEMPTS, original_preview,
                     )
 
         return ReasoningResult(

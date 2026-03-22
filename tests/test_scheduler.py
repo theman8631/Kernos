@@ -135,20 +135,14 @@ class TestManageScheduleTool:
         r = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert r._classify_tool_effect("manage_schedule", None, {"action": "list"}) == "read"
 
-    def test_gate_classification_create(self):
-        """Create is always read — authorization happens at fire time via covenants."""
+    def test_gate_classification_all_read(self):
+        """All manage_schedule actions are read — gate fires at fire time, not management time."""
         from kernos.kernel.reasoning import ReasoningService
         r = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
-        assert r._classify_tool_effect(
-            "manage_schedule", None, {"action": "create"}
-        ) == "read"
-
-    def test_gate_classification_remove(self):
-        from kernos.kernel.reasoning import ReasoningService
-        r = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
-        assert r._classify_tool_effect(
-            "manage_schedule", None, {"action": "remove"}
-        ) == "soft_write"
+        for action in ["list", "create", "remove", "pause", "resume", "update"]:
+            assert r._classify_tool_effect(
+                "manage_schedule", None, {"action": action}
+            ) == "read", f"Expected read for action={action}"
 
 
 class TestManageScheduleHandler:
@@ -221,6 +215,32 @@ class TestManageScheduleHandler:
         result = await handle_manage_schedule(store, "t1", "", "", "remove", trigger_id="trig_rm")
         assert "Removed" in result
         assert await store.get("t1", "trig_rm") is None
+
+    async def test_create_stores_conversation_id(self, tmp_path):
+        """Create passes conversation_id through to the trigger."""
+        import json
+        store = TriggerStore(tmp_path)
+        reasoning = AsyncMock()
+        reasoning.complete_simple = AsyncMock(return_value=json.dumps({
+            "action_type": "notify",
+            "when": _future_iso(1),
+            "message": "Test reminder",
+            "delivery_class": "stage",
+            "recurrence": "",
+            "notify_via": "",
+            "tool_name": "",
+            "tool_args": "",
+        }))
+
+        await handle_manage_schedule(
+            store, "t1", "m1", "s1", "create",
+            description="Remind me in 1 hour",
+            reasoning_service=reasoning,
+            conversation_id="conv_abc",
+        )
+        triggers = await store.list_active("t1")
+        assert len(triggers) == 1
+        assert triggers[0].conversation_id == "conv_abc"
 
     async def test_list_shows_triggers(self, tmp_path):
         store = TriggerStore(tmp_path)
@@ -310,6 +330,78 @@ class TestTriggerEvaluation:
         updated = await store.get("t1", "trig_recur")
         assert updated.status == "active"  # Still active (recurring)
         assert updated.next_fire_at > _now_iso()  # Recomputed to future
+
+    async def test_notify_stores_scheduled_message(self, tmp_path):
+        """Successful notify injects [SCHEDULED] message into conversation history."""
+        store = TriggerStore(tmp_path)
+        t = Trigger(
+            trigger_id="trig_hist", tenant_id="t1", status="active",
+            next_fire_at=_past_iso(0.01),
+            action_type="notify",
+            action_description="Check email",
+            action_params={"message": "Time to check email!"},
+            conversation_id="conv_123",
+            space_id="space_daily",
+        )
+        await store.save(t)
+
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        await evaluate_triggers(store, "t1", handler)
+
+        handler.conversations.append.assert_called_once()
+        call_args = handler.conversations.append.call_args
+        assert call_args[0][0] == "t1"
+        assert call_args[0][1] == "conv_123"
+        entry = call_args[0][2]
+        assert entry["role"] == "assistant"
+        assert entry["content"].startswith("[SCHEDULED]")
+        assert "Time to check email!" in entry["content"]
+        assert entry["platform"] == "scheduler"
+        assert entry["space_tags"] == ["space_daily"]
+
+    async def test_notify_no_history_without_conversation_id(self, tmp_path):
+        """No conversation history injection when trigger has no conversation_id."""
+        store = TriggerStore(tmp_path)
+        t = Trigger(
+            trigger_id="trig_noid", tenant_id="t1", status="active",
+            next_fire_at=_past_iso(0.01),
+            action_type="notify",
+            action_description="Test",
+            action_params={"message": "Hello"},
+        )
+        await store.save(t)
+
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        await evaluate_triggers(store, "t1", handler)
+        handler.conversations.append.assert_not_called()
+
+    async def test_outbound_failure_no_history(self, tmp_path):
+        """Failed outbound does NOT inject into conversation history."""
+        store = TriggerStore(tmp_path)
+        t = Trigger(
+            trigger_id="trig_fh", tenant_id="t1", status="active",
+            next_fire_at=_past_iso(0.01),
+            action_type="notify",
+            action_params={"message": "Hello"},
+            conversation_id="conv_123",
+        )
+        await store.save(t)
+
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=False)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        await evaluate_triggers(store, "t1", handler)
+        handler.conversations.append.assert_not_called()
 
     async def test_outbound_failure_sets_pending(self, tmp_path):
         store = TriggerStore(tmp_path)

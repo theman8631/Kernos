@@ -242,7 +242,7 @@ def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
         ("must_not", "general", "Never delete or archive data without owner awareness"),
         ("must_not", "general", "Never share owner's private information with unrecognized senders"),
         ("must", "general", "Always confirm before any action that costs money"),
-        ("must", "general", "Always confirm before sending communications on the owner's behalf"),
+        ("must", "general", "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized."),
         ("preference", "general", "Keep responses concise unless detail is requested"),
         ("escalation", "general", "Escalate to owner when request is ambiguous and stakes are non-trivial"),
     ]

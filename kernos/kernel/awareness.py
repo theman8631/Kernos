@@ -114,7 +114,7 @@ class AwarenessEvaluator:
         state: StateStore,
         events: EventStream,
         interval_seconds: int = 1800,  # 30 minutes default for awareness pass
-        trigger_interval_seconds: int = 60,  # 60 seconds for trigger evaluation
+        trigger_interval_seconds: int = 15,  # 15 seconds for trigger evaluation
         trigger_store=None,  # TriggerStore — set for scheduler support
         handler=None,  # MessageHandler — set for scheduler outbound delivery
     ) -> None:

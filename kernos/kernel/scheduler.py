@@ -29,6 +29,7 @@ class Trigger:
     tenant_id: str
     member_id: str = ""
     space_id: str = ""
+    conversation_id: str = ""             # Platform conversation (e.g. Discord channel ID)
 
     # Condition
     condition_type: str = "time"         # "time" for 3E-B
@@ -145,8 +146,16 @@ class TriggerStore:
             if d.get("fire_count", 0) > 0 and not d.get("recurrence"):
                 continue
             nfa = d.get("next_fire_at", "")
-            if nfa and nfa <= now_iso:
-                results.append(Trigger(**d))
+            if not nfa:
+                continue
+            try:
+                # Handle both "2026-03-22 12:03" and "2026-03-22T12:03:00" formats
+                nfa_dt = datetime.fromisoformat(nfa.replace(" ", "T"))
+                now_dt = datetime.fromisoformat(now_iso.replace(" ", "T"))
+                if nfa_dt <= now_dt:
+                    results.append(Trigger(**d))
+            except ValueError:
+                continue
         return results
 
     async def remove(self, tenant_id: str, trigger_id: str) -> bool:
@@ -232,7 +241,7 @@ _SCHEDULE_EXTRACTION_SCHEMA = {
         },
         "when": {
             "type": "string",
-            "description": "ISO datetime string in local time for one-shot triggers",
+            "description": "ISO 8601 datetime with T separator and seconds (e.g. 2026-03-22T09:00:00)",
         },
         "message": {
             "type": "string",
@@ -273,17 +282,26 @@ async def _extract_schedule_params(
     Returns a dict on success, or an error string on failure.
     """
     import time as _time
-    current_dt = datetime.now()
+    current_local = datetime.now()
+    current_utc = datetime.now(timezone.utc)
     tz_name = _time.tzname[_time.daylight] if _time.daylight else _time.tzname[0]
+    # Try to get IANA timezone name
+    try:
+        iana_tz = str(current_local.astimezone().tzinfo)
+    except Exception:
+        iana_tz = tz_name
+    local_time = current_local.strftime('%A, %B %d, %Y %I:%M %p')
+    utc_time = current_utc.strftime('%Y-%m-%d %H:%M')
 
     try:
         result = await reasoning_service.complete_simple(
             system_prompt=(
-                "You are extracting structured schedule data from a natural language description. "
-                f"The current date and time is {current_dt.strftime('%A, %B %d, %Y %I:%M %p')} {tz_name}.\n\n"
+                "You are extracting schedule data from a natural language description. "
+                f"Current time: {local_time} ({iana_tz}) / {utc_time} UTC\n\n"
                 "Extract:\n"
                 "- action_type: 'notify' (send a message) or 'tool_call' (execute a tool)\n"
-                "- when: ISO datetime string in LOCAL time (no timezone offset). "
+                "- when: ISO 8601 datetime with T separator and seconds in LOCAL time "
+                "(e.g., 2026-03-22T09:00:00, NOT 2026-03-22 09:00). No timezone offset. "
                 "Convert relative times ('in 2 hours', 'tomorrow 9am') to absolute datetimes.\n"
                 "- message: The notification message text\n"
                 "- recurrence: empty string for one-shot, or cron expression for recurring "
@@ -304,6 +322,16 @@ async def _extract_schedule_params(
 
         if not parsed.get("when"):
             return "I couldn't determine when to schedule that. Can you be more specific about the time?"
+
+        # Normalize 'when' to ISO 8601 with T separator — Haiku sometimes produces
+        # "2026-03-22 12:03" (space separator) which breaks string comparison with
+        # _now_iso() output that uses T separator.
+        raw_when = parsed["when"]
+        try:
+            when_dt = datetime.fromisoformat(raw_when.replace(" ", "T"))
+            parsed["when"] = when_dt.isoformat()  # Always produces T separator with seconds
+        except ValueError:
+            return "I couldn't parse that time. Can you be more specific?"
 
         return parsed
 
@@ -326,6 +354,7 @@ async def handle_manage_schedule(
     trigger_id: str = "",
     description: str = "",
     reasoning_service=None,
+    conversation_id: str = "",
     **kwargs,  # Accept extra fields for backward compat
 ) -> str:
     """Handle the manage_schedule kernel tool.
@@ -354,6 +383,7 @@ async def handle_manage_schedule(
             extracted.get("notify_via", ""),
             extracted.get("delivery_class", "stage"),
             extracted.get("recurrence", ""),
+            conversation_id=conversation_id,
         )
 
     if action == "pause":
@@ -413,6 +443,7 @@ async def _create_trigger(
     description: str, when: str, action_type: str, message: str,
     tool_name: str, tool_args: dict, notify_via: str,
     delivery_class: str, recurrence: str,
+    conversation_id: str = "",
 ) -> str:
     if not when:
         return "Error: 'when' is required — provide an ISO datetime or cron expression."
@@ -444,6 +475,7 @@ async def _create_trigger(
         tenant_id=tenant_id,
         member_id=member_id,
         space_id=space_id,
+        conversation_id=conversation_id,
         condition_type="time",
         condition=when,
         next_fire_at=next_fire,
@@ -568,6 +600,34 @@ async def evaluate_triggers(
     return fired
 
 
+async def _store_scheduled_message(handler, trigger: Trigger, content: str) -> None:
+    """Inject a [SCHEDULED] message into conversation history so the agent has context."""
+    if not trigger.conversation_id or not hasattr(handler, "conversations"):
+        return
+    try:
+        entry = {
+            "role": "assistant",
+            "content": content,
+            "timestamp": _now_iso(),
+            "platform": "scheduler",
+            "tenant_id": trigger.tenant_id,
+            "conversation_id": trigger.conversation_id,
+            "space_tags": [trigger.space_id] if trigger.space_id else None,
+        }
+        await handler.conversations.append(
+            trigger.tenant_id, trigger.conversation_id, entry,
+        )
+        logger.info(
+            "TRIGGER_HISTORY: stored [SCHEDULED] message for trigger=%s in conv=%s",
+            trigger.trigger_id, trigger.conversation_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "TRIGGER_HISTORY: failed to store message for trigger=%s: %s",
+            trigger.trigger_id, exc,
+        )
+
+
 async def _fire_trigger(trigger: Trigger, handler) -> bool:
     """Execute a trigger's action. Returns True on success."""
     if trigger.action_type == "notify":
@@ -577,7 +637,12 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
         success = await handler.send_outbound(
             trigger.tenant_id, member_id, channel, message,
         )
-        if not success:
+        if success:
+            # Inject into conversation history so the agent knows what it sent
+            await _store_scheduled_message(
+                handler, trigger, f"[SCHEDULED] {message}",
+            )
+        else:
             # Hold for delivery on next user message
             trigger.pending_delivery = message
             logger.warning(
@@ -615,7 +680,11 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
             success = await handler.send_outbound(
                 trigger.tenant_id, member_id, channel, delivery_msg,
             )
-            if not success:
+            if success:
+                await _store_scheduled_message(
+                    handler, trigger, f"[SCHEDULED] {delivery_msg}",
+                )
+            else:
                 trigger.pending_delivery = delivery_msg
                 logger.warning(
                     "TRIGGER_DELIVERY_PENDING: id=%s reason=outbound_failed",

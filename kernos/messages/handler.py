@@ -272,9 +272,20 @@ def _build_system_prompt(
 
     # 1. Operating principles + current date
     import time as _time
-    current_dt = datetime.now()
+    from datetime import timezone as _tz
+    current_local = datetime.now()
+    current_utc = datetime.now(_tz.utc)
     tz_name = _time.tzname[_time.daylight] if _time.daylight else _time.tzname[0]
-    date_line = f"Current date and time: {current_dt.strftime('%A, %B %d, %Y %I:%M %p')} {tz_name}"
+    # Try to get IANA timezone name
+    try:
+        iana_tz = str(current_local.astimezone().tzinfo)
+    except Exception:
+        iana_tz = tz_name
+    date_line = (
+        f"Current time: {current_local.strftime('%A, %B %d, %Y — %I:%M %p')} "
+        f"({iana_tz}) / "
+        f"{current_utc.strftime('%Y-%m-%d %H:%M')} UTC"
+    )
     parts.append(f"{date_line}\n\n{template.operating_principles}")
 
     # 2. Agent identity / personality
@@ -640,7 +651,7 @@ class MessageHandler:
                 state=self.state,
                 events=self.events,
                 interval_seconds=int(os.getenv("KERNOS_AWARENESS_INTERVAL", "1800")),
-                trigger_interval_seconds=int(os.getenv("KERNOS_TRIGGER_INTERVAL", "60")),
+                trigger_interval_seconds=int(os.getenv("KERNOS_TRIGGER_INTERVAL", "15")),
                 trigger_store=self._trigger_store,
                 handler=self,
             )
@@ -1182,6 +1193,20 @@ class MessageHandler:
         # Fallback: if no compaction state and no compaction doc, use old truncation
         if not comp_state and not active_doc:
             recent_messages = self._truncate_to_budget(recent_messages, SPACE_THREAD_TOKEN_BUDGET)
+
+        # Sanitize: strip messages with empty content (e.g. from a file-only upload that
+        # was stored before the empty-message guard was added). The Anthropic API returns
+        # 400 on empty content strings.
+        sanitized = []
+        for m in recent_messages:
+            if not m["content"] or not m["content"].strip():
+                logger.warning(
+                    "EMPTY_MSG_SANITIZE: dropping %s message with empty content from thread",
+                    m["role"],
+                )
+                continue
+            sanitized.append(m)
+        recent_messages = sanitized
 
         # Sanitize: drop any trailing user messages (orphaned from a previous failed request).
         # The Anthropic API requires alternating roles. If a rate limit or provider error
@@ -1748,9 +1773,24 @@ class MessageHandler:
             logger.warning("Failed to emit message.received: %s", exc)
 
         # Store user message WITH space_tags
+        # Prevent empty content: if the user sent only a file attachment with no text,
+        # inject a descriptive placeholder so the API never sees an empty user message.
+        user_content = message.content
+        if not user_content or not user_content.strip():
+            if upload_notifications:
+                # File-only upload — describe what was uploaded
+                filenames = []
+                if message.context:
+                    for att in message.context.get("attachments", []):
+                        filenames.append(att.get("filename", "file"))
+                user_content = "User uploaded: " + ", ".join(filenames) if filenames else "User uploaded a file."
+            else:
+                user_content = "(empty message)"
+            logger.info("EMPTY_MSG_GUARD: injected content=%r for empty user message", user_content)
+
         user_entry = {
             "role": "user",
-            "content": message.content,
+            "content": user_content,
             "timestamp": message.timestamp.isoformat(),
             "platform": message.platform,
             "tenant_id": tenant_id,

@@ -745,12 +745,12 @@ class TestModelGateAuthority:
         assert result.allowed is False
         assert result.reason == "denied"
 
-    def test_model_max_tokens_is_256(self):
-        """Model is called with max_tokens=256 (raised from 128 to fit CONFLICT: rule text)."""
+    def test_model_max_tokens_is_512(self):
+        """Model is called with max_tokens=512 (raised from 256 for richer gate responses)."""
         svc = _make_service()
         calls = []
 
-        async def capture_simple(system_prompt, user_content, max_tokens=512, **kwargs):
+        async def capture_simple(system_prompt, user_content, max_tokens=1024, **kwargs):
             calls.append(max_tokens)
             return "DENIED"
 
@@ -762,7 +762,7 @@ class TestModelGateAuthority:
                 "I was thinking", "t1", "space_1",
             )
         )
-        assert calls[0] == 256
+        assert calls[0] == 512
 
     async def test_denied_reason_is_simple(self):
         """When DENIED, reason is simply 'denied'."""

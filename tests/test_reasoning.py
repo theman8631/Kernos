@@ -22,6 +22,7 @@ from kernos.kernel.reasoning import (
     ReasoningResult,
     ReasoningService,
 )
+from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
 from kernos.persistence import AuditStore
 
 
@@ -290,3 +291,138 @@ async def test_anthropic_provider_returns_provider_response_on_success():
     assert result.stop_reason == "end_turn"
     assert result.input_tokens == 5
     assert result.output_tokens == 10
+
+
+# ---------------------------------------------------------------------------
+# Hallucination coaching model
+# ---------------------------------------------------------------------------
+
+
+class TestHallucinationCoaching:
+    """Tests for the private coaching loop when agent hallucinates tool use."""
+
+    async def test_coaching_succeeds_on_attempt_2(self):
+        """Agent hallucinates on attempt 1, succeeds with tool call on attempt 2."""
+        hallucinated = _text_response("I scheduled your reminder! ✅")
+        analysis = _text_response("Analysis: tool not called.")  # diagnostic complete_simple
+        # Use a non-kernel tool (MCP) to avoid internal complete_simple calls
+        tool_resp = ProviderResponse(
+            content=[
+                ContentBlock(type="text", text="I've created the event."),
+                ContentBlock(type="tool_use", name="create-event", id="t1",
+                             input={"title": "test"}),
+            ],
+            stop_reason="tool_use",
+            input_tokens=10,
+            output_tokens=20,
+        )
+
+        service, mock_provider, events, mcp, audit = _make_service()
+        # 3 calls: initial response, diagnostic analysis (complete_simple), coaching retry
+        mock_provider.complete.side_effect = [hallucinated, analysis, tool_resp]
+        request = _make_request(
+            tools=[{"name": "create-event", "input_schema": {"type": "object", "properties": {}}}],
+        )
+        result = await service.reason(request)
+
+        # Should NOT contain the hallucinated text
+        assert "✅" not in result.text
+        # Should contain the retry's text
+        assert "event" in result.text.lower()
+        # Provider was called 3 times (original + analysis + coaching retry)
+        assert mock_provider.complete.call_count == 3
+        # MCP tool was actually called
+        mcp.call_tool.assert_called_once_with("create-event", {"title": "test"})
+        # Coaching messages were injected in the third call (the retry)
+        retry_call_kwargs = mock_provider.complete.call_args_list[2][1]
+        retry_call_messages = retry_call_kwargs["messages"]
+        # Find the (SYSTEM) correction message
+        system_msgs = [m for m in retry_call_messages
+                       if m.get("role") == "user" and "[SYSTEM]" in m.get("content", "")]
+        assert len(system_msgs) == 1
+        assert "2 remaining attempts" in system_msgs[0]["content"]
+
+    async def test_coaching_all_attempts_fail(self):
+        """All 3 attempts hallucinate — user gets failure message."""
+        responses = [
+            _text_response("I scheduled your reminder! ✅"),
+            _text_response("Analysis: tool not called."),  # diagnostic
+            _text_response("I've scheduled it for 3pm."),
+            _text_response("Done — fires at 3pm."),
+        ]
+
+        service, mock_provider, events, mcp, audit = _make_service()
+        mock_provider.complete.side_effect = responses
+        request = _make_request()
+        result = await service.reason(request)
+
+        assert "having trouble" in result.text.lower()
+        # Original + analysis + 2 retries = 4 total calls
+        assert mock_provider.complete.call_count == 4
+
+    async def test_coaching_attempt_3_differentiated_message(self):
+        """Attempt 3 correction message is shorter and more forceful."""
+        responses = [
+            _text_response("I scheduled it! ✅"),
+            _text_response("Analysis: tool not called."),  # diagnostic
+            _text_response("I've scheduled your reminder."),
+            _text_response("Done — fires at 3pm."),
+        ]
+
+        service, mock_provider, events, mcp, audit = _make_service()
+        mock_provider.complete.side_effect = responses
+        request = _make_request()
+        await service.reason(request)
+
+        # Check that the 4th call (attempt 3) had a differentiated message
+        fourth_call_kwargs = mock_provider.complete.call_args_list[3][1]
+        fourth_call_messages = fourth_call_kwargs["messages"]
+        system_msgs = [m for m in fourth_call_messages
+                       if m.get("role") == "user" and "[SYSTEM]" in m.get("content", "")]
+        # Should have 2 system messages (attempt 2 + attempt 3)
+        assert len(system_msgs) == 2
+        last_msg = system_msgs[-1]["content"]
+        assert "Second attempt also failed" in last_msg
+        assert "MUST generate a tool_use block" in last_msg
+
+    async def test_no_coaching_when_no_hallucination(self):
+        """Normal text response without tool-claiming language is not flagged."""
+        normal = _text_response("Sure, I can help with that. What would you like?")
+
+        service, mock_provider, events, mcp, audit = _make_service()
+        mock_provider.complete.return_value = normal
+        request = _make_request()
+        result = await service.reason(request)
+
+        assert result.text == "Sure, I can help with that. What would you like?"
+        assert mock_provider.complete.call_count == 1
+
+    async def test_no_coaching_when_tool_was_called(self):
+        """If the agent actually called a tool (iterations > 0), no coaching triggered."""
+        tool_resp = ProviderResponse(
+            content=[
+                ContentBlock(type="text", text=""),
+                ContentBlock(type="tool_use", name="remember", id="t1",
+                             input={"query": "meetings"}),
+            ],
+            stop_reason="tool_use",
+            input_tokens=10,
+            output_tokens=20,
+        )
+        # After tool call, agent responds with completion text
+        final_resp = _text_response("I've created a memory entry for that.")
+
+        service, mock_provider, events, mcp, audit = _make_service()
+        mock_provider.complete.side_effect = [tool_resp, final_resp]
+        # Mock remember tool
+        service._retrieval = MagicMock()
+        service._retrieval.remember = AsyncMock(return_value="Stored.")
+        request = _make_request(
+            tools=[{"name": "remember", "input_schema": {"type": "object", "properties": {}}}],
+        )
+        result = await service.reason(request)
+
+        # "I've created" would trigger coaching IF iterations were 0, but tool was called
+        assert "I've created" in result.text
+        # Only 2 calls: tool_use + final response (no coaching retries)
+        assert mock_provider.complete.call_count == 2
