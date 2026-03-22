@@ -29,7 +29,7 @@ def _make_msg(platform: str = "sms", sender: str = "+15555550100") -> Normalized
         platform_capabilities=["text"],
         conversation_id="conv-1",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="ignored",
+        tenant_id="",  # Empty so derive_tenant_id uses platform:sender fallback
     )
 
 

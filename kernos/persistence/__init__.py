@@ -15,9 +15,11 @@ if TYPE_CHECKING:
 def derive_tenant_id(message: NormalizedMessage) -> str:
     """Derive tenant_id from a NormalizedMessage.
 
-    Phase 1A: simple platform:sender mapping.
-    Phase 2+: proper identity resolution across platforms.
+    If the adapter already set tenant_id (e.g., from KERNOS_INSTANCE_ID),
+    use it. Otherwise derive from platform:sender.
     """
+    if message.tenant_id:
+        return message.tenant_id
     return f"{message.platform}:{message.sender}"
 
 

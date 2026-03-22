@@ -77,7 +77,7 @@ def _msg(content: str, platform: str = "discord", sender: str = "user1"):
         platform_capabilities=["text"],
         conversation_id="conv_test",
         timestamp=datetime.now(timezone.utc),
-        tenant_id=sender,
+        tenant_id=f"{platform}:{sender}",
     )
 
 
@@ -692,7 +692,7 @@ class TestSystemPromptPosture:
             platform_capabilities=["text"],
             conversation_id="conv1",
             timestamp=datetime.now(timezone.utc),
-            tenant_id="user123",
+            tenant_id="discord:user123",
         )
 
     def test_posture_injected_for_non_daily_space(self):

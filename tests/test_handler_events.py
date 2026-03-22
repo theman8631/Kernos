@@ -38,7 +38,7 @@ def _make_message(content: str = "Hello", platform: str = "sms") -> NormalizedMe
         platform_capabilities=["text", "mms"],
         conversation_id="+15555550100",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="+15555550100",
+        tenant_id="sms:+15555550100",
     )
 
 

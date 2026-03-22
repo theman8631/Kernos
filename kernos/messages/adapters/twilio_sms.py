@@ -69,7 +69,7 @@ class TwilioSMSAdapter(BaseAdapter):
         )
 
         # Instance identity: KERNOS_INSTANCE_ID overrides per-adapter derivation
-        tenant_id = os.getenv("KERNOS_INSTANCE_ID", self._owner_phone)
+        tenant_id = os.getenv("KERNOS_INSTANCE_ID") or self._owner_phone
 
         # conversation_id is per-sender — SMS has no thread concept beyond who's talking.
         conversation_id = sender
