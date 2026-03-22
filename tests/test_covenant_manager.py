@@ -123,7 +123,7 @@ class TestValidateCovenantSet:
         )
 
         stats = await validate_covenant_set(store, events, reasoning, "test_tenant", "r2")
-        assert stats == {"merges": 0, "conflicts": 0, "rewrites": 0}
+        assert stats["merges"] == 0 and stats["conflicts"] == 0 and stats["rewrites"] == 0
 
     async def test_merge_duplicates(self, tmp_path):
         """MERGE: 4 rules about Sarah Henderson → merges into 1, supersedes 3."""
@@ -181,7 +181,7 @@ class TestValidateCovenantSet:
         # Whisper should have been created
         whispers = await store.get_pending_whispers("test_tenant")
         assert len(whispers) == 1
-        assert "conflict" in whispers[0].insight_text.lower()
+        assert "two rules" in whispers[0].insight_text.lower()
 
     async def test_rewrite_creates_new_rule(self, tmp_path):
         """REWRITE: vague rule gets improved description."""
@@ -248,7 +248,7 @@ class TestValidateCovenantSet:
 
         reasoning = AsyncMock()
         stats = await validate_covenant_set(store, events, reasoning, "test_tenant", "r1")
-        assert stats == {"merges": 0, "conflicts": 0, "rewrites": 0}
+        assert stats["merges"] == 0 and stats["conflicts"] == 0 and stats["rewrites"] == 0
         reasoning.complete_simple.assert_not_called()
 
     async def test_llm_failure_graceful(self, tmp_path):
@@ -262,7 +262,7 @@ class TestValidateCovenantSet:
         reasoning.complete_simple = AsyncMock(side_effect=Exception("API timeout"))
 
         stats = await validate_covenant_set(store, events, reasoning, "test_tenant", "r2")
-        assert stats == {"merges": 0, "conflicts": 0, "rewrites": 0}
+        assert stats["merges"] == 0 and stats["conflicts"] == 0 and stats["rewrites"] == 0
 
         active = await store.get_contract_rules("test_tenant", active_only=True)
         assert len(active) == 2
@@ -278,7 +278,7 @@ class TestValidateCovenantSet:
         reasoning.complete_simple = AsyncMock(return_value="not json at all")
 
         stats = await validate_covenant_set(store, events, reasoning, "test_tenant", "r2")
-        assert stats == {"merges": 0, "conflicts": 0, "rewrites": 0}
+        assert stats["merges"] == 0 and stats["conflicts"] == 0 and stats["rewrites"] == 0
 
     async def test_invalid_rule_id_skipped(self, tmp_path):
         """LLM references non-existent rule_id → that action skipped, others processed."""

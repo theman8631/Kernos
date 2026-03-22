@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 source .venv/bin/activate
 
 # Start the bot
-echo "Starting Kernos Discord bot..."
+echo "Starting Kernos..."
 echo "Press Ctrl+C to stop."
 echo ""
-python kernos/discord_bot.py
+python kernos/server.py

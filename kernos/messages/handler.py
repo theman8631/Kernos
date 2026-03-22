@@ -271,8 +271,10 @@ def _build_system_prompt(
         parts.append(cross_domain_prefix)
 
     # 1. Operating principles + current date
-    current_dt = datetime.now(timezone.utc)
-    date_line = f"Current date and time: {current_dt.strftime('%A, %B %d, %Y %I:%M %p UTC')}"
+    import time as _time
+    current_dt = datetime.now()
+    tz_name = _time.tzname[_time.daylight] if _time.daylight else _time.tzname[0]
+    date_line = f"Current date and time: {current_dt.strftime('%A, %B %d, %Y %I:%M %p')} {tz_name}"
     parts.append(f"{date_line}\n\n{template.operating_principles}")
 
     # 2. Agent identity / personality

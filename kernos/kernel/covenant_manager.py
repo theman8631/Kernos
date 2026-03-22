@@ -71,8 +71,9 @@ VALIDATION_SCHEMA = {
                 "properties": {
                     "type": {
                         "type": "string",
-                        "enum": ["MERGE", "CONFLICT", "REWRITE", "NO_ISSUES"],
+                        "enum": ["MERGE", "CONFLICT", "REWRITE", "SUPERSEDE", "NO_ISSUES"],
                     },
+                    "retire_rule_id": {"type": "string"},
                     "keep_rule_id": {"type": "string"},
                     "supersede_rule_ids": {
                         "type": "array",
@@ -98,6 +99,12 @@ VALIDATION_SCHEMA = {
 }
 
 
+# Track conflict pairs to suppress re-logging and auto-resolve after 3 runs.
+# Key: frozenset({rule_id_a, rule_id_b}), Value: run count
+_conflict_tracker: dict[frozenset, int] = {}
+_CONFLICT_AUTO_SUPERSEDE_THRESHOLD = 3
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -113,23 +120,30 @@ actions.
 
 For each problem found, return ONE action:
 
+- SUPERSEDE: A newer rule on the same topic replaces an older one — the user \
+changed their mind. Return retire_rule_id (the older rule to remove) and \
+keep_rule_id (the newer one that stays). This is the most common resolution \
+when two rules seem to conflict. Example: "be verbose about system events" \
+followed later by "don't narrate successful tool calls" = SUPERSEDE the older.
+
 - MERGE: Two or more rules say the same thing in different words. Keep the best-\
 worded version, supersede the others. Return the keep_rule_id and the \
 supersede_rule_ids, plus a reason.
 
-- CONFLICT: Two rules contradict each other (e.g., a MUST and a MUST_NOT about \
-the same behavior). Return both rule_ids and a plain-English description of \
-the conflict for the user to resolve.
+- CONFLICT: Two rules GENUINELY contradict each other AND it's ambiguous which \
+one the user prefers. This is rare — most apparent conflicts are actually \
+SUPERSEDE (user changed their mind). Only use CONFLICT when you truly cannot \
+tell which instruction is newer or preferred. Return both rule_ids and a \
+plain-English description.
 
 - REWRITE: A single rule is poorly worded, vague, or could be clearer. Return \
 the rule_id, current_description, and a suggested_description.
 
 - NO_ISSUES: The covenant set is clean. No action needed.
 
-Be thorough. Check every rule against every other rule. Common patterns:
-- "share thought process" vs "don't narrate reasoning" = CONFLICT
-- Four rules all about the same person's contact info = MERGE
-- "do the thing with the stuff" = REWRITE
+Be thorough. Check every rule against every other rule. Prefer SUPERSEDE over \
+CONFLICT when two rules address the same topic with different instructions — \
+the user most likely changed their mind.
 
 Respond with JSON only. No other text."""
 
@@ -153,7 +167,7 @@ async def validate_covenant_set(
     from kernos.kernel.event_types import EventType
     from kernos.kernel.events import emit_event
 
-    stats = {"merges": 0, "conflicts": 0, "rewrites": 0}
+    stats = {"merges": 0, "conflicts": 0, "rewrites": 0, "supersedes": 0}
 
     try:
         active_rules = await state.get_contract_rules(tenant_id, active_only=True)
@@ -165,11 +179,13 @@ async def validate_covenant_set(
         rule_map: dict[str, CovenantRule] = {}
         for rule in active_rules:
             scope = rule.context_space or "global"
+            created = rule.created_at[:19] if rule.created_at else "unknown"
             rule_lines.append(
                 f"- rule_id: {rule.id}\n"
                 f"  type: {rule.rule_type.upper()}\n"
                 f"  description: {rule.description}\n"
-                f"  context_space: {scope}"
+                f"  context_space: {scope}\n"
+                f"  created_at: {created}"
             )
             rule_map[rule.id] = rule
 
@@ -177,7 +193,7 @@ async def validate_covenant_set(
             "Active covenant rules for this tenant:\n\n"
             + "\n".join(rule_lines)
             + f"\n\nThe most recently written rule is: {new_rule_id}\n\n"
-            "Identify any MERGE, CONFLICT, or REWRITE issues. "
+            "Identify any SUPERSEDE, MERGE, CONFLICT, or REWRITE issues. "
             "If the set is clean, return NO_ISSUES."
         )
 
@@ -202,7 +218,12 @@ async def validate_covenant_set(
                 )
                 continue
 
-            if action_type == "MERGE":
+            if action_type == "SUPERSEDE":
+                await _handle_supersede(
+                    state, events, tenant_id, action, rule_map, stats,
+                )
+
+            elif action_type == "MERGE":
                 await _handle_merge(
                     state, events, tenant_id, action, rule_map, stats,
                 )
@@ -221,6 +242,70 @@ async def validate_covenant_set(
         logger.warning("COVENANT_VALIDATE: failed (%s), skipping", exc)
 
     return stats
+
+
+async def _handle_supersede(
+    state: StateStore,
+    events,
+    tenant_id: str,
+    action: dict,
+    rule_map: dict[str, CovenantRule],
+    stats: dict,
+) -> None:
+    """Auto-execute a SUPERSEDE — newer rule retires the older one."""
+    from kernos.kernel.events import emit_event
+
+    retire_id = action.get("retire_rule_id", "")
+    keep_id = action.get("keep_rule_id", "")
+    reason = action.get("reason", "")
+
+    # If LLM returned rule_ids instead, pick older/newer by created_at
+    if not retire_id and not keep_id:
+        rule_ids = action.get("rule_ids", [])
+        valid = [rid for rid in rule_ids if rid in rule_map]
+        if len(valid) >= 2:
+            sorted_by_age = sorted(valid, key=lambda rid: rule_map[rid].created_at or "")
+            retire_id = sorted_by_age[0]  # older
+            keep_id = sorted_by_age[-1]   # newer
+
+    if not retire_id or retire_id not in rule_map:
+        logger.warning("COVENANT_VALIDATE: SUPERSEDE skipped — retire_rule_id %r not found", retire_id)
+        return
+    if not keep_id or keep_id not in rule_map:
+        logger.warning("COVENANT_VALIDATE: SUPERSEDE skipped — keep_rule_id %r not found", keep_id)
+        return
+
+    # Verify: retire the older rule. If timestamps disagree with LLM's choice, trust timestamps.
+    retire_rule = rule_map[retire_id]
+    keep_rule = rule_map[keep_id]
+    if retire_rule.created_at and keep_rule.created_at and retire_rule.created_at > keep_rule.created_at:
+        # LLM got it backwards — swap
+        retire_id, keep_id = keep_id, retire_id
+        retire_rule, keep_rule = keep_rule, retire_rule
+
+    await state.update_contract_rule(
+        tenant_id, retire_id,
+        {"superseded_by": keep_id, "updated_at": _now_iso()},
+    )
+
+    stats["supersedes"] += 1
+    logger.info(
+        "COVENANT_WRITE: id=%s action=SUPERSEDE source=validate_covenant_set trigger=superseded_by:%s reason=%s",
+        retire_id, keep_id, reason[:80],
+    )
+
+    try:
+        await emit_event(
+            events, "covenant.rule.superseded", tenant_id,
+            "covenant_validator",
+            payload={
+                "retired_rule_id": retire_id,
+                "kept_rule_id": keep_id,
+                "reason": reason,
+            },
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit covenant.rule.superseded: %s", exc)
 
 
 async def _handle_merge(
@@ -282,7 +367,7 @@ async def _handle_conflict(
     rule_map: dict[str, CovenantRule],
     stats: dict,
 ) -> None:
-    """Create a whisper for a CONFLICT — do NOT auto-resolve."""
+    """Handle a CONFLICT — track, suppress re-logging, auto-supersede after threshold."""
     from kernos.kernel.event_types import EventType
     from kernos.kernel.events import emit_event
     from kernos.kernel.awareness import Whisper, generate_whisper_id
@@ -295,38 +380,67 @@ async def _handle_conflict(
         logger.warning("COVENANT_VALIDATE: CONFLICT skipped — need at least 2 valid rule_ids")
         return
 
-    stats["conflicts"] += 1
-    logger.info(
-        "COVENANT_VALIDATE: conflict detected between %s: %s",
-        valid_ids, description,
-    )
+    # Track conflict pair to suppress re-logging
+    pair_key = frozenset(valid_ids[:2])
+    run_count = _conflict_tracker.get(pair_key, 0) + 1
+    _conflict_tracker[pair_key] = run_count
 
-    # Create a whisper so the conflict surfaces at next conversation start
-    evidence = []
-    for rid in valid_ids:
-        rule = rule_map[rid]
-        evidence.append(f"Rule {rid} [{rule.rule_type.upper()}]: {rule.description}")
+    # Auto-supersede after threshold: retire the older rule
+    if run_count >= _CONFLICT_AUTO_SUPERSEDE_THRESHOLD:
+        sorted_by_age = sorted(valid_ids[:2], key=lambda rid: rule_map[rid].created_at or "")
+        retire_id = sorted_by_age[0]
+        keep_id = sorted_by_age[1]
 
-    whisper = Whisper(
-        whisper_id=generate_whisper_id(),
-        insight_text=(
-            f"I noticed a conflict in your rules: {description} "
-            "Which one do you want me to keep?"
-        ),
-        delivery_class="stage",
-        source_space_id="",
-        target_space_id="",
-        supporting_evidence=evidence,
-        reasoning_trace="Detected by post-write covenant validation",
-        knowledge_entry_id="",
-        foresight_signal="covenant_conflict",
-        created_at=_now_iso(),
-    )
+        await state.update_contract_rule(
+            tenant_id, retire_id,
+            {"superseded_by": keep_id, "updated_at": _now_iso()},
+        )
+        _conflict_tracker.pop(pair_key, None)
 
-    try:
-        await state.save_whisper(tenant_id, whisper)
-    except Exception as exc:
-        logger.warning("COVENANT_VALIDATE: failed to save conflict whisper: %s", exc)
+        stats["supersedes"] = stats.get("supersedes", 0) + 1
+        logger.info(
+            "COVENANT_WRITE: id=%s action=AUTO_SUPERSEDE source=conflict_default "
+            "trigger=unresolved_after_%d_runs keep=%s",
+            retire_id, _CONFLICT_AUTO_SUPERSEDE_THRESHOLD, keep_id,
+        )
+        return
+
+    # First occurrence: create whisper and log
+    if run_count == 1:
+        stats["conflicts"] += 1
+        logger.info(
+            "COVENANT_VALIDATE: conflict detected between %s: %s",
+            valid_ids, description,
+        )
+
+        evidence = []
+        for rid in valid_ids:
+            rule = rule_map[rid]
+            evidence.append(f"Rule {rid} [{rule.rule_type.upper()}]: {rule.description}")
+
+        whisper = Whisper(
+            whisper_id=generate_whisper_id(),
+            insight_text=(
+                f"I have two rules pulling in different directions: {description} "
+                "I'll go with the newer one — let me know if you want to adjust."
+            ),
+            delivery_class="stage",
+            source_space_id="",
+            target_space_id="",
+            supporting_evidence=evidence,
+            reasoning_trace="Detected by post-write covenant validation",
+            knowledge_entry_id="",
+            foresight_signal="covenant_conflict",
+            created_at=_now_iso(),
+        )
+
+        try:
+            await state.save_whisper(tenant_id, whisper)
+        except Exception as exc:
+            logger.warning("COVENANT_VALIDATE: failed to save conflict whisper: %s", exc)
+    else:
+        # Subsequent runs before threshold — suppress logging
+        return
 
     try:
         await emit_event(

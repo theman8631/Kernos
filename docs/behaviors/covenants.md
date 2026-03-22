@@ -36,8 +36,9 @@ Every new tenant gets seven default covenants:
 
 After every rule creation, `validate_covenant_set()` fires a single Haiku call checking the full set for:
 
+- **SUPERSEDE** — a newer rule replaces an older one on the same topic (the user changed their mind). The older rule is retired automatically. This is the most common resolution for apparent conflicts.
 - **MERGE** — auto-resolves duplicate rules (supersedes the older one)
-- **CONFLICT** — contradictory rules surface as a whisper for user resolution
+- **CONFLICT** — genuinely ambiguous contradictions surface as a whisper once. If unresolved after 3 validation runs, the older rule is auto-superseded.
 - **REWRITE** — auto-improves poorly worded rules
 
 ## manage_covenants Tool
