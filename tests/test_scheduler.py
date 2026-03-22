@@ -19,15 +19,15 @@ from kernos.kernel.scheduler import (
 
 
 def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now().isoformat()
 
 
 def _future_iso(hours: float = 1) -> str:
-    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+    return (datetime.now() + timedelta(hours=hours)).isoformat()
 
 
 def _past_iso(hours: float = 1) -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    return (datetime.now() - timedelta(hours=hours)).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -135,19 +135,13 @@ class TestManageScheduleTool:
         r = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert r._classify_tool_effect("manage_schedule", None, {"action": "list"}) == "read"
 
-    def test_gate_classification_create_notify(self):
+    def test_gate_classification_create(self):
+        """Create is always read — authorization happens at fire time via covenants."""
         from kernos.kernel.reasoning import ReasoningService
         r = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         assert r._classify_tool_effect(
-            "manage_schedule", None, {"action": "create", "action_type": "notify"}
+            "manage_schedule", None, {"action": "create"}
         ) == "read"
-
-    def test_gate_classification_create_tool_call(self):
-        from kernos.kernel.reasoning import ReasoningService
-        r = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
-        assert r._classify_tool_effect(
-            "manage_schedule", None, {"action": "create", "action_type": "tool_call"}
-        ) == "soft_write"
 
     def test_gate_classification_remove(self):
         from kernos.kernel.reasoning import ReasoningService
@@ -163,14 +157,26 @@ class TestManageScheduleHandler:
         result = await handle_manage_schedule(store, "t1", "", "", "list")
         assert "No scheduled" in result
 
-    async def test_create_notify(self, tmp_path):
+    async def test_create_notify_via_extraction(self, tmp_path):
+        """Create with NL description + mock Haiku extraction."""
+        import json
         store = TriggerStore(tmp_path)
+        reasoning = AsyncMock()
+        reasoning.complete_simple = AsyncMock(return_value=json.dumps({
+            "action_type": "notify",
+            "when": _future_iso(1),
+            "message": "Time to check your email!",
+            "delivery_class": "stage",
+            "recurrence": "",
+            "notify_via": "",
+            "tool_name": "",
+            "tool_args": "",
+        }))
+
         result = await handle_manage_schedule(
             store, "t1", "m1", "s1", "create",
-            description="Check email",
-            when=_future_iso(1),
-            action_type="notify",
-            message="Time to check your email!",
+            description="Remind me to check email in 1 hour",
+            reasoning_service=reasoning,
         )
         assert "Scheduled" in result
         assert "trig_" in result
@@ -178,7 +184,7 @@ class TestManageScheduleHandler:
         assert len(triggers) == 1
         assert triggers[0].action_type == "notify"
 
-    async def test_create_missing_when(self, tmp_path):
+    async def test_create_missing_reasoning_service(self, tmp_path):
         store = TriggerStore(tmp_path)
         result = await handle_manage_schedule(
             store, "t1", "", "", "create", description="test",
@@ -187,47 +193,40 @@ class TestManageScheduleHandler:
 
     async def test_create_missing_description(self, tmp_path):
         store = TriggerStore(tmp_path)
+        reasoning = AsyncMock()
         result = await handle_manage_schedule(
-            store, "t1", "", "", "create", when=_future_iso(1),
+            store, "t1", "", "", "create", reasoning_service=reasoning,
         )
         assert "Error" in result
 
     async def test_pause_and_resume(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await handle_manage_schedule(
-            store, "t1", "", "", "create",
-            description="test", when=_future_iso(1),
-        )
-        triggers = await store.list_active("t1")
-        tid = triggers[0].trigger_id
+        t = Trigger(trigger_id="trig_pr", tenant_id="t1", status="active",
+                    action_description="test", next_fire_at=_future_iso(1))
+        await store.save(t)
 
-        result = await handle_manage_schedule(store, "t1", "", "", "pause", trigger_id=tid)
+        result = await handle_manage_schedule(store, "t1", "", "", "pause", trigger_id="trig_pr")
         assert "paused" in result
         assert len(await store.list_active("t1")) == 0
 
-        result = await handle_manage_schedule(store, "t1", "", "", "resume", trigger_id=tid)
+        result = await handle_manage_schedule(store, "t1", "", "", "resume", trigger_id="trig_pr")
         assert "active" in result
         assert len(await store.list_active("t1")) == 1
 
     async def test_remove(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await handle_manage_schedule(
-            store, "t1", "", "", "create",
-            description="test", when=_future_iso(1),
-        )
-        triggers = await store.list_all("t1")
-        tid = triggers[0].trigger_id
+        t = Trigger(trigger_id="trig_rm", tenant_id="t1", action_description="test")
+        await store.save(t)
 
-        result = await handle_manage_schedule(store, "t1", "", "", "remove", trigger_id=tid)
+        result = await handle_manage_schedule(store, "t1", "", "", "remove", trigger_id="trig_rm")
         assert "Removed" in result
-        assert await store.get("t1", tid) is None
+        assert await store.get("t1", "trig_rm") is None
 
     async def test_list_shows_triggers(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await handle_manage_schedule(
-            store, "t1", "", "", "create",
-            description="Check email", when=_future_iso(1),
-        )
+        t = Trigger(trigger_id="trig_ls", tenant_id="t1", action_description="Check email",
+                    next_fire_at=_future_iso(1), action_type="notify")
+        await store.save(t)
         result = await handle_manage_schedule(store, "t1", "", "", "list")
         assert "Check email" in result
         assert "notify" in result

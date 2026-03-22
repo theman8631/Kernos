@@ -681,13 +681,11 @@ class ReasoningService:
         if tool_name == "manage_channels":
             action = (tool_input or {}).get("action", "list")
             return "read" if action == "list" else "soft_write"
-        # manage_schedule: "list" is read; "create" with notify is read (reminders always OK);
-        # "create" with tool_call and other actions are soft_write
+        # manage_schedule: "list" and "create" are read (reminders always OK, tool_call
+        # authorization happens at fire time via covenants); other actions are soft_write
         if tool_name == "manage_schedule":
             action = (tool_input or {}).get("action", "list")
-            if action == "list":
-                return "read"
-            if action == "create" and (tool_input or {}).get("action_type") == "notify":
+            if action in ("list", "create"):
                 return "read"
             return "soft_write"
         if tool_name in _KERNEL_WRITES:
@@ -1113,19 +1111,12 @@ class ReasoningService:
                     return await handle_manage_schedule(
                         self._trigger_store,
                         request.tenant_id,
-                        member_id=request.active_space_id,  # placeholder
+                        member_id=request.active_space_id,
                         space_id=request.active_space_id,
                         action=tool_input.get("action", "list"),
                         trigger_id=tool_input.get("trigger_id", ""),
                         description=tool_input.get("description", ""),
-                        when=tool_input.get("when", ""),
-                        action_type=tool_input.get("action_type", "notify"),
-                        message=tool_input.get("message", ""),
-                        tool_name=tool_input.get("tool_name", ""),
-                        tool_args=tool_input.get("tool_args"),
-                        notify_via=tool_input.get("notify_via", ""),
-                        delivery_class=tool_input.get("delivery_class", "stage"),
-                        recurrence=tool_input.get("recurrence", ""),
+                        reasoning_service=self,
                     )
                 return "Scheduler is not available."
             else:
@@ -1785,14 +1776,7 @@ class ReasoningService:
                                 action=tool_args.get("action", "list"),
                                 trigger_id=tool_args.get("trigger_id", ""),
                                 description=tool_args.get("description", ""),
-                                when=tool_args.get("when", ""),
-                                action_type=tool_args.get("action_type", "notify"),
-                                message=tool_args.get("message", ""),
-                                tool_name=tool_args.get("tool_name", ""),
-                                tool_args=tool_args.get("tool_args"),
-                                notify_via=tool_args.get("notify_via", ""),
-                                delivery_class=tool_args.get("delivery_class", "stage"),
-                                recurrence=tool_args.get("recurrence", ""),
+                                reasoning_service=self,
                             )
                         else:
                             result = "Scheduler is not available."
@@ -1974,8 +1958,7 @@ class ReasoningService:
         )
 
         # Hallucination check: agent claims tool use in text but no tool was actually called.
-        # This fires when stop_reason=end_turn AND iterations=0 AND response contains
-        # tool-claiming language. Instead of tagging, retry with a corrective message.
+        # Drop the hallucinated response, retry clean from the user's last message.
         if iterations == 0 and response.stop_reason == "end_turn":
             _TOOL_CLAIM_PHRASES = (
                 "used write_file", "used delete_file", "used read_file",
@@ -1983,40 +1966,36 @@ class ReasoningService:
                 "i created", "i deleted", "i wrote", "i've created", "i've deleted",
                 "i've written", "file created", "file deleted", "file written",
                 "done —", "done.", "✅",
+                "scheduled", "set a reminder", "i've scheduled", "reminder set",
+                "i've set a reminder", "i'll remind",
             )
             rt_lower = response_text.lower()
             if any(phrase in rt_lower for phrase in _TOOL_CLAIM_PHRASES):
                 logger.warning(
                     "HALLUCINATION_CHECK: Agent claims tool use but iterations=0 "
-                    "(stop=%s, tool_count=%d). Retrying with correction. "
+                    "(stop=%s, tool_count=%d). Dropping and retrying clean. "
                     "Original: %s",
                     response.stop_reason, len(tools), response_text[:200],
                 )
                 original_preview = response_text[:200]
 
-                # Retry: inject corrective system message and re-call
-                corrective = (
-                    "[SYSTEM: Your previous response claimed to perform an action but no "
-                    "tool was called. Do NOT claim actions were completed without actually "
-                    "calling the tool. If you need to call a tool, call it. If you cannot "
-                    "perform the action, say so honestly.]"
+                # Retry: clean messages (drop hallucinated response) + corrective instruction
+                corrective_system = (
+                    request.system_prompt + "\n\n"
+                    "[SYSTEM: You must use the appropriate tool to perform actions. "
+                    "Do not claim to have done something without calling the tool.]"
                 )
-                retry_messages = list(messages) + [
-                    {"role": "assistant", "content": response_text},
-                    {"role": "user", "content": corrective},
-                ]
                 try:
                     retry_response = await self._provider.complete(
                         model=request.model,
-                        system=request.system_prompt,
-                        messages=retry_messages,
+                        system=corrective_system,
+                        messages=messages,  # Original messages — no hallucinated content
                         tools=tools,
                         max_tokens=request.max_tokens,
                     )
                     total_input_tokens += retry_response.input_tokens
                     total_output_tokens += retry_response.output_tokens
 
-                    # Check if retry also hallucinates
                     retry_has_tool_use = any(
                         b.type == "tool_use" for b in retry_response.content
                     )
@@ -2024,14 +2003,44 @@ class ReasoningService:
                         b.text for b in retry_response.content if b.type == "text"
                     ]
                     retry_text = "".join(retry_text_parts) if retry_text_parts else ""
-                    retry_lower = retry_text.lower()
-                    retry_hallucinated = (
-                        not retry_has_tool_use
-                        and any(phrase in retry_lower for phrase in _TOOL_CLAIM_PHRASES)
-                    )
 
-                    if retry_hallucinated:
-                        # Both attempts failed — give up honestly
+                    if retry_has_tool_use:
+                        # Retry wants to call tools — execute them through the tool loop
+                        tool_results = []
+                        for block in retry_response.content:
+                            if block.type != "tool_use":
+                                continue
+                            tool_input_r = dict(block.input or {})
+                            tool_input_r.pop("_approval_token", None)
+                            logger.info(
+                                "HALLUCINATION_RETRY: executing tool=%s",
+                                block.name,
+                            )
+                            try:
+                                if block.name in self._KERNEL_TOOLS:
+                                    result = await self.execute_tool(
+                                        block.name, tool_input_r, request,
+                                    )
+                                else:
+                                    result = await self._mcp.call_tool(
+                                        block.name, tool_input_r,
+                                    )
+                                tool_results.append(result)
+                                iterations += 1
+                            except Exception as exc:
+                                logger.warning(
+                                    "HALLUCINATION_RETRY: tool %s failed: %s",
+                                    block.name, exc,
+                                )
+
+                        response_text = retry_text or "Done."
+                        logger.info(
+                            "HALLUCINATION_RETRY: executed %d tool(s). original=%r",
+                            len(tool_results), original_preview,
+                        )
+
+                    elif any(phrase in retry_text.lower() for phrase in _TOOL_CLAIM_PHRASES):
+                        # Retry also hallucinated — give up honestly
                         response_text = (
                             "I tried to do that but wasn't able to execute the action. "
                             "Can you try asking again?"
@@ -2041,33 +2050,22 @@ class ReasoningService:
                             "original=%r retry=%r",
                             original_preview, retry_text[:200],
                         )
-                    elif retry_has_tool_use:
-                        # Retry triggered tool use — let the tool loop handle it
-                        # This is a simplified path: we log success but can't re-enter
-                        # the tool loop here. Use the retry text as-is.
-                        response_text = retry_text or response_text
-                        logger.info(
-                            "HALLUCINATION_RETRY: retry triggered tool_use, "
-                            "using retry text. original=%r",
-                            original_preview,
-                        )
+
                     else:
-                        # Retry gave an honest response without claiming tool use
+                        # Retry gave an honest response
                         response_text = retry_text
                         logger.info(
-                            "HALLUCINATION_RETRY: retry succeeded (honest response). "
-                            "original=%r",
+                            "HALLUCINATION_RETRY: honest response. original=%r",
                             original_preview,
                         )
+
                 except Exception as exc:
                     logger.warning(
-                        "HALLUCINATION_RETRY: retry failed (%s), using tagged original",
+                        "HALLUCINATION_RETRY: retry failed (%s), honest fallback",
                         exc,
                     )
                     response_text = (
-                        "[SYSTEM NOTE: The following response was generated without actual "
-                        "tool execution. Any claims of tool use or results may be fabricated.]\n\n"
-                        + response_text
+                        "I wasn't able to complete that action. Can you try again?"
                     )
 
         return ReasoningResult(

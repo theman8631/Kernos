@@ -17,19 +17,22 @@ The scheduler stores **triggers** — persistent records that fire actions at sp
 | Action | Effect | What it does |
 |--------|--------|-------------|
 | list | read | Show all scheduled actions with status |
-| create | read (notify) / soft_write (tool_call) | Schedule a new action |
+| create | read | Schedule a new action (NL description → Haiku extraction) |
 | update | soft_write | Change a trigger's timing or content |
 | pause | soft_write | Temporarily stop a trigger from firing |
 | resume | soft_write | Re-activate a paused trigger |
 | remove | soft_write | Delete a trigger |
 
-## Time Expressions
+Create and update accept a natural language description. The handler uses a Haiku call to extract structured parameters (action_type, when, message, recurrence, delivery_class).
 
-The agent parses natural language times into ISO datetime or cron expressions:
-- "tomorrow at 9am" → ISO datetime
-- "in 3 hours" → ISO datetime (now + 3h)
-- "every Monday at 8am" → cron expression + next_fire_at
-- "March 28 at 2pm" → specific ISO datetime
+Examples:
+- `manage_schedule(action="create", description="Remind me to invoice Henderson on Friday at 9am")`
+- `manage_schedule(action="create", description="Every morning at 8am tell me what is on my calendar")`
+- `manage_schedule(action="create", description="In 2 hours send me a message saying time to stretch")`
+
+## Time Handling
+
+Times are in local timezone (from the system prompt). The Haiku extraction converts natural language to ISO datetime or cron expressions. All storage and comparison uses naive local time — no UTC conversion.
 
 Recurring triggers use cron expressions (via `croniter`). After each fire, `next_fire_at` is recomputed.
 

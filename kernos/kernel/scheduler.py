@@ -65,7 +65,8 @@ def _trigger_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    """Local time, no timezone offset — matches what the agent writes from the system prompt."""
+    return datetime.now().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -132,10 +133,16 @@ class TriggerStore:
         return [Trigger(**d) for d in self._read(tenant_id)]
 
     async def get_due(self, tenant_id: str, now_iso: str) -> list[Trigger]:
-        """Get active triggers where next_fire_at <= now."""
+        """Get active triggers where next_fire_at <= now.
+
+        Defensive: skip one-shot triggers that already fired (fire_count > 0, no recurrence).
+        """
         results = []
         for d in self._read(tenant_id):
             if d.get("status") != "active":
+                continue
+            # Defensive: skip one-shot triggers that already fired but weren't marked completed
+            if d.get("fire_count", 0) > 0 and not d.get("recurrence"):
                 continue
             nfa = d.get("next_fire_at", "")
             if nfa and nfa <= now_iso:
@@ -179,7 +186,11 @@ MANAGE_SCHEDULE_TOOL = {
     "name": "manage_schedule",
     "description": (
         "Manage scheduled actions — create reminders, recurring tasks, and timed actions. "
-        "Use 'list' to see all scheduled items. Use 'create' to schedule something new. "
+        "Use 'create' with a natural language description of what to schedule. "
+        "Examples: 'Remind me to invoice Henderson on Friday at 9am', "
+        "'Every morning at 8am tell me what is on my calendar today', "
+        "'In 2 hours send me a message saying time to stretch'. "
+        "Use 'list' to see all scheduled items. "
         "Use 'pause', 'resume', or 'remove' to manage existing schedules."
     ),
     "input_schema": {
@@ -192,57 +203,113 @@ MANAGE_SCHEDULE_TOOL = {
             },
             "trigger_id": {
                 "type": "string",
-                "description": "The trigger ID (required for update/pause/resume/remove).",
+                "description": "Trigger ID (required for update/pause/resume/remove).",
             },
             "description": {
                 "type": "string",
-                "description": "What this trigger does, in natural language (for create/update).",
-            },
-            "when": {
-                "type": "string",
                 "description": (
-                    "When to fire: ISO datetime for one-shot, "
-                    "cron expression for recurring (for create/update). "
-                    "Parse natural language ('tomorrow 9am', 'every Monday 8am') "
-                    "into ISO datetime or cron before calling."
+                    "What to schedule, in natural language. Include the time and what "
+                    "should happen. Examples: 'Remind me to invoice Henderson on Friday "
+                    "at 9am', 'Every morning at 8am tell me what is on my calendar today', "
+                    "'In 2 hours send me a message saying time to stretch'"
                 ),
-            },
-            "action_type": {
-                "type": "string",
-                "enum": ["notify", "tool_call"],
-                "description": "Type of action: 'notify' sends a message, 'tool_call' executes a tool.",
-            },
-            "message": {
-                "type": "string",
-                "description": "The message to send (for notify action_type).",
-            },
-            "tool_name": {
-                "type": "string",
-                "description": "The tool to call (for tool_call action_type).",
-            },
-            "tool_args": {
-                "type": "object",
-                "description": "Arguments for the tool call.",
-                "additionalProperties": True,
-            },
-            "notify_via": {
-                "type": "string",
-                "description": "Channel to deliver on: 'discord', 'sms', or empty for default.",
-            },
-            "delivery_class": {
-                "type": "string",
-                "enum": ["ambient", "stage", "interrupt"],
-                "description": "Urgency level. Default: stage.",
-            },
-            "recurrence": {
-                "type": "string",
-                "description": "Cron expression for recurring triggers. Empty for one-shot.",
             },
         },
         "required": ["action"],
         "additionalProperties": False,
     },
 }
+
+
+# Structured output schema for Haiku extraction of schedule parameters
+_SCHEDULE_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action_type": {
+            "type": "string",
+            "enum": ["notify", "tool_call"],
+            "description": "notify = send a message, tool_call = execute a tool",
+        },
+        "when": {
+            "type": "string",
+            "description": "ISO datetime string in local time for one-shot triggers",
+        },
+        "message": {
+            "type": "string",
+            "description": "The notification message text (for notify type)",
+        },
+        "recurrence": {
+            "type": "string",
+            "description": "Cron expression for recurring triggers, or empty for one-shot",
+        },
+        "delivery_class": {
+            "type": "string",
+            "enum": ["ambient", "stage", "interrupt"],
+            "description": "Urgency: ambient (low), stage (normal), interrupt (push now)",
+        },
+        "notify_via": {
+            "type": "string",
+            "description": "Channel name (discord, sms) or empty for default",
+        },
+        "tool_name": {
+            "type": "string",
+            "description": "Tool to call (for tool_call type only)",
+        },
+        "tool_args": {
+            "type": "string",
+            "description": "JSON string of tool arguments (for tool_call type only)",
+        },
+    },
+    "required": ["action_type", "when", "message", "delivery_class"],
+    "additionalProperties": False,
+}
+
+
+async def _extract_schedule_params(
+    reasoning_service, description: str,
+) -> dict | str:
+    """Use Haiku to extract structured schedule params from NL description.
+
+    Returns a dict on success, or an error string on failure.
+    """
+    import time as _time
+    current_dt = datetime.now()
+    tz_name = _time.tzname[_time.daylight] if _time.daylight else _time.tzname[0]
+
+    try:
+        result = await reasoning_service.complete_simple(
+            system_prompt=(
+                "You are extracting structured schedule data from a natural language description. "
+                f"The current date and time is {current_dt.strftime('%A, %B %d, %Y %I:%M %p')} {tz_name}.\n\n"
+                "Extract:\n"
+                "- action_type: 'notify' (send a message) or 'tool_call' (execute a tool)\n"
+                "- when: ISO datetime string in LOCAL time (no timezone offset). "
+                "Convert relative times ('in 2 hours', 'tomorrow 9am') to absolute datetimes.\n"
+                "- message: The notification message text\n"
+                "- recurrence: empty string for one-shot, or cron expression for recurring "
+                "(e.g., '0 8 * * *' for daily 8am, '0 8 * * 1' for Monday 8am)\n"
+                "- delivery_class: 'stage' (default normal), 'ambient' (low), 'interrupt' (urgent)\n"
+                "- notify_via: empty string for default channel, or 'discord' or 'sms'\n"
+                "- tool_name: empty for notify, tool name for tool_call\n"
+                "- tool_args: empty for notify, JSON string of args for tool_call\n\n"
+                "Respond with ONLY a JSON object."
+            ),
+            user_content=f"Description: {description}",
+            output_schema=_SCHEDULE_EXTRACTION_SCHEMA,
+            max_tokens=512,
+            prefer_cheap=True,
+        )
+        import json
+        parsed = json.loads(result)
+
+        if not parsed.get("when"):
+            return "I couldn't determine when to schedule that. Can you be more specific about the time?"
+
+        return parsed
+
+    except Exception as exc:
+        logger.warning("TRIGGER: schedule extraction failed: %s", exc)
+        return "I couldn't parse that schedule request. Can you be more specific about the time?"
 
 
 # ---------------------------------------------------------------------------
@@ -258,25 +325,35 @@ async def handle_manage_schedule(
     action: str,
     trigger_id: str = "",
     description: str = "",
-    when: str = "",
-    action_type: str = "notify",
-    message: str = "",
-    tool_name: str = "",
-    tool_args: dict | None = None,
-    notify_via: str = "",
-    delivery_class: str = "stage",
-    recurrence: str = "",
+    reasoning_service=None,
+    **kwargs,  # Accept extra fields for backward compat
 ) -> str:
-    """Handle the manage_schedule kernel tool."""
+    """Handle the manage_schedule kernel tool.
 
+    For create/update: description is parsed via Haiku into structured params.
+    """
     if action == "list":
         return await _list_triggers(trigger_store, tenant_id)
 
     if action == "create":
+        if not description:
+            return "Error: 'description' is required — describe what to schedule and when."
+        if not reasoning_service:
+            return "Error: Reasoning service not available for schedule extraction."
+        extracted = await _extract_schedule_params(reasoning_service, description)
+        if isinstance(extracted, str):
+            return extracted  # Error message
         return await _create_trigger(
             trigger_store, tenant_id, member_id, space_id,
-            description, when, action_type, message,
-            tool_name, tool_args or {}, notify_via, delivery_class, recurrence,
+            description,
+            extracted.get("when", ""),
+            extracted.get("action_type", "notify"),
+            extracted.get("message", description),
+            extracted.get("tool_name", ""),
+            {},  # tool_args parsed separately if needed
+            extracted.get("notify_via", ""),
+            extracted.get("delivery_class", "stage"),
+            extracted.get("recurrence", ""),
         )
 
     if action == "pause":
@@ -295,9 +372,19 @@ async def handle_manage_schedule(
         return f"Error: Trigger '{trigger_id}' not found."
 
     if action == "update":
+        if not description:
+            return "Error: 'description' is required for update."
+        if not reasoning_service:
+            return "Error: Reasoning service not available for schedule extraction."
+        extracted = await _extract_schedule_params(reasoning_service, description)
+        if isinstance(extracted, str):
+            return extracted
         return await _update_trigger(
             trigger_store, tenant_id, trigger_id,
-            description, when, message, recurrence,
+            description,
+            extracted.get("when", ""),
+            extracted.get("message", ""),
+            extracted.get("recurrence", ""),
         )
 
     return f"Error: Unknown action '{action}'. Use list, create, update, pause, resume, or remove."
