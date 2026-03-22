@@ -207,9 +207,9 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Dispatch gate (3D / 3D-HOTFIX-v2):** Inserted between tool call proposal and execution. Three-step authorization (token → permission_override → model). No keyword matching. No structured must_not pre-check. The model is the sole correctness authority. See Dispatch Interceptor section below for full details.
 
-**Kernel tool routing:** Six kernel-managed tools (`remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`) are intercepted before MCPClientManager. Read tools (`remember`, `list_files`, `read_file`, `request_tool`) bypass the gate. Write tools (`write_file`, `delete_file`) are gated through the dispatch interceptor. `set_retrieval()`, `set_registry()`, and `set_state()` wire services after construction (avoids circular imports).
+**Kernel tool routing:** Kernel-managed tools are intercepted before MCPClientManager. Current set: `remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`, `dismiss_whisper`, `read_source`, `read_doc`, `read_soul`, `update_soul`, `manage_covenants`, `manage_tools`, `manage_channels`. Read tools bypass the gate. Write tools are gated through the dispatch interceptor. Some tools have dynamic classification (`manage_covenants`, `manage_tools`, `manage_channels`: `list` = read, other actions = soft_write).
 
-**Hallucination detection:** After `reason()` completes, if `iterations==0` and `stop_reason=="end_turn"` and the response text contains tool-claiming phrases (`"done —"`, `"i created"`, `"✅"`, etc.), `HALLUCINATION_CHECK` fires. The response is prefixed with `[SYSTEM NOTE: generated without actual tool execution]` before storage — breaking the self-reinforcing loop where the model reads its own fabricated success and skips retrying on the next turn.
+**Hallucination detection and corrective retry:** After `reason()` completes, if `iterations==0` and `stop_reason=="end_turn"` and the response text contains tool-claiming phrases, `HALLUCINATION_CHECK` fires. Instead of tagging the response, the system injects a corrective system message ("Do NOT claim actions were completed without calling the tool") and retries the LLM call. If the retry succeeds (honest response or actual tool call), the corrected response is used. If both attempts fabricate, the user sees an honest failure: "I tried to do that but wasn't able to execute the action."
 
 **Structured trace logging:** INFO-level grep-able prefixes. Timestamps on every line (`HH:MM:SS`). Prefixes:
 - `USER_MSG:` — full user message text + sender (handler, at routing time)
@@ -223,7 +223,8 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `GATE:` — dispatch gate decisions (tool, effect, allowed, reason, method)
 - `GATE_MODEL:` — gate model call details (max_tokens, rules count, raw response)
 - `CONFIRM_EXECUTE:` / `PENDING_CLEARED:` — confirmation replay outcomes (handler)
-- `HALLUCINATION_CHECK:` / `HALLUCINATION_TAGGED:` — hallucination detection events
+- `HALLUCINATION_CHECK:` / `HALLUCINATION_RETRY:` — hallucination detection and corrective retry
+- `SOUL_WRITE:` / `CAP_WRITE:` / `COVENANT_WRITE:` — state mutation tracing with source/trigger
 - `FILE_WRITE/READ/LIST/DELETE:` — file operations (files.py)
 - `REMEMBER:` — retrieval calls (retrieval.py)
 
