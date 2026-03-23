@@ -360,6 +360,9 @@ def _make_handler_with_state():
     registry = MagicMock(spec=CapabilityRegistry)
     registry.get_connected_tools.return_value = []
     registry.build_capability_prompt.return_value = "CURRENT CAPABILITIES — conversation only."
+    registry.build_tool_directory.return_value = "AVAILABLE TOOLS:\nTo use any tool, call it by name."
+    registry.get_preloaded_tools.return_value = []
+    registry.get_tool_schema.return_value = None
     registry.get_all.return_value = []
 
     mock_provider = AsyncMock(spec=Provider)

@@ -55,6 +55,17 @@ class CapabilityInfo:
     env_template: dict[str, str] = field(default_factory=dict)  # e.g., {"GOOGLE_OAUTH_CREDENTIALS": "{credentials}"}
 
 
+# Calendar read tools — most-called MCP tools, always have full schemas in context.
+PRELOADED_TOOLS: set[str] = {
+    "list-events",
+    "search-events",
+    "get-event",
+    "get-freebusy",
+    "list-calendars",
+    "get-current-time",
+}
+
+
 class CapabilityRegistry:
     """Three-tier capability registry. Holds a reference to MCPClientManager for tool lookup."""
 
@@ -199,6 +210,90 @@ class CapabilityRegistry:
             server_tools = tool_defs_by_server.get(cap.server_name, [])
             result.extend(server_tools)
         return result
+
+    def get_tool_schema(self, tool_name: str) -> dict | None:
+        """Get the full schema for a specific tool by name."""
+        if not self._mcp:
+            return None
+        for tool in self._mcp.get_tools():
+            if tool["name"] == tool_name:
+                return tool
+        return None
+
+    def get_preloaded_tools(self, space: "ContextSpace | None" = None) -> list[dict]:
+        """Get full schemas for pre-loaded MCP tools only (calendar reads).
+
+        Respects space visibility — only returns tools from visible capabilities.
+        """
+        visible_names = self._visible_capability_names(space)
+        if not self._mcp:
+            return []
+        result = []
+        tool_defs_by_server = self._mcp.get_tool_definitions()
+        for cap_name in visible_names:
+            cap = self._capabilities.get(cap_name)
+            if not cap or cap.status != CapabilityStatus.CONNECTED:
+                continue
+            for tool in tool_defs_by_server.get(cap.server_name, []):
+                if tool["name"] in PRELOADED_TOOLS:
+                    result.append(tool)
+        return result
+
+    def get_all_tool_names(self, space: "ContextSpace | None" = None) -> set[str]:
+        """Get all available MCP tool names for a space (for directory validation)."""
+        visible_names = self._visible_capability_names(space)
+        if not self._mcp:
+            return set()
+        names: set[str] = set()
+        tool_defs_by_server = self._mcp.get_tool_definitions()
+        for cap_name in visible_names:
+            cap = self._capabilities.get(cap_name)
+            if not cap or cap.status != CapabilityStatus.CONNECTED:
+                continue
+            for tool in tool_defs_by_server.get(cap.server_name, []):
+                names.add(tool["name"])
+        return names
+
+    def build_tool_directory(self, space: "ContextSpace | None" = None) -> str:
+        """Build a compact tool directory for the system prompt.
+
+        Lists available capabilities by category with one-line descriptions.
+        Full schemas are NOT included — they load on demand via lazy loading.
+        """
+        visible_names = self._visible_capability_names(space)
+        visible_connected = [
+            c for c in self._capabilities.values()
+            if c.status == CapabilityStatus.CONNECTED and c.name in visible_names
+        ]
+        available = [
+            c for c in self._capabilities.values()
+            if c.status == CapabilityStatus.AVAILABLE
+        ]
+
+        if not visible_connected and not available:
+            return (
+                "CURRENT CAPABILITIES — only claim these:\n"
+                "- Conversation: answer questions, discuss topics, help think through problems.\n"
+                "That is ALL you can do right now."
+            )
+
+        lines = ["AVAILABLE TOOLS:"]
+
+        for cap in visible_connected:
+            tool_count = len(cap.tool_effects) if cap.tool_effects else "?"
+            lines.append(f"• {cap.display_name}: {cap.description} ({tool_count} tools)")
+
+        if available:
+            lines.append("")
+            lines.append("NOT YET CONNECTED (offer to set up if asked):")
+            for cap in available:
+                lines.append(f"• {cap.display_name}: {cap.description}")
+
+        lines.append("")
+        lines.append("To use any tool, call it by name. The system loads it automatically.")
+        lines.append("You cannot do anything beyond what's listed above. Be honest about limits.")
+
+        return "\n".join(lines)
 
     def build_capability_prompt(self, space: "ContextSpace | None" = None) -> str:
         """Build the CAPABILITIES section of the system prompt.

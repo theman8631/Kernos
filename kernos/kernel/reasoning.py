@@ -595,6 +595,8 @@ class ReasoningService:
         self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
         self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
         self._tools_changed: bool = False  # Set by manage_tools; handler checks post-reasoning
+        # Lazy tool loading: tracks which MCP tools have been loaded per-space session
+        self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
 
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
@@ -611,6 +613,22 @@ class ReasoningService:
     def set_state(self, state: Any) -> None:
         """Wire up the state store for request_tool activation."""
         self._state = state
+
+    def get_loaded_tools(self, space_id: str) -> set[str]:
+        """Get the set of MCP tool names currently loaded for a space."""
+        return self._loaded_tools.get(space_id, set())
+
+    def load_tool(self, space_id: str, tool_name: str) -> None:
+        """Add a tool to the loaded set for a space."""
+        if space_id not in self._loaded_tools:
+            self._loaded_tools[space_id] = set()
+        self._loaded_tools[space_id].add(tool_name)
+
+    def clear_loaded_tools(self, space_id: str) -> None:
+        """Clear loaded tools for a space (session boundary)."""
+        count = len(self._loaded_tools.pop(space_id, set()))
+        if count:
+            logger.info("TOOL_UNLOAD: space=%s cleared=%d", space_id, count)
 
     async def complete_simple(
         self,
@@ -1800,6 +1818,37 @@ class ReasoningService:
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:
+                    # Lazy tool loading: check if this tool was in the provided schemas.
+                    # If not (agent called it from the directory), load the schema and
+                    # execute directly — MCP can route it regardless.
+                    _tool_in_list = any(t.get("name") == block.name for t in tools)
+                    if not _tool_in_list and self._registry:
+                        schema = self._registry.get_tool_schema(block.name)
+                        if schema:
+                            self.load_tool(request.active_space_id, block.name)
+                            tools.append(schema)
+                            logger.info(
+                                "TOOL_LOAD: tool=%s space=%s (first use, schema loaded)",
+                                block.name, request.active_space_id,
+                            )
+                        elif not schema:
+                            # Tool doesn't exist at all in any connected capability
+                            result = f"Tool '{block.name}' is not available."
+                            tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
+                            is_error = True
+                            # Console logging: tool result
+                            logger.info(
+                                "AGENT_RESULT: tool=%s success=%s preview=%s",
+                                block.name, False, result[:100],
+                            )
+                            tool_results.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": result,
+                                }
+                            )
+                            continue
                     result = await self._mcp.call_tool(block.name, tool_input)
                 tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
 

@@ -73,6 +73,14 @@ def _make_mock_registry(tools: list[dict] | None = None) -> MagicMock:
         "CURRENT CAPABILITIES — conversation only." if not tools_list
         else "CONNECTED CAPABILITIES — you can use these:\n- Calendar tools available."
     )
+    registry.build_tool_directory.return_value = (
+        "AVAILABLE TOOLS:\nTo use any tool, call it by name." if not tools_list
+        else "AVAILABLE TOOLS:\n• Test Capability: Test tools\nTo use any tool, call it by name."
+    )
+    registry.get_preloaded_tools.return_value = tools_list  # All test tools are preloaded
+    registry.get_all_tool_names.return_value = {t["name"] for t in tools_list}
+    _tool_by_name = {t["name"]: t for t in tools_list}
+    registry.get_tool_schema.side_effect = lambda name: _tool_by_name.get(name)
     if tools_list:
         tool_names = [t["name"] for t in tools_list]
         cap = CapabilityInfo(
@@ -265,15 +273,15 @@ def test_system_prompt_does_not_claim_cannot_remember():
 
 
 def test_handler_uses_registry_for_capability_prompt():
-    """Verify handler calls registry.build_capability_prompt() not hardcoded logic."""
+    """Verify handler calls registry.build_tool_directory() for lazy loading."""
     handler, mock_provider = _make_handler()
-    handler.registry.build_capability_prompt.return_value = "CUSTOM PROMPT FROM REGISTRY"
+    handler.registry.build_tool_directory.return_value = "CUSTOM DIRECTORY FROM REGISTRY"
     mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     import asyncio
     asyncio.get_event_loop().run_until_complete(handler.process(_make_message()))
 
-    handler.registry.build_capability_prompt.assert_called()
+    handler.registry.build_tool_directory.assert_called()
 
 
 # --- MCP tool-use loop ---

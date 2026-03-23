@@ -427,8 +427,8 @@ class AwarenessEvaluator:
                 # User is active — downgrade to stage, session-start will catch it
                 whisper.delivery_class = "stage"
                 logger.info(
-                    "WHISPER_SUPPRESS_ACTIVE: id=%s downgraded to stage (user active)",
-                    whisper.whisper_id,
+                    "WHISPER_SUPPRESS_ACTIVE: id=%s signal=%r downgraded to stage (user active)",
+                    whisper.whisper_id, whisper.foresight_signal[:80],
                 )
                 return False  # Queue for session-start injection
         except Exception as exc:
@@ -458,15 +458,16 @@ class AwarenessEvaluator:
             await self._state.save_suppression(tenant_id, suppression)
 
             logger.info(
-                "WHISPER_PUSH: id=%s class=interrupt channel=%s",
+                "WHISPER_PUSH: id=%s class=interrupt channel=%s signal=%r space=%s",
                 whisper.whisper_id, whisper.notify_via or "default",
+                whisper.foresight_signal[:80], whisper.target_space_id,
             )
             return True
         else:
             # Outbound failed — keep as pending for retry or session-start
             logger.warning(
-                "WHISPER_PUSH_FAILED: id=%s, keeping as pending",
-                whisper.whisper_id,
+                "WHISPER_PUSH_FAILED: id=%s signal=%r, keeping as pending",
+                whisper.whisper_id, whisper.foresight_signal[:80],
             )
             return False
 
@@ -494,6 +495,10 @@ class AwarenessEvaluator:
             # Parse foresight_expires from supporting evidence
             hours_remaining = _hours_until_foresight(whisper)
             if hours_remaining is not None and hours_remaining < 2:
+                logger.info(
+                    "INTERRUPT_PROMOTE: id=%s hours=%.1f signal=%r",
+                    whisper.whisper_id, hours_remaining, whisper.foresight_signal[:80],
+                )
                 whisper.delivery_class = "interrupt"
                 if self._handler:
                     pushed = await self._push_interrupt(tenant_id, whisper)

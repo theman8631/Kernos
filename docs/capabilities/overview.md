@@ -59,14 +59,25 @@ The `manage_tools` kernel tool provides a unified interface:
 
 When new pre-installed capabilities are added to the manifest (`known.py`), existing tenants see them as "available" on their next interaction. No manual migration needed.
 
+## Lazy Tool Loading
+
+Tools use a lazy loading model to minimize token usage. Instead of injecting all ~11,800 tokens of tool schemas on every message, the system uses a three-tier approach:
+
+1. **Always loaded** — Kernel tools (~1,500 tokens). Small schemas, used constantly.
+2. **Pre-loaded** — Calendar read tools (list-events, search-events, get-event, etc.). Most-called MCP tools, always have full schemas in context.
+3. **Lazy-loaded** — All other MCP tools (calendar writes, browser, search, future Gmail). The system prompt includes a compact directory (~400 tokens) listing available tools by name and description. When the agent calls an unloaded tool, the system loads its full schema and the call executes normally. The tool stays loaded for the rest of the session.
+
+**Token savings:** ~71% reduction on typical messages. The worst case (all tools loaded) is identical to before.
+
+**Session boundary:** Loaded tools reset on compaction or server restart. Fresh session = fresh directory.
+
 ## Tool Scoping
 
-Tools are scoped per context space. Each space has an `active_tools` list:
+Tools are scoped per context space:
 
 - **Universal capabilities** (like calendar) are available in every space
 - **Non-universal capabilities** must be explicitly activated for a space
 - The `request_tool` meta-tool activates a capability for the current space
-- Gate 2 (space creation) can recommend tools when creating a new space
 
 ## Effect Classification
 

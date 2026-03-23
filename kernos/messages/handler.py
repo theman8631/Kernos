@@ -1810,20 +1810,38 @@ class MessageHandler:
             created_at=_now_iso(),
         )
 
-        tools = self.registry.get_tools_for_space(active_space)
-        # Add the kernel-managed `remember` tool when retrieval is available
-        if self._retrieval:
-            from kernos.kernel.retrieval import REMEMBER_TOOL
-            tools = tools + [REMEMBER_TOOL]
-        # Add kernel-managed file tools (always available)
+        # Lazy tool loading: kernel tools (always) + preloaded MCP + session-loaded MCP
+        # Kernel tools — always present, small schemas
         from kernos.kernel.files import FILE_TOOLS
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_TOOLS_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
         from kernos.kernel.channels import MANAGE_CHANNELS_TOOL
         from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
-        tools = tools + FILE_TOOLS + [REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL, MANAGE_TOOLS_TOOL, MANAGE_CHANNELS_TOOL, MANAGE_SCHEDULE_TOOL]
-        capability_prompt = self.registry.build_capability_prompt(space=active_space)
+        tools: list[dict] = []
+        if self._retrieval:
+            from kernos.kernel.retrieval import REMEMBER_TOOL
+            tools.append(REMEMBER_TOOL)
+        tools.extend(FILE_TOOLS)
+        tools.extend([REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL,
+                       READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL,
+                       MANAGE_TOOLS_TOOL, MANAGE_CHANNELS_TOOL, MANAGE_SCHEDULE_TOOL])
+        # Pre-loaded MCP tools (calendar reads) — always have full schemas
+        tools.extend(self.registry.get_preloaded_tools(space=active_space))
+        # Session-loaded MCP tools — tools loaded on first use during this space session
+        loaded_names = self.reasoning.get_loaded_tools(active_space_id)
+        for tool_name in loaded_names:
+            schema = self.registry.get_tool_schema(tool_name)
+            if schema:
+                tools.append(schema)
+        _preloaded_count = len(self.registry.get_preloaded_tools(space=active_space))
+        _loaded_count = len(loaded_names)
+        logger.info(
+            "TOOL_DIRECTORY: tools=%d preloaded=%d loaded=%d",
+            len(tools), _preloaded_count, _loaded_count,
+        )
+        # Capability prompt: compact directory instead of full schemas
+        capability_prompt = self.registry.build_tool_directory(space=active_space)
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
             tenant_id,
@@ -2071,6 +2089,8 @@ class MessageHandler:
                             tenant_id, active_space_id, active_space,
                             new_messages, comp_state,
                         )
+                        # Session boundary: clear lazy-loaded tools on compaction
+                        self.reasoning.clear_loaded_tools(active_space_id)
                 else:
                     await self.compaction.save_state(tenant_id, active_space_id, comp_state)
         except Exception as exc:

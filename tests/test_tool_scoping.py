@@ -31,8 +31,8 @@ def make_space(space_type="domain", active_tools=None):
     )
 
 
-def make_registry(*caps):
-    registry = CapabilityRegistry(mcp=None)
+def make_registry(*caps, mcp=None):
+    registry = CapabilityRegistry(mcp=mcp)
     for cap in caps:
         registry.register(cap)
     return registry
@@ -436,3 +436,136 @@ class TestConnectedCapabilityHelpers:
         registry = make_registry()
         desc = registry.get_capability_descriptions()
         assert "No tools" in desc
+
+
+# ---------------------------------------------------------------------------
+# Lazy Tool Loading
+# ---------------------------------------------------------------------------
+
+
+class TestToolDirectory:
+    """build_tool_directory returns compact text, not full schemas."""
+
+    def test_directory_with_connected_caps(self):
+        mcp = MagicMock()
+        mcp.get_tools.return_value = [{"name": "list-events"}, {"name": "create-event"}]
+        mcp.get_tool_definitions.return_value = {"google-calendar": []}
+        registry = make_registry(mcp=mcp)
+        registry.register(make_cap("google-calendar", universal=True))
+
+        directory = registry.build_tool_directory()
+        assert "AVAILABLE TOOLS:" in directory
+        assert "Google Calendar" in directory
+        assert "call it by name" in directory
+        # Should NOT contain full schemas
+        assert "input_schema" not in directory
+
+    def test_directory_with_no_caps(self):
+        registry = make_registry()
+        directory = registry.build_tool_directory()
+        assert "CURRENT CAPABILITIES" in directory
+
+    def test_directory_shows_available_caps(self):
+        mcp = MagicMock()
+        mcp.get_tool_definitions.return_value = {}
+        registry = make_registry(mcp=mcp)
+        registry.register(CapabilityInfo(
+            name="gmail", display_name="Gmail", description="Email",
+            category="email", status=CapabilityStatus.AVAILABLE,
+        ))
+        directory = registry.build_tool_directory()
+        assert "NOT YET CONNECTED" in directory
+        assert "Gmail" in directory
+
+
+class TestPreloadedTools:
+    """get_preloaded_tools returns only calendar read schemas."""
+
+    def test_returns_preloaded_only(self):
+        mcp = MagicMock()
+        tool_list = [
+            {"name": "list-events", "description": "List", "input_schema": {}},
+            {"name": "create-event", "description": "Create", "input_schema": {}},
+            {"name": "delete-event", "description": "Delete", "input_schema": {}},
+        ]
+        mcp.get_tools.return_value = tool_list
+        mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
+        registry = make_registry(mcp=mcp)
+        registry.register(make_cap("google-calendar", universal=True))
+
+        preloaded = registry.get_preloaded_tools()
+        names = {t["name"] for t in preloaded}
+        assert "list-events" in names
+        assert "create-event" not in names  # Not in PRELOADED_TOOLS
+        assert "delete-event" not in names
+
+    def test_no_mcp_returns_empty(self):
+        registry = make_registry()
+        assert registry.get_preloaded_tools() == []
+
+
+class TestGetToolSchema:
+    """get_tool_schema finds a specific tool by name."""
+
+    def test_finds_existing_tool(self):
+        mcp = MagicMock()
+        tool = {"name": "create-event", "description": "Create", "input_schema": {}}
+        mcp.get_tools.return_value = [tool]
+        registry = make_registry(mcp=mcp)
+
+        assert registry.get_tool_schema("create-event") == tool
+
+    def test_returns_none_for_missing(self):
+        mcp = MagicMock()
+        mcp.get_tools.return_value = []
+        registry = make_registry(mcp=mcp)
+
+        assert registry.get_tool_schema("nonexistent") is None
+
+
+class TestGetAllToolNames:
+    """get_all_tool_names returns tool names from visible capabilities."""
+
+    def test_returns_visible_names(self):
+        mcp = MagicMock()
+        tool_list = [
+            {"name": "list-events"}, {"name": "create-event"},
+        ]
+        mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
+        registry = make_registry(mcp=mcp)
+        registry.register(make_cap("google-calendar", universal=True))
+
+        names = registry.get_all_tool_names()
+        assert names == {"list-events", "create-event"}
+
+
+class TestLoadedToolTracking:
+    """ReasoningService tracks loaded tools per space."""
+
+    def test_load_and_get(self):
+        from kernos.kernel.reasoning import ReasoningService
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        assert svc.get_loaded_tools("space_1") == set()
+
+        svc.load_tool("space_1", "create-event")
+        assert "create-event" in svc.get_loaded_tools("space_1")
+
+    def test_clear(self):
+        from kernos.kernel.reasoning import ReasoningService
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        svc.load_tool("space_1", "create-event")
+        svc.load_tool("space_1", "update-event")
+        assert len(svc.get_loaded_tools("space_1")) == 2
+
+        svc.clear_loaded_tools("space_1")
+        assert svc.get_loaded_tools("space_1") == set()
+
+    def test_per_space_isolation(self):
+        from kernos.kernel.reasoning import ReasoningService
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        svc.load_tool("space_1", "create-event")
+        svc.load_tool("space_2", "send-email")
+
+        assert "create-event" in svc.get_loaded_tools("space_1")
+        assert "send-email" not in svc.get_loaded_tools("space_1")
+        assert "send-email" in svc.get_loaded_tools("space_2")
