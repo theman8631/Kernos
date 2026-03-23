@@ -43,6 +43,7 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
             "list-timezones": "read",
             "get-colors": "read",
         },
+        tool_hints={},  # All calendar tool names are self-explanatory
     ),
     CapabilityInfo(
         name="gmail",
@@ -95,6 +96,10 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
             "brave_web_search": "read",
             "brave_local_search": "read",
         },
+        tool_hints={
+            "brave_web_search": "web search",
+            "brave_local_search": "nearby places",
+        },
         universal=True,
     ),
     # Lightpanda: open-source headless browser with native MCP server.
@@ -125,6 +130,15 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
             "structuredData": "read",
             "links": "read",
             "evaluate": "soft_write",  # JS execution — gate it
+        },
+        tool_hints={
+            "goto": "load URL",
+            "markdown": "page as text",
+            "evaluate": "run JS",
+            "semantic_tree": "page DOM structure",
+            "interactiveElements": "buttons/forms/inputs",
+            "structuredData": "JSON-LD/meta tags",
+            "links": "list page links",
         },
         universal=True,  # Available in all context spaces
     ),

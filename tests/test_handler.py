@@ -74,8 +74,8 @@ def _make_mock_registry(tools: list[dict] | None = None) -> MagicMock:
         else "CONNECTED CAPABILITIES — you can use these:\n- Calendar tools available."
     )
     registry.build_tool_directory.return_value = (
-        "AVAILABLE TOOLS:\nTo use any tool, call it by name." if not tools_list
-        else "AVAILABLE TOOLS:\n• Test Capability: Test tools\nTo use any tool, call it by name."
+        "TOOLS (call by name):\nNo connected capabilities." if not tools_list
+        else "TOOLS (call by name):\n\nTest Capability:\n  list_events, create-event"
     )
     registry.get_preloaded_tools.return_value = tools_list  # All test tools are preloaded
     registry.get_all_tool_names.return_value = {t["name"] for t in tools_list}

@@ -110,7 +110,7 @@ class TestGateResult:
 class TestClassifyToolEffect:
     def test_kernel_reads_are_read(self):
         svc = _make_service()
-        for tool in ["remember", "list_files", "read_file", "request_tool"]:
+        for tool in ["remember", "list_files", "read_file", "dismiss_whisper"]:
             assert svc._classify_tool_effect(tool, None) == "read"
 
     def test_kernel_writes_are_soft_write(self):
@@ -385,7 +385,7 @@ class TestReadBypass:
     def test_read_tools_not_gated(self):
         """Read tools should never trigger the gate — classified as 'read'."""
         svc = _make_service({"list-events": "read", "search-events": "read"})
-        for tool in ["remember", "list_files", "read_file", "request_tool", "list-events"]:
+        for tool in ["remember", "list_files", "read_file", "dismiss_whisper", "list-events"]:
             effect = svc._classify_tool_effect(tool, None)
             assert effect == "read", f"{tool} should be 'read', got '{effect}'"
 

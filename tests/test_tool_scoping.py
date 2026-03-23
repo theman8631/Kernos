@@ -370,14 +370,10 @@ class TestRequestTool:
             "t1", "space_test", {"active_tools": ["google-calendar"]}
         )
 
-    def test_request_tool_in_kernel_tools(self):
+    def test_request_tool_removed_from_kernel_tools(self):
+        """request_tool replaced by lazy loading — no longer a kernel tool."""
         from kernos.kernel.reasoning import ReasoningService
-        assert "request_tool" in ReasoningService._KERNEL_TOOLS
-
-    def test_request_tool_constant_exists(self):
-        from kernos.kernel.reasoning import REQUEST_TOOL
-        assert REQUEST_TOOL["name"] == "request_tool"
-        assert "input_schema" in REQUEST_TOOL
+        assert "request_tool" not in ReasoningService._KERNEL_TOOLS
 
 
 # ===========================
@@ -448,15 +444,21 @@ class TestToolDirectory:
 
     def test_directory_with_connected_caps(self):
         mcp = MagicMock()
-        mcp.get_tools.return_value = [{"name": "list-events"}, {"name": "create-event"}]
-        mcp.get_tool_definitions.return_value = {"google-calendar": []}
+        tool_list = [
+            {"name": "list-events", "description": "List events"},
+            {"name": "create-event", "description": "Create event"},
+        ]
+        mcp.get_tools.return_value = tool_list
+        mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
         registry = make_registry(mcp=mcp)
         registry.register(make_cap("google-calendar", universal=True))
 
         directory = registry.build_tool_directory()
-        assert "AVAILABLE TOOLS:" in directory
+        assert "TOOLS" in directory
         assert "Google Calendar" in directory
-        assert "call it by name" in directory
+        assert "call" in directory.lower()
+        assert "list-events" in directory
+        assert "create-event" in directory
         # Should NOT contain full schemas
         assert "input_schema" not in directory
 

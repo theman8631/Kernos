@@ -43,6 +43,10 @@ class CapabilityInfo:
     tool_effects: dict[str, str] = field(default_factory=dict)
     # Maps tool_name → effect level: "read" | "soft_write" | "hard_write" | "unknown"
     # Tools not in this dict default to "unknown" (treated as hard_write by Dispatch Interceptor)
+    tool_hints: dict[str, str] = field(default_factory=dict)
+    # Maps tool_name → 2-4 word hint for opaque tool names in the directory.
+    # Self-explanatory names (create-event, list-files) need no hint.
+    # Opaque names (evaluate, goto, semantic_tree) need a hint.
     source: str = "default"        # "default" (from known.py) or "user" (installed at runtime)
     universal: bool = False
     # If True, visible in all spaces without explicit activation (system defaults).
@@ -53,6 +57,32 @@ class CapabilityInfo:
     server_args: list[str] = field(default_factory=list)   # e.g., ["@cocal/google-calendar-mcp"]
     credentials_key: str = ""         # e.g., "google-calendar" — key file name in secrets/
     env_template: dict[str, str] = field(default_factory=dict)  # e.g., {"GOOGLE_OAUTH_CREDENTIALS": "{credentials}"}
+
+
+def _is_self_explanatory(name: str) -> bool:
+    """Check if a tool name is self-explanatory (verb-noun pattern)."""
+    # Names with a separator containing a verb and noun are self-explanatory
+    parts = name.replace("_", "-").split("-")
+    if len(parts) >= 2:
+        _VERBS = {"list", "get", "search", "create", "update", "delete", "find",
+                  "send", "read", "write", "remove", "set", "manage", "respond",
+                  "trash", "modify"}
+        return parts[0] in _VERBS
+    return False
+
+
+def _compress_hint(description: str) -> str:
+    """Compress a tool description to 2-4 meaningful words."""
+    if not description:
+        return ""
+    # Strip common filler
+    desc = description.split(".")[0].split(",")[0]  # First clause
+    for prefix in ("get ", "retrieve ", "return ", "returns "):
+        if desc.lower().startswith(prefix):
+            desc = desc[len(prefix):]
+    # Take first 4 words, strip articles
+    words = [w for w in desc.split() if w.lower() not in ("a", "an", "the", "of", "to", "and", "on", "in", "for")]
+    return " ".join(words[:4]).rstrip(".")
 
 
 # Calendar read tools — most-called MCP tools, always have full schemas in context.
@@ -257,7 +287,7 @@ class CapabilityRegistry:
     def build_tool_directory(self, space: "ContextSpace | None" = None) -> str:
         """Build a compact tool directory for the system prompt.
 
-        Lists available capabilities by category with one-line descriptions.
+        Lists tools by capability with succinct hints for opaque names.
         Full schemas are NOT included — they load on demand via lazy loading.
         """
         visible_names = self._visible_capability_names(space)
@@ -277,20 +307,49 @@ class CapabilityRegistry:
                 "That is ALL you can do right now."
             )
 
-        lines = ["AVAILABLE TOOLS:"]
+        lines = ["TOOLS (call by name — full schema loads on first use):"]
+
+        # Get tool definitions to access descriptions
+        tool_defs_by_server = self._mcp.get_tool_definitions() if self._mcp else {}
 
         for cap in visible_connected:
-            tool_count = len(cap.tool_effects) if cap.tool_effects else "?"
-            lines.append(f"• {cap.display_name}: {cap.description} ({tool_count} tools)")
+            lines.append("")
+            lines.append(f"{cap.display_name}:")
+
+            server_tools = tool_defs_by_server.get(cap.server_name, [])
+            preloaded = [t for t in server_tools if t["name"] in PRELOADED_TOOLS]
+            on_demand = [t for t in server_tools if t["name"] not in PRELOADED_TOOLS]
+
+            if preloaded:
+                names = ", ".join(t["name"] for t in preloaded)
+                lines.append(f"  Loaded: {names}")
+
+            if on_demand:
+                tool_entries = []
+                for t in on_demand:
+                    name = t["name"]
+                    # Check explicit hint first, then auto-generate
+                    hint = cap.tool_hints.get(name, "")
+                    if not hint and not _is_self_explanatory(name):
+                        hint = _compress_hint(t.get("description", ""))
+                    if hint:
+                        tool_entries.append(f"{name} — {hint}")
+                    else:
+                        tool_entries.append(name)
+                if preloaded:
+                    lines.append(f"  On demand: {', '.join(tool_entries)}")
+                else:
+                    for entry in tool_entries:
+                        lines.append(f"  {entry}")
 
         if available:
             lines.append("")
             lines.append("NOT YET CONNECTED (offer to set up if asked):")
             for cap in available:
-                lines.append(f"• {cap.display_name}: {cap.description}")
+                lines.append(f"  {cap.display_name}: {cap.description}")
 
         lines.append("")
-        lines.append("To use any tool, call it by name. The system loads it automatically.")
+        lines.append("Call any tool by name. The system loads it automatically.")
         lines.append("You cannot do anything beyond what's listed above. Be honest about limits.")
 
         return "\n".join(lines)

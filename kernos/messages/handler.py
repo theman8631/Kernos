@@ -1813,7 +1813,7 @@ class MessageHandler:
         # Lazy tool loading: kernel tools (always) + preloaded MCP + session-loaded MCP
         # Kernel tools — always present, small schemas
         from kernos.kernel.files import FILE_TOOLS
-        from kernos.kernel.reasoning import REQUEST_TOOL, READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_TOOLS_TOOL
+        from kernos.kernel.reasoning import READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_TOOLS_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
         from kernos.kernel.channels import MANAGE_CHANNELS_TOOL
@@ -1823,7 +1823,7 @@ class MessageHandler:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             tools.append(REMEMBER_TOOL)
         tools.extend(FILE_TOOLS)
-        tools.extend([REQUEST_TOOL, DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL,
+        tools.extend([DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL,
                        READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL,
                        MANAGE_TOOLS_TOOL, MANAGE_CHANNELS_TOOL, MANAGE_SCHEDULE_TOOL])
         # Pre-loaded MCP tools (calendar reads) — always have full schemas

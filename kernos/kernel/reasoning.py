@@ -678,7 +678,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools", "manage_channels", "manage_schedule"}
+    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_tools", "manage_channels", "manage_schedule"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -692,7 +692,7 @@ class ReasoningService:
         MCP tools use tool_effects from CapabilityInfo.
         Unknown defaults to "hard_write" (safe default).
         """
-        _KERNEL_READS = {"remember", "list_files", "read_file", "request_tool", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
+        _KERNEL_READS = {"remember", "list_files", "read_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
         _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_tools"}
 
         if tool_name in _KERNEL_READS:
@@ -1693,13 +1693,6 @@ class ReasoningService:
                                 result = "File deletion failed — try again."
                         else:
                             result = "File system is not available right now."
-                    elif block.name == "request_tool":
-                        result = await self._handle_request_tool(
-                            request.tenant_id,
-                            request.active_space_id,
-                            tool_args.get("capability_name", "unknown"),
-                            tool_args.get("description", ""),
-                        )
                     elif block.name == "dismiss_whisper":
                         try:
                             result = await self._handle_dismiss_whisper(
