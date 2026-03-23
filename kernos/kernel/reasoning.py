@@ -1469,9 +1469,6 @@ class ReasoningService:
         )
 
         # --- Tool-use loop ---
-        # Gate cache: when a stub call passes the gate, cache the result so the
-        # re-run with full schema skips redundant gate evaluation (same tool, same turn).
-        _gate_cache: dict[str, "GateResult"] = {}
         iterations = 0
         while (
             response.stop_reason == "tool_use"
@@ -1516,22 +1513,14 @@ class ReasoningService:
                 # Dispatch Gate: classify and check write tools before execution
                 tool_effect = self._classify_tool_effect(block.name, request.active_space, tool_input)
                 if tool_effect in ("soft_write", "hard_write", "unknown"):
-                    # Check gate cache — skip redundant evaluation on lazy-load re-run
-                    cached = _gate_cache.get(block.name)
-                    if cached and cached.allowed:
-                        gate_result = cached
-                        logger.info(
-                            "GATE_CACHED: tool=%s (approved on stub call)", block.name,
-                        )
-                    else:
-                        gate_result = await self._gate_tool_call(
-                            block.name, tool_input, tool_effect,
-                            request.input_text, request.tenant_id,
-                            request.active_space_id,
-                            messages=request.messages,
-                            approval_token_id=approval_token_id,
-                            agent_reasoning=agent_reasoning,
-                        )
+                    gate_result = await self._gate_tool_call(
+                        block.name, tool_input, tool_effect,
+                        request.input_text, request.tenant_id,
+                        request.active_space_id,
+                        messages=request.messages,
+                        approval_token_id=approval_token_id,
+                        agent_reasoning=agent_reasoning,
+                    )
 
                     try:
                         await emit_event(
@@ -1555,10 +1544,6 @@ class ReasoningService:
                         block.name, tool_effect, gate_result.allowed,
                         gate_result.reason, gate_result.method,
                     )
-
-                    # Cache allowed gate results so lazy-load re-runs skip the gate
-                    if gate_result.allowed:
-                        _gate_cache[block.name] = gate_result
 
                     if not gate_result.allowed:
                         # Keep token for programmatic callers (Step 1 of the gate)

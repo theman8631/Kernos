@@ -348,7 +348,7 @@ class CapabilityRegistry:
                 "That is ALL you can do right now."
             )
 
-        lines = ["TOOLS (call any by name):"]
+        lines = ["TOOLS (call by name — full schema loads on first use):"]
 
         # Get tool definitions to access descriptions
         tool_defs_by_server = self._mcp.get_tool_definitions() if self._mcp else {}
@@ -358,19 +358,30 @@ class CapabilityRegistry:
             lines.append(f"{cap.display_name}:")
 
             server_tools = tool_defs_by_server.get(cap.server_name, [])
-            tool_entries = []
-            for t in server_tools:
-                name = t["name"]
-                # Add hints only for opaque names (not self-explanatory)
-                hint = cap.tool_hints.get(name, "")
-                if not hint and not _is_self_explanatory(name):
-                    hint = _compress_hint(t.get("description", ""))
-                if hint:
-                    tool_entries.append(f"{name} — {hint}")
+            preloaded = [t for t in server_tools if t["name"] in PRELOADED_TOOLS]
+            on_demand = [t for t in server_tools if t["name"] not in PRELOADED_TOOLS]
+
+            if preloaded:
+                names = ", ".join(t["name"] for t in preloaded)
+                lines.append(f"  Loaded: {names}")
+
+            if on_demand:
+                tool_entries = []
+                for t in on_demand:
+                    name = t["name"]
+                    # Check explicit hint first, then auto-generate
+                    hint = cap.tool_hints.get(name, "")
+                    if not hint and not _is_self_explanatory(name):
+                        hint = _compress_hint(t.get("description", ""))
+                    if hint:
+                        tool_entries.append(f"{name} — {hint}")
+                    else:
+                        tool_entries.append(name)
+                if preloaded:
+                    lines.append(f"  On demand: {', '.join(tool_entries)}")
                 else:
-                    tool_entries.append(name)
-            for entry in tool_entries:
-                lines.append(f"  {entry}")
+                    for entry in tool_entries:
+                        lines.append(f"  {entry}")
 
         if available:
             lines.append("")
