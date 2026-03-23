@@ -78,6 +78,7 @@ def _make_mock_registry(tools: list[dict] | None = None) -> MagicMock:
         else "TOOLS (call by name):\n\nTest Capability:\n  list_events, create-event"
     )
     registry.get_preloaded_tools.return_value = tools_list  # All test tools are preloaded
+    registry.get_lazy_tool_stubs.return_value = []  # No stubs in tests (all preloaded)
     registry.get_all_tool_names.return_value = {t["name"] for t in tools_list}
     _tool_by_name = {t["name"]: t for t in tools_list}
     registry.get_tool_schema.side_effect = lambda name: _tool_by_name.get(name)

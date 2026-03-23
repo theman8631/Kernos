@@ -571,3 +571,77 @@ class TestLoadedToolTracking:
         assert "create-event" in svc.get_loaded_tools("space_1")
         assert "send-email" not in svc.get_loaded_tools("space_1")
         assert "send-email" in svc.get_loaded_tools("space_2")
+
+
+class TestLazyToolStubs:
+    """get_lazy_tool_stubs returns lightweight stubs for non-preloaded tools."""
+
+    def test_returns_stubs_for_non_preloaded(self):
+        mcp = MagicMock()
+        tool_list = [
+            {"name": "list-events", "description": "List events"},
+            {"name": "create-event", "description": "Create a new calendar event"},
+            {"name": "delete-event", "description": "Delete event"},
+        ]
+        mcp.get_tools.return_value = tool_list
+        mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
+        registry = make_registry(mcp=mcp)
+        registry.register(make_cap("google-calendar", universal=True))
+
+        stubs = registry.get_lazy_tool_stubs()
+        stub_names = {s["name"] for s in stubs}
+        # list-events is PRELOADED — should NOT be a stub
+        assert "list-events" not in stub_names
+        # create-event and delete-event are lazy — should be stubs
+        assert "create-event" in stub_names
+        assert "delete-event" in stub_names
+
+    def test_stubs_have_open_schema(self):
+        mcp = MagicMock()
+        tool_list = [{"name": "create-event", "description": "Create event"}]
+        mcp.get_tools.return_value = tool_list
+        mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
+        registry = make_registry(mcp=mcp)
+        registry.register(make_cap("google-calendar", universal=True))
+
+        stubs = registry.get_lazy_tool_stubs()
+        assert len(stubs) == 1
+        schema = stubs[0]["input_schema"]
+        assert schema["additionalProperties"] is True
+        assert schema["properties"] == {}
+        assert "loads on first use" in stubs[0]["description"]
+
+    def test_excludes_already_loaded(self):
+        mcp = MagicMock()
+        tool_list = [
+            {"name": "create-event", "description": "Create event"},
+            {"name": "delete-event", "description": "Delete event"},
+        ]
+        mcp.get_tools.return_value = tool_list
+        mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
+        registry = make_registry(mcp=mcp)
+        registry.register(make_cap("google-calendar", universal=True))
+
+        stubs = registry.get_lazy_tool_stubs(loaded_names={"create-event"})
+        stub_names = {s["name"] for s in stubs}
+        assert "create-event" not in stub_names
+        assert "delete-event" in stub_names
+
+    def test_stubs_use_tool_hints(self):
+        mcp = MagicMock()
+        tool_list = [{"name": "evaluate", "description": "Run JavaScript on current page"}]
+        mcp.get_tools.return_value = tool_list
+        mcp.get_tool_definitions.return_value = {"lightpanda": tool_list}
+        cap = make_cap("web-browser", universal=True)
+        cap.server_name = "lightpanda"
+        cap.tool_hints = {"evaluate": "run JS"}
+        registry = make_registry(mcp=mcp)
+        registry.register(cap)
+
+        stubs = registry.get_lazy_tool_stubs()
+        assert len(stubs) == 1
+        assert "run JS" in stubs[0]["description"]
+
+    def test_no_mcp_returns_empty(self):
+        registry = make_registry()
+        assert registry.get_lazy_tool_stubs() == []

@@ -250,6 +250,47 @@ class CapabilityRegistry:
                 return tool
         return None
 
+    def get_lazy_tool_stubs(
+        self, space: "ContextSpace | None" = None, loaded_names: set[str] | None = None,
+    ) -> list[dict]:
+        """Get lightweight stub schemas for lazy (non-preloaded, non-loaded) MCP tools.
+
+        Stubs contain name + short description + open input_schema so the agent
+        can generate tool_use blocks. On first use, the handler replaces the stub
+        with the full schema and re-runs.
+        """
+        visible_names = self._visible_capability_names(space)
+        if not self._mcp:
+            return []
+        loaded = loaded_names or set()
+        stubs = []
+        tool_defs_by_server = self._mcp.get_tool_definitions()
+        for cap_name in visible_names:
+            cap = self._capabilities.get(cap_name)
+            if not cap or cap.status != CapabilityStatus.CONNECTED:
+                continue
+            for tool in tool_defs_by_server.get(cap.server_name, []):
+                name = tool["name"]
+                # Skip preloaded and already-loaded tools (they have full schemas)
+                if name in PRELOADED_TOOLS or name in loaded:
+                    continue
+                # Build stub description with hint
+                hint = cap.tool_hints.get(name, "")
+                if not hint and not _is_self_explanatory(name):
+                    hint = _compress_hint(tool.get("description", ""))
+                desc = hint if hint else name.replace("-", " ").replace("_", " ")
+                stub = {
+                    "name": name,
+                    "description": f"{desc} (loads on first use)",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": True,
+                    },
+                }
+                stubs.append(stub)
+        return stubs
+
     def get_preloaded_tools(self, space: "ContextSpace | None" = None) -> list[dict]:
         """Get full schemas for pre-loaded MCP tools only (calendar reads).
 

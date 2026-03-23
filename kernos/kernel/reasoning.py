@@ -1811,36 +1811,68 @@ class ReasoningService:
                     else:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:
-                    # Lazy tool loading: check if this tool was in the provided schemas.
-                    # If not (agent called it from the directory), load the schema and
-                    # execute directly — MCP can route it regardless.
-                    _tool_in_list = any(t.get("name") == block.name for t in tools)
-                    if not _tool_in_list and self._registry:
+                    # Lazy tool loading: check if this tool is a stub (loads on first use).
+                    # A stub has "additionalProperties": true and empty properties — the agent
+                    # generated a call with best-guess params. Load full schema and re-run.
+                    _is_stub = False
+                    _tool_entry = None
+                    for _t in tools:
+                        if _t.get("name") == block.name:
+                            _tool_entry = _t
+                            break
+                    if _tool_entry:
+                        _schema = _tool_entry.get("input_schema", {})
+                        _is_stub = (
+                            _schema.get("additionalProperties") is True
+                            and not _schema.get("properties")
+                        )
+
+                    if _is_stub and self._registry:
+                        full_schema = self._registry.get_tool_schema(block.name)
+                        if full_schema:
+                            # Replace stub with full schema in the tools list
+                            for _i, _t in enumerate(tools):
+                                if _t.get("name") == block.name:
+                                    tools[_i] = full_schema
+                                    break
+                            self.load_tool(request.active_space_id, block.name)
+                            logger.info(
+                                "TOOL_LOAD: tool=%s space=%s (stub -> full schema, re-running)",
+                                block.name, request.active_space_id,
+                            )
+                            # Return a tool result asking the agent to retry with full schema
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": (
+                                    f"[SYSTEM] The tool {block.name} is now fully loaded. "
+                                    "Please retry your call with the correct parameters."
+                                ),
+                            })
+                            continue  # Skip execution — agent will retry with full schema
+
+                    if not _tool_entry and self._registry:
+                        # Tool not in list at all — check if it exists in registry
                         schema = self._registry.get_tool_schema(block.name)
                         if schema:
                             self.load_tool(request.active_space_id, block.name)
                             tools.append(schema)
                             logger.info(
-                                "TOOL_LOAD: tool=%s space=%s (first use, schema loaded)",
+                                "TOOL_LOAD: tool=%s space=%s (not in list, schema loaded)",
                                 block.name, request.active_space_id,
                             )
-                        elif not schema:
-                            # Tool doesn't exist at all in any connected capability
+                        else:
                             result = f"Tool '{block.name}' is not available."
                             tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
-                            is_error = True
-                            # Console logging: tool result
                             logger.info(
                                 "AGENT_RESULT: tool=%s success=%s preview=%s",
                                 block.name, False, result[:100],
                             )
-                            tool_results.append(
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": block.id,
-                                    "content": result,
-                                }
-                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result,
+                            })
                             continue
                     result = await self._mcp.call_tool(block.name, tool_input)
                 tool_duration_ms = int((time.monotonic() - t_tool) * 1000)

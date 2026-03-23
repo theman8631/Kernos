@@ -1834,11 +1834,16 @@ class MessageHandler:
             schema = self.registry.get_tool_schema(tool_name)
             if schema:
                 tools.append(schema)
+        # Lazy tool stubs — lightweight schemas so the agent can generate tool_use blocks
+        stubs = self.registry.get_lazy_tool_stubs(
+            space=active_space, loaded_names=loaded_names,
+        )
+        tools.extend(stubs)
         _preloaded_count = len(self.registry.get_preloaded_tools(space=active_space))
         _loaded_count = len(loaded_names)
         logger.info(
-            "TOOL_DIRECTORY: tools=%d preloaded=%d loaded=%d",
-            len(tools), _preloaded_count, _loaded_count,
+            "TOOL_DIRECTORY: tools=%d preloaded=%d loaded=%d stubs=%d",
+            len(tools), _preloaded_count, _loaded_count, len(stubs),
         )
         # Capability prompt: compact directory instead of full schemas
         capability_prompt = self.registry.build_tool_directory(space=active_space)

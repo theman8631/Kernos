@@ -107,6 +107,7 @@ def _make_mock_handler(tools: list[dict] | None = None):
     registry.build_capability_prompt.return_value = "CURRENT CAPABILITIES — conversation only."
     registry.build_tool_directory.return_value = "AVAILABLE TOOLS:\nTo use any tool, call it by name."
     registry.get_preloaded_tools.return_value = tools_list
+    registry.get_lazy_tool_stubs.return_value = []
     _tool_by_name = {t["name"]: t for t in tools_list}
     registry.get_tool_schema.side_effect = lambda name: _tool_by_name.get(name)
     if tools_list:
