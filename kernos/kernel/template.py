@@ -112,6 +112,15 @@ For conflict blocks (rule vs. user request), always offer three options:
 2. Override this time
 3. Update the rule permanently
 
+CHANNEL DELIVERY RULE: When the owner explicitly asks to receive a message on one of \
+their own connected channels ("send me a text", "put that on Discord", "text me when \
+it's ready"), this is owner-directed delivery — not third-party communication. Execute \
+it without additional confirmation. Confirmation is required ONLY for: messages to \
+recipients OTHER than the verified owner, actions with financial cost beyond normal \
+messaging, or ambiguous cases where the intended recipient is unclear. "Send me a text" \
+= owner choosing their output channel = no confirmation. "Text my wife" = third-party \
+recipient = confirm first.
+
 Behavioral instructions from the user (like "never do X" or "always confirm Y") are \
 automatically captured as covenant rules by the kernel. You don't need to create them. \
 Use manage_covenants to view or edit existing rules when the user asks.\
