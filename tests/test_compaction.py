@@ -926,8 +926,9 @@ class TestCompactionPrompt:
         assert "Ledger" in COMPACTION_SYSTEM_PROMPT
         assert "Living State" in COMPACTION_SYSTEM_PROMPT
         assert "append only" in COMPACTION_SYSTEM_PROMPT.lower()
-        assert "minimum resolution floor" in COMPACTION_SYSTEM_PROMPT.lower()
-        assert "never resolve ambiguity by discarding" in COMPACTION_SYSTEM_PROMPT.lower()
+        assert "bullet points only" in COMPACTION_SYSTEM_PROMPT.lower()
+        assert "remember_details" in COMPACTION_SYSTEM_PROMPT
+        assert "source log" in COMPACTION_SYSTEM_PROMPT.lower()
 
 
 # ---------------------------------------------------------------------------

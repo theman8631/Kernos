@@ -154,7 +154,8 @@ You receive the following inputs in this order:
 1. These instructions.
 2. Context Space Definition — the domain, purpose, and character of this context space. This is your editorial lens. It determines what matters, what to preserve in detail, what to condense, and what to discard.
 3. Previous Compaction History — the existing historical record from prior compaction cycles (empty on first run). This document contains two layers: a Ledger followed by a Living State. Both are described below.
-4. New Message Exchanges — the raw conversation messages since the last compaction that must now be integrated into the record.
+4. Source Log Identifier — the log file this compaction is derived from (e.g., "log_003"). The full conversation text is permanently archived in this file and can be retrieved later via remember_details(). You do not need to preserve the conversation verbatim — the source log does that.
+5. New Message Exchanges — the raw conversation messages since the last compaction that must now be integrated into the record.
 
 This ordering is intentional. The Ledger occupies the middle of context where archival material belongs — present but not competing for attention. The Living State sits closer to the new messages, keeping current operational reality in sharp focus as you process what is new and produce your output.
 
@@ -180,32 +181,52 @@ The Ledger comes first. The Living State comes last. This ensures that when this
 
 **Ledger**
 
-The Ledger is the immutable, append-only historical record. Each compaction cycle adds a new entry at the end. Once a Ledger entry is written, it is never edited, rewritten, or removed by future compaction cycles.
+The Ledger is a minimal topical index. Each compaction cycle appends one short entry listing WHAT was discussed. The full conversation is permanently archived in the source log file — the Ledger does not need to preserve detail, narrative, or reasoning.
 
-The Ledger is insurance. It guarantees that information which ages out of the Living State is never truly lost. It provides the historical depth necessary to understand not just what is true now, but how things got here.
+Think of the Ledger as a table of contents for the archived logs. A future reader scanning the Ledger should be able to say: "The pricing discussion happened in Compaction #3 — I'll use remember_details(log_003) to see exactly what was said." The Ledger tells them WHERE to look. The source log has the content.
 
-Each Ledger entry captures what the new message exchanges contributed to this context space, written at the appropriate resolution for the domain.
+Once a Ledger entry is written, it is never edited, rewritten, or removed by future compaction cycles.
 
-The context space definition determines the character of each Ledger entry:
-- In a transactional/operational context, Ledger entries read like detailed records — dated transaction logs, client interaction notes, specific data points (amounts, names, outcomes, exceptions).
-- In a narrative/creative context, Ledger entries read like annotated footnotes to a novel — what happened during this session, which characters were involved, what changed in the world, what emotional beats landed, what plot threads advanced or closed.
-- In a technical/engineering context, Ledger entries read like changelog entries — what was built, what was decided, what was tried and failed, what files or systems were touched.
+Each Ledger entry is a short bullet list — one line per topic, one sentence per bullet. No paragraphs. No narrative. No analysis.
 
 Ledger entry format:
 
 ```
-## Compaction #N — [first message timestamp] → [last message timestamp]
+## Compaction #N (source: log_NNN) — [first message timestamp] → [last message timestamp]
 
-[Body of the entry, written at domain-appropriate resolution]
+- [Topic]: [one-sentence summary of what happened or was decided]
+- [Topic]: [one-sentence summary]
+- [Topic]: [one-sentence summary]
 ```
 
 Ledger rules:
 1. Append only. New entries are added at the end. Existing entries are never modified.
-2. Self-contained. Each entry should be interpretable on its own, without requiring the reader to have read prior entries.
-3. Domain-resolution. Write each entry at the level of detail the domain demands. A financial ledger preserves dollar amounts to the cent. A narrative ledger preserves character motivations and story beats. A technical ledger preserves file paths and error messages.
-4. Exception capture. If anything anomalous occurred during this compaction window — something that deviates from the normal pattern — note it explicitly. This is the safety net for information that might not fit the Living State's structure.
-5. Sequential numbering. Number entries sequentially starting from 1.
-6. Minimum resolution floor. Every Ledger entry must preserve at minimum: all named entities mentioned, all decisions made or commitments given, all facts that would change behavior if forgotten, and any content the user explicitly asked to be remembered. When in doubt about whether a detail meets this bar, include it — the cost of an extra sentence is lower than the cost of a lost detail.
+2. Bullet points only. No paragraphs. No narrative prose.
+3. One line per topic. Maximum one sentence per bullet. If a topic needs more detail, the source log has it.
+4. Preserve in every bullet: named entities mentioned, decisions made, commitments given, and key facts (numbers, dates, names). These are the searchable anchors that help remember() find the right Ledger entry.
+5. Do NOT preserve: reasoning, back-and-forth discussion, suggestions, emotional context, analysis, or how conclusions were reached. Those live in the source log.
+6. Include the source log reference in the header.
+7. Sequential numbering starting from 1.
+
+Example of a GOOD Ledger entry:
+
+```
+## Compaction #2 (source: log_002) — 2026-03-25T06:20 → 2026-03-25T06:21
+
+- Birthday dinner for Alex (35, April 12): sushi + vegetarian girlfriend + shellfish allergy + omakase preference, $50/pp budget. City/group size still open.
+- Guitar learning: user knows G/C/D/Em chords, barre chords hurt. Gradual approach discussed.
+- Roth vs traditional IRA: user is 32, makes ~$85k. Basics explained, no decision yet.
+```
+
+Example of a BAD Ledger entry (too verbose — this defeats the purpose):
+
+```
+## Compaction #2
+
+The user introduced several unrelated topics. First, they asked for help planning a birthday dinner for their friend Alex, who is turning 35 on April 12th. Alex loves sushi, but his girlfriend is vegetarian. The budget is around $50 per person. The assistant asked clarifying questions about city, group size, and vibe...
+```
+
+The bad example narrates the conversation. The source log already has the conversation. The Ledger just indexes it.
 
 **Living State**
 
@@ -213,7 +234,9 @@ The Living State is the mutable, current-truth layer. It represents what is true
 
 A reader who only reads the Living State should be able to step into this conversation and operate competently — understanding what is happening, who is involved, what has been decided, and what is pending.
 
-The Living State is not a summary of the conversation. It is a maintained snapshot of current reality as understood through this context space's domain. Old information that is no longer active does not persist here — it lives in the Ledger.
+The Living State is not a summary of the conversation. It is a maintained snapshot of current reality as understood through this context space's domain. Old information that is no longer active does not persist here — it lives in the Ledger (and in full fidelity in the source logs).
+
+The Living State should feel rich and detailed. Unlike the Ledger (which is deliberately minimal), the Living State is the working document — it needs enough detail that a future agent can continue operating without re-reading the source logs.
 
 The context space definition determines the character of the Living State:
 - In a transactional/operational context, the Living State reads like a dashboard — specific, data-dense, covering recent activity at full fidelity.
@@ -232,15 +255,15 @@ Organize the Living State into whatever sections serve the domain. Suggested sec
 
 First compaction (no previous history):
 
-1. Write Ledger entry Compaction #1 capturing the full scope of what transpired.
+1. Write Ledger entry Compaction #1 — a short bullet list of topics discussed.
 2. Construct the initial Living State from the new message exchanges.
 3. Return the complete document: Ledger then Living State.
 
 Subsequent compactions:
 
 1. Pass through all existing Ledger entries unchanged. Do not touch them.
-2. Write a new Ledger entry. Append it after the last existing entry. Capture what the new message exchanges contributed, at domain-appropriate resolution.
-3. Rewrite the Living State. Update it to reflect current reality as of the end of the new message exchanges. Remove what is no longer active. Add what is new. Information aging out of the Living State is not lost — it already exists in prior Ledger entries.
+2. Write a new Ledger entry. Append it after the last existing entry. Bullet list of topics — brief, indexed, not narrative.
+3. Rewrite the Living State. Update it to reflect current reality as of the end of the new message exchanges. Remove what is no longer active. Add what is new. Information aging out of the Living State is preserved in the Ledger index AND in full detail in the source logs — nothing is truly lost.
 4. Return the complete document — full Ledger (all prior entries unchanged, new entry appended), followed by the updated Living State.
 
 ---
@@ -249,15 +272,17 @@ Subsequent compactions:
 
 The context space definition tells you what this space is for. Use it as your editorial lens:
 
-What belongs in the Living State — anything a participant needs to know to continue operating right now.
+What belongs in the Living State — anything a participant needs to know to continue operating right now. Be thorough here. The Living State is the agent's working memory.
 
-What resolution for the Ledger — match the domain. Transactional domains need data-point fidelity. Narrative domains need story-beat fidelity. Technical domains need implementation-detail fidelity.
+What resolution for the Ledger — always bullet points, always minimal. One line per topic. The source log has the full resolution.
 
-What to discard entirely — mechanical exchanges, redundant restatements, thinking-out-loud that led nowhere, greetings, acknowledgments. Information with zero retrieval value in either layer.
+What to discard entirely from both layers — mechanical exchanges, redundant restatements, thinking-out-loud that led nowhere, greetings, acknowledgments. Information with zero retrieval value.
 
-What to promote from noise to signal — sometimes an exchange that would normally be discarded carries unusual weight. An offhand remark that reveals a constraint. An emotional reaction in a transactional context. A mechanical detail in a narrative context. The context space definition should help you recognize these.
+What to promote from noise to signal — sometimes an exchange that would normally be discarded carries unusual weight. An offhand remark that reveals a constraint. A name mentioned in passing. A number. These become bullet points in the Ledger even if they seem minor — they're the searchable anchors that help future retrieval find the right source log.
 
-When ambiguous — err toward preservation. If you are unsure whether a detail belongs in the Ledger entry, include it. If you are unsure whether something is still active enough for the Living State, keep it one more cycle and let the next compaction decide. The cost of an extra sentence is always lower than the cost of a lost detail. Never resolve ambiguity by discarding.
+When ambiguous about the Living State — err toward keeping it one more cycle. The next compaction can remove it.
+
+When ambiguous about the Ledger — include a bullet. One extra line costs nothing. A missed entity or decision means remember() can't find the source log.
 
 ---
 
@@ -266,10 +291,12 @@ When ambiguous — err toward preservation. If you are unsure whether a detail b
 1. Never fabricate. Every fact in either layer must originate from the message exchanges or the prior compaction history.
 2. Living State is rewritten freely. It reflects current truth. Old states are preserved in the Ledger.
 3. Ledger entries are immutable. Once written, never edited, merged, reworded, or removed.
-4. Preserve specificity in both layers. Names, numbers, identifiers, exact phrasing of commitments — these survive compaction at full fidelity wherever they appear.
-5. The document must be self-contained. A future reader with no access to the original messages should be able to continue the conversation from the Living State and reconstruct any historical moment from the Ledger.
-6. Number Ledger entries sequentially.
-7. Every Ledger entry carries a message date range header regardless of domain.
+4. Preserve specificity in both layers. Names, numbers, dates, identifiers — these survive compaction at full fidelity. "Alex is turning 35 on April 12" not "a friend has a birthday coming up."
+5. Ledger entries are bullet points only. No paragraphs. No narrative. Each bullet is one topic, one sentence.
+6. Living State should be rich and detailed. It is the working document. Don't apply the Ledger's minimalism here.
+7. The document must enable continuity. A future reader with the Living State should be able to continue the conversation. A future reader with the Ledger should be able to find any past topic and retrieve the source log for details.
+8. Number Ledger entries sequentially.
+9. Every Ledger entry carries the source log reference and a message date range header.
 
 ---
 
