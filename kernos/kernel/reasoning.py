@@ -1738,6 +1738,11 @@ class ReasoningService:
             tenant_id, space_id, log_number,
         )
 
+        if log_text:
+            # Unescape newlines — P1 writes \\n for single-line entries,
+            # but remember_details returns human-readable text
+            log_text = log_text.replace("\\n", "\n")
+
         if log_text is None:
             logger.info("DEEP_RECALL: space=%s log=%03d not_found", space_id, log_number)
             return f"Log file log_{log_number:03d} not found for this space."
