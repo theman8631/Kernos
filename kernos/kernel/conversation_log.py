@@ -11,6 +11,49 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Pattern matching the start of a log entry: [timestamp] [speaker] [channel]
+_ENTRY_RE = re.compile(
+    r'^\[(\d{4}-\d{2}-\d{2}T[^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+'
+)
+
+
+def _parse_entries(text: str) -> list[dict]:
+    """Parse log text into structured entries, handling multiline content.
+
+    Each entry starts with [timestamp] [speaker] [channel] on a new line.
+    Everything until the next entry header is the content (including real newlines).
+    """
+    lines = text.split("\n")
+    entries: list[dict] = []
+    current: dict | None = None
+
+    for line in lines:
+        match = _ENTRY_RE.match(line)
+        if match:
+            if current:
+                entries.append(current)
+            timestamp, speaker, channel = match.groups()
+            content_start = match.end()
+            role = "user" if speaker == "user" else "assistant"
+            current = {
+                "role": role,
+                "content": line[content_start:],
+                "timestamp": timestamp,
+                "channel": channel,
+            }
+        elif current:
+            # Continuation line — append to current entry's content
+            current["content"] += "\n" + line
+
+    if current:
+        entries.append(current)
+
+    # Strip trailing whitespace from content
+    for entry in entries:
+        entry["content"] = entry["content"].rstrip()
+
+    return entries
+
 
 class ConversationLogger:
     """Per-space conversation log files.
@@ -50,10 +93,6 @@ class ConversationLogger:
         num = meta["current_log"]
         return self._logs_dir(tenant_id, space_id) / f"log_{num:03d}.txt"
 
-    def _escape_newlines(self, text: str) -> str:
-        """Replace actual newlines with literal \\n for single-line log entries."""
-        return text.replace("\n", "\\n")
-
     async def append(
         self,
         tenant_id: str,
@@ -63,7 +102,11 @@ class ConversationLogger:
         content: str,
         timestamp: str = "",  # ISO 8601, defaults to now
     ) -> None:
-        """Append a single line to the current log file for this space."""
+        """Append an entry to the current log file for this space.
+
+        Content is written with real newlines — no escaping.
+        Each entry starts with a [timestamp] [speaker] [channel] header line.
+        """
         if not space_id:
             return
 
@@ -72,8 +115,7 @@ class ConversationLogger:
             logs_dir.mkdir(parents=True, exist_ok=True)
 
             ts = timestamp or datetime.now(timezone.utc).isoformat()
-            escaped = self._escape_newlines(content)
-            line = f"[{ts}] [{speaker}] [{channel}] {escaped}\n"
+            line = f"[{ts}] [{speaker}] [{channel}] {content}\n"
 
             log_path = self._current_log_path(tenant_id, space_id)
             with open(log_path, "a", encoding="utf-8") as f:
@@ -94,8 +136,6 @@ class ConversationLogger:
 
     # --- P2: Read ---
 
-    _LOG_LINE_RE = re.compile(r'\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(.*)')
-
     async def read_recent(
         self,
         tenant_id: str,
@@ -105,12 +145,11 @@ class ConversationLogger:
     ) -> list[dict]:
         """Read recent conversation entries from the current space log.
 
-        Walks backward from the tail of the current log file until either
+        Walks backward from the tail of parsed entries until either
         token_budget or max_messages is exhausted. Returns entries in
         chronological order (oldest first).
 
         Returns list of dicts: {role, content, timestamp, channel}.
-        The HANDLER owns conversion into the exact reasoning message format.
         """
         if not space_id:
             return []
@@ -119,62 +158,23 @@ class ConversationLogger:
         if not log_path.exists():
             return []
 
-        with open(log_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        text = log_path.read_text(encoding="utf-8")
+        all_entries = _parse_entries(text)
 
-        entries: list[dict] = []
+        result: list[dict] = []
         tokens_used = 0
 
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-
-            parsed = self._parse_log_line(line)
-            if parsed is None:
-                continue
-
-            # Token estimate from the FULL rendered line (speaker + channel + content)
-            entry_tokens = len(line) // 4
-            if tokens_used + entry_tokens > token_budget and entries:
-                break  # Budget exhausted (always include at least one)
-
+        for entry in reversed(all_entries):
+            entry_tokens = len(entry["content"]) // 4 + 10  # content + header overhead
+            if tokens_used + entry_tokens > token_budget and result:
+                break
             tokens_used += entry_tokens
-            entries.append(parsed)
-
-            if len(entries) >= max_messages:
+            result.append(entry)
+            if len(result) >= max_messages:
                 break
 
-        entries.reverse()
-        return entries
-
-    def _parse_log_line(self, line: str) -> dict | None:
-        """Parse a strict-format log line into a structured dict.
-
-        Input:  [2026-03-22T14:00:06-07:00] [user] [discord] Hello there
-        Output: {"role": "user", "content": "Hello there",
-                 "timestamp": "2026-03-22T14:00:06-07:00", "channel": "discord"}
-
-        Unescapes \\n back to real newlines (P1 escapes on write).
-        """
-        match = self._LOG_LINE_RE.match(line)
-        if not match:
-            return None
-
-        timestamp, speaker, channel, content = match.groups()
-
-        # Unescape multiline content
-        content = content.replace("\\n", "\n")
-
-        # Map speaker to role
-        role = "user" if speaker == "user" else "assistant"
-
-        return {
-            "role": role,
-            "content": content,
-            "timestamp": timestamp,
-            "channel": channel,
-        }
+        result.reverse()
+        return result
 
     # --- P3: Compaction support ---
 
@@ -234,44 +234,48 @@ class ConversationLogger:
 
     async def seed_from_previous(
         self, tenant_id: str, space_id: str,
-        previous_log_number: int, tail_lines: int = 10,
+        previous_log_number: int, tail_entries: int = 10,
     ) -> int:
-        """Copy last N lines from archived log into new current log.
+        """Copy last N entries from archived log into new current log.
 
         Preserves recent context across compaction boundaries so the agent
         doesn't lose track of the conversation.
 
-        Returns number of lines seeded. Updates meta.json token estimate.
+        Returns number of entries seeded. Updates meta.json token estimate.
         """
         prev_path = self._logs_dir(tenant_id, space_id) / f"log_{previous_log_number:03d}.txt"
         if not prev_path.exists():
             return 0
 
-        with open(prev_path, "r", encoding="utf-8") as f:
-            all_lines = f.readlines()
-
-        seed_lines = all_lines[-tail_lines:] if len(all_lines) > tail_lines else all_lines
-        if not seed_lines:
+        text = prev_path.read_text(encoding="utf-8")
+        all_entries = _parse_entries(text)
+        if not all_entries:
             return 0
 
-        # Write seed lines to the new current log
+        seed_entries = all_entries[-tail_entries:]
+
+        # Reconstruct log lines for seeded entries
         current_path = self._current_log_path(tenant_id, space_id)
         current_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(current_path, "a", encoding="utf-8") as f:
-            for line in seed_lines:
-                f.write(line)
+        seed_text = ""
+        for entry in seed_entries:
+            speaker = "user" if entry["role"] == "user" else "assistant"
+            line = f"[{entry['timestamp']}] [{speaker}] [{entry['channel']}] {entry['content']}\n"
+            seed_text += line
 
-        # Update token estimate to include seeded content
-        seed_chars = sum(len(line) for line in seed_lines)
+        with open(current_path, "a", encoding="utf-8") as f:
+            f.write(seed_text)
+
+        # Update token estimate
         meta = self._load_meta(tenant_id, space_id)
-        meta["current_log_tokens_est"] += seed_chars // 4
+        meta["current_log_tokens_est"] += len(seed_text) // 4
         self._save_meta(tenant_id, space_id, meta)
 
         logger.info(
-            "LOG_SEED: space=%s from=log_%03d lines=%d tokens_est=%d",
-            space_id, previous_log_number, len(seed_lines), seed_chars // 4,
+            "LOG_SEED: space=%s from=log_%03d entries=%d tokens_est=%d",
+            space_id, previous_log_number, len(seed_entries), len(seed_text) // 4,
         )
-        return len(seed_lines)
+        return len(seed_entries)
 
     async def read_log_text(
         self, tenant_id: str, space_id: str, log_number: int,
