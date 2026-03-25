@@ -297,6 +297,7 @@ When ambiguous about the Ledger — include a bullet. One extra line costs nothi
 7. The document must enable continuity. A future reader with the Living State should be able to continue the conversation. A future reader with the Ledger should be able to find any past topic and retrieve the source log for details.
 8. Number Ledger entries sequentially.
 9. Every Ledger entry carries the source log reference and a message date range header.
+10. Convert relative time references to absolute dates. "Yesterday" becomes the actual date (e.g., "2026-03-23"). "Last week" becomes "week of March 17, 2026." "Two hours ago" becomes the actual time if timestamps are available. Relative references become meaningless after time passes.
 
 ---
 

@@ -1,4 +1,5 @@
 """Tests for ReasoningService and AnthropicProvider."""
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic
@@ -211,10 +212,29 @@ async def test_reason_reasoning_response_has_token_counts():
 # ---------------------------------------------------------------------------
 
 
+def _mock_stream_error(exc):
+    """Return a mock messages.stream that raises *exc* on __aenter__."""
+    @asynccontextmanager
+    async def _stream(**kwargs):
+        raise exc
+        yield  # pragma: no cover — makes this an async generator
+    return _stream
+
+
+def _mock_stream_ok(response):
+    """Return a mock messages.stream that yields a stream whose get_final_message returns *response*."""
+    @asynccontextmanager
+    async def _stream(**kwargs):
+        stream = MagicMock()
+        stream.get_final_message = AsyncMock(return_value=response)
+        yield stream
+    return _stream
+
+
 async def test_anthropic_provider_maps_timeout_to_reasoning_error():
     mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(
-        side_effect=anthropic.APITimeoutError(request=MagicMock())
+    mock_client.messages.stream = _mock_stream_error(
+        anthropic.APITimeoutError(request=MagicMock())
     )
 
     with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
@@ -225,8 +245,8 @@ async def test_anthropic_provider_maps_timeout_to_reasoning_error():
 
 async def test_anthropic_provider_maps_connection_error():
     mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(
-        side_effect=anthropic.APIConnectionError(request=MagicMock())
+    mock_client.messages.stream = _mock_stream_error(
+        anthropic.APIConnectionError(request=MagicMock())
     )
 
     with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
@@ -240,8 +260,8 @@ async def test_anthropic_provider_maps_rate_limit_error():
     mock_response = MagicMock()
     mock_response.status_code = 429
     mock_response.headers = {}
-    mock_client.messages.create = AsyncMock(
-        side_effect=anthropic.RateLimitError(
+    mock_client.messages.stream = _mock_stream_error(
+        anthropic.RateLimitError(
             message="rate limited", response=mock_response, body=None
         )
     )
@@ -257,8 +277,8 @@ async def test_anthropic_provider_maps_api_status_error():
     mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.headers = {}
-    mock_client.messages.create = AsyncMock(
-        side_effect=anthropic.APIStatusError(
+    mock_client.messages.stream = _mock_stream_error(
+        anthropic.APIStatusError(
             message="Internal Server Error", response=mock_response, body=None
         )
     )
@@ -274,7 +294,7 @@ async def test_anthropic_provider_returns_provider_response_on_success():
     text_block = MagicMock()
     text_block.type = "text"
     text_block.text = "Hello!"
-    mock_client.messages.create = AsyncMock(return_value=MagicMock(
+    mock_client.messages.stream = _mock_stream_ok(MagicMock(
         content=[text_block],
         stop_reason="end_turn",
         usage=MagicMock(input_tokens=5, output_tokens=10),

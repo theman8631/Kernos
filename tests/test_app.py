@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,6 +26,36 @@ def _mock_text_response(text: str) -> MagicMock:
     return response
 
 
+def _mock_stream_responses(*responses):
+    """Return a callable that produces async-context-manager streams.
+
+    Each call to the returned function pops the next response from the list.
+    If only one response is given, every call returns that same response.
+    """
+    remaining = list(responses)
+
+    def _stream(**kwargs):
+        resp = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+        @asynccontextmanager
+        async def _ctx():
+            stream = MagicMock()
+            stream.get_final_message = AsyncMock(return_value=resp)
+            yield stream
+        return _ctx()
+    return _stream
+
+
+def _mock_stream_error(exc):
+    """Return a callable that produces a stream raising *exc*."""
+    def _stream(**kwargs):
+        @asynccontextmanager
+        async def _ctx():
+            raise exc
+            yield  # noqa: unreachable — makes this an async generator
+        return _ctx()
+    return _stream
+
+
 @pytest.fixture
 def tc():
     """TestClient with Anthropic mocked and persistence using a temp directory."""
@@ -32,7 +63,7 @@ def tc():
     try:
         with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic") as mock_cls:
             mock_anthropic = MagicMock()
-            mock_anthropic.messages.create = AsyncMock()
+            mock_anthropic.messages.stream = _mock_stream_responses(_mock_text_response(""))
             mock_cls.return_value = mock_anthropic
             with patch.dict(os.environ, {"KERNOS_DATA_DIR": tmpdir}):
                 with TestClient(app) as client:
@@ -50,7 +81,7 @@ def test_health(tc):
 
 def test_sms_inbound_returns_twiml(tc):
     client, mock_anthropic = tc
-    mock_anthropic.messages.create = AsyncMock(return_value=_mock_text_response("Hi there!"))
+    mock_anthropic.messages.stream = _mock_stream_responses(_mock_text_response("Hi there!"))
 
     response = client.post(
         "/sms/inbound",
@@ -71,7 +102,7 @@ def test_sms_inbound_returns_twiml(tc):
 def test_sms_inbound_error_returns_friendly_twiml(tc):
     """If the handler raises unexpectedly, the app returns friendly TwiML (not 500)."""
     client, mock_anthropic = tc
-    mock_anthropic.messages.create = AsyncMock(side_effect=Exception("kaboom"))
+    mock_anthropic.messages.stream = _mock_stream_error(Exception("kaboom"))
 
     response = client.post(
         "/sms/inbound",
@@ -115,10 +146,10 @@ def test_sms_inbound_with_tool_use_returns_calendar_response(tc):
     tool_response.usage.input_tokens = 15
     tool_response.usage.output_tokens = 5
 
-    mock_anthropic.messages.create.side_effect = [
+    mock_anthropic.messages.stream = _mock_stream_responses(
         tool_response,
         _mock_text_response("You have a team standup at 10am."),
-    ]
+    )
 
     # Inject a mock tool into the handler's MCP manager
     mcp = client.app.state.handler.mcp

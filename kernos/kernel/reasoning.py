@@ -468,7 +468,9 @@ class AnthropicProvider(Provider):
             }
 
         try:
-            response = await self._client.messages.create(**create_kwargs)
+            # Use streaming to avoid SDK timeout for large max_tokens values
+            async with self._client.messages.stream(**create_kwargs) as stream:
+                response = await stream.get_final_message()
         except anthropic.APITimeoutError as exc:
             raise ReasoningTimeoutError(str(exc)) from exc
         except anthropic.APIConnectionError as exc:
