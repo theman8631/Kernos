@@ -6,6 +6,7 @@ simple truncation with structured historical preservation.
 """
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,7 +64,7 @@ class CompactionState:
     cumulative_new_tokens: int = 0
     last_compaction_at: str = ""
     index_tokens: int = 0
-    compaction_threshold: int = 8000  # estimated tokens before log triggers compaction
+    compaction_threshold: int = int(os.getenv("KERNOS_COMPACTION_THRESHOLD", "8000"))
     _context_def_tokens: int = 0
     _system_overhead: int = 0
 
@@ -338,7 +339,10 @@ class CompactionService:
                 cumulative_new_tokens=data.get("cumulative_new_tokens", 0),
                 last_compaction_at=data.get("last_compaction_at", ""),
                 index_tokens=data.get("index_tokens", 0),
-                compaction_threshold=data.get("compaction_threshold", 8000),
+                compaction_threshold=data.get(
+                    "compaction_threshold",
+                    int(os.getenv("KERNOS_COMPACTION_THRESHOLD", "8000")),
+                ),
                 _context_def_tokens=data.get("_context_def_tokens", 0),
                 _system_overhead=data.get("_system_overhead", 0),
             )
