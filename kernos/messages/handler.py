@@ -2114,25 +2114,61 @@ class MessageHandler:
             content=response_text,
         )
 
-        # Track tokens for compaction trigger
+        # P3: Log-based compaction trigger
         try:
             comp_state = await self.compaction.load_state(tenant_id, active_space_id)
             if comp_state:
-                exchange_tokens = await self.compaction.adapter.count_tokens(
-                    message.content + "\n" + response_text
+                log_info = await self.conv_logger.get_current_log_info(
+                    tenant_id, active_space_id,
                 )
-                comp_state.cumulative_new_tokens += exchange_tokens
 
-                if await self.compaction.should_compact(active_space_id, comp_state):
-                    # Get messages with timestamps for compaction
+                if log_info["tokens_est"] >= comp_state.compaction_threshold:
+                    # Read the log text
+                    log_text, log_num = await self.conv_logger.read_current_log_text(
+                        tenant_id, active_space_id,
+                    )
+
+                    if log_text.strip() and active_space:
+                        # Run compaction from the log
+                        comp_state = await self.compaction.compact_from_log(
+                            tenant_id, active_space_id, active_space,
+                            log_text, log_num, comp_state,
+                        )
+
+                        # ONLY roll after compaction succeeds
+                        old_num, new_num = await self.conv_logger.roll_log(
+                            tenant_id, active_space_id,
+                        )
+
+                        # Session boundary: clear lazy-loaded tools
+                        self.reasoning.clear_loaded_tools(active_space_id)
+
+                        logger.info(
+                            "COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
+                            active_space_id, old_num, new_num,
+                        )
+                    else:
+                        logger.info("COMPACTION: skipped, log empty for space=%s", active_space_id)
+                else:
+                    # Not at threshold yet — save any state updates
+                    await self.compaction.save_state(tenant_id, active_space_id, comp_state)
+        except Exception as exc:
+            # Log-based compaction failed — fall back to legacy path
+            logger.warning(
+                "COMPACTION: log-based failed for space=%s (%s), trying legacy",
+                active_space_id, exc,
+            )
+            try:
+                comp_state = await self.compaction.load_state(tenant_id, active_space_id)
+                if comp_state and await self.compaction.should_compact(
+                    active_space_id, comp_state,
+                ):
                     is_daily = active_space.is_default if active_space else False
                     space_thread_full = await self.conversations.get_space_thread(
                         tenant_id, conversation_id, active_space_id,
-                        max_messages=200,
-                        include_untagged=is_daily,
+                        max_messages=200, include_untagged=is_daily,
                         include_timestamp=True,
                     )
-                    # Filter to messages since last compaction
                     new_messages = [
                         m for m in space_thread_full
                         if m.get("timestamp", "") > (comp_state.last_compaction_at or "")
@@ -2142,12 +2178,9 @@ class MessageHandler:
                             tenant_id, active_space_id, active_space,
                             new_messages, comp_state,
                         )
-                        # Session boundary: clear lazy-loaded tools on compaction
                         self.reasoning.clear_loaded_tools(active_space_id)
-                else:
-                    await self.compaction.save_state(tenant_id, active_space_id, comp_state)
-        except Exception as exc:
-            logger.warning("Compaction tracking failed for %s/%s: %s", tenant_id, active_space_id, exc)
+            except Exception as legacy_exc:
+                logger.error("COMPACTION: legacy fallback also failed: %s", legacy_exc)
 
         # Emit message.sent
         try:

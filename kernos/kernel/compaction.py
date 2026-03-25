@@ -63,6 +63,7 @@ class CompactionState:
     cumulative_new_tokens: int = 0
     last_compaction_at: str = ""
     index_tokens: int = 0
+    compaction_threshold: int = 8000  # estimated tokens before log triggers compaction
     _context_def_tokens: int = 0
     _system_overhead: int = 0
 
@@ -337,6 +338,7 @@ class CompactionService:
                 cumulative_new_tokens=data.get("cumulative_new_tokens", 0),
                 last_compaction_at=data.get("last_compaction_at", ""),
                 index_tokens=data.get("index_tokens", 0),
+                compaction_threshold=data.get("compaction_threshold", 8000),
                 _context_def_tokens=data.get("_context_def_tokens", 0),
                 _system_overhead=data.get("_system_overhead", 0),
             )
@@ -363,6 +365,7 @@ class CompactionService:
             "cumulative_new_tokens": comp_state.cumulative_new_tokens,
             "last_compaction_at": comp_state.last_compaction_at,
             "index_tokens": comp_state.index_tokens,
+            "compaction_threshold": comp_state.compaction_threshold,
             "_context_def_tokens": comp_state._context_def_tokens,
             "_system_overhead": comp_state._system_overhead,
         }
@@ -579,6 +582,97 @@ class CompactionService:
                 )
         except Exception as exc:
             logger.warning("Failed to emit compaction.completed: %s", exc)
+
+        return comp_state
+
+    async def compact_from_log(
+        self,
+        tenant_id: str,
+        space_id: str,
+        space: ContextSpace,
+        log_text: str,
+        source_log_number: int,
+        comp_state: CompactionState,
+    ) -> CompactionState:
+        """Run compaction from a space log file (P3).
+
+        Args:
+            log_text: The full text of the current log file.
+            source_log_number: The log number (e.g., 3 for log_003.txt).
+            comp_state: Current compaction state for this space.
+
+        Returns: Updated CompactionState after successful compaction.
+        """
+        space_dir = self._space_dir(tenant_id, space_id)
+        space_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load existing compaction document
+        active_doc_path = space_dir / "active_document.md"
+        existing_doc = (
+            active_doc_path.read_text(encoding="utf-8")
+            if active_doc_path.exists() else ""
+        )
+
+        # Space definition
+        space_definition = (
+            f"Space: {space.name}\n"
+            f"Type: {space.space_type}\n"
+            f"Description: {space.description}\n"
+            f"Posture: {space.posture}\n"
+        )
+
+        # Manifest injection
+        if self._files:
+            try:
+                manifest = await self._files.load_manifest(tenant_id, space_id)
+                if manifest:
+                    manifest_text = "Current files in this space:\n"
+                    for fname, desc in manifest.items():
+                        manifest_text += f"  - {fname}: {desc}\n"
+                    space_definition += f"\n{manifest_text}"
+            except Exception as exc:
+                logger.warning("Manifest load failed for compaction: %s", exc)
+
+        # Build compaction prompt with source log reference
+        user_content = ""
+        if existing_doc:
+            user_content += f"Previous Compaction History:\n\n{existing_doc}\n\n---\n\n"
+        user_content += (
+            f"Source: log_{source_log_number:03d}\n"
+            f"You are compacting source log log_{source_log_number:03d}. "
+            f"Include this reference in your Ledger entry header.\n\n"
+            f"New Message Exchanges:\n\n{log_text}"
+        )
+
+        updated_doc = await self.reasoning.complete_simple(
+            system_prompt=COMPACTION_SYSTEM_PROMPT + f"\n\n{space_definition}",
+            user_content=user_content,
+            max_tokens=16000,
+            prefer_cheap=True,
+        )
+
+        # Write updated document
+        active_doc_path.write_text(updated_doc, encoding="utf-8")
+
+        # Update state
+        new_history_tokens = await self.adapter.count_tokens(updated_doc)
+        comp_state.history_tokens = new_history_tokens
+        comp_state.compaction_number += 1
+        comp_state.global_compaction_number += 1
+        comp_state.cumulative_new_tokens = 0
+        comp_state.last_compaction_at = _now_iso()
+        comp_state.message_ceiling = self._compute_ceiling(comp_state)
+
+        # Check rotation
+        if new_history_tokens > comp_state.document_budget:
+            await self._rotate(tenant_id, space_id, space, comp_state)
+
+        await self.save_state(tenant_id, space_id, comp_state)
+
+        logger.info(
+            "COMPACTION: space=%s source=log_%03d compaction_number=%d",
+            space_id, source_log_number, comp_state.global_compaction_number,
+        )
 
         return comp_state
 

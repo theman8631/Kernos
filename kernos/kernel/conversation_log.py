@@ -175,3 +175,59 @@ class ConversationLogger:
             "timestamp": timestamp,
             "channel": channel,
         }
+
+    # --- P3: Compaction support ---
+
+    async def get_current_log_info(
+        self, tenant_id: str, space_id: str,
+    ) -> dict:
+        """Get metadata about the current log.
+
+        Returns: {"log_number": N, "tokens_est": N, "path": Path, "exists": bool}
+        """
+        meta = self._load_meta(tenant_id, space_id)
+        log_path = self._logs_dir(tenant_id, space_id) / f"log_{meta['current_log']:03d}.txt"
+        return {
+            "log_number": meta["current_log"],
+            "tokens_est": meta.get("current_log_tokens_est", 0),
+            "path": log_path,
+            "exists": log_path.exists(),
+        }
+
+    async def read_current_log_text(
+        self, tenant_id: str, space_id: str,
+    ) -> tuple[str, int]:
+        """Read the full text of the current log file.
+
+        Returns: (log_text, log_number)
+        Raises FileNotFoundError if no log exists.
+        """
+        meta = self._load_meta(tenant_id, space_id)
+        log_num = meta["current_log"]
+        log_path = self._logs_dir(tenant_id, space_id) / f"log_{log_num:03d}.txt"
+        if not log_path.exists():
+            raise FileNotFoundError(f"No log file at {log_path}")
+        text = log_path.read_text(encoding="utf-8")
+        return text, log_num
+
+    async def roll_log(
+        self, tenant_id: str, space_id: str,
+    ) -> tuple[int, int]:
+        """Close current log for appends and start a new one.
+
+        Returns: (old_log_number, new_log_number)
+        """
+        meta = self._load_meta(tenant_id, space_id)
+        old_num = meta["current_log"]
+        new_num = old_num + 1
+
+        meta["current_log"] = new_num
+        meta["current_log_tokens_est"] = 0
+        meta["created_at"] = datetime.now(timezone.utc).isoformat()
+        self._save_meta(tenant_id, space_id, meta)
+
+        logger.info(
+            "LOG_ROLL: space=%s closed=log_%03d starting=log_%03d",
+            space_id, old_num, new_num,
+        )
+        return old_num, new_num

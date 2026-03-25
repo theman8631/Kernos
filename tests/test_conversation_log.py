@@ -258,3 +258,85 @@ class TestParseLogLine:
         logger = ConversationLogger()
         assert logger._parse_log_line("not a valid log line") is None
         assert logger._parse_log_line("") is None
+
+
+# ---------------------------------------------------------------------------
+# P3: Compaction support — get_current_log_info, read_current_log_text, roll_log
+# ---------------------------------------------------------------------------
+
+
+class TestGetCurrentLogInfo:
+    async def test_returns_info_with_log(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "Hello")
+
+        info = await logger.get_current_log_info("t1", "s1")
+        assert info["log_number"] == 1
+        assert info["tokens_est"] > 0
+        assert info["exists"] is True
+
+    async def test_returns_info_without_log(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        info = await logger.get_current_log_info("t1", "s1")
+        assert info["log_number"] == 1
+        assert info["tokens_est"] == 0
+        assert info["exists"] is False
+
+
+class TestReadCurrentLogText:
+    async def test_reads_full_text(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "Hello")
+        await logger.append("t1", "s1", "assistant", "discord", "Hi!")
+
+        text, num = await logger.read_current_log_text("t1", "s1")
+        assert num == 1
+        assert "[user]" in text
+        assert "[assistant]" in text
+        assert "Hello" in text
+        assert "Hi!" in text
+
+    async def test_raises_when_no_file(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        with pytest.raises(FileNotFoundError):
+            await logger.read_current_log_text("t1", "s1")
+
+
+class TestRollLog:
+    async def test_advances_log_number(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "Before roll")
+
+        old_num, new_num = await logger.roll_log("t1", "s1")
+        assert old_num == 1
+        assert new_num == 2
+
+        meta = logger._load_meta("t1", "s1")
+        assert meta["current_log"] == 2
+        assert meta["current_log_tokens_est"] == 0
+
+    async def test_new_appends_go_to_new_log(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "In log 1")
+        await logger.roll_log("t1", "s1")
+        await logger.append("t1", "s1", "user", "discord", "In log 2")
+
+        # log_001 should have first message
+        log1 = tmp_path / "tenants" / "t1" / "spaces" / "s1" / "logs" / "log_001.txt"
+        assert "In log 1" in log1.read_text()
+
+        # log_002 should have second message
+        log2 = tmp_path / "tenants" / "t1" / "spaces" / "s1" / "logs" / "log_002.txt"
+        assert "In log 2" in log2.read_text()
+        assert "In log 1" not in log2.read_text()
+
+    async def test_read_recent_reads_from_new_log(self, tmp_path):
+        """After rolling, read_recent reads from the new current log."""
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "Old message")
+        await logger.roll_log("t1", "s1")
+        await logger.append("t1", "s1", "user", "discord", "New message")
+
+        entries = await logger.read_recent("t1", "s1")
+        assert len(entries) == 1
+        assert entries[0]["content"] == "New message"
