@@ -231,3 +231,16 @@ class ConversationLogger:
             space_id, old_num, new_num,
         )
         return old_num, new_num
+
+    async def read_log_text(
+        self, tenant_id: str, space_id: str, log_number: int,
+    ) -> str | None:
+        """Read the full text of an archived or current log file.
+
+        Returns the log text, or None if the file doesn't exist.
+        Public API — used by remember_details handler.
+        """
+        log_path = self._logs_dir(tenant_id, space_id) / f"log_{log_number:03d}.txt"
+        if not log_path.exists():
+            return None
+        return log_path.read_text(encoding="utf-8")

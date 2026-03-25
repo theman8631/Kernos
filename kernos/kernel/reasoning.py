@@ -93,6 +93,38 @@ READ_DOC_TOOL = {
 }
 
 
+REMEMBER_DETAILS_TOOL = {
+    "name": "remember_details",
+    "description": (
+        "Retrieve exact conversation text from a specific archived source log. "
+        "Use after remember() when a Ledger entry includes 'source: log_NNN'. "
+        "Optional query narrows to the relevant section within that log. "
+        "This is a read-only operation — no state is changed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "source_ref": {
+                "type": "string",
+                "description": (
+                    "The log reference to retrieve, e.g., 'log_003'. "
+                    "Get this from a Ledger entry returned by remember()."
+                ),
+            },
+            "query": {
+                "type": "string",
+                "description": (
+                    "Optional keyword to find the relevant section within "
+                    "the log. Returns matching lines with surrounding context. "
+                    "If omitted, returns the full log (bounded)."
+                ),
+            },
+        },
+        "required": ["source_ref"],
+    },
+}
+
+
 def _read_doc(path: str) -> str:
     """Read a Kernos documentation file from docs/.
 
@@ -1016,7 +1048,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "manage_schedule"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "manage_schedule"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -1030,7 +1062,7 @@ class ReasoningService:
         MCP tools use tool_effects from CapabilityInfo.
         Unknown defaults to "hard_write" (safe default).
         """
-        _KERNEL_READS = {"remember", "list_files", "read_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
+        _KERNEL_READS = {"remember", "remember_details", "list_files", "read_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
         _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_capabilities"}
 
         if tool_name in _KERNEL_READS:
@@ -1673,6 +1705,129 @@ class ReasoningService:
             return f"Dismissed whisper {whisper_id}. Won't bring this up again."
         return f"Whisper {whisper_id} not found in suppression registry."
 
+    async def _handle_remember_details(
+        self, tenant_id: str, space_id: str, input_data: dict,
+    ) -> str:
+        """Retrieve conversation text from a specific archived log file.
+
+        Read-only. No state mutation.
+        """
+        source_ref = input_data.get("source_ref", "")
+        query = input_data.get("query", "")
+
+        if not source_ref:
+            return (
+                "No source reference provided. Call remember() first to find "
+                "a Ledger entry with a source log reference (e.g., 'source: log_003'), "
+                "then pass that reference here."
+            )
+
+        log_number = self._parse_log_ref(source_ref)
+        if log_number is None:
+            return (
+                f"Could not parse '{source_ref}' as a log reference. "
+                f"Expected format: 'log_003' or '3'. "
+                f"Call remember() first to find the correct source reference."
+            )
+
+        # Read via public ConversationLogger API
+        if not self._handler or not hasattr(self._handler, "conv_logger"):
+            return "Conversation logger is not available."
+
+        log_text = await self._handler.conv_logger.read_log_text(
+            tenant_id, space_id, log_number,
+        )
+
+        if log_text is None:
+            logger.info("DEEP_RECALL: space=%s log=%03d not_found", space_id, log_number)
+            return f"Log file log_{log_number:03d} not found for this space."
+
+        # If a query is provided, extract relevant section
+        if query:
+            relevant = self._extract_relevant_section(log_text, query)
+            if relevant:
+                logger.info(
+                    "DEEP_RECALL: space=%s log=%03d query=%s chars=%d",
+                    space_id, log_number, query[:50], len(relevant),
+                )
+                return (
+                    f"From log_{log_number:03d} — section matching '{query}':"
+                    f"\n\n{relevant}"
+                )
+            else:
+                return (
+                    f"Log_{log_number:03d} exists but no section matches '{query}'. "
+                    f"Try a different search term, or omit the query to see the full log."
+                )
+
+        # No query — return bounded log content
+        max_chars = 8000  # ~2000 tokens
+        if len(log_text) <= max_chars:
+            logger.info(
+                "DEEP_RECALL: space=%s log=%03d full chars=%d",
+                space_id, log_number, len(log_text),
+            )
+            return f"From log_{log_number:03d} (full log):\n\n{log_text}"
+
+        # Log too large — head + tail with gap notice
+        chunk_size = max_chars // 2
+        head = log_text[:chunk_size]
+        tail = log_text[-chunk_size:]
+        logger.info(
+            "DEEP_RECALL: space=%s log=%03d bounded chars=%d (total=%d)",
+            space_id, log_number, max_chars, len(log_text),
+        )
+        return (
+            f"From log_{log_number:03d} ({len(log_text)} chars total, "
+            f"showing first and last sections):\n\n"
+            f"--- START ---\n{head}\n\n"
+            f"--- GAP ({len(log_text) - max_chars} chars omitted) ---\n\n"
+            f"--- END ---\n{tail}\n\n"
+            f"To see a specific section, retry with a query keyword."
+        )
+
+    @staticmethod
+    def _parse_log_ref(ref: str) -> int | None:
+        """Parse a log reference string into a log number.
+
+        Accepts: "log_003", "log_3", "3", "log003"
+        """
+        import re as _re
+        match = _re.match(r'log_?(\d+)', ref.strip().lower())
+        if match:
+            return int(match.group(1))
+        try:
+            return int(ref.strip())
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _extract_relevant_section(
+        log_text: str, query: str, context_lines: int = 10,
+    ) -> str:
+        """Extract lines from a log relevant to a query.
+
+        Simple keyword matching with surrounding context lines.
+        """
+        lines = log_text.split("\n")
+        query_lower = query.lower()
+
+        matching_indices = [
+            i for i, line in enumerate(lines) if query_lower in line.lower()
+        ]
+
+        if not matching_indices:
+            return ""
+
+        included: set[int] = set()
+        for idx in matching_indices:
+            start = max(0, idx - context_lines)
+            end = min(len(lines), idx + context_lines + 1)
+            for i in range(start, end):
+                included.add(i)
+
+        return "\n".join(lines[i] for i in sorted(included))
+
     async def reason(self, request: ReasoningRequest) -> ReasoningResult:
         """Run a full reasoning turn, including tool-use loop.
 
@@ -1990,6 +2145,12 @@ class ReasoningService:
                                 result = "Memory search failed — try asking in a different way."
                         else:
                             result = "Memory search is not available right now."
+                    elif block.name == "remember_details":
+                        result = await self._handle_remember_details(
+                            request.tenant_id,
+                            request.active_space_id,
+                            tool_args,
+                        )
                     elif block.name == "write_file":
                         if self._files:
                             try:

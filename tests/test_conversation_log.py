@@ -340,3 +340,130 @@ class TestRollLog:
         entries = await logger.read_recent("t1", "s1")
         assert len(entries) == 1
         assert entries[0]["content"] == "New message"
+
+
+# ---------------------------------------------------------------------------
+# P4: read_log_text + remember_details
+# ---------------------------------------------------------------------------
+
+
+class TestReadLogText:
+    async def test_reads_archived_log(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "In log 1")
+        await logger.roll_log("t1", "s1")
+        await logger.append("t1", "s1", "user", "discord", "In log 2")
+
+        # Read archived log 1
+        text = await logger.read_log_text("t1", "s1", 1)
+        assert text is not None
+        assert "In log 1" in text
+
+        # Read current log 2
+        text2 = await logger.read_log_text("t1", "s1", 2)
+        assert text2 is not None
+        assert "In log 2" in text2
+
+    async def test_returns_none_for_missing(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        assert await logger.read_log_text("t1", "s1", 99) is None
+
+
+class TestParseLogRef:
+    def test_standard_format(self):
+        from kernos.kernel.reasoning import ReasoningService
+        assert ReasoningService._parse_log_ref("log_003") == 3
+
+    def test_bare_number(self):
+        from kernos.kernel.reasoning import ReasoningService
+        assert ReasoningService._parse_log_ref("3") == 3
+
+    def test_no_underscore(self):
+        from kernos.kernel.reasoning import ReasoningService
+        assert ReasoningService._parse_log_ref("log003") == 3
+
+    def test_short_format(self):
+        from kernos.kernel.reasoning import ReasoningService
+        assert ReasoningService._parse_log_ref("log_3") == 3
+
+    def test_invalid(self):
+        from kernos.kernel.reasoning import ReasoningService
+        assert ReasoningService._parse_log_ref("abc") is None
+        assert ReasoningService._parse_log_ref("") is None
+
+
+class TestExtractRelevantSection:
+    def test_finds_matching_lines_with_context(self):
+        from kernos.kernel.reasoning import ReasoningService
+        log = "\n".join([
+            "[ts] [user] [discord] Line 1",
+            "[ts] [user] [discord] Line 2",
+            "[ts] [user] [discord] Henderson deal discussion",
+            "[ts] [user] [discord] Line 4",
+            "[ts] [user] [discord] Line 5",
+        ])
+        result = ReasoningService._extract_relevant_section(log, "Henderson", context_lines=1)
+        assert "Henderson" in result
+        assert "Line 2" in result  # context before
+        assert "Line 4" in result  # context after
+
+    def test_returns_empty_on_no_match(self):
+        from kernos.kernel.reasoning import ReasoningService
+        result = ReasoningService._extract_relevant_section("no match here", "Henderson")
+        assert result == ""
+
+
+class TestRememberDetailsHandler:
+    async def test_no_source_ref_returns_guidance(self):
+        from kernos.kernel.reasoning import ReasoningService
+        from unittest.mock import MagicMock
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        result = await svc._handle_remember_details("t1", "s1", {"source_ref": ""})
+        assert "remember()" in result
+
+    async def test_invalid_ref_returns_error(self):
+        from kernos.kernel.reasoning import ReasoningService
+        from unittest.mock import MagicMock
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        result = await svc._handle_remember_details("t1", "s1", {"source_ref": "xyz"})
+        assert "Could not parse" in result
+
+    async def test_retrieves_from_archived_log(self, tmp_path):
+        from kernos.kernel.reasoning import ReasoningService
+        from unittest.mock import MagicMock, AsyncMock
+        from kernos.kernel.conversation_log import ConversationLogger
+
+        conv_logger = ConversationLogger(data_dir=str(tmp_path))
+        await conv_logger.append("t1", "s1", "user", "discord", "Henderson discussed")
+        await conv_logger.roll_log("t1", "s1")
+
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        handler_mock = MagicMock()
+        handler_mock.conv_logger = conv_logger
+        svc._handler = handler_mock
+
+        result = await svc._handle_remember_details("t1", "s1", {
+            "source_ref": "log_001",
+            "query": "Henderson",
+        })
+        assert "Henderson" in result
+        assert "log_001" in result
+
+    async def test_full_log_without_query(self, tmp_path):
+        from kernos.kernel.reasoning import ReasoningService
+        from unittest.mock import MagicMock
+        from kernos.kernel.conversation_log import ConversationLogger
+
+        conv_logger = ConversationLogger(data_dir=str(tmp_path))
+        await conv_logger.append("t1", "s1", "user", "discord", "Short log")
+
+        svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        handler_mock = MagicMock()
+        handler_mock.conv_logger = conv_logger
+        svc._handler = handler_mock
+
+        result = await svc._handle_remember_details("t1", "s1", {
+            "source_ref": "1",
+        })
+        assert "Short log" in result
+        assert "full log" in result
