@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# kernos-cli — run the KERNOS CLI from the project's virtual environment.
+#
+# Usage (from repo root):
+#   ./kernos-cli tenants
+#   ./kernos-cli costs <tenant_id>
+#   ./kernos-cli events <tenant_id> [--type message.received] [--limit 20]
+#   ./kernos-cli profile <tenant_id>
+#   ./kernos-cli knowledge <tenant_id> [--subject "Alice"] [--category entity]
+#   ./kernos-cli contract <tenant_id>
+#   ./kernos-cli contracts <tenant_id>
+#   ./kernos-cli soul <tenant_id>
+#   ./kernos-cli capabilities [--tenant <tenant_id>]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$SCRIPT_DIR/.venv/bin/python"
+
+if [ ! -f "$VENV" ]; then
+    echo "Error: virtual environment not found at $SCRIPT_DIR/.venv"
+    echo "Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
+
+exec "$VENV" -m kernos.cli "$@"
