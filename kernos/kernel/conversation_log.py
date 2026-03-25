@@ -232,6 +232,47 @@ class ConversationLogger:
         )
         return old_num, new_num
 
+    async def seed_from_previous(
+        self, tenant_id: str, space_id: str,
+        previous_log_number: int, tail_lines: int = 10,
+    ) -> int:
+        """Copy last N lines from archived log into new current log.
+
+        Preserves recent context across compaction boundaries so the agent
+        doesn't lose track of the conversation.
+
+        Returns number of lines seeded. Updates meta.json token estimate.
+        """
+        prev_path = self._logs_dir(tenant_id, space_id) / f"log_{previous_log_number:03d}.txt"
+        if not prev_path.exists():
+            return 0
+
+        with open(prev_path, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
+
+        seed_lines = all_lines[-tail_lines:] if len(all_lines) > tail_lines else all_lines
+        if not seed_lines:
+            return 0
+
+        # Write seed lines to the new current log
+        current_path = self._current_log_path(tenant_id, space_id)
+        current_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(current_path, "a", encoding="utf-8") as f:
+            for line in seed_lines:
+                f.write(line)
+
+        # Update token estimate to include seeded content
+        seed_chars = sum(len(line) for line in seed_lines)
+        meta = self._load_meta(tenant_id, space_id)
+        meta["current_log_tokens_est"] += seed_chars // 4
+        self._save_meta(tenant_id, space_id, meta)
+
+        logger.info(
+            "LOG_SEED: space=%s from=log_%03d lines=%d tokens_est=%d",
+            space_id, previous_log_number, len(seed_lines), seed_chars // 4,
+        )
+        return len(seed_lines)
+
     async def read_log_text(
         self, tenant_id: str, space_id: str, log_number: int,
     ) -> str | None:

@@ -2141,6 +2141,11 @@ class MessageHandler:
                             tenant_id, active_space_id,
                         )
 
+                        # Seed new log with recent context from the archived log
+                        await self.conv_logger.seed_from_previous(
+                            tenant_id, active_space_id, old_num, tail_lines=10,
+                        )
+
                         # Session boundary: clear lazy-loaded tools
                         self.reasoning.clear_loaded_tools(active_space_id)
 

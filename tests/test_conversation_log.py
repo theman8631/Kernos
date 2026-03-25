@@ -342,6 +342,59 @@ class TestRollLog:
         assert entries[0]["content"] == "New message"
 
 
+class TestSeedFromPrevious:
+    async def test_seeds_tail_lines(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        for i in range(20):
+            await logger.append("t1", "s1", "user", "discord", f"Msg {i}")
+        await logger.roll_log("t1", "s1")
+
+        seeded = await logger.seed_from_previous("t1", "s1", 1, tail_lines=5)
+        assert seeded == 5
+
+        # New current log should have the last 5 messages
+        entries = await logger.read_recent("t1", "s1")
+        assert len(entries) == 5
+        assert entries[0]["content"] == "Msg 15"
+        assert entries[4]["content"] == "Msg 19"
+
+    async def test_seeds_all_when_fewer_than_tail(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "Only one")
+        await logger.roll_log("t1", "s1")
+
+        seeded = await logger.seed_from_previous("t1", "s1", 1, tail_lines=10)
+        assert seeded == 1
+
+    async def test_returns_zero_for_missing_log(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        seeded = await logger.seed_from_previous("t1", "s1", 99, tail_lines=10)
+        assert seeded == 0
+
+    async def test_updates_token_estimate(self, tmp_path):
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        await logger.append("t1", "s1", "user", "discord", "A" * 100)
+        await logger.roll_log("t1", "s1")
+
+        meta_before = logger._load_meta("t1", "s1")
+        assert meta_before["current_log_tokens_est"] == 0
+
+        await logger.seed_from_previous("t1", "s1", 1)
+        meta_after = logger._load_meta("t1", "s1")
+        assert meta_after["current_log_tokens_est"] > 0
+
+    async def test_seed_doesnt_trigger_immediate_recompaction(self, tmp_path):
+        """Seed tokens should be well below the 8000 threshold."""
+        logger = ConversationLogger(data_dir=str(tmp_path))
+        for i in range(10):
+            await logger.append("t1", "s1", "user", "discord", f"Message {i} with content")
+        await logger.roll_log("t1", "s1")
+        await logger.seed_from_previous("t1", "s1", 1, tail_lines=10)
+
+        meta = logger._load_meta("t1", "s1")
+        assert meta["current_log_tokens_est"] < 8000
+
+
 # ---------------------------------------------------------------------------
 # P4: read_log_text + remember_details
 # ---------------------------------------------------------------------------
