@@ -1050,7 +1050,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "manage_schedule"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -1065,7 +1065,7 @@ class ReasoningService:
         Unknown defaults to "hard_write" (safe default).
         """
         _KERNEL_READS = {"remember", "remember_details", "list_files", "read_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
-        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_capabilities"}
+        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_capabilities", "send_to_channel"}
 
         if tool_name in _KERNEL_READS:
             return "read"
@@ -1503,6 +1503,40 @@ class ReasoningService:
                         tool_input.get("channel", ""),
                     )
                 return "Channel registry is not available."
+            elif tool_name == "send_to_channel":
+                from kernos.kernel.channels import resolve_channel_alias
+                channel_input = tool_input.get("channel", "")
+                message_text = tool_input.get("message", "")
+                if not channel_input or not message_text:
+                    return "Error: both 'channel' and 'message' are required."
+                resolved = resolve_channel_alias(channel_input)
+                if not self._channel_registry:
+                    return "Channel registry is not available."
+                ch_info = self._channel_registry.get(resolved)
+                if not ch_info:
+                    available = [c.name for c in self._channel_registry.get_connected()]
+                    return (
+                        f"Channel '{resolved}' (from '{channel_input}') is not registered. "
+                        f"Available channels: {', '.join(available) or 'none'}"
+                    )
+                if ch_info.status != "connected":
+                    return f"Channel '{resolved}' exists but is not connected (status: {ch_info.status})."
+                if not ch_info.can_send_outbound:
+                    return f"Channel '{resolved}' is connected but cannot send outbound messages."
+                if not self._handler:
+                    return "Handler not available for outbound delivery."
+                try:
+                    member_id = f"member:{request.tenant_id}:owner"
+                    await self._handler.send_outbound(
+                        request.tenant_id, member_id, resolved, message_text,
+                    )
+                    logger.info(
+                        "CROSS_CHANNEL_SEND: channel=%s resolved_from=%s len=%d",
+                        resolved, channel_input, len(message_text),
+                    )
+                    return f"Message sent to {ch_info.display_name}."
+                except Exception as exc:
+                    return f"Failed to send to {resolved}: {exc}"
             elif tool_name == "manage_schedule":
                 from kernos.kernel.scheduler import handle_manage_schedule
                 if self._trigger_store:
@@ -2305,6 +2339,42 @@ class ReasoningService:
                             )
                         else:
                             result = "Channel registry is not available."
+                    elif block.name == "send_to_channel":
+                        from kernos.kernel.channels import resolve_channel_alias
+                        _ch_input = tool_args.get("channel", "")
+                        _ch_msg = tool_args.get("message", "")
+                        if not _ch_input or not _ch_msg:
+                            result = "Error: both 'channel' and 'message' are required."
+                        elif not self._channel_registry:
+                            result = "Channel registry is not available."
+                        else:
+                            _resolved = resolve_channel_alias(_ch_input)
+                            _ch_info = self._channel_registry.get(_resolved)
+                            if not _ch_info:
+                                _avail = [c.name for c in self._channel_registry.get_connected()]
+                                result = (
+                                    f"Channel '{_resolved}' (from '{_ch_input}') is not registered. "
+                                    f"Available channels: {', '.join(_avail) or 'none'}"
+                                )
+                            elif _ch_info.status != "connected":
+                                result = f"Channel '{_resolved}' exists but is not connected (status: {_ch_info.status})."
+                            elif not _ch_info.can_send_outbound:
+                                result = f"Channel '{_resolved}' is connected but cannot send outbound messages."
+                            elif not self._handler:
+                                result = "Handler not available for outbound delivery."
+                            else:
+                                try:
+                                    _member_id = f"member:{request.tenant_id}:owner"
+                                    await self._handler.send_outbound(
+                                        request.tenant_id, _member_id, _resolved, _ch_msg,
+                                    )
+                                    logger.info(
+                                        "CROSS_CHANNEL_SEND: channel=%s resolved_from=%s len=%d",
+                                        _resolved, _ch_input, len(_ch_msg),
+                                    )
+                                    result = f"Message sent to {_ch_info.display_name}."
+                                except Exception as exc:
+                                    result = f"Failed to send to {_resolved}: {exc}"
                     elif block.name == "manage_schedule":
                         from kernos.kernel.scheduler import handle_manage_schedule
                         if self._trigger_store:

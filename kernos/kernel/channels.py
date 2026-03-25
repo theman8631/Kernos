@@ -138,3 +138,68 @@ def handle_manage_channels(registry: "ChannelRegistry", action: str, channel: st
         return f"Cannot disable '{channel}' — current status is '{ch.status}'."
 
     return f"Unknown action: '{action}'. Use list, enable, or disable."
+
+
+# ---------------------------------------------------------------------------
+# Channel alias resolver
+# ---------------------------------------------------------------------------
+
+_CHANNEL_ALIASES: dict[str, str] = {
+    # SMS aliases
+    "sms": "sms",
+    "text": "sms",
+    "phone": "sms",
+    "my phone": "sms",
+    "txt": "sms",
+    # Discord aliases
+    "discord": "discord",
+    "chat": "discord",
+    "over chat": "discord",
+    # Email (future — when Gmail is connected)
+    "email": "email",
+    "gmail": "email",
+    "mail": "email",
+}
+
+
+def resolve_channel_alias(name: str) -> str:
+    """Resolve a user-friendly channel name to the canonical name.
+
+    Returns the canonical name, or the input unchanged if no alias matches.
+    Deterministic — no LLM call.
+    """
+    return _CHANNEL_ALIASES.get(name.strip().lower(), name.strip().lower())
+
+
+# ---------------------------------------------------------------------------
+# send_to_channel tool definition
+# ---------------------------------------------------------------------------
+
+SEND_TO_CHANNEL_TOOL = {
+    "name": "send_to_channel",
+    "description": (
+        "Send a message to the user on a specific channel. "
+        "Use when the user asks to receive something on a different channel "
+        "than the current one — e.g., 'send that to my Discord' or "
+        "'text me the summary'. Use manage_channels list to see available channels."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "channel": {
+                "type": "string",
+                "description": (
+                    "Target channel name: 'discord', 'sms'. "
+                    "Common aliases also work: 'text'/'phone' → sms, "
+                    "'chat' → discord."
+                ),
+            },
+            "message": {
+                "type": "string",
+                "description": "The message content to deliver.",
+            },
+        },
+        "required": ["channel", "message"],
+        "additionalProperties": False,
+    },
+}

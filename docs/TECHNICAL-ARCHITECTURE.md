@@ -207,7 +207,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Dispatch gate (3D / 3D-HOTFIX-v2):** Inserted between tool call proposal and execution. Three-step authorization (token → permission_override → model). No keyword matching. No structured must_not pre-check. The model is the sole correctness authority. See Dispatch Interceptor section below for full details.
 
-**Kernel tool routing:** Kernel-managed tools are intercepted before MCPClientManager. Current set: `remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`, `dismiss_whisper`, `read_source`, `read_doc`, `read_soul`, `update_soul`, `manage_covenants`, `manage_tools`, `manage_channels`. Read tools bypass the gate. Write tools are gated through the dispatch interceptor. Some tools have dynamic classification (`manage_covenants`, `manage_tools`, `manage_channels`: `list` = read, other actions = soft_write).
+**Kernel tool routing:** Kernel-managed tools are intercepted before MCPClientManager. Current set: `remember`, `write_file`, `read_file`, `list_files`, `delete_file`, `request_tool`, `dismiss_whisper`, `read_source`, `read_doc`, `read_soul`, `update_soul`, `manage_covenants`, `manage_tools`, `manage_channels`, `send_to_channel`, `manage_schedule`. Read tools bypass the gate. Write tools are gated through the dispatch interceptor. Some tools have dynamic classification (`manage_covenants`, `manage_tools`, `manage_channels`: `list` = read, other actions = soft_write). `send_to_channel` resolves channel aliases deterministically (e.g., "text" → "sms") and delivers via `handler.send_outbound()`.
 
 **Hallucination detection and corrective retry:** After `reason()` completes, if `iterations==0` and `stop_reason=="end_turn"` and the response text contains tool-claiming phrases, `HALLUCINATION_CHECK` fires. Instead of tagging the response, the system injects a corrective system message ("Do NOT claim actions were completed without calling the tool") and retries the LLM call. If the retry succeeds (honest response or actual tool call), the corrected response is used. If both attempts fabricate, the user sees an honest failure: "I tried to do that but wasn't able to execute the action."
 
@@ -227,6 +227,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `SOUL_WRITE:` / `CAP_WRITE:` / `COVENANT_WRITE:` — state mutation tracing with source/trigger
 - `FILE_WRITE/READ/LIST/DELETE:` — file operations (files.py)
 - `REMEMBER:` — retrieval calls (retrieval.py)
+- `CROSS_CHANNEL_SEND:` — cross-channel delivery via send_to_channel (channel, resolved_from, len)
 
 ### Retrieval Service (2D)
 
@@ -821,6 +822,18 @@ Seven default rules provisioned for every new tenant:
 - ESCALATION: Escalate when ambiguous and stakes non-trivial
 
 Contracts are injected into the system prompt as explicit rules. The agent reads its behavioral boundaries. Phase 2 adds the Dispatch Interceptor for infrastructure-level enforcement.
+
+### Channel Registry & Cross-Channel Delivery
+
+**File:** `kernos/kernel/channels.py`
+
+`ChannelRegistry` tracks connected communication channels (Discord, SMS, CLI). Each `ChannelInfo` has: name, display_name, status, can_send_outbound, channel_target, platform.
+
+**System prompt awareness:** `_build_system_prompt()` injects an `OUTBOUND CHANNELS` block listing all connected channels with current-channel marker and outbound capability. Always shown, even with one channel.
+
+**Cross-channel delivery:** `send_to_channel` kernel tool lets the agent send messages to a different channel than the current one. A deterministic alias resolver maps user-friendly names ("text", "phone", "chat") to canonical channel names ("sms", "discord"). Validation checks: channel exists, connected, outbound-capable. Delivery via `handler.send_outbound()`.
+
+**Platform posture:** `_PLATFORM_CONTEXT` in handler.py provides channel-specific guidance. SMS posture encourages brevity and offers cross-channel delivery for long content.
 
 ### Channel Trust
 

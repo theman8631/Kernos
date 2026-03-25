@@ -122,7 +122,10 @@ _BOOTSTRAP_MIN_INTERACTIONS = 10
 _PLATFORM_CONTEXT: dict[str, str] = {
     "sms": (
         "You are communicating via SMS. Keep responses very short — "
-        "a few sentences max unless the user asks for detail."
+        "a few sentences max. No one wants a wall of text on their phone. "
+        "If content is long (reports, detailed explanations, lists), "
+        "offer to send it to Discord instead using send_to_channel. "
+        "Use abbreviations where natural."
     ),
     "discord": (
         "You are communicating via Discord. Keep responses concise and clear; "
@@ -248,6 +251,7 @@ def _build_system_prompt(
     active_space: ContextSpace | None = None,
     cross_domain_prefix: str | None = None,
     user_knowledge_entries: list | None = None,
+    channel_registry: "ChannelRegistry | None" = None,
 ) -> str:
     """Build a template-driven, soul-aware system prompt.
 
@@ -322,6 +326,21 @@ def _build_system_prompt(
         f"You are communicating via {message.platform}. Keep responses concise.",
     )
     parts.append(platform_line)
+
+    # 4b. Available outbound channels — always show
+    connected = channel_registry.get_connected() if channel_registry else []
+    if connected:
+        channel_lines = []
+        for ch in connected:
+            marker = " (current)" if ch.platform == message.platform else ""
+            outbound = "can send" if ch.can_send_outbound else "receive only"
+            channel_lines.append(
+                f"- {ch.name}: {ch.display_name} [{outbound}]{marker}"
+            )
+        parts.append(
+            "OUTBOUND CHANNELS (use send_to_channel to deliver to a "
+            "specific channel):\n" + "\n".join(channel_lines)
+        )
 
     # 5. Auth context
     auth_line = _AUTH_CONTEXT.get(
@@ -1855,7 +1874,7 @@ class MessageHandler:
         from kernos.kernel.reasoning import READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
-        from kernos.kernel.channels import MANAGE_CHANNELS_TOOL
+        from kernos.kernel.channels import MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL
         from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
         tools: list[dict] = []
         if self._retrieval:
@@ -1864,8 +1883,8 @@ class MessageHandler:
         tools.extend(FILE_TOOLS)
         tools.extend([DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL,
                        READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL,
-                       MANAGE_CAPABILITIES_TOOL, MANAGE_CHANNELS_TOOL, MANAGE_SCHEDULE_TOOL,
-                       REMEMBER_DETAILS_TOOL])
+                       MANAGE_CAPABILITIES_TOOL, MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL,
+                       MANAGE_SCHEDULE_TOOL, REMEMBER_DETAILS_TOOL])
         # Pre-loaded MCP tools (calendar reads) — always have full schemas
         tools.extend(self.registry.get_preloaded_tools(space=active_space))
         # Session-loaded MCP tools — tools loaded on first use during this space session
@@ -1906,6 +1925,7 @@ class MessageHandler:
             active_space=active_space,
             cross_domain_prefix=cross_domain_prefix,
             user_knowledge_entries=user_knowledge_entries,
+            channel_registry=self._channel_registry,
         )
 
         # Developer mode: inject pending errors into system prompt

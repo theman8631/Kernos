@@ -1,17 +1,21 @@
-"""Tests for SPEC-3E-A: Outbound Messaging + Channels.
+"""Tests for SPEC-3E-A: Outbound Messaging + Channels + Cross-Channel.
 
 Covers: ChannelRegistry, manage_channels tool, BaseAdapter send_outbound,
-member_id resolution, NormalizedMessage.member_id field.
+member_id resolution, NormalizedMessage.member_id field,
+resolve_channel_alias, send_to_channel tool, system prompt channel block.
 """
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from kernos.kernel.channels import (
     MANAGE_CHANNELS_TOOL,
+    SEND_TO_CHANNEL_TOOL,
     ChannelInfo,
     ChannelRegistry,
     handle_manage_channels,
+    resolve_channel_alias,
 )
 from kernos.messages.adapters.base import BaseAdapter
 from kernos.messages.models import NormalizedMessage, AuthLevel
@@ -248,3 +252,258 @@ class TestTwilioAuthorization:
             from kernos.messages.adapters.twilio_sms import TwilioSMSAdapter
             adapter = TwilioSMSAdapter()
             assert adapter.is_authorized("+15551234567")
+
+
+# ---------------------------------------------------------------------------
+# Channel alias resolver
+# ---------------------------------------------------------------------------
+
+
+class TestResolveChannelAlias:
+    def test_sms_aliases(self):
+        assert resolve_channel_alias("sms") == "sms"
+        assert resolve_channel_alias("text") == "sms"
+        assert resolve_channel_alias("phone") == "sms"
+        assert resolve_channel_alias("my phone") == "sms"
+        assert resolve_channel_alias("txt") == "sms"
+
+    def test_discord_aliases(self):
+        assert resolve_channel_alias("discord") == "discord"
+        assert resolve_channel_alias("chat") == "discord"
+        assert resolve_channel_alias("over chat") == "discord"
+
+    def test_email_aliases(self):
+        assert resolve_channel_alias("email") == "email"
+        assert resolve_channel_alias("gmail") == "email"
+        assert resolve_channel_alias("mail") == "email"
+
+    def test_case_insensitive(self):
+        assert resolve_channel_alias("SMS") == "sms"
+        assert resolve_channel_alias("Discord") == "discord"
+        assert resolve_channel_alias("TEXT") == "sms"
+
+    def test_strips_whitespace(self):
+        assert resolve_channel_alias("  sms  ") == "sms"
+        assert resolve_channel_alias(" discord ") == "discord"
+
+    def test_unknown_returns_lowered(self):
+        assert resolve_channel_alias("slack") == "slack"
+        assert resolve_channel_alias("TEAMS") == "teams"
+
+    def test_deterministic(self):
+        """Alias resolver is deterministic — no LLM call (AC7)."""
+        for _ in range(100):
+            assert resolve_channel_alias("text") == "sms"
+
+
+# ---------------------------------------------------------------------------
+# send_to_channel tool definition
+# ---------------------------------------------------------------------------
+
+
+class TestSendToChannelTool:
+    def test_tool_shape(self):
+        assert SEND_TO_CHANNEL_TOOL["name"] == "send_to_channel"
+        schema = SEND_TO_CHANNEL_TOOL["input_schema"]
+        assert "channel" in schema["properties"]
+        assert "message" in schema["properties"]
+        assert set(schema["required"]) == {"channel", "message"}
+
+    def test_in_kernel_tools(self):
+        from kernos.kernel.reasoning import ReasoningService
+        assert "send_to_channel" in ReasoningService._KERNEL_TOOLS
+
+    def test_classified_as_write(self):
+        """send_to_channel is a write operation (AC9)."""
+        from kernos.kernel.reasoning import ReasoningService
+        svc = MagicMock(spec=ReasoningService)
+        svc._registry = None
+        svc._classify_tool_effect = ReasoningService._classify_tool_effect.__get__(svc)
+        assert svc._classify_tool_effect("send_to_channel", None) == "soft_write"
+
+
+# ---------------------------------------------------------------------------
+# send_to_channel dispatch (via execute_tool)
+# ---------------------------------------------------------------------------
+
+
+class TestSendToChannelDispatch:
+    def _make_reasoning_svc(self):
+        """Create a minimal ReasoningService mock with channel registry and handler."""
+        from kernos.kernel.reasoning import ReasoningService
+        svc = MagicMock(spec=ReasoningService)
+        svc._KERNEL_TOOLS = ReasoningService._KERNEL_TOOLS
+        svc.execute_tool = ReasoningService.execute_tool.__get__(svc)
+
+        reg = ChannelRegistry()
+        reg.register(ChannelInfo("discord", "Discord", "connected", "default", True, "123", "discord"))
+        reg.register(ChannelInfo("sms", "Twilio SMS", "connected", "default", True, "+1555", "sms"))
+        reg.register(ChannelInfo("cli", "CLI Terminal", "connected", "default", False, "", "cli"))
+        svc._channel_registry = reg
+
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        svc._handler = handler
+        svc._mcp = MagicMock()
+        return svc, handler
+
+    async def test_send_to_sms(self):
+        svc, handler = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "sms", "message": "hello"},
+            request,
+        )
+        assert "Twilio SMS" in result
+        handler.send_outbound.assert_called_once_with("t1", "member:t1:owner", "sms", "hello")
+
+    async def test_send_to_sms_via_alias_member_id(self):
+        """Verify member_id is derived from tenant_id."""
+        svc, handler = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="discord:999", active_space_id="space1")
+        await svc.execute_tool(
+            "send_to_channel", {"channel": "sms", "message": "hi"},
+            request,
+        )
+        handler.send_outbound.assert_called_once_with("discord:999", "member:discord:999:owner", "sms", "hi")
+
+    async def test_send_resolves_alias(self):
+        """AC4: 'text' resolves to 'sms'."""
+        svc, handler = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "text", "message": "hi"},
+            request,
+        )
+        assert "Twilio SMS" in result
+        handler.send_outbound.assert_called_once_with("t1", "member:t1:owner", "sms", "hi")  # resolved alias
+
+    async def test_send_to_discord(self):
+        """AC5."""
+        svc, handler = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "discord", "message": "report"},
+            request,
+        )
+        assert "Discord" in result
+
+    async def test_invalid_channel_error(self):
+        """AC6: clear error for unregistered channel."""
+        svc, _ = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "email", "message": "test"},
+            request,
+        )
+        assert "not registered" in result
+        assert "discord" in result  # lists available channels
+
+    async def test_non_outbound_channel_error(self):
+        """AC6: clear error for receive-only channel."""
+        svc, _ = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "cli", "message": "test"},
+            request,
+        )
+        assert "cannot send outbound" in result
+
+    async def test_disconnected_channel_error(self):
+        """AC6: clear error for disconnected channel."""
+        svc, _ = self._make_reasoning_svc()
+        svc._channel_registry.disable("sms")
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "sms", "message": "test"},
+            request,
+        )
+        assert "not connected" in result
+
+    async def test_missing_params_error(self):
+        svc, _ = self._make_reasoning_svc()
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "", "message": ""},
+            request,
+        )
+        assert "required" in result
+
+    async def test_send_failure_returns_error(self):
+        svc, handler = self._make_reasoning_svc()
+        handler.send_outbound = AsyncMock(side_effect=RuntimeError("network down"))
+        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        result = await svc.execute_tool(
+            "send_to_channel", {"channel": "sms", "message": "test"},
+            request,
+        )
+        assert "Failed to send" in result
+
+
+# ---------------------------------------------------------------------------
+# System prompt channel block
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptChannelBlock:
+    def _make_prompt(self, platform: str = "discord", registry: ChannelRegistry | None = None):
+        from kernos.messages.handler import _build_system_prompt, PRIMARY_TEMPLATE
+        from kernos.kernel.state import Soul
+        msg = NormalizedMessage(
+            content="hi", sender="123", sender_auth_level=AuthLevel.owner_verified,
+            platform=platform, platform_capabilities=["text"],
+            conversation_id="c1", timestamp=datetime.now(timezone.utc),
+            tenant_id="t1",
+        )
+        soul = Soul(tenant_id="t1")
+        return _build_system_prompt(
+            msg, "CAPABILITIES", soul, PRIMARY_TEMPLATE, [],
+            channel_registry=registry,
+        )
+
+    def test_channel_block_present_with_registry(self):
+        """AC1: system prompt includes available outbound channels."""
+        reg = ChannelRegistry()
+        reg.register(ChannelInfo("discord", "Discord", "connected", "default", True, "123", "discord"))
+        reg.register(ChannelInfo("sms", "Twilio SMS", "connected", "default", True, "+1555", "sms"))
+        prompt = self._make_prompt("discord", reg)
+        assert "OUTBOUND CHANNELS" in prompt
+        assert "send_to_channel" in prompt
+
+    def test_current_channel_marker(self):
+        """AC2: current channel marked with (current)."""
+        reg = ChannelRegistry()
+        reg.register(ChannelInfo("discord", "Discord", "connected", "default", True, "123", "discord"))
+        reg.register(ChannelInfo("sms", "Twilio SMS", "connected", "default", True, "+1555", "sms"))
+        prompt = self._make_prompt("discord", reg)
+        assert "discord: Discord [can send] (current)" in prompt
+        assert "(current)" not in prompt.split("sms: Twilio SMS")[1].split("\n")[0]
+
+    def test_single_channel_still_shown(self):
+        """AC1: always show, even with one channel."""
+        reg = ChannelRegistry()
+        reg.register(ChannelInfo("discord", "Discord", "connected", "default", True, "123", "discord"))
+        prompt = self._make_prompt("discord", reg)
+        assert "OUTBOUND CHANNELS" in prompt
+
+    def test_no_registry_no_block(self):
+        prompt = self._make_prompt("discord", None)
+        assert "OUTBOUND CHANNELS" not in prompt
+
+    def test_receive_only_shown(self):
+        reg = ChannelRegistry()
+        reg.register(ChannelInfo("cli", "CLI", "connected", "default", False, "", "cli"))
+        prompt = self._make_prompt("cli", reg)
+        assert "receive only" in prompt
+
+
+# ---------------------------------------------------------------------------
+# manage_channels unchanged (AC11)
+# ---------------------------------------------------------------------------
+
+
+class TestManageChannelsUnchanged:
+    def test_no_send_action(self):
+        """AC11: manage_channels only has list/enable/disable — no send."""
+        schema = MANAGE_CHANNELS_TOOL["input_schema"]
+        assert set(schema["properties"]["action"]["enum"]) == {"list", "enable", "disable"}

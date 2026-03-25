@@ -246,8 +246,10 @@ def test_system_prompt_includes_platform():
     assert "SMS" not in _build_system_prompt(discord_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
 
     sms_msg = NormalizedMessage(**base, platform="sms")
-    assert "SMS" in _build_system_prompt(sms_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
-    assert "Discord" not in _build_system_prompt(sms_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
+    sms_prompt = _build_system_prompt(sms_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
+    assert "SMS" in sms_prompt
+    # SMS posture now references Discord as a cross-channel suggestion target
+    assert "send_to_channel" in sms_prompt
 
 
 def test_system_prompt_includes_capability_prompt():
