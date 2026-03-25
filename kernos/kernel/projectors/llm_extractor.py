@@ -78,7 +78,8 @@ EXTRACTION_SCHEMA = {
                     "foresight_expires": {"type": "string"},
                     "salience": {"type": "string"}
                 },
-                "required": ["subject", "content", "confidence", "lifecycle_archetype"],
+                "required": ["subject", "content", "confidence", "lifecycle_archetype",
+                             "foresight_signal", "foresight_expires", "salience"],
                 "additionalProperties": False
             }
         },

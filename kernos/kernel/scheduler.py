@@ -269,7 +269,8 @@ _SCHEDULE_EXTRACTION_SCHEMA = {
             "description": "JSON string of tool arguments (for tool_call type only)",
         },
     },
-    "required": ["action_type", "when", "message", "delivery_class"],
+    "required": ["action_type", "when", "message", "recurrence",
+                 "delivery_class", "notify_via", "tool_name", "tool_args"],
     "additionalProperties": False,
 }
 
