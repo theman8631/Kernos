@@ -356,9 +356,12 @@ class CapabilityRegistry:
         parts: list[str] = []
 
         if visible_connected:
-            names = ", ".join(c.display_name for c in visible_connected)
+            connected_lines = []
+            for c in visible_connected:
+                connected_lines.append(f"  - {c.display_name}: {c.description}")
             parts.append(
-                f"CONNECTED SERVICES: {names}\n"
+                "CONNECTED SERVICES:\n"
+                + "\n".join(connected_lines) + "\n"
                 "Your tools are listed in your tool definitions — call any by name."
             )
 
