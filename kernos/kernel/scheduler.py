@@ -1158,14 +1158,17 @@ async def _evaluate_calendar_trigger(
 
     # 1. Poll calendar via explicit MCP client contract
     window_end = now + timedelta(hours=24)
-    raw_result = await mcp_client.call_tool(
-        "list-events",
-        {
-            "timeMin": now.isoformat(),
-            "timeMax": window_end.isoformat(),
-            "maxResults": 20,
-        }
+    poll_args = {
+        "account": "normal",
+        "timeMin": now.isoformat(),
+        "timeMax": window_end.isoformat(),
+        "maxResults": 20,
+    }
+    logger.info(
+        "EVENT_CALL: trigger=%s tool=list-events args=%s",
+        trigger.trigger_id, json.dumps(poll_args),
     )
+    raw_result = await mcp_client.call_tool("list-events", poll_args)
 
     # Check for MCP error (call_tool returns error strings, never raises)
     if raw_result.startswith("Tool error:") or raw_result.startswith("Calendar tool error:"):
