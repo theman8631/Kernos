@@ -961,6 +961,62 @@ class TestBugRegressions:
 # ---------------------------------------------------------------------------
 
 
+class TestExtractionSchemaEventFields:
+    """Verify extraction schema includes event trigger fields (Bug 1 fix)."""
+
+    def test_schema_has_event_fields(self):
+        from kernos.kernel.scheduler import _SCHEDULE_EXTRACTION_SCHEMA
+        props = _SCHEDULE_EXTRACTION_SCHEMA["properties"]
+        assert "condition_type" in props
+        assert "event_source" in props
+        assert "event_filter" in props
+        assert "event_lead_minutes" in props
+
+    def test_schema_condition_type_enum(self):
+        from kernos.kernel.scheduler import _SCHEDULE_EXTRACTION_SCHEMA
+        ct = _SCHEDULE_EXTRACTION_SCHEMA["properties"]["condition_type"]
+        assert set(ct["enum"]) == {"time", "event"}
+
+    def test_schema_event_source_allows_empty(self):
+        """event_source must allow empty string for time triggers."""
+        from kernos.kernel.scheduler import _SCHEDULE_EXTRACTION_SCHEMA
+        es = _SCHEDULE_EXTRACTION_SCHEMA["properties"]["event_source"]
+        assert "" in es["enum"]
+
+    def test_event_fields_in_required(self):
+        from kernos.kernel.scheduler import _SCHEDULE_EXTRACTION_SCHEMA
+        req = _SCHEDULE_EXTRACTION_SCHEMA["required"]
+        assert "condition_type" in req
+        assert "event_source" in req
+        assert "event_filter" in req
+        assert "event_lead_minutes" in req
+
+    async def test_event_trigger_creation_from_extracted(self, tmp_path):
+        """Simulate what happens when extraction returns event fields."""
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        result = await _create_trigger(
+            store, "t1", "member:t1:owner", "space1",
+            description="Notify me 5 minutes before any calendar event",
+            when="", action_type="notify",
+            message="Upcoming calendar event",
+            tool_name="", tool_args={}, notify_via="",
+            delivery_class="stage", recurrence="standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=5,
+        )
+        assert "Scheduled:" in result
+
+        triggers = await store.list_active("t1")
+        t = triggers[0]
+        assert t.condition_type == "event"
+        assert t.event_source == "calendar"
+        assert t.event_lead_minutes == 5
+        assert t.event_filter == ""
+        assert t.recurrence == "standing"
+        assert t.next_fire_at == ""
+
+
 class TestClassifyTriggerFailure:
     def test_structural_patterns(self):
         assert classify_trigger_failure("Tool not found: calendar") == "structural"

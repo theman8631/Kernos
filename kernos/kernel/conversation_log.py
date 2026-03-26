@@ -190,6 +190,7 @@ class ConversationLogger:
         return {
             "log_number": meta["current_log"],
             "tokens_est": meta.get("current_log_tokens_est", 0),
+            "seeded_tokens_est": meta.get("seeded_tokens_est", 0),
             "path": log_path,
             "exists": log_path.exists(),
         }
@@ -223,6 +224,7 @@ class ConversationLogger:
 
         meta["current_log"] = new_num
         meta["current_log_tokens_est"] = 0
+        meta["seeded_tokens_est"] = 0
         meta["created_at"] = datetime.now(timezone.utc).isoformat()
         self._save_meta(tenant_id, space_id, meta)
 
@@ -266,9 +268,11 @@ class ConversationLogger:
         with open(current_path, "a", encoding="utf-8") as f:
             f.write(seed_text)
 
-        # Update token estimate
+        # Update token estimate — track seeded tokens separately
+        seed_tokens = len(seed_text) // 4
         meta = self._load_meta(tenant_id, space_id)
-        meta["current_log_tokens_est"] += len(seed_text) // 4
+        meta["current_log_tokens_est"] += seed_tokens
+        meta["seeded_tokens_est"] = meta.get("seeded_tokens_est", 0) + seed_tokens
         self._save_meta(tenant_id, space_id, meta)
 
         logger.info(

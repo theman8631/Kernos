@@ -320,7 +320,10 @@ _SCHEDULE_EXTRACTION_SCHEMA = {
         },
         "recurrence": {
             "type": "string",
-            "description": "Cron expression for recurring triggers, or empty for one-shot",
+            "description": (
+                "For time triggers: cron expression for recurring, or empty for one-shot. "
+                "For event triggers: 'standing' if ongoing monitoring, or empty for one-shot."
+            ),
         },
         "delivery_class": {
             "type": "string",
@@ -350,16 +353,16 @@ _SCHEDULE_EXTRACTION_SCHEMA = {
         },
         "event_source": {
             "type": "string",
-            "enum": ["calendar"],
-            "description": "Event source. Currently only 'calendar'.",
+            "enum": ["calendar", ""],
+            "description": "Event source. 'calendar' for event triggers, empty string for time triggers.",
         },
         "event_filter": {
             "type": "string",
-            "description": "Keyword to match event titles. Empty = all events.",
+            "description": "Keyword to match event titles. Empty = all events. Empty for time triggers.",
         },
         "event_lead_minutes": {
             "type": "integer",
-            "description": "Minutes before the event to fire. Default 30.",
+            "description": "Minutes before the event to fire (default 30). 0 for time triggers.",
         },
     },
     "required": ["action_type", "when", "message", "recurrence",
@@ -490,6 +493,7 @@ async def handle_manage_schedule(
         extracted = await _extract_schedule_params(reasoning_service, description)
         if isinstance(extracted, str):
             return extracted  # Error message
+        logger.info("EXTRACTION_RESULT: %s", json.dumps(extracted, default=str))
         return await _create_trigger(
             trigger_store, tenant_id, member_id, space_id,
             description,

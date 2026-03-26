@@ -469,3 +469,70 @@ class TestRememberDetailsHandler:
         result = await svc._handle_remember_details("t1", "s1", {"source_ref": "1"})
         assert "Short log" in result
         assert "full log" in result
+
+
+# ---------------------------------------------------------------------------
+# Seeded tokens tracking (Bug fix: compaction cascade)
+# ---------------------------------------------------------------------------
+
+
+class TestSeededTokensTracking:
+    async def test_seed_tracks_seeded_tokens(self, tmp_path):
+        """After seeding, seeded_tokens_est is tracked separately."""
+        logger = ConversationLogger(tmp_path)
+        # Write some entries to log 1
+        for i in range(5):
+            await logger.append("t1", "s1", "user", "discord", f"Message {i} with some content")
+            await logger.append("t1", "s1", "assistant", "discord", f"Response {i} with some content")
+
+        # Roll and seed
+        old_num, new_num = await logger.roll_log("t1", "s1")
+        seeded = await logger.seed_from_previous("t1", "s1", old_num, tail_entries=5)
+        assert seeded == 5
+
+        # Check that seeded tokens are tracked
+        info = await logger.get_current_log_info("t1", "s1")
+        assert info["seeded_tokens_est"] > 0
+        assert info["tokens_est"] >= info["seeded_tokens_est"]
+
+    async def test_new_tokens_excludes_seeded(self, tmp_path):
+        """New conversation tokens = total - seeded."""
+        logger = ConversationLogger(tmp_path)
+        # Write entries to log 1
+        for i in range(3):
+            await logger.append("t1", "s1", "user", "discord", f"Old message {i}")
+            await logger.append("t1", "s1", "assistant", "discord", f"Old response {i}")
+
+        # Roll and seed
+        old_num, _ = await logger.roll_log("t1", "s1")
+        await logger.seed_from_previous("t1", "s1", old_num, tail_entries=3)
+
+        info_after_seed = await logger.get_current_log_info("t1", "s1")
+        seeded = info_after_seed["seeded_tokens_est"]
+        total_after_seed = info_after_seed["tokens_est"]
+        assert total_after_seed == seeded  # no new content yet
+
+        # Add genuine new content
+        await logger.append("t1", "s1", "user", "discord", "Brand new message")
+        await logger.append("t1", "s1", "assistant", "discord", "Brand new response")
+
+        info_after_new = await logger.get_current_log_info("t1", "s1")
+        new_tokens = info_after_new["tokens_est"] - info_after_new["seeded_tokens_est"]
+        assert new_tokens > 0
+        # seeded_tokens_est should be unchanged
+        assert info_after_new["seeded_tokens_est"] == seeded
+
+    async def test_roll_resets_seeded_tokens(self, tmp_path):
+        """Rolling a log resets seeded_tokens_est to 0."""
+        logger = ConversationLogger(tmp_path)
+        await logger.append("t1", "s1", "user", "discord", "Hello")
+        old_num, _ = await logger.roll_log("t1", "s1")
+        await logger.seed_from_previous("t1", "s1", old_num, tail_entries=1)
+
+        info = await logger.get_current_log_info("t1", "s1")
+        assert info["seeded_tokens_est"] > 0
+
+        # Roll again — seeded tokens should reset
+        await logger.roll_log("t1", "s1")
+        info2 = await logger.get_current_log_info("t1", "s1")
+        assert info2["seeded_tokens_est"] == 0

@@ -2157,7 +2157,9 @@ class MessageHandler:
                     tenant_id, active_space_id,
                 )
 
-                if log_info["tokens_est"] >= comp_state.compaction_threshold:
+                # Exclude seeded carry-forward tokens — only new conversation counts
+                new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
+                if new_tokens >= comp_state.compaction_threshold:
                     # Read the log text
                     log_text, log_num = await self.conv_logger.read_current_log_text(
                         tenant_id, active_space_id,
