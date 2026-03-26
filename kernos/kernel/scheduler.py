@@ -262,11 +262,14 @@ def compute_next_fire(recurrence: str, after_iso: str) -> str:
 MANAGE_SCHEDULE_TOOL = {
     "name": "manage_schedule",
     "description": (
-        "Manage scheduled actions — create reminders, recurring tasks, and timed actions. "
-        "Use 'create' with a natural language description of what to schedule. "
-        "Examples: 'Remind me to invoice Henderson on Friday at 9am', "
+        "Manage scheduled actions — both time-based reminders AND event-based monitoring. "
+        "Use 'create' with a natural language description. "
+        "Time-based: 'Remind me to invoice Henderson on Friday at 9am', "
         "'Every morning at 8am tell me what is on my calendar today', "
         "'In 2 hours send me a message saying time to stretch'. "
+        "Event-based monitoring: 'Let me know 30 minutes before any calendar event', "
+        "'Remind me about the dentist appointment', 'Alert me 15 minutes before meetings'. "
+        "Currently supported event sources: calendar. "
         "Use 'list' to see all scheduled items. "
         "Use 'pause', 'resume', or 'remove' to manage existing schedules."
     ),
