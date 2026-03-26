@@ -1160,6 +1160,7 @@ async def _evaluate_calendar_trigger(
     window_end = now + timedelta(hours=24)
     poll_args = {
         "account": "normal",
+        "calendarId": "primary",
         "timeMin": now.isoformat(),
         "timeMax": window_end.isoformat(),
         "maxResults": 20,
