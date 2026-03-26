@@ -171,9 +171,12 @@ class AwarenessEvaluator:
         Fast-path interrupt check runs every 300s / trigger_interval ticks.
         Trigger evaluation runs every tick.
         """
+        from kernos.kernel.scheduler import EVENT_POLL_INTERVAL_SECONDS
         awareness_every_n = max(1, self._interval // self._trigger_interval)
         interrupt_check_every_n = max(1, 300 // self._trigger_interval)  # ~5 minutes
+        event_every_n = max(1, EVENT_POLL_INTERVAL_SECONDS // self._trigger_interval)
         _interrupt_tick_count = 0
+        _event_tick_count = 0
 
         while self._running:
             self._awareness_tick_count += 1
@@ -213,6 +216,29 @@ class AwarenessEvaluator:
                     raise
                 except Exception as e:
                     logger.error("Trigger evaluation error: %s", e)
+
+            # Phase 3: Event trigger evaluation (runs every Nth tick)
+            _event_tick_count += 1
+            if _event_tick_count >= event_every_n:
+                _event_tick_count = 0
+                if self._trigger_store and self._handler:
+                    mcp_client = getattr(self._handler, 'mcp', None)
+                    if mcp_client:
+                        try:
+                            from kernos.kernel.scheduler import evaluate_event_triggers
+                            event_fired = await evaluate_event_triggers(
+                                self._trigger_store, tenant_id,
+                                self._handler, mcp_client,
+                            )
+                            if event_fired:
+                                logger.info(
+                                    "EVENT_TRIGGERS: tenant=%s fired=%d",
+                                    tenant_id, event_fired,
+                                )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            logger.warning("EVENT_TRIGGERS_FAILED: %s", e)
 
             await asyncio.sleep(self._trigger_interval)
 

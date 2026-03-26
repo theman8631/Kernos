@@ -1,11 +1,14 @@
-"""Time-Triggered Scheduler — manage_schedule tool + trigger evaluation.
+"""Scheduler — time and event triggers, manage_schedule tool.
 
-Triggers are persistent records that fire actions at specified times.
+Triggers are persistent records that fire actions at specified times
+or in response to external events (calendar, etc.).
 - Notify: send a message to the user (always authorized)
 - Tool call: execute a tool with covenant pre-authorization
+- Event: poll external sources and fire on matching events
 """
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
@@ -57,6 +60,14 @@ class Trigger:
     failure_reason: str = ""
     pending_delivery: str = ""           # Held result if outbound failed
 
+    # Event-specific fields (used when condition_type == "event")
+    event_source: str = ""               # "calendar" (future: "gmail", "webhook")
+    event_filter: str = ""               # Keyword filter on event TITLE ONLY
+    event_lead_minutes: int = 30         # How far before the event to fire
+    event_matched_ids: list[str] = field(default_factory=list)  # Duplicate suppression
+    event_daily_fire_count: int = 0      # Anti-spam: fires today (standing triggers only)
+    event_daily_fire_date: str = ""      # ISO date of last fire count reset
+
     # Audit
     created_by_tool_call: str = ""
 
@@ -68,6 +79,15 @@ def _trigger_id() -> str:
 def _now_iso() -> str:
     """Local time, no timezone offset — matches what the agent writes from the system prompt."""
     return datetime.now().isoformat()
+
+
+def resolve_owner_member_id(tenant_id: str) -> str:
+    """Canonical owner member ID for a tenant.
+
+    Centralized resolver — do not construct member IDs by
+    splitting tenant_id strings elsewhere.
+    """
+    return f"member:{tenant_id}:owner"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +177,16 @@ class TriggerStore:
             except ValueError:
                 continue
         return results
+
+    async def get_by_condition_type(
+        self, tenant_id: str, condition_type: str, status: str = "active"
+    ) -> list[Trigger]:
+        """Get all triggers of a specific condition type."""
+        all_triggers = await self.list_all(tenant_id)
+        return [
+            t for t in all_triggers
+            if t.condition_type == condition_type and t.status == status
+        ]
 
     async def remove(self, tenant_id: str, trigger_id: str) -> bool:
         raw = self._read(tenant_id)
@@ -268,9 +298,33 @@ _SCHEDULE_EXTRACTION_SCHEMA = {
             "type": "string",
             "description": "JSON string of tool arguments (for tool_call type only)",
         },
+        "condition_type": {
+            "type": "string",
+            "enum": ["time", "event"],
+            "description": (
+                "Use 'time' for reminders at specific times/dates. "
+                "Use 'event' for calendar-based triggers like "
+                "'let me know before meetings' or 'remind me about my dentist'."
+            ),
+        },
+        "event_source": {
+            "type": "string",
+            "enum": ["calendar"],
+            "description": "Event source. Currently only 'calendar'.",
+        },
+        "event_filter": {
+            "type": "string",
+            "description": "Keyword to match event titles. Empty = all events.",
+        },
+        "event_lead_minutes": {
+            "type": "integer",
+            "description": "Minutes before the event to fire. Default 30.",
+        },
     },
     "required": ["action_type", "when", "message", "recurrence",
-                 "delivery_class", "notify_via", "tool_name", "tool_args"],
+                 "delivery_class", "notify_via", "tool_name", "tool_args",
+                 "condition_type", "event_source", "event_filter",
+                 "event_lead_minutes"],
     "additionalProperties": False,
 }
 
@@ -310,7 +364,24 @@ async def _extract_schedule_params(
                 "- delivery_class: 'stage' (default normal), 'ambient' (low), 'interrupt' (urgent)\n"
                 "- notify_via: empty string for default channel, or 'discord' or 'sms'\n"
                 "- tool_name: empty for notify, tool name for tool_call\n"
-                "- tool_args: empty for notify, JSON string of args for tool_call\n\n"
+                "- tool_args: empty for notify, JSON string of args for tool_call\n"
+                "- condition_type: 'time' for reminders at specific times, 'event' for "
+                "calendar-based triggers\n"
+                "- event_source: 'calendar' for event triggers, empty for time triggers\n"
+                "- event_filter: keyword to match event titles (empty = all events), "
+                "empty for time triggers\n"
+                "- event_lead_minutes: minutes before event to fire (default 30), "
+                "0 for time triggers\n\n"
+                "For calendar-based requests like 'let me know before meetings', "
+                "'remind me about the dentist', or 'alert me 15 minutes before events':\n"
+                "  - condition_type: 'event'\n"
+                "  - event_source: 'calendar'\n"
+                "  - event_filter: keyword if specific ('dentist', 'Henderson'), "
+                "empty string if all events\n"
+                "  - event_lead_minutes: requested lead time (default 30)\n"
+                "  - recurrence: 'standing' if ongoing ('before any meeting'), "
+                "empty if one-shot ('about the dentist appointment')\n"
+                "  - when: empty string (event triggers poll, not fire at a time)\n\n"
                 "Respond with ONLY a JSON object."
             ),
             user_content=f"Description: {description}",
@@ -321,18 +392,23 @@ async def _extract_schedule_params(
         import json
         parsed = json.loads(result)
 
-        if not parsed.get("when"):
+        # Event triggers don't need a 'when' — they poll
+        is_event = parsed.get("condition_type") == "event"
+        if not parsed.get("when") and not is_event:
             return "I couldn't determine when to schedule that. Can you be more specific about the time?"
 
         # Normalize 'when' to ISO 8601 with T separator — Haiku sometimes produces
         # "2026-03-22 12:03" (space separator) which breaks string comparison with
         # _now_iso() output that uses T separator.
-        raw_when = parsed["when"]
-        try:
-            when_dt = datetime.fromisoformat(raw_when.replace(" ", "T"))
-            parsed["when"] = when_dt.isoformat()  # Always produces T separator with seconds
-        except ValueError:
-            return "I couldn't parse that time. Can you be more specific?"
+        raw_when = parsed.get("when", "")
+        if raw_when:
+            try:
+                when_dt = datetime.fromisoformat(raw_when.replace(" ", "T"))
+                parsed["when"] = when_dt.isoformat()  # Always produces T separator with seconds
+            except ValueError:
+                if not is_event:
+                    return "I couldn't parse that time. Can you be more specific?"
+                parsed["when"] = ""
 
         return parsed
 
@@ -385,6 +461,10 @@ async def handle_manage_schedule(
             extracted.get("delivery_class", "stage"),
             extracted.get("recurrence", ""),
             conversation_id=conversation_id,
+            condition_type=extracted.get("condition_type", "time"),
+            event_source=extracted.get("event_source", ""),
+            event_filter=extracted.get("event_filter", ""),
+            event_lead_minutes=int(extracted.get("event_lead_minutes", 30) or 30),
         )
 
     if action == "pause":
@@ -430,11 +510,21 @@ async def _list_triggers(store: TriggerStore, tenant_id: str) -> str:
     for t in triggers:
         status_icon = {"active": "▶", "paused": "⏸", "completed": "✓", "failed": "✗"}.get(t.status, "?")
         recur = f" (recurring: {t.recurrence})" if t.recurrence else ""
-        lines.append(
-            f"  {status_icon} [{t.trigger_id}] {t.action_description}\n"
-            f"    next: {t.next_fire_at[:19] if t.next_fire_at else 'N/A'} | "
-            f"type: {t.action_type} | fires: {t.fire_count}{recur}"
-        )
+        if t.condition_type == "event":
+            source_info = f"source: {t.event_source}"
+            filter_info = f" filter: \"{t.event_filter}\"" if t.event_filter else ""
+            lead_info = f" lead: {t.event_lead_minutes}min"
+            lines.append(
+                f"  {status_icon} [{t.trigger_id}] {t.action_description}\n"
+                f"    event trigger | {source_info}{filter_info}{lead_info} | "
+                f"fires: {t.fire_count}{recur}"
+            )
+        else:
+            lines.append(
+                f"  {status_icon} [{t.trigger_id}] {t.action_description}\n"
+                f"    next: {t.next_fire_at[:19] if t.next_fire_at else 'N/A'} | "
+                f"type: {t.action_type} | fires: {t.fire_count}{recur}"
+            )
     return "\n".join(lines)
 
 
@@ -445,8 +535,12 @@ async def _create_trigger(
     tool_name: str, tool_args: dict, notify_via: str,
     delivery_class: str, recurrence: str,
     conversation_id: str = "",
+    condition_type: str = "time",
+    event_source: str = "",
+    event_filter: str = "",
+    event_lead_minutes: int = 30,
 ) -> str:
-    if not when:
+    if not when and condition_type != "event":
         return "Error: 'when' is required — provide an ISO datetime or cron expression."
     if not description:
         return "Error: 'description' is required — what should this trigger do?"
@@ -471,14 +565,18 @@ async def _create_trigger(
         params["tool_name"] = tool_name
         params["tool_args"] = tool_args
 
+    # Event triggers don't use next_fire_at — they poll
+    if condition_type == "event":
+        next_fire = ""
+
     trigger = Trigger(
         trigger_id=tid,
         tenant_id=tenant_id,
         member_id=member_id,
         space_id=space_id,
         conversation_id=conversation_id,
-        condition_type="time",
-        condition=when,
+        condition_type=condition_type,
+        condition=when if condition_type == "time" else "",
         next_fire_at=next_fire,
         recurrence=recurrence,
         action_type=action_type,
@@ -488,6 +586,9 @@ async def _create_trigger(
         delivery_class=delivery_class or "stage",
         status="active",
         created_at=now,
+        event_source=event_source if condition_type == "event" else "",
+        event_filter=event_filter if condition_type == "event" else "",
+        event_lead_minutes=event_lead_minutes if condition_type == "event" else 30,
     )
 
     await store.save(trigger)
@@ -644,7 +745,7 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
     """Execute a trigger's action. Returns True on success."""
     if trigger.action_type == "notify":
         message = trigger.action_params.get("message", trigger.action_description)
-        member_id = trigger.member_id or f"member:{trigger.tenant_id}:owner"
+        member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
         channel = trigger.notify_via or None
         success = await handler.send_outbound(
             trigger.tenant_id, member_id, channel, message,
@@ -686,7 +787,7 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
             result = await handler.reasoning.execute_tool(tool_name, tool_args, request)
 
             # Deliver result to user
-            member_id = trigger.member_id or f"member:{trigger.tenant_id}:owner"
+            member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
             delivery_msg = f"Scheduled action completed: {trigger.action_description}\n\nResult: {result}"
             channel = trigger.notify_via or None
             success = await handler.send_outbound(
@@ -707,7 +808,7 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
         except Exception as exc:
             trigger.failure_reason = str(exc)
             # Notify user of failure
-            member_id = trigger.member_id or f"member:{trigger.tenant_id}:owner"
+            member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
             fail_msg = (
                 f"I tried to run '{trigger.action_description}' but it failed: {exc}. "
                 "Want me to try again?"
@@ -719,3 +820,228 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
 
     trigger.failure_reason = f"Unknown action_type: {trigger.action_type}"
     return False
+
+
+# ---------------------------------------------------------------------------
+# Calendar event type + parser (Component 1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CalendarEvent:
+    """Normalized calendar event from MCP list-events response."""
+
+    id: str
+    summary: str
+    start: datetime          # Parsed datetime, timezone-aware
+    end: datetime | None
+    location: str = ""
+    is_all_day: bool = False  # True if date-only (no dateTime)
+
+
+def parse_calendar_events(raw_result: str) -> list[CalendarEvent]:
+    """Parse MCP list-events response into structured CalendarEvent objects.
+
+    Returns only timed events. All-day events are SKIPPED in v1 —
+    "N minutes before" has no meaning for all-day events without a
+    chosen policy.
+    """
+    try:
+        data = json.loads(raw_result)
+        items = data if isinstance(data, list) else data.get("items", data.get("events", []))
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    events: list[CalendarEvent] = []
+    for item in items:
+        start_raw = item.get("start", {})
+
+        # Skip all-day events (explicit v1 policy)
+        if "date" in start_raw and "dateTime" not in start_raw:
+            continue
+
+        dt_str = start_raw.get("dateTime")
+        if not dt_str:
+            continue
+
+        try:
+            start_dt = datetime.fromisoformat(dt_str)
+        except (ValueError, TypeError):
+            continue
+
+        end_dt = None
+        end_raw = item.get("end", {})
+        if end_raw.get("dateTime"):
+            try:
+                end_dt = datetime.fromisoformat(end_raw["dateTime"])
+            except (ValueError, TypeError):
+                pass
+
+        events.append(CalendarEvent(
+            id=item.get("id", ""),
+            summary=item.get("summary", "Calendar event"),
+            start=start_dt,
+            end=end_dt,
+            location=item.get("location", ""),
+            is_all_day=False,
+        ))
+
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Event trigger evaluation (Component 4)
+# ---------------------------------------------------------------------------
+
+EVENT_POLL_INTERVAL_SECONDS = int(os.getenv("KERNOS_EVENT_POLL_INTERVAL", "60"))
+EVENT_DAILY_FIRE_CAP = int(os.getenv("KERNOS_EVENT_DAILY_CAP", "15"))
+
+
+async def evaluate_event_triggers(
+    trigger_store: TriggerStore,
+    tenant_id: str,
+    handler,
+    mcp_client,   # MCPClientManager — explicit contract
+) -> int:
+    """Evaluate event-based triggers. Returns count fired."""
+    event_triggers = await trigger_store.get_by_condition_type(
+        tenant_id, "event", status="active"
+    )
+
+    fired = 0
+    for trigger in event_triggers:
+        if trigger.event_source == "calendar":
+            try:
+                fired += await _evaluate_calendar_trigger(
+                    trigger, trigger_store, handler, mcp_client
+                )
+            except Exception as exc:
+                # MCP temporarily unavailable: log, skip, keep active,
+                # retry on next pass. NEVER disable trigger.
+                logger.warning(
+                    "EVENT_EVAL_FAILED: trigger=%s source=%s error=%s",
+                    trigger.trigger_id, trigger.event_source, exc,
+                )
+
+    return fired
+
+
+async def _evaluate_calendar_trigger(
+    trigger: Trigger,
+    trigger_store: TriggerStore,
+    handler,
+    mcp_client,
+) -> int:
+    """Evaluate a single calendar event trigger. Returns count fired."""
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%Y-%m-%d")
+
+    # Anti-spam: daily cap applies to STANDING triggers only
+    is_standing = bool(trigger.recurrence)
+    if is_standing:
+        if trigger.event_daily_fire_date != today_str:
+            trigger.event_daily_fire_count = 0
+            trigger.event_daily_fire_date = today_str
+
+        if trigger.event_daily_fire_count >= EVENT_DAILY_FIRE_CAP:
+            logger.info(
+                "EVENT_CAPPED: trigger=%s fires_today=%d cap=%d",
+                trigger.trigger_id, trigger.event_daily_fire_count,
+                EVENT_DAILY_FIRE_CAP,
+            )
+            return 0
+
+    # 1. Poll calendar via explicit MCP client contract
+    window_end = now + timedelta(hours=24)
+    raw_result = await mcp_client.call_tool(
+        "list-events",
+        {
+            "timeMin": now.isoformat(),
+            "timeMax": window_end.isoformat(),
+            "maxResults": 20,
+        }
+    )
+
+    # Check for MCP error (call_tool returns error strings, never raises)
+    if raw_result.startswith("Tool error:") or raw_result.startswith("Calendar tool error:"):
+        logger.warning("EVENT_CALENDAR_POLL_FAILED: %s", raw_result)
+        return 0
+
+    # 2. Parse into structured CalendarEvent objects
+    events = parse_calendar_events(raw_result)
+
+    # 3. Filter by event_filter — TITLE/SUMMARY ONLY
+    if trigger.event_filter:
+        filter_lower = trigger.event_filter.lower()
+        events = [e for e in events if filter_lower in e.summary.lower()]
+
+    # 4. Inline cleanup: prune matched IDs for past/out-of-window events
+    active_event_ids = {e.id for e in events}
+    trigger.event_matched_ids = [
+        eid for eid in trigger.event_matched_ids
+        if eid in active_event_ids
+    ]
+
+    # 5. Check lead time and fire
+    fired = 0
+    for event in events:
+        if event.id in trigger.event_matched_ids:
+            continue
+
+        minutes_until = (event.start - now).total_seconds() / 60
+
+        if 0 < minutes_until <= trigger.event_lead_minutes:
+            # Build notification message
+            time_str = event.start.strftime("%I:%M %p")
+            message = f"Upcoming: {event.summary} at {time_str}"
+            if event.location:
+                message += f" ({event.location})"
+            message += f" — in {int(minutes_until)} minutes"
+
+            # Deliver via send_outbound — canonical member ID
+            channel = trigger.notify_via or None
+            member_id = resolve_owner_member_id(trigger.tenant_id)
+
+            try:
+                await handler.send_outbound(
+                    trigger.tenant_id, member_id, channel, message,
+                )
+
+                # Write to conversation log
+                if hasattr(handler, "conv_logger") and trigger.space_id:
+                    await handler.conv_logger.append(
+                        tenant_id=trigger.tenant_id,
+                        space_id=trigger.space_id,
+                        speaker="assistant",
+                        channel="scheduled",
+                        content=f"[EVENT] {message}",
+                    )
+
+                # Mark as fired
+                trigger.event_matched_ids.append(event.id)
+                if is_standing:
+                    trigger.event_daily_fire_count += 1
+                trigger.last_fired_at = _now_iso()
+                trigger.fire_count += 1
+                fired += 1
+
+                logger.info(
+                    "EVENT_FIRE: trigger=%s event=%s summary=%r minutes=%d channel=%s",
+                    trigger.trigger_id, event.id, event.summary,
+                    int(minutes_until), channel or "default",
+                )
+
+            except Exception as exc:
+                logger.error(
+                    "EVENT_FIRE_FAILED: trigger=%s event=%s error=%s",
+                    trigger.trigger_id, event.id, exc,
+                )
+
+    # 6. Handle one-shot completion
+    if fired > 0 and not is_standing:
+        trigger.status = "completed"
+
+    # Save trigger state
+    await trigger_store.save(trigger)
+
+    return fired

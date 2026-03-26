@@ -1506,6 +1506,7 @@ class ReasoningService:
                 return "Channel registry is not available."
             elif tool_name == "send_to_channel":
                 from kernos.kernel.channels import resolve_channel_alias
+                from kernos.kernel.scheduler import resolve_owner_member_id
                 channel_input = tool_input.get("channel", "")
                 message_text = tool_input.get("message", "")
                 if not channel_input or not message_text:
@@ -1527,7 +1528,7 @@ class ReasoningService:
                 if not self._handler:
                     return "Handler not available for outbound delivery."
                 try:
-                    member_id = f"member:{request.tenant_id}:owner"
+                    member_id = resolve_owner_member_id(request.tenant_id)
                     await self._handler.send_outbound(
                         request.tenant_id, member_id, resolved, message_text,
                     )
@@ -2366,7 +2367,8 @@ class ReasoningService:
                                 result = "Handler not available for outbound delivery."
                             else:
                                 try:
-                                    _member_id = f"member:{request.tenant_id}:owner"
+                                    from kernos.kernel.scheduler import resolve_owner_member_id as _resolve_mid
+                                    _member_id = _resolve_mid(request.tenant_id)
                                     await self._handler.send_outbound(
                                         request.tenant_id, _member_id, _resolved, _ch_msg,
                                     )

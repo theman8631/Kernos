@@ -228,6 +228,11 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `FILE_WRITE/READ/LIST/DELETE:` — file operations (files.py)
 - `REMEMBER:` — retrieval calls (retrieval.py)
 - `CROSS_CHANNEL_SEND:` — cross-channel delivery via send_to_channel (channel, resolved_from, len)
+- `EVENT_FIRE:` — event trigger fires (trigger, event, summary, minutes, channel)
+- `EVENT_CAPPED:` — daily cap reached on standing event trigger
+- `EVENT_EVAL_FAILED:` — event trigger evaluation failed
+- `EVENT_CALENDAR_POLL_FAILED:` — calendar MCP poll failed
+- `EVENT_TRIGGERS:` — summary after event evaluation pass
 
 ### Retrieval Service (2D)
 
@@ -622,6 +627,32 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 **Storage**: `data/{tenant_id}/awareness/whispers.json` and `data/{tenant_id}/awareness/suppressions.json`. Atomic writes via filelock.
 
 **Evaluator lifecycle**: Started lazily per-tenant in handler on first message. Stored as `handler._evaluator`. Stopped on shutdown.
+
+**Tick cadence** in `_run_loop`:
+- Every 15s: evaluate time triggers (existing)
+- Every 60s: evaluate event triggers (configurable via `KERNOS_EVENT_POLL_INTERVAL`)
+- Every 300s: fast-path interrupt check
+- Every 1800s: full awareness pass
+
+### Scheduler & Event Triggers
+
+**File:** `kernos/kernel/scheduler.py`
+
+**Time triggers** (`condition_type="time"`): Fire at a specific time (`next_fire_at`). One-shot or recurring (cron). `evaluate_triggers()` checks `get_due()` every 15s.
+
+**Event triggers** (`condition_type="event"`): Poll external event sources and fire when matching events are within `event_lead_minutes` of starting. Currently only `event_source="calendar"`. `evaluate_event_triggers()` runs every 60s.
+
+**CalendarEvent dataclass**: Normalized from MCP `list-events` response via `parse_calendar_events()`. All-day events skipped (v1 policy). Structured parsing — no ad hoc MCP output manipulation.
+
+**Duplicate suppression**: `event_matched_ids` on Trigger tracks which event IDs have already fired. Pruned each evaluation pass (past events removed). Window-based/approximate.
+
+**Anti-spam**: Standing event triggers have `event_daily_fire_cap` (default 15, configurable via `KERNOS_EVENT_DAILY_CAP`). Does not apply to one-shot triggers.
+
+**Member ID**: `resolve_owner_member_id(tenant_id)` — canonical resolver. All callers (scheduler, reasoning, handler) use this instead of inline `f"member:{...}:owner"` construction.
+
+**NL creation**: `manage_schedule create` uses Haiku extraction. Schema includes `condition_type`, `event_source`, `event_filter`, `event_lead_minutes` for event triggers. `event_filter` matches event title/summary only.
+
+**Failure semantics**: MCP poll failures log `EVENT_CALENDAR_POLL_FAILED` and return 0. Trigger stays active. Retries next pass. Triggers are never disabled by transient background failures.
 
 **Tracing prefix**: `AWARENESS:` — all evaluator log lines use this prefix.
 

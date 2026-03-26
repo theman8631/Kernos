@@ -711,7 +711,8 @@ class MessageHandler:
         For now: single member per instance = owner.
         Future: lookup in members table by identity signal.
         """
-        return f"member:{tenant_id}:owner"
+        from kernos.kernel.scheduler import resolve_owner_member_id
+        return resolve_owner_member_id(tenant_id)
 
     async def send_outbound(
         self, tenant_id: str, member_id: str,
