@@ -1175,6 +1175,24 @@ class TestSystemEventQueue:
         assert handler.drain_system_events("t1") == []
 
 
+class TestEventPollTimeFormat:
+    """Bug fix: MCP rejects timezone offsets and microseconds in timeMin/timeMax."""
+
+    def test_poll_args_no_timezone_offset(self):
+        """timeMin/timeMax must not contain +00:00 or timezone info."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        time_fmt = "%Y-%m-%dT%H:%M:%S"
+        time_min = now.strftime(time_fmt)
+        time_max = (now + timedelta(hours=24)).strftime(time_fmt)
+        # Must not contain + or Z
+        assert "+" not in time_min
+        assert "+" not in time_max
+        assert "Z" not in time_min
+        # Must match expected format
+        assert len(time_min) == 19  # '2026-01-01T00:00:00'
+
+
 class TestClassifyTriggerFailure:
     def test_structural_patterns(self):
         assert classify_trigger_failure("Tool not found: calendar") == "structural"

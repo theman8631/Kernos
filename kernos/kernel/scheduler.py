@@ -1157,12 +1157,14 @@ async def _evaluate_calendar_trigger(
             return 0
 
     # 1. Poll calendar via explicit MCP client contract
+    # MCP expects ISO 8601 WITHOUT timezone offset or microseconds: '2026-01-01T00:00:00'
     window_end = now + timedelta(hours=24)
+    time_fmt = "%Y-%m-%dT%H:%M:%S"
     poll_args = {
         "account": "normal",
         "calendarId": "primary",
-        "timeMin": now.isoformat(),
-        "timeMax": window_end.isoformat(),
+        "timeMin": now.strftime(time_fmt),
+        "timeMax": window_end.strftime(time_fmt),
         "maxResults": 20,
     }
     logger.info(

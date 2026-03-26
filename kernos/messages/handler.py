@@ -2063,10 +2063,16 @@ class MessageHandler:
                     if execution_results:
                         response_text += "\n\n" + "\n".join(execution_results)
                 else:
-                    del self.reasoning._pending_actions[tenant_id]
-                    logger.info(
-                        "PENDING_CLEARED: tenant=%s reason=no_confirm_signal", tenant_id
+                    # Don't clear pending actions just because user sent an unrelated message.
+                    # Only clear if all pending actions have expired.
+                    all_expired = all(
+                        datetime.now(timezone.utc) >= a.expires_at for a in pending
                     )
+                    if all_expired:
+                        del self.reasoning._pending_actions[tenant_id]
+                        logger.info(
+                            "PENDING_CLEARED: tenant=%s reason=all_expired", tenant_id
+                        )
 
             # Persist tool config if manage_capabilities changed capability state
             if self.reasoning._tools_changed:

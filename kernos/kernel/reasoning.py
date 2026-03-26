@@ -2046,6 +2046,43 @@ class ReasoningService:
                     block.name, json.dumps(tool_input)[:200],
                 )
 
+                # Early stub detection: if this is a stub call (empty input, open schema),
+                # skip the gate and go straight to reload. Stub calls have no meaningful
+                # params for the gate to evaluate.
+                if block.name not in self._KERNEL_TOOLS:
+                    _stub_entry = None
+                    for _t in tools:
+                        if _t.get("name") == block.name:
+                            _stub_entry = _t
+                            break
+                    if _stub_entry:
+                        _s_schema = _stub_entry.get("input_schema", {})
+                        _is_early_stub = (
+                            _s_schema.get("additionalProperties") is True
+                            and not _s_schema.get("properties")
+                        )
+                        if _is_early_stub and self._registry:
+                            full_schema = self._registry.get_tool_schema(block.name)
+                            if full_schema:
+                                for _i, _t in enumerate(tools):
+                                    if _t.get("name") == block.name:
+                                        tools[_i] = full_schema
+                                        break
+                                self.load_tool(request.active_space_id, block.name)
+                                logger.info(
+                                    "TOOL_LOAD: tool=%s space=%s (stub -> full schema, re-running)",
+                                    block.name, request.active_space_id,
+                                )
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": (
+                                        f"[SYSTEM] The tool {block.name} is now fully loaded. "
+                                        "Please retry your call with the correct parameters."
+                                    ),
+                                })
+                                continue  # Skip gate and execution for stub call
+
                 # Dispatch Gate: classify and check write tools before execution
                 tool_effect = self._classify_tool_effect(block.name, request.active_space, tool_input)
                 if tool_effect in ("soft_write", "hard_write", "unknown"):
