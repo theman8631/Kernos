@@ -548,8 +548,11 @@ async def _create_trigger(
     now = _now_iso()
     tid = _trigger_id()
 
-    # Determine next_fire_at
-    if recurrence:
+    # Event triggers don't use next_fire_at — they poll, not schedule.
+    # "standing" recurrence means "stay active" — not a cron expression.
+    if condition_type == "event":
+        next_fire = ""
+    elif recurrence:
         next_fire = compute_next_fire(recurrence, now)
         if not next_fire:
             return f"Error: Could not parse recurrence '{recurrence}' as a cron expression."
@@ -564,10 +567,6 @@ async def _create_trigger(
             return "Error: 'tool_name' is required for tool_call action type."
         params["tool_name"] = tool_name
         params["tool_args"] = tool_args
-
-    # Event triggers don't use next_fire_at — they poll
-    if condition_type == "event":
-        next_fire = ""
 
     trigger = Trigger(
         trigger_id=tid,
@@ -785,6 +784,19 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
                 active_space_id=trigger.space_id,
             )
             result = await handler.reasoning.execute_tool(tool_name, tool_args, request)
+
+            # Check for permanent tool failures (tool not found, not handled)
+            _permanent_fail_markers = (
+                "not found", "not handled", "not available",
+                "Tool error: No tool", "unknown tool",
+            )
+            if any(marker in result.lower() for marker in _permanent_fail_markers):
+                trigger.failure_reason = f"Tool permanently unavailable: {result}"
+                logger.warning(
+                    "TRIGGER_TOOL_MISSING: id=%s tool=%s result=%s",
+                    trigger.trigger_id, tool_name, result,
+                )
+                return False
 
             # Deliver result to user
             member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)

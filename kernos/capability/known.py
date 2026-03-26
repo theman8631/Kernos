@@ -15,7 +15,8 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         description=(
             "Check your schedule, list events, find availability. "
             "Always use calendar tools when asked about schedule, events, "
-            "or appointments — never guess from memory."
+            "or appointments — never guess from memory. "
+            "Use account='normal' for all calendar operations."
         ),
         category="calendar",
         status=CapabilityStatus.AVAILABLE,

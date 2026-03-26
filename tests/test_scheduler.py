@@ -883,3 +883,69 @@ class TestTriggerEventFields:
         assert t.event_source == "calendar"
         assert t.event_filter == "dentist"
         assert t.event_lead_minutes == 15
+
+
+# ---------------------------------------------------------------------------
+# Bug regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestBugRegressions:
+    async def test_standing_recurrence_not_parsed_as_cron(self, tmp_path):
+        """BUG 2: recurrence='standing' should not be parsed as cron for event triggers."""
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        result = await _create_trigger(
+            store, "t1", "member:t1:owner", "space1",
+            description="Alert before meetings",
+            when="", action_type="notify", message="Meeting soon",
+            tool_name="", tool_args={}, notify_via="",
+            delivery_class="stage", recurrence="standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=30,
+        )
+        # Should succeed, not "Could not parse recurrence 'standing'"
+        assert "Scheduled:" in result
+        assert "Error" not in result
+
+        # Verify trigger was stored correctly
+        triggers = await store.list_active("t1")
+        assert len(triggers) == 1
+        t = triggers[0]
+        assert t.condition_type == "event"
+        assert t.recurrence == "standing"
+        assert t.next_fire_at == ""  # event triggers don't use next_fire_at
+
+    async def test_stale_tool_trigger_fails_gracefully(self, tmp_path):
+        """BUG 3: tool_call trigger with nonexistent tool should fail, not retry forever."""
+        store = TriggerStore(tmp_path)
+        t = Trigger(
+            trigger_id="trig_stale", tenant_id="t1",
+            condition_type="time", next_fire_at=_past_iso(),
+            status="active", action_type="tool_call",
+            action_params={"tool_name": "nonexistent_tool", "tool_args": {}},
+            action_description="Run missing tool",
+        )
+        await store.save(t)
+
+        handler = MagicMock()
+        handler.reasoning = MagicMock()
+        handler.reasoning.execute_tool = AsyncMock(
+            return_value="Kernel tool 'nonexistent_tool' not handled."
+        )
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        await evaluate_triggers(store, "t1", handler)
+        updated = await store.get("t1", "trig_stale")
+        assert updated.status == "failed"
+        assert "permanently unavailable" in updated.failure_reason.lower()
+
+    def test_seed_from_previous_param_name(self):
+        """BUG 1: seed_from_previous parameter is tail_entries, not tail_lines."""
+        import inspect
+        from kernos.kernel.conversation_log import ConversationLogger
+        sig = inspect.signature(ConversationLogger.seed_from_previous)
+        assert "tail_entries" in sig.parameters
+        assert "tail_lines" not in sig.parameters
