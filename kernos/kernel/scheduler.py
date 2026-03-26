@@ -1173,6 +1173,7 @@ async def _evaluate_calendar_trigger(
         return 0
 
     # 2. Parse into structured CalendarEvent objects
+    logger.info("EVENT_RAW: trigger=%s raw=%s", trigger.trigger_id, raw_result[:500])
     events = parse_calendar_events(raw_result)
     logger.info(
         "EVENT_POLL: trigger=%s events_parsed=%d raw_len=%d",
