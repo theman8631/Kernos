@@ -1017,6 +1017,54 @@ class TestExtractionSchemaEventFields:
         assert t.next_fire_at == ""
 
 
+class TestSystemEventQueue:
+    """Verify trigger lifecycle uses queue_system_event instead of send_outbound."""
+
+    async def test_retirement_queues_system_event(self, tmp_path):
+        store = TriggerStore(tmp_path)
+        t = Trigger(
+            trigger_id="trig_ret", tenant_id="t1",
+            condition_type="time", next_fire_at=_past_iso(),
+            status="active", action_type="tool_call",
+            action_params={"tool_name": "gone_tool", "tool_args": {}},
+            action_description="Run gone tool",
+        )
+        await store.save(t)
+
+        handler = MagicMock()
+        handler.reasoning = MagicMock()
+        handler.reasoning.execute_tool = AsyncMock(
+            return_value="Kernel tool 'gone_tool' not handled."
+        )
+        handler.queue_system_event = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+
+        await evaluate_triggers(store, "t1", handler)
+        # Should use queue_system_event, NOT send_outbound for notification
+        handler.queue_system_event.assert_called_once()
+        event_text = handler.queue_system_event.call_args[0][1]
+        assert "[SYSTEM] trigger_retired" in event_text
+
+    def test_handler_queue_drain(self):
+        """Queue and drain system events on handler."""
+        from kernos.messages.handler import MessageHandler
+        handler = MagicMock(spec=MessageHandler)
+        handler._pending_system_events = {}
+        handler.queue_system_event = MessageHandler.queue_system_event.__get__(handler)
+        handler.drain_system_events = MessageHandler.drain_system_events.__get__(handler)
+
+        handler.queue_system_event("t1", "[SYSTEM] trigger_retired: test")
+        handler.queue_system_event("t1", "[SYSTEM] dependency_degraded: cal")
+        events = handler.drain_system_events("t1")
+        assert len(events) == 2
+        assert "[SYSTEM] trigger_retired" in events[0]
+
+        # Second drain returns empty
+        assert handler.drain_system_events("t1") == []
+
+
 class TestClassifyTriggerFailure:
     def test_structural_patterns(self):
         assert classify_trigger_failure("Tool not found: calendar") == "structural"
@@ -1190,7 +1238,7 @@ class TestRetireStaleTriggers:
         registry.get_tool_schema = MagicMock(return_value=None)  # Tool doesn't exist
 
         handler = MagicMock()
-        handler.send_outbound = AsyncMock(return_value=True)
+        handler.queue_system_event = MagicMock()
 
         retired = await retire_stale_triggers(store, "t1", registry, handler)
         assert retired == 1
@@ -1199,7 +1247,9 @@ class TestRetireStaleTriggers:
         assert updated.status == "retired"
         assert updated.failure_class == "structural"
         assert "no longer exists" in updated.failure_reason
-        handler.send_outbound.assert_called_once()
+        handler.queue_system_event.assert_called_once()
+        event_text = handler.queue_system_event.call_args[0][1]
+        assert "[SYSTEM] trigger_retired" in event_text
 
     async def test_skips_existing_tools(self, tmp_path):
         """Tools that still exist are not retired."""

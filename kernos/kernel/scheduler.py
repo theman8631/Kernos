@@ -916,16 +916,13 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
 
 
 def _notify_retirement(handler, trigger: Trigger) -> None:
-    """Best-effort one-time notification when a trigger is retired."""
+    """Queue a system event for trigger retirement."""
     try:
-        import asyncio
-        member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
-        asyncio.ensure_future(handler.send_outbound(
-            trigger.tenant_id, member_id, trigger.notify_via or None,
-            f"A scheduled action has been retired because it can no longer work: "
-            f"\"{trigger.action_description}\" — {trigger.failure_reason}. "
-            f"If you still need this, you can create a new one.",
-        ))
+        handler.queue_system_event(
+            trigger.tenant_id,
+            f'[SYSTEM] trigger_retired: "{trigger.action_description}" — '
+            f'{trigger.failure_reason}. Recreate under event triggers if needed.',
+        )
     except Exception:
         pass
 
@@ -949,14 +946,11 @@ def _apply_transient_failure(trigger: Trigger, handler) -> None:
             trigger.trigger_id, trigger.transient_failure_count,
         )
         try:
-            import asyncio
-            member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
-            asyncio.ensure_future(handler.send_outbound(
-                trigger.tenant_id, member_id, trigger.notify_via or None,
-                f"Your reminder \"{trigger.action_description}\" is still active but "
-                f"hasn't been able to fire: {trigger.failure_reason}. "
-                f"You may need to reconnect the service.",
-            ))
+            handler.queue_system_event(
+                trigger.tenant_id,
+                f'[SYSTEM] trigger_degraded: "{trigger.action_description}" — '
+                f'{trigger.failure_reason}. Service may need reconnection.',
+            )
         except Exception:
             pass
 
@@ -992,13 +986,12 @@ async def retire_stale_triggers(
                 trigger.retired_at = _now_iso()
                 await trigger_store.save(trigger)
                 retired += 1
-                # One-time notification (best effort)
+                # Queue system event (agent sees on next message)
                 try:
-                    member_id = resolve_owner_member_id(trigger.tenant_id)
-                    await handler.send_outbound(
-                        trigger.tenant_id, member_id, None,
-                        f"An old reminder was retired: \"{trigger.action_description}\" "
-                        f"— {trigger.failure_reason}. Create a new one if needed.",
+                    handler.queue_system_event(
+                        trigger.tenant_id,
+                        f'[SYSTEM] trigger_retired: "{trigger.action_description}" — '
+                        f'{trigger.failure_reason}. Recreate if needed.',
                     )
                 except Exception:
                     pass

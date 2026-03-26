@@ -238,6 +238,8 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `TRIGGER_DEGRADED_NOTIFY:` — threshold crossed, user notified
 - `TRIGGER_RECOVERED:` — success after degraded state
 - `STALE_TRIGGERS_RETIRED:` — boot scan summary
+- `SYSTEM_EVENT_QUEUED:` — system event queued for next user message
+- `SYSTEM_EVENTS_INJECTED:` — system events injected into system prompt
 
 ### Retrieval Service (2D)
 
@@ -663,7 +665,13 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **Lifecycle states**: `active` → `active+degraded` (transient) → `retired` (structural) or back to `active` (recovered). `completed` (one-shot success). `retired` is NOT reversible — recreate instead.
 
-**Boot scan** (`retire_stale_triggers()`): Runs once per tenant on first evaluation pass. Scans active `tool_call` triggers against `CapabilityRegistry.get_tool_schema()`. Missing tools → retired with one-time user notification.
+**Boot scan** (`retire_stale_triggers()`): Runs once per tenant on first evaluation pass. Scans active `tool_call` triggers against `CapabilityRegistry.get_tool_schema()`. Missing tools → retired with system event queued.
+
+### System Event Queue
+
+**File:** `kernos/messages/handler.py`
+
+In-memory queue (`_pending_system_events`) for internal notifications. Events from trigger lifecycle (retirement, degradation) are queued via `queue_system_event()` instead of calling `send_outbound()` directly. On next user message, `drain_system_events()` injects them into the system prompt preamble as a `RECENT SYSTEM EVENTS` block (between awareness whispers and compaction document). The agent decides whether and how to communicate them naturally. System events are logged to the conversation log with `[system]` speaker and `internal` channel. Events during downtime are lost (acceptable — trigger lifecycle state persists independently).
 
 **Tracing prefix**: `AWARENESS:` — all evaluator log lines use this prefix.
 

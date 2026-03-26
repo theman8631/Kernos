@@ -405,6 +405,7 @@ class MessageHandler:
         self._covenant_cleanup_done: set[str] = set()
         self._evaluators: dict[str, "AwarenessEvaluator"] = {}  # per-tenant evaluators
         self._error_buffer = ErrorBuffer()
+        self._pending_system_events: dict[str, list[str]] = {}
         self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
         from kernos.kernel.channels import ChannelRegistry
         self._channel_registry = ChannelRegistry()
@@ -713,6 +714,15 @@ class MessageHandler:
         """
         from kernos.kernel.scheduler import resolve_owner_member_id
         return resolve_owner_member_id(tenant_id)
+
+    def queue_system_event(self, tenant_id: str, event: str) -> None:
+        """Queue a system event for injection into the next system prompt."""
+        self._pending_system_events.setdefault(tenant_id, []).append(event)
+        logger.info("SYSTEM_EVENT_QUEUED: tenant=%s event=%s", tenant_id, event[:100])
+
+    def drain_system_events(self, tenant_id: str) -> list[str]:
+        """Drain and return all pending system events for a tenant."""
+        return self._pending_system_events.pop(tenant_id, [])
 
     async def send_outbound(
         self, tenant_id: str, member_id: str,
@@ -1183,6 +1193,28 @@ class MessageHandler:
         awareness_block = await self._get_pending_awareness(tenant_id, active_space_id)
         if awareness_block:
             prefix_parts.append(awareness_block)
+
+        # 2b. Pending system events — internal notifications for agent awareness
+        system_events = self.drain_system_events(tenant_id)
+        if system_events:
+            events_block = "RECENT SYSTEM EVENTS:\n" + "\n".join(system_events)
+            prefix_parts.append(events_block)
+            logger.info(
+                "SYSTEM_EVENTS_INJECTED: tenant=%s count=%d",
+                tenant_id, len(system_events),
+            )
+            # Write to conversation log with [system] speaker
+            for evt in system_events:
+                try:
+                    await self.conv_logger.append(
+                        tenant_id=tenant_id,
+                        space_id=active_space_id,
+                        speaker="system",
+                        channel="internal",
+                        content=evt,
+                    )
+                except Exception:
+                    pass
 
         # 3. Compaction document (Ledger -> Living State)
         active_doc = await self.compaction.load_document(tenant_id, active_space_id)
