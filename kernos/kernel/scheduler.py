@@ -1157,14 +1157,18 @@ async def _evaluate_calendar_trigger(
             return 0
 
     # 1. Poll calendar via explicit MCP client contract
-    # MCP expects ISO 8601 WITHOUT timezone offset or microseconds: '2026-01-01T00:00:00'
-    window_end = now + timedelta(hours=24)
+    # MCP expects LOCAL time, no timezone offset, no microseconds: '2026-01-01T00:00:00'
+    # Use datetime.now() (local), NOT datetime.now(timezone.utc) — the MCP interprets
+    # bare timestamps as local time. Using UTC values with stripped offsets causes the
+    # window to start hours in the future, hiding nearby events.
+    now_local = datetime.now()
+    window_end_local = now_local + timedelta(hours=24)
     time_fmt = "%Y-%m-%dT%H:%M:%S"
     poll_args = {
         "account": "normal",
         "calendarId": "primary",
-        "timeMin": now.strftime(time_fmt),
-        "timeMax": window_end.strftime(time_fmt),
+        "timeMin": now_local.strftime(time_fmt),
+        "timeMax": window_end_local.strftime(time_fmt),
         "maxResults": 20,
     }
     logger.info(
