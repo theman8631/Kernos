@@ -1174,11 +1174,21 @@ async def _evaluate_calendar_trigger(
 
     # 2. Parse into structured CalendarEvent objects
     events = parse_calendar_events(raw_result)
+    logger.info(
+        "EVENT_POLL: trigger=%s events_parsed=%d raw_len=%d",
+        trigger.trigger_id, len(events), len(raw_result),
+    )
 
     # 3. Filter by event_filter — TITLE/SUMMARY ONLY
+    pre_filter_count = len(events)
     if trigger.event_filter:
         filter_lower = trigger.event_filter.lower()
         events = [e for e in events if filter_lower in e.summary.lower()]
+    if trigger.event_filter:
+        logger.info(
+            "EVENT_FILTER: trigger=%s filter=%r before=%d after=%d",
+            trigger.trigger_id, trigger.event_filter, pre_filter_count, len(events),
+        )
 
     # 4. Inline cleanup: prune matched IDs for past/out-of-window events
     active_event_ids = {e.id for e in events}
@@ -1190,10 +1200,18 @@ async def _evaluate_calendar_trigger(
     # 5. Check lead time and fire
     fired = 0
     for event in events:
-        if event.id in trigger.event_matched_ids:
-            continue
-
+        is_matched = event.id in trigger.event_matched_ids
         minutes_until = (event.start - now).total_seconds() / 60
+        logger.info(
+            "EVENT_CHECK: trigger=%s event=%s summary=%r start=%s now=%s "
+            "minutes_until=%.1f lead=%d matched=%s",
+            trigger.trigger_id, event.id, event.summary,
+            event.start.isoformat(), now.isoformat(),
+            minutes_until, trigger.event_lead_minutes, is_matched,
+        )
+
+        if is_matched:
+            continue
 
         if 0 < minutes_until <= trigger.event_lead_minutes:
             # Build notification message
