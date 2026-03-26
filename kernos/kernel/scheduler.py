@@ -494,6 +494,12 @@ async def handle_manage_schedule(
         if isinstance(extracted, str):
             return extracted  # Error message
         logger.info("EXTRACTION_RESULT: %s", json.dumps(extracted, default=str))
+
+        # Normalize: event triggers are always notify actions
+        condition_type = extracted.get("condition_type", "time")
+        if condition_type == "event":
+            extracted["action_type"] = "notify"
+
         return await _create_trigger(
             trigger_store, tenant_id, member_id, space_id,
             description,
@@ -506,7 +512,7 @@ async def handle_manage_schedule(
             extracted.get("delivery_class", "stage"),
             extracted.get("recurrence", ""),
             conversation_id=conversation_id,
-            condition_type=extracted.get("condition_type", "time"),
+            condition_type=condition_type,
             event_source=extracted.get("event_source", ""),
             event_filter=extracted.get("event_filter", ""),
             event_lead_minutes=int(extracted.get("event_lead_minutes", 30) or 30),

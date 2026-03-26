@@ -1017,6 +1017,44 @@ class TestExtractionSchemaEventFields:
         assert t.recurrence == "standing"
         assert t.next_fire_at == ""
 
+    async def test_event_trigger_normalizes_tool_call_to_notify(self, tmp_path):
+        """P0: extraction returns action_type=tool_call for event trigger → normalized to notify."""
+        store = TriggerStore(tmp_path)
+        reasoning = MagicMock()
+        reasoning.complete_simple = AsyncMock(return_value=json.dumps({
+            "action_type": "tool_call",  # BUG: model returns tool_call
+            "when": "",
+            "message": "Calendar event coming up",
+            "recurrence": "standing",
+            "delivery_class": "stage",
+            "notify_via": "",
+            "tool_name": "",  # empty — would fail tool_name validation
+            "tool_args": "",
+            "condition_type": "event",
+            "event_source": "calendar",
+            "event_filter": "",
+            "event_lead_minutes": 1,
+        }))
+
+        result = await handle_manage_schedule(
+            store, "t1", "member:t1:owner", "space1",
+            action="create",
+            description="Remind me 1 minute before calendar events",
+            reasoning_service=reasoning,
+            conversation_id="test",
+        )
+        # Should succeed, not "tool_name is required"
+        assert "Scheduled:" in result
+        assert "Error" not in result
+
+        triggers = await store.list_active("t1")
+        assert len(triggers) == 1
+        t = triggers[0]
+        assert t.condition_type == "event"
+        assert t.action_type == "notify"  # normalized
+        assert t.event_source == "calendar"
+        assert t.event_lead_minutes == 1
+
     async def test_event_trigger_persisted_on_disk(self, tmp_path):
         """P0 verification: event fields must survive JSON round-trip."""
         from kernos.kernel.scheduler import _create_trigger
