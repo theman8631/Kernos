@@ -637,10 +637,22 @@ async def _create_trigger(
 
     await store.save(trigger)
     logger.info(
-        "TRIGGER_CREATE: id=%s desc=%r next=%s type=%s recurrence=%r",
-        tid, description, next_fire[:19] if next_fire else "?", action_type, recurrence,
+        "TRIGGER_CREATE: id=%s desc=%r condition=%s next=%s action=%s recurrence=%r"
+        " event_source=%s event_filter=%r event_lead=%d",
+        tid, description, condition_type,
+        next_fire[:19] if next_fire else "?", action_type, recurrence,
+        trigger.event_source, trigger.event_filter, trigger.event_lead_minutes,
     )
 
+    if condition_type == "event":
+        recur_note = f" Standing: {recurrence}." if recurrence else ""
+        return (
+            f"Scheduled: {description}\n"
+            f"Event trigger: {trigger.event_source} | "
+            f"Lead: {trigger.event_lead_minutes}min | "
+            f"Filter: {trigger.event_filter or '(all events)'}\n"
+            f"ID: {tid}{recur_note}"
+        )
     recur_note = f" Recurring: {recurrence}." if recurrence else ""
     return (
         f"Scheduled: {description}\n"
@@ -1089,6 +1101,10 @@ async def evaluate_event_triggers(
     """Evaluate event-based triggers. Returns count fired."""
     event_triggers = await trigger_store.get_by_condition_type(
         tenant_id, "event", status="active"
+    )
+    logger.info(
+        "EVENT_TICK: tenant=%s triggers_found=%d",
+        tenant_id, len(event_triggers),
     )
 
     fired = 0

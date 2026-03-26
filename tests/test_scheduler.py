@@ -1006,6 +1006,7 @@ class TestExtractionSchemaEventFields:
             event_filter="", event_lead_minutes=5,
         )
         assert "Scheduled:" in result
+        assert "Event trigger" in result  # new event-specific return format
 
         triggers = await store.list_active("t1")
         t = triggers[0]
@@ -1013,6 +1014,77 @@ class TestExtractionSchemaEventFields:
         assert t.event_source == "calendar"
         assert t.event_lead_minutes == 5
         assert t.event_filter == ""
+        assert t.recurrence == "standing"
+        assert t.next_fire_at == ""
+
+    async def test_event_trigger_persisted_on_disk(self, tmp_path):
+        """P0 verification: event fields must survive JSON round-trip."""
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        await _create_trigger(
+            store, "t1", "member:t1:owner", "space1",
+            description="Alert 1 min before events",
+            when="", action_type="notify",
+            message="Event soon",
+            tool_name="", tool_args={}, notify_via="",
+            delivery_class="stage", recurrence="standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=1,
+        )
+
+        # Read raw JSON from disk
+        raw = store._read("t1")
+        assert len(raw) == 1
+        d = raw[0]
+        assert d["condition_type"] == "event"
+        assert d["event_source"] == "calendar"
+        assert d["event_lead_minutes"] == 1
+        assert d["recurrence"] == "standing"
+        assert d["next_fire_at"] == ""
+
+        # Reload via Trigger(**d) and verify
+        t = Trigger(**d)
+        assert t.condition_type == "event"
+        assert t.event_source == "calendar"
+        assert t.event_lead_minutes == 1
+
+    async def test_full_handle_manage_schedule_event_path(self, tmp_path):
+        """End-to-end: handle_manage_schedule → extraction → persisted event trigger."""
+        store = TriggerStore(tmp_path)
+        # Mock reasoning service that returns event extraction
+        reasoning = MagicMock()
+        reasoning.complete_simple = AsyncMock(return_value=json.dumps({
+            "action_type": "notify",
+            "when": "",
+            "message": "Calendar event coming up",
+            "recurrence": "standing",
+            "delivery_class": "stage",
+            "notify_via": "",
+            "tool_name": "",
+            "tool_args": "",
+            "condition_type": "event",
+            "event_source": "calendar",
+            "event_filter": "",
+            "event_lead_minutes": 5,
+        }))
+
+        result = await handle_manage_schedule(
+            store, "t1", "member:t1:owner", "space1",
+            action="create",
+            description="Remind me 5 minutes before any calendar event",
+            reasoning_service=reasoning,
+            conversation_id="test",
+        )
+        assert "Scheduled:" in result
+        assert "Event trigger" in result
+
+        # Verify persisted trigger
+        triggers = await store.list_active("t1")
+        assert len(triggers) == 1
+        t = triggers[0]
+        assert t.condition_type == "event"
+        assert t.event_source == "calendar"
+        assert t.event_lead_minutes == 5
         assert t.recurrence == "standing"
         assert t.next_fire_at == ""
 
