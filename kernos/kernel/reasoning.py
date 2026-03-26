@@ -963,6 +963,7 @@ class ReasoningService:
         self._handler = None           # Set by handler after construction (for schedule tool)
         self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
         self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
+        self._conflict_raised_this_turn: bool = False  # Set when gate blocks; cleared at turn start
         self._tools_changed: bool = False  # Set by manage_capabilities; handler checks post-reasoning
         # Lazy tool loading: tracks which MCP tools have been loaded per-space session
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
@@ -2102,6 +2103,7 @@ class ReasoningService:
                             gate_reason=gate_result.reason,
                             expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
                         ))
+                        self._conflict_raised_this_turn = True
                         if gate_result.reason == "covenant_conflict":
                             system_msg = (
                                 f"[SYSTEM] Action blocked — conflict with standing rule. "

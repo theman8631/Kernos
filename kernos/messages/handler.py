@@ -1625,6 +1625,9 @@ class MessageHandler:
         tenant_id = derive_tenant_id(message)
         conversation_id = message.conversation_id
 
+        # Reset per-turn flag so confirm tokens work on subsequent turns
+        self.reasoning._conflict_raised_this_turn = False
+
         # Set current tenant for error buffer collection
         self._error_buffer.set_tenant(tenant_id)
 
@@ -1974,7 +1977,17 @@ class MessageHandler:
 
             # --- Kernel-owned confirmation replay ---
             pending = self.reasoning._pending_actions.get(tenant_id)
-            if pending:
+            conflict_this_turn = self.reasoning._conflict_raised_this_turn
+            if pending and conflict_this_turn:
+                # Same turn that raised the conflict — strip CONFIRM tokens
+                # but do NOT execute. User must confirm in a subsequent message.
+                confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
+                response_text = confirm_pattern.sub("", response_text).strip()
+                logger.info(
+                    "CONFIRM_BLOCKED: tenant=%s reason=same_turn_as_conflict",
+                    tenant_id,
+                )
+            elif pending:
                 confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
                 matches = confirm_pattern.findall(response_text)
                 if matches:

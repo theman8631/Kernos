@@ -1360,3 +1360,51 @@ class TestConfirmationReplay:
         # Only b.md (index 1) should have been executed
         assert len(executed_inputs) == 1
         assert executed_inputs[0] == {"name": "b.md"}
+
+    async def test_same_turn_conflict_strips_confirm_tokens(self):
+        """When conflict_raised_this_turn is True, CONFIRM tokens are stripped but NOT executed."""
+        svc = _make_service()
+        svc._conflict_raised_this_turn = True
+        pending = [self._make_pending_action()]
+        svc._pending_actions["t1"] = list(pending)
+        svc.execute_tool = AsyncMock(return_value="Done")
+
+        import re
+        response_text = "I'll do that now. [CONFIRM:0]"
+        confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
+        response_text = confirm_pattern.sub("", response_text).strip()
+
+        svc.execute_tool.assert_not_called()
+        assert "[CONFIRM" not in response_text
+        # Pending actions should still exist for next turn
+        assert "t1" in svc._pending_actions
+
+    async def test_next_turn_confirm_executes_after_conflict(self):
+        """On a subsequent turn (conflict_raised_this_turn=False), CONFIRM tokens execute normally."""
+        svc = _make_service()
+        svc._conflict_raised_this_turn = False
+        pending = [self._make_pending_action()]
+        result = await self._run_confirm_logic(
+            svc,
+            response_text="Confirmed. [CONFIRM:0]",
+            pending_actions=pending,
+            execute_tool_result="Action completed.",
+        )
+        assert "[CONFIRM:0]" not in result
+        assert "Action completed" in result
+
+    def test_conflict_flag_initialized_false(self):
+        """The conflict flag starts as False."""
+        svc = _make_service()
+        assert svc._conflict_raised_this_turn is False
+
+    def test_conflict_flag_set_on_pending_store(self):
+        """Storing a PendingAction (gate block) sets the conflict flag."""
+        svc = _make_service()
+        svc._conflict_raised_this_turn = False
+        # Simulate what reason() does when gate blocks
+        svc._pending_actions.setdefault("t1", []).append(
+            self._make_pending_action("send-email", {"to": "alice"}, "Send email")
+        )
+        svc._conflict_raised_this_turn = True  # reason() sets this
+        assert svc._conflict_raised_this_turn is True

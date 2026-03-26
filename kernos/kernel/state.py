@@ -238,11 +238,11 @@ def _enforcement_tier_for(rule_type: str) -> str:
 def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
     """The conservative-by-default rules every new tenant starts with."""
     rules = [
-        ("must_not", "general", "Never send messages to external contacts without owner approval"),
+        ("must_not", "general", "Never send messages to third-party contacts unless the owner initiated the request"),
         ("must_not", "general", "Never delete or archive data without owner awareness"),
         ("must_not", "general", "Never share owner's private information with unrecognized senders"),
         ("must", "general", "Always confirm before any action that costs money"),
-        ("must", "general", "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized."),
+        ("must", "general", "For composed messages to third parties, show the draft before sending. For simple relays, briefly confirm content and recipient. Owner-directed delivery to connected channels needs no confirmation."),
         ("preference", "general", "Keep responses concise unless detail is requested"),
         ("escalation", "general", "Escalate to owner when request is ambiguous and stakes are non-trivial"),
     ]

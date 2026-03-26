@@ -345,6 +345,83 @@ def test_covenant_rule_loads_from_old_json(tmp_path):
     asyncio.get_event_loop().run_until_complete(_check())
 
 
+def test_default_covenant_rules_updated_wording():
+    """New tenants get the updated covenant wording for third-party comms."""
+    rules = default_covenant_rules("t1", _now())
+    descs = [r.description for r in rules]
+    assert any("third-party contacts unless the owner initiated" in d for d in descs)
+    assert any("Owner-directed delivery to connected channels needs no confirmation" in d for d in descs)
+    # Old wording should NOT be present
+    assert not any("external contacts without owner approval" in d for d in descs)
+    assert not any("THIRD PARTIES" in d for d in descs)
+
+
+def test_covenant_migration_updates_old_wording(tmp_path):
+    """Existing tenants with old default wording get migrated on load."""
+    import json as _json
+    state_dir = tmp_path / "t1" / "state"
+    state_dir.mkdir(parents=True)
+    old_rules = [
+        {
+            "id": "rule_a", "tenant_id": "t1", "capability": "general",
+            "rule_type": "must_not",
+            "description": "Never send messages to external contacts without owner approval",
+            "active": True, "source": "default", "source_event_id": None,
+            "created_at": _now(), "updated_at": _now(), "context_space": None,
+        },
+        {
+            "id": "rule_b", "tenant_id": "t1", "capability": "general",
+            "rule_type": "must",
+            "description": "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized.",
+            "active": True, "source": "default", "source_event_id": None,
+            "created_at": _now(), "updated_at": _now(), "context_space": None,
+        },
+    ]
+    (state_dir / "contracts.json").write_text(_json.dumps(old_rules))
+
+    import asyncio
+    store = JsonStateStore(tmp_path)
+
+    async def _check():
+        rules = await store.get_contract_rules("t1")
+        assert len(rules) == 2
+        descs = [r.description for r in rules]
+        assert "Never send messages to third-party contacts unless the owner initiated the request" in descs
+        assert any("Owner-directed delivery" in d for d in descs)
+        # Old wording gone
+        assert not any("external contacts without owner approval" in d for d in descs)
+        # Verify migration persisted to disk
+        raw = _json.loads((state_dir / "contracts.json").read_text())
+        assert "third-party contacts" in raw[0]["description"]
+
+    asyncio.get_event_loop().run_until_complete(_check())
+
+
+def test_covenant_migration_skips_user_modified_rules(tmp_path):
+    """Rules with source != 'default' are NOT migrated even if wording matches."""
+    import json as _json
+    state_dir = tmp_path / "t1" / "state"
+    state_dir.mkdir(parents=True)
+    user_rule = [{
+        "id": "rule_u", "tenant_id": "t1", "capability": "general",
+        "rule_type": "must_not",
+        "description": "Never send messages to external contacts without owner approval",
+        "active": True, "source": "user", "source_event_id": None,
+        "created_at": _now(), "updated_at": _now(), "context_space": None,
+    }]
+    (state_dir / "contracts.json").write_text(_json.dumps(user_rule))
+
+    import asyncio
+    store = JsonStateStore(tmp_path)
+
+    async def _check():
+        rules = await store.get_contract_rules("t1")
+        # User-sourced rule should NOT be migrated
+        assert rules[0].description == "Never send messages to external contacts without owner approval"
+
+    asyncio.get_event_loop().run_until_complete(_check())
+
+
 # ---------------------------------------------------------------------------
 # EntityNode, IdentityEdge, CausalEdge models
 # ---------------------------------------------------------------------------

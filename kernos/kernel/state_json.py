@@ -291,6 +291,17 @@ class JsonStateStore(StateStore):
     # Behavioral Contracts (CovenantRule)
     # -----------------------------------------------------------------------
 
+    _COVENANT_MIGRATIONS: list[tuple[str, str]] = [
+        (
+            "Never send messages to external contacts without owner approval",
+            "Never send messages to third-party contacts unless the owner initiated the request",
+        ),
+        (
+            "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized.",
+            "For composed messages to third parties, show the draft before sending. For simple relays, briefly confirm content and recipient. Owner-directed delivery to connected channels needs no confirmation.",
+        ),
+    ]
+
     async def get_contract_rules(
         self,
         tenant_id: str,
@@ -300,6 +311,16 @@ class JsonStateStore(StateStore):
     ) -> list[CovenantRule]:
         path = self._state_dir(tenant_id) / "contracts.json"
         raw = self._read_json(path, [])
+        # One-time migration: update old default covenant wording
+        migrated = False
+        for d in raw:
+            for old_text, new_text in self._COVENANT_MIGRATIONS:
+                if d.get("description") == old_text and d.get("source") == "default":
+                    d["description"] = new_text
+                    migrated = True
+        if migrated:
+            self._write_json(path, raw)
+            logger.info("COVENANT_MIGRATE: tenant=%s migrated default covenant wording", tenant_id)
         results: list[CovenantRule] = []
         for d in raw:
             rule = _load_covenant_rule(d)
