@@ -1098,6 +1098,31 @@ EVENT_POLL_INTERVAL_SECONDS = int(os.getenv("KERNOS_EVENT_POLL_INTERVAL", "60"))
 EVENT_DAILY_FIRE_CAP = int(os.getenv("KERNOS_EVENT_DAILY_CAP", "15"))
 
 
+async def _poll_calendar_events(mcp_client) -> list[CalendarEvent] | None:
+    """Poll calendar once and return parsed events. Returns None on error."""
+    # MCP expects LOCAL time, no timezone offset, no microseconds: '2026-01-01T00:00:00'
+    now_local = datetime.now()
+    window_end_local = now_local + timedelta(hours=24)
+    time_fmt = "%Y-%m-%dT%H:%M:%S"
+    poll_args = {
+        "account": "normal",
+        "calendarId": "primary",
+        "timeMin": now_local.strftime(time_fmt),
+        "timeMax": window_end_local.strftime(time_fmt),
+        "maxResults": 20,
+    }
+    logger.info("EVENT_CALL: tool=list-events args=%s", json.dumps(poll_args))
+    raw_result = await mcp_client.call_tool("list-events", poll_args)
+
+    if raw_result.startswith("Tool error:") or raw_result.startswith("Calendar tool error:") or raw_result.startswith("MCP error"):
+        logger.warning("EVENT_CALENDAR_POLL_FAILED: %s", raw_result[:200])
+        return None
+
+    events = parse_calendar_events(raw_result)
+    logger.info("EVENT_POLL: events_parsed=%d raw_len=%d", len(events), len(raw_result))
+    return events
+
+
 async def evaluate_event_triggers(
     trigger_store: TriggerStore,
     tenant_id: str,
@@ -1108,25 +1133,31 @@ async def evaluate_event_triggers(
     event_triggers = await trigger_store.get_by_condition_type(
         tenant_id, "event", status="active"
     )
+    if not event_triggers:
+        return 0
+
+    # Group by event_source — poll each source ONCE, share across triggers
+    calendar_triggers = [t for t in event_triggers if t.event_source == "calendar"]
     logger.info(
-        "EVENT_TICK: tenant=%s triggers_found=%d",
-        tenant_id, len(event_triggers),
+        "EVENT_TICK: tenant=%s triggers_found=%d calendar=%d",
+        tenant_id, len(event_triggers), len(calendar_triggers),
     )
 
     fired = 0
-    for trigger in event_triggers:
-        if trigger.event_source == "calendar":
-            try:
-                fired += await _evaluate_calendar_trigger(
-                    trigger, trigger_store, handler, mcp_client
-                )
-            except Exception as exc:
-                # MCP temporarily unavailable: log, skip, keep active,
-                # retry on next pass. NEVER disable trigger.
-                logger.warning(
-                    "EVENT_EVAL_FAILED: trigger=%s source=%s error=%s",
-                    trigger.trigger_id, trigger.event_source, exc,
-                )
+    if calendar_triggers:
+        # Single poll for all calendar triggers
+        all_events = await _poll_calendar_events(mcp_client)
+        if all_events is not None:
+            for trigger in calendar_triggers:
+                try:
+                    fired += await _evaluate_calendar_trigger(
+                        trigger, trigger_store, handler, all_events,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "EVENT_EVAL_FAILED: trigger=%s source=%s error=%s",
+                        trigger.trigger_id, trigger.event_source, exc,
+                    )
 
     return fired
 
@@ -1135,9 +1166,9 @@ async def _evaluate_calendar_trigger(
     trigger: Trigger,
     trigger_store: TriggerStore,
     handler,
-    mcp_client,
+    all_events: list[CalendarEvent],
 ) -> int:
-    """Evaluate a single calendar event trigger. Returns count fired."""
+    """Evaluate a single calendar event trigger against pre-fetched events."""
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%Y-%m-%d")
 
@@ -1156,49 +1187,15 @@ async def _evaluate_calendar_trigger(
             )
             return 0
 
-    # 1. Poll calendar via explicit MCP client contract
-    # MCP expects LOCAL time, no timezone offset, no microseconds: '2026-01-01T00:00:00'
-    # Use datetime.now() (local), NOT datetime.now(timezone.utc) — the MCP interprets
-    # bare timestamps as local time. Using UTC values with stripped offsets causes the
-    # window to start hours in the future, hiding nearby events.
-    now_local = datetime.now()
-    window_end_local = now_local + timedelta(hours=24)
-    time_fmt = "%Y-%m-%dT%H:%M:%S"
-    poll_args = {
-        "account": "normal",
-        "calendarId": "primary",
-        "timeMin": now_local.strftime(time_fmt),
-        "timeMax": window_end_local.strftime(time_fmt),
-        "maxResults": 20,
-    }
-    logger.info(
-        "EVENT_CALL: trigger=%s tool=list-events args=%s",
-        trigger.trigger_id, json.dumps(poll_args),
-    )
-    raw_result = await mcp_client.call_tool("list-events", poll_args)
-
-    # Check for MCP error (call_tool returns error strings, never raises)
-    if raw_result.startswith("Tool error:") or raw_result.startswith("Calendar tool error:"):
-        logger.warning("EVENT_CALENDAR_POLL_FAILED: %s", raw_result)
-        return 0
-
-    # 2. Parse into structured CalendarEvent objects
-    logger.info("EVENT_RAW: trigger=%s raw=%s", trigger.trigger_id, raw_result[:500])
-    events = parse_calendar_events(raw_result)
-    logger.info(
-        "EVENT_POLL: trigger=%s events_parsed=%d raw_len=%d",
-        trigger.trigger_id, len(events), len(raw_result),
-    )
-
-    # 3. Filter by event_filter — TITLE/SUMMARY ONLY
-    pre_filter_count = len(events)
+    # 1. Filter by event_filter — TITLE/SUMMARY ONLY
+    events = list(all_events)
     if trigger.event_filter:
         filter_lower = trigger.event_filter.lower()
+        pre_count = len(events)
         events = [e for e in events if filter_lower in e.summary.lower()]
-    if trigger.event_filter:
         logger.info(
             "EVENT_FILTER: trigger=%s filter=%r before=%d after=%d",
-            trigger.trigger_id, trigger.event_filter, pre_filter_count, len(events),
+            trigger.trigger_id, trigger.event_filter, pre_count, len(events),
         )
 
     # 4. Inline cleanup: prune matched IDs for past/out-of-window events
