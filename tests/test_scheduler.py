@@ -589,7 +589,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value=raw)
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 1
         handler.send_outbound.assert_called_once()
         call_args = handler.send_outbound.call_args
@@ -611,7 +611,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value=raw)
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 0
         handler.send_outbound.assert_not_called()
 
@@ -631,7 +631,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value=raw)
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 0
 
     async def test_event_filter_matches_title(self, tmp_path):
@@ -653,7 +653,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value=raw)
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 1
         assert "Dentist" in handler.send_outbound.call_args[0][3]
 
@@ -723,7 +723,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value=raw)
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 0
 
     async def test_daily_cap_resets_on_new_day(self, tmp_path):
@@ -748,7 +748,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value=raw)
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 1  # cap reset
 
     async def test_mcp_error_logs_and_skips(self, tmp_path):
@@ -761,7 +761,7 @@ class TestEvaluateEventTriggers:
         mcp = MagicMock()
         mcp.call_tool = AsyncMock(return_value="Tool error: connection refused")
 
-        fired = await evaluate_event_triggers(store, "t1", handler, mcp)
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 0
         updated = await store.get("t1", "trig_ev1")
         assert updated.status == "active"
@@ -1173,6 +1173,131 @@ class TestSystemEventQueue:
 
         # Second drain returns empty
         assert handler.drain_system_events("t1") == []
+
+
+class TestPreferenceReplacement:
+    """Fix 1: Standing event triggers replace previous matching triggers."""
+
+    async def test_standing_replaces_standing_same_source(self, tmp_path):
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        # Create first trigger
+        await _create_trigger(
+            store, "t1", "m1", "s1", "2 min before events", "",
+            "notify", "msg", "", {}, "", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=2,
+        )
+        first = (await store.list_active("t1"))[0]
+
+        # Create replacement
+        result = await _create_trigger(
+            store, "t1", "m1", "s1", "5 min before events", "",
+            "notify", "msg", "", {}, "", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=5,
+        )
+        assert "Replaced" in result
+
+        all_triggers = await store.list_all("t1")
+        active = [t for t in all_triggers if t.status == "active"]
+        replaced = [t for t in all_triggers if t.status == "replaced"]
+        assert len(active) == 1
+        assert active[0].event_lead_minutes == 5
+        assert len(replaced) == 1
+        assert replaced[0].trigger_id == first.trigger_id
+        assert replaced[0].replaced_by == active[0].trigger_id
+
+    async def test_different_filter_not_replaced(self, tmp_path):
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        await _create_trigger(
+            store, "t1", "m1", "s1", "before meetings", "",
+            "notify", "msg", "", {}, "", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="meeting", event_lead_minutes=5,
+        )
+        await _create_trigger(
+            store, "t1", "m1", "s1", "before dentist", "",
+            "notify", "msg", "", {}, "", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="dentist", event_lead_minutes=10,
+        )
+        active = await store.list_active("t1")
+        assert len(active) == 2  # different filters, both stay
+
+    async def test_one_shot_not_replaced_by_standing(self, tmp_path):
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        await _create_trigger(
+            store, "t1", "m1", "s1", "one-shot dentist", "",
+            "notify", "msg", "", {}, "", "stage", "",
+            condition_type="event", event_source="calendar",
+            event_filter="dentist", event_lead_minutes=5,
+        )
+        await _create_trigger(
+            store, "t1", "m1", "s1", "standing all events", "",
+            "notify", "msg", "", {}, "", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=10,
+        )
+        active = await store.list_active("t1")
+        assert len(active) == 2  # one-shot not replaced
+
+
+class TestSkipPastEvents:
+    """Fix 2: Past events skipped, grammar fix."""
+
+    async def test_past_events_not_fired(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        store = TriggerStore(tmp_path)
+        trigger = Trigger(
+            trigger_id="trig_past", tenant_id="t1",
+            condition_type="event", event_source="calendar",
+            event_lead_minutes=30, status="active", recurrence="standing",
+        )
+        await store.save(trigger)
+
+        past_event = CalendarEvent(
+            id="ev_past", summary="Already happened",
+            start=now - timedelta(minutes=10), end=None,
+        )
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        mcp = MagicMock()
+        mcp.call_tool = AsyncMock(return_value=json.dumps([
+            {"id": "ev_past", "summary": "Already happened",
+             "start": {"dateTime": (now - timedelta(minutes=10)).isoformat()}}
+        ]))
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
+        assert fired == 0
+        handler.send_outbound.assert_not_called()
+
+
+class TestAdaptiveCadence:
+    """Fix 3: Adaptive polling cadence."""
+
+    def test_no_events_returns_ceiling(self):
+        from kernos.kernel.scheduler import _compute_adaptive_cadence
+        result = _compute_adaptive_cadence([], [])
+        assert result == 15 * 60
+
+    def test_far_event_returns_capped(self):
+        from kernos.kernel.scheduler import _compute_adaptive_cadence
+        now = datetime.now(timezone.utc)
+        events = [CalendarEvent("e1", "Meeting", now + timedelta(hours=5), None)]
+        triggers = [Trigger(trigger_id="t1", tenant_id="t1", event_lead_minutes=15)]
+        result = _compute_adaptive_cadence(events, triggers)
+        assert result <= 5 * 60  # capped at 5 min
+        assert result >= 30  # floor
+
+    def test_imminent_event_returns_floor(self):
+        from kernos.kernel.scheduler import _compute_adaptive_cadence
+        now = datetime.now(timezone.utc)
+        events = [CalendarEvent("e1", "Meeting", now + timedelta(minutes=1), None)]
+        triggers = [Trigger(trigger_id="t1", tenant_id="t1", event_lead_minutes=15)]
+        result = _compute_adaptive_cadence(events, triggers)
+        assert result == 30  # floor
 
 
 class TestEventPollTimeFormat:

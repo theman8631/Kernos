@@ -75,6 +75,9 @@ class Trigger:
     event_daily_fire_count: int = 0      # Anti-spam: fires today (standing triggers only)
     event_daily_fire_date: str = ""      # ISO date of last fire count reset
 
+    # Replacement chain
+    replaced_by: str = ""               # trigger_id that superseded this one
+
     # Audit
     created_by_tool_call: str = ""
 
@@ -559,7 +562,7 @@ async def _list_triggers(store: TriggerStore, tenant_id: str) -> str:
 
     lines = ["**Scheduled Actions:**\n"]
     for t in triggers:
-        status_icon = {"active": "▶", "paused": "⏸", "completed": "✓", "failed": "✗", "retired": "⊘"}.get(t.status, "?")
+        status_icon = {"active": "▶", "paused": "⏸", "completed": "✓", "failed": "✗", "retired": "⊘", "replaced": "↻"}.get(t.status, "?")
         recur = f" (recurring: {t.recurrence})" if t.recurrence else ""
         if t.condition_type == "event":
             source_info = f"source: {t.event_source}"
@@ -641,23 +644,49 @@ async def _create_trigger(
         event_lead_minutes=event_lead_minutes if condition_type == "event" else 30,
     )
 
+    # Fix 1: Supersede existing standing event triggers with same source+filter+notify_via
+    replaced_descriptions: list[str] = []
+    if condition_type == "event" and recurrence == "standing":
+        existing = await store.list_active(tenant_id)
+        for old in existing:
+            if (old.condition_type == "event"
+                    and old.event_source == event_source
+                    and old.event_filter == event_filter
+                    and old.recurrence == "standing"
+                    and old.notify_via == notify_via
+                    and old.status == "active"):
+                old.status = "replaced"
+                old.replaced_by = tid
+                await store.save(old)
+                replaced_descriptions.append(
+                    f"{old.event_lead_minutes}min (id={old.trigger_id})"
+                )
+                logger.info(
+                    "TRIGGER_REPLACED: old=%s new=%s reason=preference_update",
+                    old.trigger_id, tid,
+                )
+
     await store.save(trigger)
     logger.info(
         "TRIGGER_CREATE: id=%s desc=%r condition=%s next=%s action=%s recurrence=%r"
-        " event_source=%s event_filter=%r event_lead=%d",
+        " event_source=%s event_filter=%r event_lead=%d replaced=%d",
         tid, description, condition_type,
         next_fire[:19] if next_fire else "?", action_type, recurrence,
         trigger.event_source, trigger.event_filter, trigger.event_lead_minutes,
+        len(replaced_descriptions),
     )
 
     if condition_type == "event":
         recur_note = f" Standing: {recurrence}." if recurrence else ""
+        replaced_note = ""
+        if replaced_descriptions:
+            replaced_note = f"\nReplaced {len(replaced_descriptions)} previous reminder(s): {', '.join(replaced_descriptions)}"
         return (
             f"Scheduled: {description}\n"
             f"Event trigger: {trigger.event_source} | "
             f"Lead: {trigger.event_lead_minutes}min | "
             f"Filter: {trigger.event_filter or '(all events)'}\n"
-            f"ID: {tid}{recur_note}"
+            f"ID: {tid}{recur_note}{replaced_note}"
         )
     recur_note = f" Recurring: {recurrence}." if recurrence else ""
     return (
@@ -1128,13 +1157,16 @@ async def evaluate_event_triggers(
     tenant_id: str,
     handler,
     mcp_client,   # MCPClientManager — explicit contract
-) -> int:
-    """Evaluate event-based triggers. Returns count fired."""
+) -> tuple[int, int]:
+    """Evaluate event-based triggers.
+
+    Returns (count_fired, next_poll_seconds) for adaptive cadence.
+    """
     event_triggers = await trigger_store.get_by_condition_type(
         tenant_id, "event", status="active"
     )
     if not event_triggers:
-        return 0
+        return 0, 15 * 60  # no triggers, 15 min ceiling
 
     # Group by event_source — poll each source ONCE, share across triggers
     calendar_triggers = [t for t in event_triggers if t.event_source == "calendar"]
@@ -1144,6 +1176,7 @@ async def evaluate_event_triggers(
     )
 
     fired = 0
+    next_poll = 15 * 60  # default ceiling
     if calendar_triggers:
         # Single poll for all calendar triggers
         all_events = await _poll_calendar_events(mcp_client)
@@ -1159,7 +1192,42 @@ async def evaluate_event_triggers(
                         trigger.trigger_id, trigger.event_source, exc,
                     )
 
-    return fired
+            # Adaptive cadence: compute next poll based on nearest event
+            next_poll = _compute_adaptive_cadence(all_events, calendar_triggers)
+        else:
+            # MCP error — retry sooner
+            next_poll = 60
+
+    return fired, next_poll
+
+
+def _compute_adaptive_cadence(
+    events: list[CalendarEvent], triggers: list[Trigger],
+) -> int:
+    """Compute seconds until next poll based on nearest upcoming event."""
+    now = datetime.now(timezone.utc)
+    max_lead = max(t.event_lead_minutes for t in triggers) if triggers else 30
+
+    # Find earliest future event
+    future_minutes = []
+    for e in events:
+        mins = (e.start - now).total_seconds() / 60
+        if mins > 0:
+            future_minutes.append(mins)
+
+    if not future_minutes:
+        return 15 * 60  # nothing upcoming, 15 min ceiling
+
+    earliest = min(future_minutes)
+
+    if earliest > max_lead + 5:
+        # Far away — sleep until approaching lead window
+        sleep_min = earliest - max_lead - 2
+        return max(30, min(int(sleep_min * 60), 5 * 60))  # 30s floor, 5min cap
+    elif earliest > 2:
+        return 60  # approaching lead window
+    else:
+        return 30  # imminent, 30s floor
 
 
 async def _evaluate_calendar_trigger(
@@ -1198,36 +1266,55 @@ async def _evaluate_calendar_trigger(
             trigger.trigger_id, trigger.event_filter, pre_count, len(events),
         )
 
-    # 4. Inline cleanup: prune matched IDs for past/out-of-window events
+    # 2. Skip past events — filter out events that have already started
+    future_events = []
+    skipped_past = 0
+    for e in events:
+        minutes_until = (e.start - now).total_seconds() / 60
+        if minutes_until < 0:
+            skipped_past += 1
+        else:
+            future_events.append(e)
+    if skipped_past:
+        logger.info("EVENT_SKIP_PAST: trigger=%s skipped=%d", trigger.trigger_id, skipped_past)
+    events = future_events
+
+    # 3. Inline cleanup: prune matched IDs for past/out-of-window events
     active_event_ids = {e.id for e in events}
     trigger.event_matched_ids = [
         eid for eid in trigger.event_matched_ids
         if eid in active_event_ids
     ]
 
-    # 5. Check lead time and fire
+    # 4. Check lead time and fire
     fired = 0
     for event in events:
         is_matched = event.id in trigger.event_matched_ids
         minutes_until = (event.start - now).total_seconds() / 60
         logger.info(
-            "EVENT_CHECK: trigger=%s event=%s summary=%r start=%s now=%s "
+            "EVENT_CHECK: trigger=%s event=%s summary=%r "
             "minutes_until=%.1f lead=%d matched=%s",
             trigger.trigger_id, event.id, event.summary,
-            event.start.isoformat(), now.isoformat(),
             minutes_until, trigger.event_lead_minutes, is_matched,
         )
 
         if is_matched:
             continue
 
-        if 0 < minutes_until <= trigger.event_lead_minutes:
-            # Build notification message
+        if minutes_until <= trigger.event_lead_minutes:
+            # Build notification message — grammar fix
             time_str = event.start.strftime("%I:%M %p")
+            mins = int(minutes_until)
+            if mins == 0:
+                time_note = "starting now"
+            elif mins == 1:
+                time_note = "in 1 minute"
+            else:
+                time_note = f"in {mins} minutes"
             message = f"Upcoming: {event.summary} at {time_str}"
             if event.location:
                 message += f" ({event.location})"
-            message += f" — in {int(minutes_until)} minutes"
+            message += f" — {time_note}"
 
             # Deliver via send_outbound — canonical member ID
             channel = trigger.notify_via or None

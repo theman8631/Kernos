@@ -232,7 +232,7 @@ class AwarenessEvaluator:
                 except Exception as e:
                     logger.error("Trigger evaluation error: %s", e)
 
-            # Phase 3: Event trigger evaluation (runs every Nth tick)
+            # Phase 3: Event trigger evaluation (adaptive cadence)
             _event_tick_count += 1
             if _event_tick_count >= event_every_n:
                 _event_tick_count = 0
@@ -241,14 +241,16 @@ class AwarenessEvaluator:
                     if mcp_client:
                         try:
                             from kernos.kernel.scheduler import evaluate_event_triggers
-                            event_fired = await evaluate_event_triggers(
+                            event_fired, next_poll = await evaluate_event_triggers(
                                 self._trigger_store, tenant_id,
                                 self._handler, mcp_client,
                             )
+                            # Adaptive cadence: adjust event_every_n based on proximity
+                            event_every_n = max(1, next_poll // self._trigger_interval)
                             if event_fired:
                                 logger.info(
-                                    "EVENT_TRIGGERS: tenant=%s fired=%d",
-                                    tenant_id, event_fired,
+                                    "EVENT_TRIGGERS: tenant=%s fired=%d next_poll=%ds",
+                                    tenant_id, event_fired, next_poll,
                                 )
                         except asyncio.CancelledError:
                             raise

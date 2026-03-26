@@ -651,9 +651,15 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **CalendarEvent dataclass**: Normalized from MCP `list-events` response via `parse_calendar_events()`. All-day events skipped (v1 policy). Structured parsing — no ad hoc MCP output manipulation.
 
-**Duplicate suppression**: `event_matched_ids` on Trigger tracks which event IDs have already fired. Pruned each evaluation pass (past events removed). Window-based/approximate.
+**Duplicate suppression**: `event_matched_ids` on Trigger tracks which event IDs have already fired. Pruned each evaluation pass (past events removed). Window-based/approximate. Per-trigger — each trigger fires independently at its own lead time.
+
+**Preference replacement**: Creating a new standing event trigger supersedes existing standing triggers with the same `event_source`, `event_filter`, and `notify_via`. Old triggers get `status="replaced"` with `replaced_by` pointing to the new trigger. Different filters or one-shot triggers are never replaced.
+
+**Firing semantics**: Past events (minutes_until < 0) are skipped entirely with one `EVENT_SKIP_PAST` summary line per trigger. Grammar: "in 1 minute" not "in 1 minutes", "starting now" not "in 0 minutes".
 
 **Anti-spam**: Standing event triggers have `event_daily_fire_cap` (default 15, configurable via `KERNOS_EVENT_DAILY_CAP`). Does not apply to one-shot triggers.
+
+**Adaptive cadence**: After each poll, `_compute_adaptive_cadence()` computes next poll interval based on nearest upcoming event and max lead time across triggers. Floor: 30s (imminent). Ceiling: 15min (nothing upcoming). Approaching lead window: 60s. Far away: capped at 5min.
 
 **Member ID**: `resolve_owner_member_id(tenant_id)` — canonical resolver. All callers (scheduler, reasoning, handler) use this instead of inline `f"member:{...}:owner"` construction.
 
