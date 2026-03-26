@@ -53,12 +53,19 @@ class Trigger:
     authorization_covenant_id: str = ""  # Covenant rule ID authorizing this action
 
     # Lifecycle
-    status: str = "active"              # "active", "paused", "completed", "failed"
+    status: str = "active"              # "active", "paused", "completed", "failed", "retired"
     created_at: str = ""
     last_fired_at: str = ""
     fire_count: int = 0
     failure_reason: str = ""
     pending_delivery: str = ""           # Held result if outbound failed
+
+    # Failure classification
+    failure_class: str = ""              # "structural" or "transient" or ""
+    transient_failure_count: int = 0     # Consecutive transient failures
+    last_failure_at: str = ""            # ISO timestamp of last failure
+    degraded: bool = False               # True if active but dependency broken
+    retired_at: str = ""                 # ISO timestamp if retired
 
     # Event-specific fields (used when condition_type == "event")
     event_source: str = ""               # "calendar" (future: "gmail", "webhook")
@@ -79,6 +86,37 @@ def _trigger_id() -> str:
 def _now_iso() -> str:
     """Local time, no timezone offset — matches what the agent writes from the system prompt."""
     return datetime.now().isoformat()
+
+
+TRANSIENT_FAILURE_NOTIFY_THRESHOLD = 10
+
+
+def classify_trigger_failure(error: str | Exception) -> str:
+    """Classify a trigger failure as 'structural' or 'transient'.
+
+    Structural: trigger itself is invalid, will never succeed.
+    Transient: dependency is temporarily broken, may recover.
+
+    Conservative default: transient. Better to retry a broken
+    trigger than retire a valid one.
+    """
+    err_str = str(error).lower()
+
+    structural_patterns = [
+        "not found",
+        "not handled",
+        "no longer exists",
+        "unknown tool",
+        "not available",
+        "not registered",
+        "permanently unavailable",
+    ]
+
+    for pattern in structural_patterns:
+        if pattern in err_str:
+            return "structural"
+
+    return "transient"
 
 
 def resolve_owner_member_id(tenant_id: str) -> str:
@@ -508,7 +546,7 @@ async def _list_triggers(store: TriggerStore, tenant_id: str) -> str:
 
     lines = ["**Scheduled Actions:**\n"]
     for t in triggers:
-        status_icon = {"active": "▶", "paused": "⏸", "completed": "✓", "failed": "✗"}.get(t.status, "?")
+        status_icon = {"active": "▶", "paused": "⏸", "completed": "✓", "failed": "✗", "retired": "⊘"}.get(t.status, "?")
         recur = f" (recurring: {t.recurrence})" if t.recurrence else ""
         if t.condition_type == "event":
             source_info = f"source: {t.event_source}"
@@ -666,10 +704,28 @@ async def evaluate_triggers(
     for trigger in due:
         try:
             success = await _fire_trigger(trigger, handler)
+
+            # If _fire_trigger already retired the trigger, just save and continue
+            if trigger.status == "retired":
+                await trigger_store.save(trigger)
+                continue
+
             trigger.last_fired_at = now
             trigger.fire_count += 1
 
             if success:
+                # Recovery from degraded state
+                if trigger.degraded:
+                    logger.info(
+                        "TRIGGER_RECOVERED: id=%s was_degraded_for=%d failures desc=%r",
+                        trigger.trigger_id, trigger.transient_failure_count,
+                        trigger.action_description,
+                    )
+                    trigger.degraded = False
+                    trigger.transient_failure_count = 0
+                    trigger.failure_class = ""
+                    # Keep failure_reason for debugging history
+
                 if trigger.recurrence:
                     trigger.next_fire_at = compute_next_fire(trigger.recurrence, now)
                     if not trigger.next_fire_at:
@@ -677,7 +733,8 @@ async def evaluate_triggers(
                 else:
                     trigger.status = "completed"
             else:
-                if not trigger.recurrence:
+                # _fire_trigger may have applied transient failure state already
+                if not trigger.recurrence and trigger.failure_class != "transient":
                     trigger.status = "failed"
 
             await trigger_store.save(trigger)
@@ -690,8 +747,20 @@ async def evaluate_triggers(
                 trigger.action_description,
             )
         except Exception as exc:
-            trigger.status = "failed"
+            fc = classify_trigger_failure(exc)
             trigger.failure_reason = str(exc)
+            trigger.failure_class = fc
+            trigger.last_failure_at = _now_iso()
+            if fc == "structural":
+                trigger.status = "retired"
+                trigger.retired_at = _now_iso()
+                logger.info(
+                    "TRIGGER_RETIRED: id=%s reason=structural error=%s",
+                    trigger.trigger_id, exc,
+                )
+                _notify_retirement(handler, trigger)
+            else:
+                _apply_transient_failure(trigger, handler)
             await trigger_store.save(trigger)
             logger.error(
                 "TRIGGER_FIRE: id=%s action=%s EXCEPTION: %s",
@@ -785,17 +854,18 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
             )
             result = await handler.reasoning.execute_tool(tool_name, tool_args, request)
 
-            # Check for permanent tool failures (tool not found, not handled)
-            _permanent_fail_markers = (
-                "not found", "not handled", "not available",
-                "Tool error: No tool", "unknown tool",
-            )
-            if any(marker in result.lower() for marker in _permanent_fail_markers):
+            # Classify the result for potential tool failures
+            fc = classify_trigger_failure(result)
+            if fc == "structural":
                 trigger.failure_reason = f"Tool permanently unavailable: {result}"
-                logger.warning(
-                    "TRIGGER_TOOL_MISSING: id=%s tool=%s result=%s",
-                    trigger.trigger_id, tool_name, result,
+                trigger.failure_class = "structural"
+                trigger.status = "retired"
+                trigger.retired_at = _now_iso()
+                logger.info(
+                    "TRIGGER_RETIRED: id=%s reason=structural tool=%s",
+                    trigger.trigger_id, tool_name,
                 )
+                _notify_retirement(handler, trigger)
                 return False
 
             # Deliver result to user
@@ -818,20 +888,121 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
             return True  # Tool call succeeded even if delivery pending
 
         except Exception as exc:
+            fc = classify_trigger_failure(exc)
             trigger.failure_reason = str(exc)
-            # Notify user of failure
-            member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
-            fail_msg = (
-                f"I tried to run '{trigger.action_description}' but it failed: {exc}. "
-                "Want me to try again?"
-            )
-            await handler.send_outbound(
-                trigger.tenant_id, member_id, trigger.notify_via or None, fail_msg,
-            )
+            trigger.failure_class = fc
+            trigger.last_failure_at = _now_iso()
+            if fc == "structural":
+                trigger.status = "retired"
+                trigger.retired_at = _now_iso()
+                logger.info(
+                    "TRIGGER_RETIRED: id=%s reason=structural error=%s",
+                    trigger.trigger_id, exc,
+                )
+                _notify_retirement(handler, trigger)
+            else:
+                _apply_transient_failure(trigger, handler)
             return False
 
     trigger.failure_reason = f"Unknown action_type: {trigger.action_type}"
     return False
+
+
+def _notify_retirement(handler, trigger: Trigger) -> None:
+    """Best-effort one-time notification when a trigger is retired."""
+    try:
+        import asyncio
+        member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
+        asyncio.ensure_future(handler.send_outbound(
+            trigger.tenant_id, member_id, trigger.notify_via or None,
+            f"A scheduled action has been retired because it can no longer work: "
+            f"\"{trigger.action_description}\" — {trigger.failure_reason}. "
+            f"If you still need this, you can create a new one.",
+        ))
+    except Exception:
+        pass
+
+
+def _apply_transient_failure(trigger: Trigger, handler) -> None:
+    """Update trigger state for a transient failure."""
+    trigger.transient_failure_count += 1
+    trigger.last_failure_at = _now_iso()
+    trigger.failure_class = "transient"
+
+    if not trigger.degraded:
+        trigger.degraded = True
+        logger.info(
+            "TRIGGER_DEGRADED: id=%s reason=%s",
+            trigger.trigger_id, trigger.failure_reason,
+        )
+
+    if trigger.transient_failure_count == TRANSIENT_FAILURE_NOTIFY_THRESHOLD:
+        logger.info(
+            "TRIGGER_DEGRADED_NOTIFY: id=%s count=%d",
+            trigger.trigger_id, trigger.transient_failure_count,
+        )
+        try:
+            import asyncio
+            member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
+            asyncio.ensure_future(handler.send_outbound(
+                trigger.tenant_id, member_id, trigger.notify_via or None,
+                f"Your reminder \"{trigger.action_description}\" is still active but "
+                f"hasn't been able to fire: {trigger.failure_reason}. "
+                f"You may need to reconnect the service.",
+            ))
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Boot scan — retire stale legacy triggers
+# ---------------------------------------------------------------------------
+
+
+async def retire_stale_triggers(
+    trigger_store: TriggerStore,
+    tenant_id: str,
+    registry,  # CapabilityRegistry — public API
+    handler,
+) -> int:
+    """Retire active triggers whose tools no longer exist."""
+    all_triggers = await trigger_store.list_all(tenant_id)
+    retired = 0
+
+    for trigger in all_triggers:
+        if trigger.status != "active":
+            continue
+        if trigger.action_type == "tool_call":
+            tool_name = trigger.action_params.get("tool_name", "")
+            if not tool_name:
+                continue
+            # Check via public registry
+            tool_exists = registry.get_tool_schema(tool_name) is not None
+            if not tool_exists:
+                trigger.status = "retired"
+                trigger.failure_class = "structural"
+                trigger.failure_reason = f"Tool '{tool_name}' no longer exists"
+                trigger.retired_at = _now_iso()
+                await trigger_store.save(trigger)
+                retired += 1
+                # One-time notification (best effort)
+                try:
+                    member_id = resolve_owner_member_id(trigger.tenant_id)
+                    await handler.send_outbound(
+                        trigger.tenant_id, member_id, None,
+                        f"An old reminder was retired: \"{trigger.action_description}\" "
+                        f"— {trigger.failure_reason}. Create a new one if needed.",
+                    )
+                except Exception:
+                    pass
+                logger.info(
+                    "TRIGGER_RETIRED: id=%s reason=tool_not_found tool=%s",
+                    trigger.trigger_id, tool_name,
+                )
+
+    if retired:
+        logger.info("STALE_TRIGGERS_RETIRED: tenant=%s count=%d", tenant_id, retired)
+    return retired
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1199,17 @@ async def _evaluate_calendar_trigger(
                         channel="scheduled",
                         content=f"[EVENT] {message}",
                     )
+
+                # Recovery from degraded state
+                if trigger.degraded:
+                    logger.info(
+                        "TRIGGER_RECOVERED: id=%s was_degraded_for=%d failures desc=%r",
+                        trigger.trigger_id, trigger.transient_failure_count,
+                        trigger.action_description,
+                    )
+                    trigger.degraded = False
+                    trigger.transient_failure_count = 0
+                    trigger.failure_class = ""
 
                 # Mark as fired
                 trigger.event_matched_ids.append(event.id)

@@ -233,6 +233,11 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `EVENT_EVAL_FAILED:` — event trigger evaluation failed
 - `EVENT_CALENDAR_POLL_FAILED:` — calendar MCP poll failed
 - `EVENT_TRIGGERS:` — summary after event evaluation pass
+- `TRIGGER_RETIRED:` — trigger permanently stopped (structural failure)
+- `TRIGGER_DEGRADED:` — first transient failure (state transition only)
+- `TRIGGER_DEGRADED_NOTIFY:` — threshold crossed, user notified
+- `TRIGGER_RECOVERED:` — success after degraded state
+- `STALE_TRIGGERS_RETIRED:` — boot scan summary
 
 ### Retrieval Service (2D)
 
@@ -653,6 +658,12 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 **NL creation**: `manage_schedule create` uses Haiku extraction. Schema includes `condition_type`, `event_source`, `event_filter`, `event_lead_minutes` for event triggers. `event_filter` matches event title/summary only.
 
 **Failure semantics**: MCP poll failures log `EVENT_CALENDAR_POLL_FAILED` and return 0. Trigger stays active. Retries next pass. Triggers are never disabled by transient background failures.
+
+**Failure classification** (`classify_trigger_failure()`): Structural failures (tool not found, not handled) → trigger retired permanently. Transient failures (timeout, rate limit) → trigger stays active+degraded, retries on next pass. Conservative default: transient. After 10 consecutive transient failures, user notified once. On recovery, `degraded` flag cleared but `failure_reason` preserved for history.
+
+**Lifecycle states**: `active` → `active+degraded` (transient) → `retired` (structural) or back to `active` (recovered). `completed` (one-shot success). `retired` is NOT reversible — recreate instead.
+
+**Boot scan** (`retire_stale_triggers()`): Runs once per tenant on first evaluation pass. Scans active `tool_call` triggers against `CapabilityRegistry.get_tool_schema()`. Missing tools → retired with one-time user notification.
 
 **Tracing prefix**: `AWARENESS:` — all evaluator log lines use this prefix.
 

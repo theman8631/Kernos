@@ -144,6 +144,7 @@ class AwarenessEvaluator:
         self._running = False
         self._task: asyncio.Task | None = None
         self._awareness_tick_count = 0
+        self._stale_scan_done: set[str] = set()
 
     async def start(self, tenant_id: str) -> None:
         """Start the periodic evaluator for a tenant."""
@@ -181,6 +182,20 @@ class AwarenessEvaluator:
         while self._running:
             self._awareness_tick_count += 1
             _interrupt_tick_count += 1
+
+            # Phase 0: Boot scan — retire stale triggers (first pass only)
+            if tenant_id not in self._stale_scan_done:
+                self._stale_scan_done.add(tenant_id)
+                if self._trigger_store and self._handler:
+                    try:
+                        from kernos.kernel.scheduler import retire_stale_triggers
+                        await retire_stale_triggers(
+                            self._trigger_store, tenant_id,
+                            self._handler.registry,
+                            self._handler,
+                        )
+                    except Exception as e:
+                        logger.warning("Stale trigger scan error: %s", e)
 
             # Phase 1: Awareness pass (runs every Nth tick)
             if self._awareness_tick_count >= awareness_every_n:
