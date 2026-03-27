@@ -968,6 +968,27 @@ class ReasoningService:
         # Lazy tool loading: tracks which MCP tools have been loaded per-space session
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
 
+    def cleanup_expired_authorizations(self, tenant_id: str) -> None:
+        """Remove expired PendingActions and used/expired ApprovalTokens."""
+        now = datetime.now(timezone.utc)
+
+        # Prune pending actions
+        if tenant_id in self._pending_actions:
+            self._pending_actions[tenant_id] = [
+                a for a in self._pending_actions[tenant_id]
+                if now < a.expires_at
+            ]
+            if not self._pending_actions[tenant_id]:
+                del self._pending_actions[tenant_id]
+
+        # Prune approval tokens (all tenants, since tokens aren't keyed by tenant)
+        expired_tokens = [
+            tid for tid, token in self._approval_tokens.items()
+            if token.used or (now - token.issued_at).total_seconds() > 300
+        ]
+        for tid in expired_tokens:
+            del self._approval_tokens[tid]
+
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
         self._retrieval = retrieval

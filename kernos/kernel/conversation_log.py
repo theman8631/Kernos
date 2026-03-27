@@ -2,10 +2,16 @@
 
 Phase 1: write — append-only plain-text logs alongside existing conversation store.
 Phase 2: read — handler reads context from space logs instead of channel JSON.
+
+Concurrency: per-space asyncio Lock serializes writes (append, roll, seed).
+Reads are eventually consistent (no lock). Single-process only.
 """
+import asyncio
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,6 +70,14 @@ class ConversationLogger:
 
     def __init__(self, data_dir: str = "./data") -> None:
         self._data_dir = Path(data_dir)
+        self._meta_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_lock(self, tenant_id: str, space_id: str) -> asyncio.Lock:
+        """Per-space asyncio lock for serializing meta read-modify-write."""
+        key = f"{tenant_id}:{space_id}"
+        if key not in self._meta_locks:
+            self._meta_locks[key] = asyncio.Lock()
+        return self._meta_locks[key]
 
     def _logs_dir(self, tenant_id: str, space_id: str) -> Path:
         return self._data_dir / "tenants" / tenant_id / "spaces" / space_id / "logs"
@@ -83,10 +97,20 @@ class ConversationLogger:
         }
 
     def _save_meta(self, tenant_id: str, space_id: str, meta: dict) -> None:
+        """Atomic write: tempfile + os.replace (POSIX atomic)."""
         path = self._meta_path(tenant_id, space_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+            os.replace(tmp, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _current_log_path(self, tenant_id: str, space_id: str) -> Path:
         meta = self._load_meta(tenant_id, space_id)
@@ -111,25 +135,26 @@ class ConversationLogger:
             return
 
         try:
-            logs_dir = self._logs_dir(tenant_id, space_id)
-            logs_dir.mkdir(parents=True, exist_ok=True)
+            async with self._get_lock(tenant_id, space_id):
+                logs_dir = self._logs_dir(tenant_id, space_id)
+                logs_dir.mkdir(parents=True, exist_ok=True)
 
-            ts = timestamp or datetime.now(timezone.utc).isoformat()
-            line = f"[{ts}] [{speaker}] [{channel}] {content}\n"
+                ts = timestamp or datetime.now(timezone.utc).isoformat()
+                line = f"[{ts}] [{speaker}] [{channel}] {content}\n"
 
-            log_path = self._current_log_path(tenant_id, space_id)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(line)
+                log_path = self._current_log_path(tenant_id, space_id)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(line)
 
-            # Update estimated token count (rough: 1 token ≈ 4 chars)
-            meta = self._load_meta(tenant_id, space_id)
-            meta["current_log_tokens_est"] += len(line) // 4
-            self._save_meta(tenant_id, space_id, meta)
+                # Update estimated token count (rough: 1 token ≈ 4 chars)
+                meta = self._load_meta(tenant_id, space_id)
+                meta["current_log_tokens_est"] += len(line) // 4
+                self._save_meta(tenant_id, space_id, meta)
 
-            logger.info(
-                "CONV_LOG: space=%s log=%03d speaker=%s channel=%s len=%d",
-                space_id, meta["current_log"], speaker, channel, len(content),
-            )
+                logger.info(
+                    "CONV_LOG: space=%s log=%03d speaker=%s channel=%s len=%d",
+                    space_id, meta["current_log"], speaker, channel, len(content),
+                )
         except Exception as exc:
             # Never break the user's message flow for logging failures
             logger.warning("CONV_LOG: failed to write: %s", exc)
@@ -218,21 +243,22 @@ class ConversationLogger:
 
         Returns: (old_log_number, new_log_number)
         """
-        meta = self._load_meta(tenant_id, space_id)
-        old_num = meta["current_log"]
-        new_num = old_num + 1
+        async with self._get_lock(tenant_id, space_id):
+            meta = self._load_meta(tenant_id, space_id)
+            old_num = meta["current_log"]
+            new_num = old_num + 1
 
-        meta["current_log"] = new_num
-        meta["current_log_tokens_est"] = 0
-        meta["seeded_tokens_est"] = 0
-        meta["created_at"] = datetime.now(timezone.utc).isoformat()
-        self._save_meta(tenant_id, space_id, meta)
+            meta["current_log"] = new_num
+            meta["current_log_tokens_est"] = 0
+            meta["seeded_tokens_est"] = 0
+            meta["created_at"] = datetime.now(timezone.utc).isoformat()
+            self._save_meta(tenant_id, space_id, meta)
 
-        logger.info(
-            "LOG_ROLL: space=%s closed=log_%03d starting=log_%03d",
-            space_id, old_num, new_num,
-        )
-        return old_num, new_num
+            logger.info(
+                "LOG_ROLL: space=%s closed=log_%03d starting=log_%03d",
+                space_id, old_num, new_num,
+            )
+            return old_num, new_num
 
     async def seed_from_previous(
         self, tenant_id: str, space_id: str,
@@ -245,6 +271,16 @@ class ConversationLogger:
 
         Returns number of entries seeded. Updates meta.json token estimate.
         """
+        async with self._get_lock(tenant_id, space_id):
+            return await self._seed_from_previous_locked(
+                tenant_id, space_id, previous_log_number, tail_entries,
+            )
+
+    async def _seed_from_previous_locked(
+        self, tenant_id: str, space_id: str,
+        previous_log_number: int, tail_entries: int,
+    ) -> int:
+        """Internal seed implementation — must be called under lock."""
         prev_path = self._logs_dir(tenant_id, space_id) / f"log_{previous_log_number:03d}.txt"
         if not prev_path.exists():
             return 0

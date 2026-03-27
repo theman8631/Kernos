@@ -675,6 +675,20 @@ All internal timestamps are UTC (`utc_now()`, `utc_now_dt()`). 14 copies of `_no
 
 **Invariant:** Naive local timestamps appear ONLY at external MCP request boundaries, never in internal state.
 
+### ConversationLogger Locking
+
+**File:** `kernos/kernel/conversation_log.py`
+
+Per-space `asyncio.Lock` serializes the full read-modify-write section in `append()`, `roll_log()`, `seed_from_previous()`. Prevents the compaction cascade bug (concurrent meta.json updates causing double compaction). `_save_meta()` uses tempfile + `os.replace` for atomic writes. Read methods (`get_current_log_info`, `read_current_log_text`) are eventually consistent (no lock). Single-process only.
+
+### Handler Hygiene
+
+**PendingAction GC:** `cleanup_expired_authorizations()` on `ReasoningService` prunes expired PendingActions and used/expired ApprovalTokens. Called at the top of every `handler.process()`.
+
+**Compaction backoff:** `CompactionState.consecutive_failures` and `last_compaction_failure_at` track failure state. Exponential backoff (60s → 120s → 240s → 480s → 900s cap). Both primary and legacy fallback paths share backoff state. Legacy fallback path removed entirely — if log-based compaction fails, the system waits for backoff instead of trying a second buggy code path.
+
+**Compaction concurrency guard:** `handler._compacting: set[str]` prevents concurrent compactions for the same space. Cleared in `finally` block regardless of success or failure.
+
 **Member ID**: `resolve_owner_member_id(tenant_id)` — canonical resolver. All callers (scheduler, reasoning, handler) use this instead of inline `f"member:{...}:owner"` construction.
 
 **NL creation**: `manage_schedule create` uses Haiku extraction. Schema includes `condition_type`, `event_source`, `event_filter`, `event_lead_minutes` for event triggers. `event_filter` matches event title/summary only.

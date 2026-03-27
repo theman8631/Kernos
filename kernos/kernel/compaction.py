@@ -66,6 +66,8 @@ class CompactionState:
     compaction_threshold: int = int(os.getenv("KERNOS_COMPACTION_THRESHOLD", "8000"))
     _context_def_tokens: int = 0
     _system_overhead: int = 0
+    consecutive_failures: int = 0
+    last_compaction_failure_at: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +374,8 @@ class CompactionService:
                 ),
                 _context_def_tokens=data.get("_context_def_tokens", 0),
                 _system_overhead=data.get("_system_overhead", 0),
+                consecutive_failures=data.get("consecutive_failures", 0),
+                last_compaction_failure_at=data.get("last_compaction_failure_at", ""),
             )
         except Exception as exc:
             logger.warning("Failed to load compaction state for %s/%s: %s", tenant_id, space_id, exc)
@@ -399,6 +403,8 @@ class CompactionService:
             "compaction_threshold": comp_state.compaction_threshold,
             "_context_def_tokens": comp_state._context_def_tokens,
             "_system_overhead": comp_state._system_overhead,
+            "consecutive_failures": comp_state.consecutive_failures,
+            "last_compaction_failure_at": comp_state.last_compaction_failure_at,
         }
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

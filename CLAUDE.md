@@ -26,9 +26,13 @@ These are non-negotiable. Violating any of these is a build failure regardless o
 
 - **Adapter/handler isolation:** The handler NEVER imports from adapters. Adapters NEVER import from the handler. They share only the NormalizedMessage model.
 - **tenant_id from day one:** Every piece of state is keyed to a `tenant_id`. No code ever assumes a single user.
-- **No destructive deletions:** Every "delete" is a relocation to a shadow archive. No operation permanently destroys user data.
+- **Protect user data based on loss cost:** Destructive actions on user data require judgment at the dispatch boundary. Low ambiguity + low loss cost = execute ("delete the 5:00 entry we just made"). High loss cost = confirm first ("delete all my calendar events"). Ambiguity + any loss cost = clarify ("clear my reminders" — which ones?). Internal operational artifacts (expired tokens, whispers, suppression entries) are housekeeping — delete freely. This is not a universal ban on deletes; it's a principle of proportional caution.
 - **Graceful errors:** Every failure mode produces a friendly user-facing response. Never a silent crash, never a raw exception.
 - **MCP for capabilities:** Tools and data are accessed through MCP. No direct API integrations that bypass the capability abstraction layer.
+
+## Spec Execution Principles
+
+**Implementation latitude:** Specs define the intention, not a literal recipe. Where a spec prescribes specific implementation details, treat them as guidance. If a cleaner approach achieves the same goal within Kernos's architecture and conventions, use your judgment. When choosing between options, pick what best serves the intention of the feature being specced and the foundational principles of Kernos: conservative by default, memory as the moat, ambient not demanding, and earning trust through thousands of correct small actions.
 
 ## When You're Done
 

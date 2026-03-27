@@ -399,6 +399,7 @@ class MessageHandler:
         self._evaluators: dict[str, "AwarenessEvaluator"] = {}  # per-tenant evaluators
         self._error_buffer = ErrorBuffer()
         self._pending_system_events: dict[str, list[str]] = {}
+        self._compacting: set[str] = set()  # space_ids currently compacting
         self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
         from kernos.kernel.channels import ChannelRegistry
         self._channel_registry = ChannelRegistry()
@@ -1670,6 +1671,9 @@ class MessageHandler:
         # Reset per-turn flag so confirm tokens work on subsequent turns
         self.reasoning._conflict_raised_this_turn = False
 
+        # Housekeeping: prune expired pending actions and approval tokens
+        self.reasoning.cleanup_expired_authorizations(tenant_id)
+
         # Set current tenant for error buffer collection
         self._error_buffer.set_tenant(tenant_id)
 
@@ -2197,80 +2201,78 @@ class MessageHandler:
             content=response_text,
         )
 
-        # P3: Log-based compaction trigger
-        try:
-            comp_state = await self.compaction.load_state(tenant_id, active_space_id)
-            if comp_state:
-                log_info = await self.conv_logger.get_current_log_info(
-                    tenant_id, active_space_id,
-                )
-
-                # Exclude seeded carry-forward tokens — only new conversation counts
-                new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
-                if new_tokens >= comp_state.compaction_threshold:
-                    # Read the log text
-                    log_text, log_num = await self.conv_logger.read_current_log_text(
-                        tenant_id, active_space_id,
-                    )
-
-                    if log_text.strip() and active_space:
-                        # Run compaction from the log
-                        comp_state = await self.compaction.compact_from_log(
-                            tenant_id, active_space_id, active_space,
-                            log_text, log_num, comp_state,
-                        )
-
-                        # ONLY roll after compaction succeeds
-                        old_num, new_num = await self.conv_logger.roll_log(
-                            tenant_id, active_space_id,
-                        )
-
-                        # Seed new log with recent context from the archived log
-                        await self.conv_logger.seed_from_previous(
-                            tenant_id, active_space_id, old_num, tail_entries=10,
-                        )
-
-                        # Session boundary: clear lazy-loaded tools
-                        self.reasoning.clear_loaded_tools(active_space_id)
-
-                        logger.info(
-                            "COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
-                            active_space_id, old_num, new_num,
-                        )
-                    else:
-                        logger.info("COMPACTION: skipped, log empty for space=%s", active_space_id)
-                else:
-                    # Not at threshold yet — save any state updates
-                    await self.compaction.save_state(tenant_id, active_space_id, comp_state)
-        except Exception as exc:
-            # Log-based compaction failed — fall back to legacy path
-            logger.warning(
-                "COMPACTION: log-based failed for space=%s (%s), trying legacy",
-                active_space_id, exc,
-            )
+        # P3: Log-based compaction trigger (with concurrency guard + backoff)
+        if active_space_id in self._compacting:
+            logger.info("COMPACTION: already in progress for space=%s, skipping", active_space_id)
+        else:
             try:
                 comp_state = await self.compaction.load_state(tenant_id, active_space_id)
-                if comp_state and await self.compaction.should_compact(
-                    active_space_id, comp_state,
-                ):
-                    is_daily = active_space.is_default if active_space else False
-                    space_thread_full = await self.conversations.get_space_thread(
-                        tenant_id, conversation_id, active_space_id,
-                        max_messages=200, include_untagged=is_daily,
-                        include_timestamp=True,
-                    )
-                    new_messages = [
-                        m for m in space_thread_full
-                        if m.get("timestamp", "") > (comp_state.last_compaction_at or "")
-                    ]
-                    if new_messages and active_space:
-                        comp_state = await self.compaction.compact(
-                            tenant_id, active_space_id, active_space,
-                            new_messages, comp_state,
+                if comp_state:
+                    # Backoff check: skip if recent failure
+                    _skip_compaction = False
+                    if comp_state.consecutive_failures > 0 and comp_state.last_compaction_failure_at:
+                        _backoff_s = min(60 * (2 ** (comp_state.consecutive_failures - 1)), 900)
+                        try:
+                            _last_fail = datetime.fromisoformat(comp_state.last_compaction_failure_at)
+                            _elapsed = (datetime.now(timezone.utc) - _last_fail).total_seconds()
+                            if _elapsed < _backoff_s:
+                                logger.info(
+                                    "COMPACTION: backoff active for space=%s (failures=%d, retry_in=%ds)",
+                                    active_space_id, comp_state.consecutive_failures,
+                                    int(_backoff_s - _elapsed),
+                                )
+                                _skip_compaction = True
+                        except (ValueError, TypeError):
+                            pass
+
+                    if not _skip_compaction:
+                        log_info = await self.conv_logger.get_current_log_info(
+                            tenant_id, active_space_id,
                         )
-                        self.reasoning.clear_loaded_tools(active_space_id)
-            except Exception as legacy_exc:
-                logger.error("COMPACTION: legacy fallback also failed: %s", legacy_exc)
+                        new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
+                        if new_tokens >= comp_state.compaction_threshold:
+                            log_text, log_num = await self.conv_logger.read_current_log_text(
+                                tenant_id, active_space_id,
+                            )
+                            if log_text.strip() and active_space:
+                                self._compacting.add(active_space_id)
+                                try:
+                                    comp_state = await self.compaction.compact_from_log(
+                                        tenant_id, active_space_id, active_space,
+                                        log_text, log_num, comp_state,
+                                    )
+                                    old_num, new_num = await self.conv_logger.roll_log(
+                                        tenant_id, active_space_id,
+                                    )
+                                    await self.conv_logger.seed_from_previous(
+                                        tenant_id, active_space_id, old_num, tail_entries=10,
+                                    )
+                                    self.reasoning.clear_loaded_tools(active_space_id)
+                                    # Reset backoff on success
+                                    comp_state.consecutive_failures = 0
+                                    comp_state.last_compaction_failure_at = ""
+                                    logger.info(
+                                        "COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
+                                        active_space_id, old_num, new_num,
+                                    )
+                                finally:
+                                    self._compacting.discard(active_space_id)
+                            else:
+                                logger.info("COMPACTION: skipped, log empty for space=%s", active_space_id)
+                        else:
+                            await self.compaction.save_state(tenant_id, active_space_id, comp_state)
+            except Exception as exc:
+                logger.warning("COMPACTION: failed for space=%s: %s", active_space_id, exc)
+                # Increment backoff
+                try:
+                    comp_state = await self.compaction.load_state(tenant_id, active_space_id)
+                    if comp_state:
+                        comp_state.consecutive_failures += 1
+                        comp_state.last_compaction_failure_at = utc_now()
+                        await self.compaction.save_state(tenant_id, active_space_id, comp_state)
+                except Exception:
+                    pass
+                self._compacting.discard(active_space_id)
 
         # Emit message.sent
         try:
