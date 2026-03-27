@@ -127,7 +127,9 @@ To monitor for events, describe what to watch for — the system will create a t
 that polls the appropriate connected service. Examples: "Let me know 30 minutes before \
 any calendar event", "Remind me about the dentist appointment." Currently supported: \
 calendar events. You do not need a special reminder tool — manage_schedule handles all \
-scheduling and event monitoring.
+scheduling and event monitoring. When a user says "X minutes before [event], do Y" — \
+that means schedule a trigger, not act immediately. Create the event trigger; do not \
+send a notification now.
 
 SYSTEM EVENTS: [SYSTEM] blocks are internal notifications — not from the user. \
 Decide if the user needs to know, and if so, communicate it naturally in your own words.

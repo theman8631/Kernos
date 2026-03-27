@@ -644,7 +644,8 @@ async def _create_trigger(
         event_lead_minutes=event_lead_minutes if condition_type == "event" else 30,
     )
 
-    # Fix 1: Supersede existing standing event triggers with same source+filter+notify_via
+    # Fix 1: Supersede existing standing event triggers with same source+filter.
+    # Ignore notify_via — latest preference wins regardless of channel.
     replaced_descriptions: list[str] = []
     if condition_type == "event" and recurrence == "standing":
         existing = await store.list_active(tenant_id)
@@ -653,7 +654,6 @@ async def _create_trigger(
                     and old.event_source == event_source
                     and old.event_filter == event_filter
                     and old.recurrence == "standing"
-                    and old.notify_via == notify_via
                     and old.status == "active"):
                 old.status = "replaced"
                 old.replaced_by = tid
@@ -1181,10 +1181,25 @@ async def evaluate_event_triggers(
         # Single poll for all calendar triggers
         all_events = await _poll_calendar_events(mcp_client)
         if all_events is not None:
+            # Pre-filter: separate past, relevant, and far-future events
+            now = datetime.now(timezone.utc)
+            max_lead = max(t.event_lead_minutes for t in calendar_triggers)
+            past_count = 0
+            relevant_events: list[CalendarEvent] = []
+            for e in all_events:
+                mins = (e.start - now).total_seconds() / 60
+                if mins < 0:
+                    past_count += 1
+                elif mins <= max_lead + 5:
+                    relevant_events.append(e)
+                # else: far-future, skip silently
+            if past_count:
+                logger.info("EVENT_SKIP_PAST: skipped=%d", past_count)
+
             for trigger in calendar_triggers:
                 try:
                     fired += await _evaluate_calendar_trigger(
-                        trigger, trigger_store, handler, all_events,
+                        trigger, trigger_store, handler, relevant_events,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -1266,20 +1281,8 @@ async def _evaluate_calendar_trigger(
             trigger.trigger_id, trigger.event_filter, pre_count, len(events),
         )
 
-    # 2. Skip past events — filter out events that have already started
-    future_events = []
-    skipped_past = 0
-    for e in events:
-        minutes_until = (e.start - now).total_seconds() / 60
-        if minutes_until < 0:
-            skipped_past += 1
-        else:
-            future_events.append(e)
-    if skipped_past:
-        logger.info("EVENT_SKIP_PAST: trigger=%s skipped=%d", trigger.trigger_id, skipped_past)
-    events = future_events
-
-    # 3. Inline cleanup: prune matched IDs for past/out-of-window events
+    # 2. Inline cleanup: prune matched IDs for past/out-of-window events
+    # (Past and far-future events already filtered at caller level)
     active_event_ids = {e.id for e in events}
     trigger.event_matched_ids = [
         eid for eid in trigger.event_matched_ids

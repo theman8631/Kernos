@@ -1208,6 +1208,32 @@ class TestPreferenceReplacement:
         assert replaced[0].trigger_id == first.trigger_id
         assert replaced[0].replaced_by == active[0].trigger_id
 
+    async def test_different_notify_via_still_replaced(self, tmp_path):
+        """v2: notify_via is ignored — latest preference wins regardless of channel."""
+        from kernos.kernel.scheduler import _create_trigger
+        store = TriggerStore(tmp_path)
+        # Discord trigger
+        await _create_trigger(
+            store, "t1", "m1", "s1", "2 min before events (discord)", "",
+            "notify", "msg", "", {}, "", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=2,
+        )
+        # SMS trigger should replace the Discord one
+        result = await _create_trigger(
+            store, "t1", "m1", "s1", "5 min before events (sms)", "",
+            "notify", "msg", "", {}, "sms", "stage", "standing",
+            condition_type="event", event_source="calendar",
+            event_filter="", event_lead_minutes=5,
+        )
+        assert "Replaced" in result
+
+        all_triggers = await store.list_all("t1")
+        active = [t for t in all_triggers if t.status == "active"]
+        assert len(active) == 1
+        assert active[0].notify_via == "sms"
+        assert active[0].event_lead_minutes == 5
+
     async def test_different_filter_not_replaced(self, tmp_path):
         from kernos.kernel.scheduler import _create_trigger
         store = TriggerStore(tmp_path)
@@ -1272,6 +1298,40 @@ class TestSkipPastEvents:
         fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
         assert fired == 0
         handler.send_outbound.assert_not_called()
+
+
+class TestFarFutureEventSkip:
+    """Fix 2 v2: Far-future events skipped silently."""
+
+    async def test_far_future_events_not_checked(self, tmp_path):
+        """Events far beyond max_lead are not passed to triggers."""
+        now = datetime.now(timezone.utc)
+        store = TriggerStore(tmp_path)
+        trigger = Trigger(
+            trigger_id="trig_ff", tenant_id="t1",
+            condition_type="event", event_source="calendar",
+            event_lead_minutes=5, status="active", recurrence="standing",
+        )
+        await store.save(trigger)
+
+        # Far-future event (200 min away, lead=5) should be filtered
+        raw = json.dumps([
+            {"id": "ev_far", "summary": "Far meeting",
+             "start": {"dateTime": (now + timedelta(minutes=200)).isoformat()}},
+            {"id": "ev_near", "summary": "Near meeting",
+             "start": {"dateTime": (now + timedelta(minutes=3)).isoformat()}},
+        ])
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conv_logger = MagicMock()
+        handler.conv_logger.append = AsyncMock()
+        mcp = MagicMock()
+        mcp.call_tool = AsyncMock(return_value=raw)
+
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
+        assert fired == 1  # only near event fires
+        msg = handler.send_outbound.call_args[0][3]
+        assert "Near meeting" in msg
 
 
 class TestAdaptiveCadence:
