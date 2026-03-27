@@ -661,6 +661,20 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **Adaptive cadence**: After each poll, `_compute_adaptive_cadence()` computes next poll interval based on nearest upcoming event and max lead time across triggers. Floor: 30s (imminent). Ceiling: 15min (nothing upcoming). Approaching lead window: 60s. Far away: capped at 5min.
 
+### Timezone Architecture
+
+**File:** `kernos/utils.py`
+
+All internal timestamps are UTC (`utc_now()`, `utc_now_dt()`). 14 copies of `_now_iso()` consolidated into `utc_now()` from `kernos/utils.py`. scheduler.py's naive-local `_now_iso()` (the root of multiple timezone bugs) is gone.
+
+**Soul field:** `soul.timezone` stores the user's IANA timezone (e.g., `America/Los_Angeles`). Discovered from system local on first message. Empty = system local fallback → UTC.
+
+**Boundary conversions:** `to_user_local()`, `format_user_time()`, `format_user_datetime()` convert UTC to user-local at display boundaries. `interpret_local_iso_as_utc()` converts extraction model output (naive local ISO) to UTC for storage.
+
+**MCP boundary:** Calendar MCP expects naive local time — the ONE allowed place for non-UTC timestamps. `_poll_calendar_events()` converts UTC through user timezone, strips offset for MCP.
+
+**Invariant:** Naive local timestamps appear ONLY at external MCP request boundaries, never in internal state.
+
 **Member ID**: `resolve_owner_member_id(tenant_id)` — canonical resolver. All callers (scheduler, reasoning, handler) use this instead of inline `f"member:{...}:owner"` construction.
 
 **NL creation**: `manage_schedule create` uses Haiku extraction. Schema includes `condition_type`, `event_source`, `event_filter`, `event_lead_minutes` for event triggers. `event_filter` matches event title/summary only.

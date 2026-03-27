@@ -8,6 +8,7 @@ When the reasoning service encounters a `remember` tool call, it routes
 to this service instead of MCPClientManager.
 """
 import asyncio
+from kernos.utils import utc_now
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -78,8 +79,6 @@ class EntityResult:
 # ---------------------------------------------------------------------------
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _days_since(iso_timestamp: str, now_iso: str) -> float:
@@ -182,7 +181,7 @@ class RetrievalService:
         active_space_id: str,
     ) -> str:
         """Execute a remember() query. Returns formatted readable text."""
-        now = _now_iso()
+        now = utc_now()
         query_lower = query.lower()
 
         # Embed the query

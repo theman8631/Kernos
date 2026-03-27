@@ -9,6 +9,7 @@ Rule creation is owned exclusively by Tier 2 extraction → NL contract parser.
 The agent does NOT create rules — it manages existing ones via manage_covenants.
 """
 import asyncio
+from kernos.utils import utc_now
 import json
 import logging
 from datetime import datetime, timezone
@@ -108,8 +109,6 @@ _conflict_tracker: dict[frozenset, int] = {}
 _CONFLICT_AUTO_SUPERSEDE_THRESHOLD = 3
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +287,7 @@ async def _handle_supersede(
 
     await state.update_contract_rule(
         tenant_id, retire_id,
-        {"superseded_by": keep_id, "updated_at": _now_iso()},
+        {"superseded_by": keep_id, "updated_at": utc_now()},
     )
 
     stats["supersedes"] += 1
@@ -339,7 +338,7 @@ async def _handle_merge(
     for rid in valid_supersede:
         await state.update_contract_rule(
             tenant_id, rid,
-            {"superseded_by": keep_id, "updated_at": _now_iso()},
+            {"superseded_by": keep_id, "updated_at": utc_now()},
         )
 
     stats["merges"] += len(valid_supersede)
@@ -396,7 +395,7 @@ async def _handle_conflict(
 
         await state.update_contract_rule(
             tenant_id, retire_id,
-            {"superseded_by": keep_id, "updated_at": _now_iso()},
+            {"superseded_by": keep_id, "updated_at": utc_now()},
         )
         _conflict_tracker.pop(pair_key, None)
 
@@ -434,7 +433,7 @@ async def _handle_conflict(
             reasoning_trace="Detected by post-write covenant validation",
             knowledge_entry_id="",
             foresight_signal="covenant_conflict",
-            created_at=_now_iso(),
+            created_at=utc_now(),
         )
 
         try:
@@ -483,7 +482,7 @@ async def _handle_rewrite(
         return
 
     old_rule = rule_map[rule_id]
-    now = _now_iso()
+    now = utc_now()
     new_id = f"rule_{uuid4().hex[:8]}"
     new_rule = _replace(
         old_rule,
@@ -538,7 +537,7 @@ async def supersede_rules(
         await state.update_contract_rule(
             tenant_id,
             rule.id,
-            {"superseded_by": superseded_by, "updated_at": _now_iso()},
+            {"superseded_by": superseded_by, "updated_at": utc_now()},
         )
 
 
@@ -626,7 +625,7 @@ async def _remove_covenant(state: StateStore, tenant_id: str, rule_id: str) -> s
 
     await state.update_contract_rule(
         tenant_id, rule_id,
-        {"superseded_by": "user_removed", "updated_at": _now_iso()},
+        {"superseded_by": "user_removed", "updated_at": utc_now()},
     )
     logger.info("COVENANT_REMOVE: rule=%s desc=%r", rule_id, target.description)
     return f"Removed rule '{rule_id}': {target.description}"
@@ -650,7 +649,7 @@ async def _update_covenant(
     if target.superseded_by:
         return f"Rule '{rule_id}' is already removed/superseded."
 
-    now = _now_iso()
+    now = utc_now()
     new_id = f"rule_{uuid4().hex[:8]}"
     new_rule = _replace(
         target,
@@ -716,7 +715,7 @@ async def run_covenant_cleanup(
                 older, newer = (existing, rule) if existing.created_at <= rule.created_at else (rule, existing)
                 await state.update_contract_rule(
                     tenant_id, older.id,
-                    {"superseded_by": newer.id, "updated_at": _now_iso()},
+                    {"superseded_by": newer.id, "updated_at": utc_now()},
                 )
                 stats["deduped"] += 1
                 logger.info(
@@ -754,7 +753,7 @@ async def run_covenant_cleanup(
 
             await state.update_contract_rule(
                 tenant_id, older.id,
-                {"superseded_by": newer.id, "updated_at": _now_iso()},
+                {"superseded_by": newer.id, "updated_at": utc_now()},
             )
             stats["contradictions_resolved"] += 1
             logger.info(

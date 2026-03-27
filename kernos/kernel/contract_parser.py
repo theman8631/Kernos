@@ -5,6 +5,7 @@ The coordinator fires this parser, which uses a cheap LLM call to
 classify the instruction and create a structured CovenantRule.
 """
 import json
+from kernos.utils import utc_now
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -75,8 +76,6 @@ CONTRACT_PARSER_SCHEMA = {
 }
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -165,8 +164,8 @@ async def classify_and_parse(
             context_space=None
             if parsed.get("is_global")
             else (active_space.id if active_space else None),
-            created_at=_now_iso(),
-            updated_at=_now_iso(),
+            created_at=utc_now(),
+            updated_at=utc_now(),
             enforcement_tier="confirm"
             if parsed["rule_type"] == "must_not"
             else "silent",

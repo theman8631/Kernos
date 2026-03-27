@@ -31,6 +31,10 @@ class Soul:
     user_context: str = ""
     communication_style: str = "" # "direct", "warm", "formal", etc. — inferred or stated
 
+    # User locale
+    timezone: str = ""            # IANA timezone (e.g., 'America/Los_Angeles').
+                                  # Empty = use system local until discovered.
+
     # Lifecycle
     hatched: bool = False              # True after first bootstrap conversation
     hatched_at: str = ""               # ISO timestamp of hatch completion

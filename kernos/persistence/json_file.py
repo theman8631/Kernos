@@ -30,11 +30,9 @@ _ARCHIVE_SUBDIRS = [
 
 
 from kernos.utils import _safe_name
+from kernos.utils import utc_now
 
 
-def _now_iso() -> str:
-    """Return current UTC time as ISO 8601 string."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _ensure_tenant_dirs(tenant_root: Path) -> None:
@@ -160,7 +158,7 @@ class JsonConversationStore(ConversationStore):
             original = json.load(f)
 
         archived = {
-            "archived_at": _now_iso(),
+            "archived_at": utc_now(),
             "tenant_id": tenant_id,
             "conversation_id": conversation_id,
             "entries": original,
@@ -200,7 +198,7 @@ class JsonTenantStore(TenantStore):
         record: dict = {
             "tenant_id": tenant_id,
             "status": "active",
-            "created_at": _now_iso(),
+            "created_at": utc_now(),
             "capabilities": {},
         }
         lock_path = str(path) + ".lock"

@@ -1,4 +1,5 @@
 import json
+from kernos.utils import utc_now
 import logging
 import os
 import re
@@ -147,8 +148,6 @@ _AUTH_CONTEXT: dict[str, str] = {
 }
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 _SECURE_API_TRIGGER = "secure api"
@@ -275,20 +274,14 @@ def _build_system_prompt(
         parts.append(cross_domain_prefix)
 
     # 1. Operating principles + current date
-    import time as _time
-    from datetime import timezone as _tz
-    current_local = datetime.now()
-    current_utc = datetime.now(_tz.utc)
-    tz_name = _time.tzname[_time.daylight] if _time.daylight else _time.tzname[0]
-    # Try to get IANA timezone name
-    try:
-        iana_tz = str(current_local.astimezone().tzinfo)
-    except Exception:
-        iana_tz = tz_name
+    from kernos.utils import utc_now_dt, format_user_datetime
+    now_utc = utc_now_dt()
+    user_tz = soul.timezone or ""
+    tz_display = user_tz or "system local"
     date_line = (
-        f"Current time: {current_local.strftime('%A, %B %d, %Y — %I:%M %p')} "
-        f"({iana_tz}) / "
-        f"{current_utc.strftime('%Y-%m-%d %H:%M')} UTC"
+        f"Current time: {format_user_datetime(now_utc, user_tz)} "
+        f"({tz_display}) / "
+        f"{now_utc.strftime('%Y-%m-%d %H:%M')} UTC"
     )
     parts.append(f"{date_line}\n\n{template.operating_principles}")
 
@@ -883,7 +876,7 @@ class MessageHandler:
             await self.state.save_tenant_profile(tenant_id, profile)
             return
 
-        now = _now_iso()
+        now = utc_now()
         new_profile = TenantProfile(
             tenant_id=tenant_id,
             status="active",
@@ -944,10 +937,26 @@ class MessageHandler:
             await self.state.save_soul(soul, source="soul_init", trigger="new_tenant")
             logger.info("Initialized new soul for tenant: %s", tenant_id)
 
+        # Timezone discovery: infer from system local if not yet set
+        if not soul.timezone:
+            try:
+                _sys_tz = str(datetime.now().astimezone().tzinfo)
+                if _sys_tz and "/" in _sys_tz:  # IANA format check
+                    soul.timezone = _sys_tz
+                    await self.state.save_soul(
+                        soul, source="handler_process", trigger="timezone_discovery",
+                    )
+                    logger.info(
+                        "TIMEZONE_DISCOVERED: tenant=%s tz=%s source=system_local",
+                        tenant_id, _sys_tz,
+                    )
+            except Exception:
+                pass
+
         # Ensure a daily context space exists — idempotent
         spaces = await self.state.list_context_spaces(tenant_id)
         if not any(s.is_default for s in spaces):
-            now = _now_iso()
+            now = utc_now()
             daily_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
                 tenant_id=tenant_id,
@@ -999,7 +1008,7 @@ class MessageHandler:
         # Ensure a system context space exists — idempotent
         spaces_now = await self.state.list_context_spaces(tenant_id)
         if not any(s.space_type == "system" for s in spaces_now):
-            now = _now_iso()
+            now = utc_now()
             system_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
                 tenant_id=tenant_id,
@@ -1093,7 +1102,7 @@ class MessageHandler:
         - Check bootstrap graduation maturity
         - Save
         """
-        now = _now_iso()
+        now = utc_now()
 
         if not soul.hatched:
             soul.hatched = True
@@ -1377,7 +1386,7 @@ class MessageHandler:
         except (UnicodeEncodeError, AttributeError):
             return "I can only handle text files right now — images and PDFs are coming soon."
 
-        description = f"Uploaded by user on {_now_iso()[:10]}"
+        description = f"Uploaded by user on {utc_now()[:10]}"
         await self._files.write_file(
             tenant_id, active_space_id, filename, content, description
         )
@@ -1524,7 +1533,7 @@ class MessageHandler:
             parsed = _json.loads(result_str)
             if parsed.get("create_space"):
                 await self._enforce_space_cap(tenant_id)
-                now = _now_iso()
+                now = utc_now()
                 new_space = ContextSpace(
                     id=f"space_{uuid.uuid4().hex[:8]}",
                     tenant_id=tenant_id,
@@ -1617,7 +1626,7 @@ class MessageHandler:
     async def _update_conversation_summary(
         self, tenant_id: str, conversation_id: str, platform: str
     ) -> None:
-        now = _now_iso()
+        now = utc_now()
         try:
             summary = await self.state.get_conversation_summary(
                 tenant_id, conversation_id
@@ -1819,7 +1828,7 @@ class MessageHandler:
         if active_space and active_space_id:
             await self.state.update_context_space(
                 tenant_id, active_space_id,
-                {"last_active_at": _now_iso(), "status": "active"},
+                {"last_active_at": utc_now(), "status": "active"},
             )
 
         # Step 7b: Handle file uploads from context (downloaded by platform adapter)
@@ -1901,7 +1910,7 @@ class MessageHandler:
             conversation_id=conversation_id,
             source="user_message",
             input_text=message.content,
-            created_at=_now_iso(),
+            created_at=utc_now(),
         )
 
         # Lazy tool loading: kernel tools (always) + preloaded MCP + session-loaded MCP
@@ -2002,6 +2011,7 @@ class MessageHandler:
             active_space_id=active_space_id,
             input_text=message.content,
             active_space=active_space,
+            user_timezone=soul.timezone,
         )
 
         try:
@@ -2170,7 +2180,7 @@ class MessageHandler:
         assistant_entry = {
             "role": "assistant",
             "content": response_text,
-            "timestamp": _now_iso(),
+            "timestamp": utc_now(),
             "platform": message.platform,
             "tenant_id": tenant_id,
             "conversation_id": conversation_id,

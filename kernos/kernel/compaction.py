@@ -19,12 +19,11 @@ from kernos.kernel.reasoning import ReasoningService
 from kernos.kernel.spaces import ContextSpace
 from kernos.kernel.state import StateStore
 from kernos.kernel.tokens import TokenAdapter
+from kernos.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +584,7 @@ class CompactionService:
         comp_state.compaction_number += 1
         comp_state.global_compaction_number += 1
         comp_state.cumulative_new_tokens = 0
-        comp_state.last_compaction_at = _now_iso()
+        comp_state.last_compaction_at = utc_now()
 
         # Recompute message ceiling
         comp_state.message_ceiling = self._compute_ceiling(comp_state)
@@ -692,7 +691,7 @@ class CompactionService:
         comp_state.compaction_number += 1
         comp_state.global_compaction_number += 1
         comp_state.cumulative_new_tokens = 0
-        comp_state.last_compaction_at = _now_iso()
+        comp_state.last_compaction_at = utc_now()
         comp_state.message_ceiling = self._compute_ceiling(comp_state)
 
         # Check rotation

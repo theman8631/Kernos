@@ -17,6 +17,7 @@ Legacy path (no resolver/deduplicator):
   - Hash-based exact dedup only (unchanged from Phase 1B)
 """
 from __future__ import annotations
+from kernos.utils import utc_now
 
 import json
 import logging
@@ -202,8 +203,6 @@ def _normalize_confidence(value: str) -> str:
     return "inferred"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _durability_to_archetype(durability: str) -> str:
@@ -315,7 +314,7 @@ async def run_tier2_extraction(
         extracted = json.loads(raw)
 
         existing_hashes = await state.get_knowledge_hashes(tenant_id)
-        now = _now_iso()
+        now = utc_now()
         wrote_count = 0
 
         def _space_for_entry(subject: str, archetype: str) -> str:

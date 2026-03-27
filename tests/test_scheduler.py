@@ -30,15 +30,15 @@ from kernos.kernel.scheduler import (
 
 
 def _now_iso():
-    return datetime.now().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _future_iso(hours: float = 1) -> str:
-    return (datetime.now() + timedelta(hours=hours)).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
 
 
 def _past_iso(hours: float = 1) -> str:
-    return (datetime.now() - timedelta(hours=hours)).isoformat()
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
 # ---------------------------------------------------------------------------

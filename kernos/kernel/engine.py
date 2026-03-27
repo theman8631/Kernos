@@ -6,6 +6,7 @@ The engine is the hook point for behavioral contract enforcement,
 priority scheduling, and task decomposition in future phases.
 """
 import logging
+from kernos.utils import utc_now
 from datetime import datetime, timezone
 
 from kernos.kernel.event_types import EventType
@@ -16,8 +17,6 @@ from kernos.kernel.task import Task, TaskStatus
 logger = logging.getLogger(__name__)
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 class TaskEngine:
@@ -47,7 +46,7 @@ class TaskEngine:
         emitting task.failed so the handler can handle user communication.
         """
         task.status = TaskStatus.RUNNING
-        task.started_at = _now_iso()
+        task.started_at = utc_now()
 
         # Emit task.created
         try:
@@ -71,7 +70,7 @@ class TaskEngine:
             result = await self._reasoning.reason(request)
 
             task.status = TaskStatus.COMPLETED
-            task.completed_at = _now_iso()
+            task.completed_at = utc_now()
             task.result_text = result.text
             task.input_tokens = result.input_tokens
             task.output_tokens = result.output_tokens
@@ -104,7 +103,7 @@ class TaskEngine:
 
         except Exception as exc:
             task.status = TaskStatus.FAILED
-            task.completed_at = _now_iso()
+            task.completed_at = utc_now()
             task.error_message = str(exc)
 
             # Emit task.failed (best-effort)

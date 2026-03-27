@@ -4,6 +4,7 @@ The handler calls ``ReasoningService.reason()`` instead of importing any provide
 ReasoningService owns the full tool-use loop, event emission, and audit logging.
 """
 import hashlib
+from kernos.utils import utc_now
 import json
 import logging
 import os
@@ -359,8 +360,6 @@ def _read_source(path: str, section: str = "") -> str:
     return "\n".join(result_lines)
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +849,7 @@ class ReasoningRequest:
     active_space_id: str = ""  # For kernel tool routing (e.g., remember)
     input_text: str = ""       # Current user message — used by dispatch gate
     active_space: Any = None   # ContextSpace | None — for gate tool effect classification
+    user_timezone: str = ""    # IANA timezone from soul — for scheduler extraction
 
 
 @dataclass
@@ -1552,6 +1552,7 @@ class ReasoningService:
                         description=tool_input.get("description", ""),
                         reasoning_service=self,
                         conversation_id=request.conversation_id,
+                        user_timezone=request.user_timezone,
                     )
                 return "Scheduler is not available."
             else:
@@ -2192,7 +2193,7 @@ class ReasoningService:
                     request.tenant_id,
                     {
                         "type": "tool_call",
-                        "timestamp": _now_iso(),
+                        "timestamp": utc_now(),
                         "tenant_id": request.tenant_id,
                         "conversation_id": request.conversation_id,
                         "tool_name": block.name,
@@ -2429,6 +2430,7 @@ class ReasoningService:
                                 description=tool_args.get("description", ""),
                                 reasoning_service=self,
                                 conversation_id=request.conversation_id,
+                                user_timezone=request.user_timezone,
                             )
                         else:
                             result = "Scheduler is not available."
@@ -2540,7 +2542,7 @@ class ReasoningService:
                     request.tenant_id,
                     {
                         "type": "tool_result",
-                        "timestamp": _now_iso(),
+                        "timestamp": utc_now(),
                         "tenant_id": request.tenant_id,
                         "conversation_id": request.conversation_id,
                         "tool_name": block.name,

@@ -10,6 +10,7 @@ The "present, don't presume" principle:
   The agent presents the existing entity as context and resolves conversationally.
 """
 import json
+from kernos.utils import utc_now
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -42,8 +43,6 @@ NEW_PERSON_SIGNALS = [
 ]
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _ent_id() -> str:
@@ -103,7 +102,7 @@ class EntityResolver:
                     edge_type="MAYBE_SAME_AS",
                     confidence=0.5,
                     evidence_signals=["name_match_context_mismatch"],
-                    created_at=_now_iso(),
+                    created_at=utc_now(),
                 )
                 await self._state.save_identity_edge(tenant_id, edge)
                 return new_node, "present_not_presume"
@@ -138,7 +137,7 @@ class EntityResolver:
                         edge_type="SAME_AS",
                         confidence=0.9,
                         evidence_signals=["multi_signal_score"],
-                        created_at=_now_iso(),
+                        created_at=utc_now(),
                     )
                     await self._update_last_seen(node, tenant_id)
                     if mention.lower() not in [a.lower() for a in node.aliases] and \
@@ -157,7 +156,7 @@ class EntityResolver:
                             edge_type="SAME_AS",
                             confidence=confidence,
                             evidence_signals=["llm_judgment"],
-                            created_at=_now_iso(),
+                            created_at=utc_now(),
                         )
                         await self._update_last_seen(node, tenant_id)
                         if mention.lower() not in [a.lower() for a in node.aliases] and \
@@ -178,7 +177,7 @@ class EntityResolver:
                             edge_type="NOT_SAME_AS",
                             confidence=confidence,
                             evidence_signals=["llm_denial"],
-                            created_at=_now_iso(),
+                            created_at=utc_now(),
                         )
                         await self._state.save_identity_edge(tenant_id, not_same_edge)
                         return new_node, "new_entity"
@@ -432,7 +431,7 @@ class EntityResolver:
             node.aliases.append(mention)
         if relationship_type and not node.relationship_type:
             node.relationship_type = relationship_type
-        node.last_seen = _now_iso()
+        node.last_seen = utc_now()
         await self._state.save_entity_node(node)
 
         # Split reconciliation: look for a separate named entity that should be merged
@@ -461,7 +460,7 @@ class EntityResolver:
                 edge_type="SAME_AS",
                 confidence=1.0,
                 evidence_signals=["role_name_merge"],
-                created_at=_now_iso(),
+                created_at=utc_now(),
             )
             await self._state.save_identity_edge(tenant_id, edge)
             logger.info(
@@ -485,7 +484,7 @@ class EntityResolver:
         contact_email: str = "",
         embedding: list[float] | None = None,
     ) -> EntityNode:
-        now = _now_iso()
+        now = utc_now()
         node = EntityNode(
             id=_ent_id(),
             tenant_id=tenant_id,
@@ -502,7 +501,7 @@ class EntityResolver:
         return node
 
     async def _update_last_seen(self, node: EntityNode, tenant_id: str) -> None:
-        node.last_seen = _now_iso()
+        node.last_seen = utc_now()
         await self._state.save_entity_node(node)
 
     async def _maybe_embed(self, text: str) -> list[float]:

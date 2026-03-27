@@ -11,12 +11,11 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from kernos.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +219,7 @@ class FileService:
         deleted_dir.mkdir(parents=True, exist_ok=True)
 
         # Timestamp in filename — replace colons for filesystem compatibility
-        ts = _now_iso().replace(":", "-")
+        ts = utc_now().replace(":", "-")
         dest = deleted_dir / f"{name}_{ts}"
         file_path.rename(dest)
 

@@ -52,11 +52,10 @@ def generate_event_id() -> str:
     return f"evt_{ts_us}_{rand}"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 from kernos.utils import _safe_name
+from kernos.utils import utc_now
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +216,7 @@ async def emit_event(
         id=generate_event_id(),
         type=event_type,
         tenant_id=tenant_id,
-        timestamp=_now_iso(),
+        timestamp=utc_now(),
         source=source,
         payload=payload,
         metadata=metadata or {},

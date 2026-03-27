@@ -241,9 +241,18 @@ class AwarenessEvaluator:
                     if mcp_client:
                         try:
                             from kernos.kernel.scheduler import evaluate_event_triggers
+                            # Get user timezone from soul for correct time formatting
+                            _user_tz = ""
+                            try:
+                                _soul = await self._state.get_soul(tenant_id)
+                                if _soul:
+                                    _user_tz = getattr(_soul, "timezone", "")
+                            except Exception:
+                                pass
                             event_fired, next_poll = await evaluate_event_triggers(
                                 self._trigger_store, tenant_id,
                                 self._handler, mcp_client,
+                                user_timezone=_user_tz,
                             )
                             # Adaptive cadence: adjust event_every_n based on proximity
                             event_every_n = max(1, next_poll // self._trigger_interval)

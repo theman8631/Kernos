@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kernos.kernel.state import StateStore
+from kernos.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +87,6 @@ def _trigger_id() -> str:
     return f"trig_{uuid.uuid4().hex[:8]}"
 
 
-def _now_iso() -> str:
-    """Local time, no timezone offset — matches what the agent writes from the system prompt."""
-    return datetime.now().isoformat()
 
 
 TRANSIENT_FAILURE_NOTIFY_THRESHOLD = 10
@@ -377,29 +375,24 @@ _SCHEDULE_EXTRACTION_SCHEMA = {
 
 
 async def _extract_schedule_params(
-    reasoning_service, description: str,
+    reasoning_service, description: str, user_timezone: str = "",
 ) -> dict | str:
     """Use Haiku to extract structured schedule params from NL description.
 
     Returns a dict on success, or an error string on failure.
     """
-    import time as _time
-    current_local = datetime.now()
-    current_utc = datetime.now(timezone.utc)
-    tz_name = _time.tzname[_time.daylight] if _time.daylight else _time.tzname[0]
-    # Try to get IANA timezone name
-    try:
-        iana_tz = str(current_local.astimezone().tzinfo)
-    except Exception:
-        iana_tz = tz_name
-    local_time = current_local.strftime('%A, %B %d, %Y %I:%M %p')
-    utc_time = current_utc.strftime('%Y-%m-%d %H:%M')
+    from kernos.utils import utc_now_dt, to_user_local, format_user_datetime
+    now_utc = utc_now_dt()
+    now_local = to_user_local(now_utc, user_timezone)
+    tz_display = user_timezone or "system local"
+    local_time = now_local.strftime('%A, %B %d, %Y %I:%M %p')
+    utc_time = now_utc.strftime('%Y-%m-%d %H:%M')
 
     try:
         result = await reasoning_service.complete_simple(
             system_prompt=(
                 "You are extracting schedule data from a natural language description. "
-                f"Current time: {local_time} ({iana_tz}) / {utc_time} UTC\n\n"
+                f"Current time: {local_time} ({tz_display}) / {utc_time} UTC\n\n"
                 "Extract:\n"
                 "- action_type: 'notify' (send a message) or 'tool_call' (execute a tool)\n"
                 "- when: ISO 8601 datetime with T separator and seconds in LOCAL time "
@@ -446,7 +439,7 @@ async def _extract_schedule_params(
 
         # Normalize 'when' to ISO 8601 with T separator — Haiku sometimes produces
         # "2026-03-22 12:03" (space separator) which breaks string comparison with
-        # _now_iso() output that uses T separator.
+        # utc_now() output that uses T separator.
         raw_when = parsed.get("when", "")
         if raw_when:
             try:
@@ -479,6 +472,7 @@ async def handle_manage_schedule(
     description: str = "",
     reasoning_service=None,
     conversation_id: str = "",
+    user_timezone: str = "",
     **kwargs,  # Accept extra fields for backward compat
 ) -> str:
     """Handle the manage_schedule kernel tool.
@@ -493,7 +487,7 @@ async def handle_manage_schedule(
             return "Error: 'description' is required — describe what to schedule and when."
         if not reasoning_service:
             return "Error: Reasoning service not available for schedule extraction."
-        extracted = await _extract_schedule_params(reasoning_service, description)
+        extracted = await _extract_schedule_params(reasoning_service, description, user_timezone)
         if isinstance(extracted, str):
             return extracted  # Error message
         logger.info("EXTRACTION_RESULT: %s", json.dumps(extracted, default=str))
@@ -599,7 +593,7 @@ async def _create_trigger(
     if not description:
         return "Error: 'description' is required — what should this trigger do?"
 
-    now = _now_iso()
+    now = utc_now()
     tid = _trigger_id()
 
     # Event triggers don't use next_fire_at — they poll, not schedule.
@@ -726,14 +720,14 @@ async def _update_trigger(
         trigger.condition = when
         if recurrence:
             trigger.recurrence = recurrence
-            trigger.next_fire_at = compute_next_fire(recurrence, _now_iso())
+            trigger.next_fire_at = compute_next_fire(recurrence, utc_now())
         else:
             trigger.next_fire_at = when
     if message and trigger.action_type == "notify":
         trigger.action_params["message"] = message
     if recurrence and not when:
         trigger.recurrence = recurrence
-        trigger.next_fire_at = compute_next_fire(recurrence, _now_iso())
+        trigger.next_fire_at = compute_next_fire(recurrence, utc_now())
 
     await store.save(trigger)
     logger.info("TRIGGER_UPDATE: id=%s desc=%r next=%s", trigger_id, trigger.action_description, trigger.next_fire_at[:19] if trigger.next_fire_at else "?")
@@ -751,7 +745,7 @@ async def evaluate_triggers(
     handler,  # MessageHandler — for send_outbound and tool execution
 ) -> int:
     """Evaluate and fire all due triggers. Returns count of triggers fired."""
-    now = _now_iso()
+    now = utc_now()
     due = await trigger_store.get_due(tenant_id, now)
     fired = 0
 
@@ -804,10 +798,10 @@ async def evaluate_triggers(
             fc = classify_trigger_failure(exc)
             trigger.failure_reason = str(exc)
             trigger.failure_class = fc
-            trigger.last_failure_at = _now_iso()
+            trigger.last_failure_at = utc_now()
             if fc == "structural":
                 trigger.status = "retired"
-                trigger.retired_at = _now_iso()
+                trigger.retired_at = utc_now()
                 logger.info(
                     "TRIGGER_RETIRED: id=%s reason=structural error=%s",
                     trigger.trigger_id, exc,
@@ -832,7 +826,7 @@ async def _store_scheduled_message(handler, trigger: Trigger, content: str) -> N
         entry = {
             "role": "assistant",
             "content": content,
-            "timestamp": _now_iso(),
+            "timestamp": utc_now(),
             "platform": "scheduler",
             "tenant_id": trigger.tenant_id,
             "conversation_id": trigger.conversation_id,
@@ -914,7 +908,7 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
                 trigger.failure_reason = f"Tool permanently unavailable: {result}"
                 trigger.failure_class = "structural"
                 trigger.status = "retired"
-                trigger.retired_at = _now_iso()
+                trigger.retired_at = utc_now()
                 logger.info(
                     "TRIGGER_RETIRED: id=%s reason=structural tool=%s",
                     trigger.trigger_id, tool_name,
@@ -945,10 +939,10 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
             fc = classify_trigger_failure(exc)
             trigger.failure_reason = str(exc)
             trigger.failure_class = fc
-            trigger.last_failure_at = _now_iso()
+            trigger.last_failure_at = utc_now()
             if fc == "structural":
                 trigger.status = "retired"
-                trigger.retired_at = _now_iso()
+                trigger.retired_at = utc_now()
                 logger.info(
                     "TRIGGER_RETIRED: id=%s reason=structural error=%s",
                     trigger.trigger_id, exc,
@@ -977,7 +971,7 @@ def _notify_retirement(handler, trigger: Trigger) -> None:
 def _apply_transient_failure(trigger: Trigger, handler) -> None:
     """Update trigger state for a transient failure."""
     trigger.transient_failure_count += 1
-    trigger.last_failure_at = _now_iso()
+    trigger.last_failure_at = utc_now()
     trigger.failure_class = "transient"
 
     if not trigger.degraded:
@@ -1030,7 +1024,7 @@ async def retire_stale_triggers(
                 trigger.status = "retired"
                 trigger.failure_class = "structural"
                 trigger.failure_reason = f"Tool '{tool_name}' no longer exists"
-                trigger.retired_at = _now_iso()
+                trigger.retired_at = utc_now()
                 await trigger_store.save(trigger)
                 retired += 1
                 # Queue system event (agent sees on next message)
@@ -1127,10 +1121,12 @@ EVENT_POLL_INTERVAL_SECONDS = int(os.getenv("KERNOS_EVENT_POLL_INTERVAL", "60"))
 EVENT_DAILY_FIRE_CAP = int(os.getenv("KERNOS_EVENT_DAILY_CAP", "15"))
 
 
-async def _poll_calendar_events(mcp_client) -> list[CalendarEvent] | None:
+async def _poll_calendar_events(mcp_client, user_timezone: str = "") -> list[CalendarEvent] | None:
     """Poll calendar once and return parsed events. Returns None on error."""
     # MCP expects LOCAL time, no timezone offset, no microseconds: '2026-01-01T00:00:00'
-    now_local = datetime.now()
+    from kernos.utils import utc_now_dt, to_user_local
+    now_utc = utc_now_dt()
+    now_local = to_user_local(now_utc, user_timezone)
     window_end_local = now_local + timedelta(hours=24)
     time_fmt = "%Y-%m-%dT%H:%M:%S"
     poll_args = {
@@ -1157,6 +1153,7 @@ async def evaluate_event_triggers(
     tenant_id: str,
     handler,
     mcp_client,   # MCPClientManager — explicit contract
+    user_timezone: str = "",
 ) -> tuple[int, int]:
     """Evaluate event-based triggers.
 
@@ -1179,7 +1176,7 @@ async def evaluate_event_triggers(
     next_poll = 15 * 60  # default ceiling
     if calendar_triggers:
         # Single poll for all calendar triggers
-        all_events = await _poll_calendar_events(mcp_client)
+        all_events = await _poll_calendar_events(mcp_client, user_timezone)
         if all_events is not None:
             # Pre-filter: separate past, relevant, and far-future events
             now = datetime.now(timezone.utc)
@@ -1200,6 +1197,7 @@ async def evaluate_event_triggers(
                 try:
                     fired += await _evaluate_calendar_trigger(
                         trigger, trigger_store, handler, relevant_events,
+                        user_timezone,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -1250,6 +1248,7 @@ async def _evaluate_calendar_trigger(
     trigger_store: TriggerStore,
     handler,
     all_events: list[CalendarEvent],
+    user_timezone: str = "",
 ) -> int:
     """Evaluate a single calendar event trigger against pre-fetched events."""
     now = datetime.now(timezone.utc)
@@ -1306,7 +1305,11 @@ async def _evaluate_calendar_trigger(
 
         if minutes_until <= trigger.event_lead_minutes:
             # Build notification message — grammar fix
-            time_str = event.start.strftime("%I:%M %p")
+            from kernos.utils import format_user_time
+            try:
+                time_str = format_user_time(event.start, user_timezone)
+            except (ValueError, Exception):
+                time_str = event.start.strftime("%I:%M %p")
             mins = int(minutes_until)
             if mins == 0:
                 time_note = "starting now"
@@ -1353,7 +1356,7 @@ async def _evaluate_calendar_trigger(
                 trigger.event_matched_ids.append(event.id)
                 if is_standing:
                     trigger.event_daily_fire_count += 1
-                trigger.last_fired_at = _now_iso()
+                trigger.last_fired_at = utc_now()
                 trigger.fire_count += 1
                 fired += 1
 

@@ -5,6 +5,7 @@ Reads message meaning, recent history, and space descriptions.
 Algorithmic fallback for single-space tenants (zero cost).
 """
 import json
+from kernos.utils import utc_now
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,8 +62,6 @@ class RouterResult:
     continuation: bool    # Obvious continuation — ride momentum
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _compute_gap_description(last_ts: str, now_ts: str) -> str:
@@ -140,7 +139,7 @@ class LLMRouter:
             history_lines.append(f"[{ts}] ({role}) [{', '.join(tag_names)}]: {content}")
 
         # Temporal metadata
-        now = _now_iso()
+        now = utc_now()
         last_ts = recent_history[-1].get("timestamp", "") if recent_history else ""
         gap = _compute_gap_description(last_ts, now)
         current_focus_name = space_name_map.get(current_focus_id, "none")
