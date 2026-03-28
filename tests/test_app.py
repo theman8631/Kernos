@@ -61,7 +61,7 @@ def tc():
     """TestClient with Anthropic mocked and persistence using a temp directory."""
     tmpdir = tempfile.mkdtemp()
     try:
-        with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic") as mock_cls:
+        with patch("kernos.providers.anthropic_provider.anthropic.AsyncAnthropic") as mock_cls:
             mock_anthropic = MagicMock()
             mock_anthropic.messages.stream = _mock_stream_responses(_mock_text_response(""))
             mock_cls.return_value = mock_anthropic
@@ -121,7 +121,7 @@ def test_sms_inbound_error_returns_friendly_twiml(tc):
 
 async def test_startup_emits_system_started(tmp_path):
     """AC15: app startup writes a system.started event under tenant 'system'."""
-    with patch("kernos.kernel.reasoning.anthropic.Anthropic"):
+    with patch("kernos.providers.anthropic_provider.anthropic.Anthropic"):
         with patch.dict(os.environ, {"KERNOS_DATA_DIR": str(tmp_path)}):
             with TestClient(app):
                 pass  # lifespan runs fully on enter/exit

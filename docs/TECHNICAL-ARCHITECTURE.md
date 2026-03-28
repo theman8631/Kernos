@@ -218,7 +218,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `execute(request)` — full reasoning with tool-use loop. Used for agent conversations. Emits reasoning.request/response and tool.called/result events. Handles multi-turn tool use (agent calls tool, gets result, calls another tool, etc.)
 - `complete_simple(system_prompt, user_content, max_tokens, prefer_cheap)` — stateless single completion. No tools, no history, no task events. Used by kernel infrastructure (LLM router, Tier 2 extraction, Gate 2, session exit, bootstrap consolidation). `prefer_cheap=True` → Haiku (`claude-haiku-4-5-20251001`); `prefer_cheap=False` → Sonnet.
 
-**Provider abstraction:** `AnthropicProvider` implements the provider interface. Model and API key are configuration, not hardcoded in the handler. Currently only Anthropic is configured. Adding providers means implementing the provider interface.
+**Provider abstraction:** Provider implementations extracted to `kernos/providers/` package — `Provider` ABC in `base.py`, `AnthropicProvider` in `anthropic_provider.py`, `OpenAICodexProvider` in `codex_provider.py`. ContentBlock and ProviderResponse data classes in `base.py`. Providers are pure transport — no kernel imports needed. Re-exported from reasoning.py for backward compatibility.
 
 **Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
 

@@ -237,7 +237,7 @@ async def test_anthropic_provider_maps_timeout_to_reasoning_error():
         anthropic.APITimeoutError(request=MagicMock())
     )
 
-    with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("kernos.providers.anthropic_provider.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(api_key="test")
         with pytest.raises(ReasoningTimeoutError):
             await provider.complete("model", "system", [], [], 1024)
@@ -249,7 +249,7 @@ async def test_anthropic_provider_maps_connection_error():
         anthropic.APIConnectionError(request=MagicMock())
     )
 
-    with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("kernos.providers.anthropic_provider.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(api_key="test")
         with pytest.raises(ReasoningConnectionError):
             await provider.complete("model", "system", [], [], 1024)
@@ -266,7 +266,7 @@ async def test_anthropic_provider_maps_rate_limit_error():
         )
     )
 
-    with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("kernos.providers.anthropic_provider.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(api_key="test")
         with pytest.raises(ReasoningRateLimitError):
             await provider.complete("model", "system", [], [], 1024)
@@ -283,7 +283,7 @@ async def test_anthropic_provider_maps_api_status_error():
         )
     )
 
-    with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("kernos.providers.anthropic_provider.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(api_key="test")
         with pytest.raises(ReasoningProviderError):
             await provider.complete("model", "system", [], [], 1024)
@@ -300,7 +300,7 @@ async def test_anthropic_provider_returns_provider_response_on_success():
         usage=MagicMock(input_tokens=5, output_tokens=10),
     ))
 
-    with patch("kernos.kernel.reasoning.anthropic.AsyncAnthropic", return_value=mock_client):
+    with patch("kernos.providers.anthropic_provider.anthropic.AsyncAnthropic", return_value=mock_client):
         provider = AnthropicProvider(api_key="test")
         result = await provider.complete("model", "system", [], [], 1024)
 
