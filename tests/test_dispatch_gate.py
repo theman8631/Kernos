@@ -77,7 +77,7 @@ def _make_space(space_type: str = "domain") -> ContextSpace:
 
 class TestGateResult:
     def test_allowed_gate_result(self):
-        r = GateResult(allowed=True, reason="explicit_instruction", method="model_check")
+        r = GateResult(allowed=True, reason="approved", method="model_check")
         assert r.allowed is True
         assert r.proposed_action == ""
         assert r.conflicting_rule == ""
@@ -85,7 +85,7 @@ class TestGateResult:
 
     def test_blocked_gate_result_with_action(self):
         r = GateResult(
-            allowed=False, reason="denied", method="model_check",
+            allowed=False, reason="confirm", method="model_check",
             proposed_action="Delete file: notes.md",
         )
         assert r.allowed is False
@@ -237,7 +237,7 @@ class TestGateToolCall:
         )
         assert result.allowed is True
         assert result.method == "model_check"
-        assert result.reason == "explicit_instruction"
+        assert result.reason == "approved"
 
     async def test_blocked_without_instruction_or_covenant(self):
         svc = _make_service()
@@ -329,7 +329,7 @@ class TestGateToolCall:
             "I was thinking about meetings", "t1", "space_1",
         )
         assert result.allowed is True
-        assert result.reason == "covenant_authorized"
+        assert result.reason == "approved"
         assert result.method == "model_check"
 
     async def test_covenant_denied(self):
@@ -355,7 +355,7 @@ class TestGateToolCall:
             "I was thinking about meetings", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "denied"
+        assert result.reason == "confirm"
         assert result.method == "model_check"
 
     async def test_unexpected_response_denies(self):
@@ -374,7 +374,7 @@ class TestGateToolCall:
             "I was thinking about meetings", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "denied"
+        assert result.reason == "confirm"
 
 
 # ===========================
@@ -584,7 +584,7 @@ class TestConflictResponse:
             "no need to review, just send it", "t1", "space_1",
         )
         assert result.allowed is True
-        assert result.reason == "explicit_instruction"
+        assert result.reason == "approved"
 
     async def test_no_must_not_rules_without_conflict(self):
         """Without must_not rules, CONFLICT is never returned."""
@@ -607,7 +607,7 @@ class TestConflictResponse:
         result = await svc._gate_tool_call(
             "send-email", {}, "soft_write", "thinking about sending", "t1", "space_1",
         )
-        assert result.reason == "denied"
+        assert result.reason == "confirm"
         assert result.conflicting_rule == ""
 
     async def test_no_has_prohibiting_covenant_method(self):
@@ -743,7 +743,7 @@ class TestModelGateAuthority:
             "I was thinking about meetings", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "denied"
+        assert result.reason == "confirm"
 
     def test_model_max_tokens_is_512(self):
         """Model is called with max_tokens=512 (raised from 256 for richer gate responses)."""
@@ -778,7 +778,7 @@ class TestModelGateAuthority:
         result = await svc._gate_tool_call(
             "create-event", {}, "soft_write", "I was thinking", "t1", "space_1",
         )
-        assert result.reason == "denied"
+        assert result.reason == "confirm"
 
     async def test_first_word_parsing_denied_with_explanation(self):
         """'DENIED\\n\\nThe user...EXPLICIT...' → reason is 'denied' not 'explicit_instruction'."""
@@ -799,7 +799,7 @@ class TestModelGateAuthority:
             "create-event", {}, "soft_write", "again?", "t1", "space_1",
         )
         assert result.allowed is False
-        assert result.reason == "denied"
+        assert result.reason == "confirm"
 
     async def test_agent_reasoning_passed_to_model(self):
         """agent_reasoning parameter is included in the user_content sent to model."""
@@ -947,15 +947,14 @@ class TestApprovalToken:
             "I was thinking", "t1", "space_1",
         )
         assert not gate_result.allowed
-        assert gate_result.reason == "denied"
+        assert gate_result.reason == "confirm"
         # Build what the system message would look like (index 0 for first block)
         msg = (
-            f"[SYSTEM] Action blocked — no authorization found. "
+            f"[SYSTEM] Action paused — confirming intent. "
             f"Proposed: {gate_result.proposed_action}. "
             f"Pending action index: 0. "
             f"Ask the user if they want to proceed. If they confirm, "
-            f"include [CONFIRM:0] in your response. "
-            f"You may also offer to create a standing rule."
+            f"include [CONFIRM:0] in your response."
         )
         assert "[SYSTEM]" in msg
         assert "[CONFIRM:0]" in msg
@@ -1042,7 +1041,7 @@ class TestPendingActions:
         tool_input: dict,
         proposed_action: str = "Do something",
         conflicting_rule: str = "",
-        gate_reason: str = "denied",
+        gate_reason: str = "confirm",
     ) -> PendingAction:
         """Simulate what reason() does when a gate blocks: store a PendingAction."""
         if tenant_id not in svc._pending_actions:
@@ -1064,7 +1063,7 @@ class TestPendingActions:
         action = self._store_pending(
             svc, "t1", "create-event", {"summary": "Meeting"},
             proposed_action="Create a calendar event",
-            gate_reason="denied",
+            gate_reason="confirm",
         )
         assert "t1" in svc._pending_actions
         assert len(svc._pending_actions["t1"]) == 1
@@ -1072,7 +1071,7 @@ class TestPendingActions:
         assert isinstance(stored, PendingAction)
         assert stored.tool_name == "create-event"
         assert stored.tool_input == {"summary": "Meeting"}
-        assert stored.gate_reason == "denied"
+        assert stored.gate_reason == "confirm"
         assert stored.expires_at > datetime.now(timezone.utc)
 
     def test_pending_action_indexed_for_multiple_blocks(self):
@@ -1095,7 +1094,7 @@ class TestPendingActions:
         pending_idx = 0
         proposed_action = "Create a calendar event"
         msg = (
-            f"[SYSTEM] Action blocked — no authorization found. "
+            f"[SYSTEM] Action paused — confirming intent. "
             f"Proposed: {proposed_action}. "
             f"Pending action index: {pending_idx}. "
             f"Ask the user if they want to proceed. If they confirm, "
@@ -1130,15 +1129,15 @@ class TestPendingActions:
         assert "_approval_token" not in msg
         assert "Never delete without awareness" in msg
 
-    def test_system_message_denied_format(self):
-        """DENIED format: gate_reason is 'denied', conflicting_rule is empty."""
+    def test_system_message_confirm_format(self):
+        """CONFIRM format: gate_reason is 'confirm', conflicting_rule is empty."""
         svc = _make_service()
         action = self._store_pending(
             svc, "t1", "create-event", {"summary": "Meeting"},
-            gate_reason="denied",
+            gate_reason="confirm",
             conflicting_rule="",
         )
-        assert action.gate_reason == "denied"
+        assert action.gate_reason == "confirm"
         assert action.conflicting_rule == ""
 
     def test_token_still_issued_for_programmatic_callers(self):

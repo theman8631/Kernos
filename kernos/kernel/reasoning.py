@@ -989,6 +989,12 @@ class ReasoningService:
         for tid in expired_tokens:
             del self._approval_tokens[tid]
 
+    @staticmethod
+    def _is_stub_schema(tool_entry: dict) -> bool:
+        """Check if a tool entry has a stub schema (open input, no properties)."""
+        schema = tool_entry.get("input_schema", {})
+        return schema.get("additionalProperties") is True and not schema.get("properties")
+
     def set_retrieval(self, retrieval: Any) -> None:
         """Wire up the retrieval service for kernel tool routing."""
         self._retrieval = retrieval
@@ -1279,28 +1285,28 @@ class ReasoningService:
         tool_description = self._get_tool_description(tool_name)
 
         system_prompt = (
-            "You are a security gate checking whether an agent's proposed action is "
-            "authorized. You have access to the user's recent messages, the agent's "
-            "reasoning for the action, and the user's standing behavioral rules "
-            "(covenants).\n\n"
-            "Evaluate and answer with ONE of these:\n\n"
-            "EXPLICIT — The user directly asked for this action in their recent messages.\n"
-            "AUTHORIZED — A standing covenant rule explicitly covers this action, and "
-            "the agent's reasoning is consistent with the evidence.\n"
-            "CONFLICT: <exact rule text> — The user asked for this action, BUT a "
-            "restriction (must_not rule) also applies. Copy the exact rule text after "
-            "the colon. The user may be knowingly overriding the restriction.\n"
-            "DENIED — The user did not ask for this, and no covenant authorizes it.\n\n"
+            "You are a safety check for an AI assistant's actions. Your job is to "
+            "assess LOSS COST — what happens if the assistant misunderstood the "
+            "user's intent.\n\n"
+            "Answer with ONE of these:\n\n"
+            "APPROVE — The user's intent is clear AND if the assistant misunderstood, "
+            "the cost is low (easily reversible, minor data, user's own resources).\n"
+            "CONFIRM — The action affects someone other than the user (sending messages, "
+            "sharing data with third parties), OR could cause significant data loss or "
+            "is hard to reverse (bulk deletion), OR has financial cost.\n"
+            "CONFLICT: <exact rule text> — The user asked for this, BUT a standing "
+            "must_not covenant rule applies. Copy the exact rule text after the colon.\n"
+            "CLARIFY — The user's request is ambiguous — it could mean multiple things "
+            "with meaningfully different outcomes.\n\n"
             "Important:\n"
             "- If the user explicitly addresses a restriction (\"no need to review, "
-            "just send it\"), that is an override — return EXPLICIT, not CONFLICT.\n"
-            "- If the user asks for an action and a must_not rule exists but the user "
-            "did NOT address the restriction, return CONFLICT: <that rule's exact text>.\n"
-            "- Match the conflicting rule carefully — only flag a rule if it genuinely "
-            "applies to the proposed action. Do not flag unrelated rules.\n"
-            "- If the agent's reasoning claims the user asked for something but the "
-            "recent messages don't support that claim, return DENIED.\n"
-            "- When in doubt, return DENIED. It is always safe to ask.\n\n"
+            "just send it\"), that is an override — return APPROVE, not CONFLICT.\n"
+            "- If a must_not rule genuinely applies and the user did NOT address it, "
+            "return CONFLICT: <that rule's exact text>.\n"
+            "- This check is for loss-cost calibration only. Standing rules and "
+            "covenant conflicts are handled separately. You are only assessing: how "
+            "costly is a misunderstanding here?\n"
+            "- When in doubt between APPROVE and CONFIRM, choose CONFIRM.\n\n"
             "For CONFLICT, use format: CONFLICT: <rule text>\n"
             "For all others, answer with ONLY the one word."
         )
@@ -1328,19 +1334,14 @@ class ReasoningService:
 
         stripped = raw.strip()
         first_word = stripped.split()[0].upper() if stripped else ""
-        if first_word == "EXPLICIT":
+        # APPROVE (or legacy EXPLICIT/AUTHORIZED) = allow
+        if first_word in ("APPROVE", "EXPLICIT", "AUTHORIZED"):
             return GateResult(
-                allowed=True, reason="explicit_instruction", method="model_check",
-                raw_response=raw,
-            )
-        if first_word == "AUTHORIZED":
-            return GateResult(
-                allowed=True, reason="covenant_authorized", method="model_check",
+                allowed=True, reason="approved", method="model_check",
                 raw_response=raw,
             )
         if first_word.startswith("CONFLICT"):
             # Extract rule text from "CONFLICT: <rule text>" format.
-            # Fall back to must_not_rules[0] if the model didn't include it.
             conflicting_rule = ""
             if ":" in stripped:
                 conflicting_rule = stripped.split(":", 1)[1].strip()
@@ -1350,9 +1351,14 @@ class ReasoningService:
                 allowed=False, reason="covenant_conflict", method="model_check",
                 proposed_action=action_desc, conflicting_rule=conflicting_rule, raw_response=raw,
             )
-        # DENIED or anything unexpected
+        if first_word == "CLARIFY":
+            return GateResult(
+                allowed=False, reason="clarify", method="model_check",
+                proposed_action=action_desc, raw_response=raw,
+            )
+        # CONFIRM, DENIED, or anything unexpected = block and ask
         return GateResult(
-            allowed=False, reason="denied", method="model_check",
+            allowed=False, reason="confirm", method="model_check",
             proposed_action=action_desc, raw_response=raw,
         )
 
@@ -2077,13 +2083,7 @@ class ReasoningService:
                         if _t.get("name") == block.name:
                             _stub_entry = _t
                             break
-                    if _stub_entry:
-                        _s_schema = _stub_entry.get("input_schema", {})
-                        _is_early_stub = (
-                            _s_schema.get("additionalProperties") is True
-                            and not _s_schema.get("properties")
-                        )
-                        if _is_early_stub and self._registry:
+                    if _stub_entry and self._is_stub_schema(_stub_entry) and self._registry:
                             full_schema = self._registry.get_tool_schema(block.name)
                             if full_schema:
                                 for _i, _t in enumerate(tools):
@@ -2161,7 +2161,7 @@ class ReasoningService:
                             proposed_action=gate_result.proposed_action,
                             conflicting_rule=gate_result.conflicting_rule,
                             gate_reason=gate_result.reason,
-                            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
                         ))
                         self._conflict_raised_this_turn = True
                         if gate_result.reason == "covenant_conflict":
@@ -2177,14 +2177,21 @@ class ReasoningService:
                                 f"2. Override this time (confirm the action). "
                                 f"3. Update the rule permanently."
                             )
+                        elif gate_result.reason == "clarify":
+                            system_msg = (
+                                f"[SYSTEM] Action paused — the request is ambiguous. "
+                                f"Proposed: {gate_result.proposed_action}. "
+                                f"Pending action index: {pending_idx}. "
+                                f"Ask the user to clarify what they meant. "
+                                f"Once clear, include [CONFIRM:{pending_idx}] in your response."
+                            )
                         else:
                             system_msg = (
-                                f"[SYSTEM] Action blocked — no authorization found. "
+                                f"[SYSTEM] Action paused — confirming intent. "
                                 f"Proposed: {gate_result.proposed_action}. "
                                 f"Pending action index: {pending_idx}. "
                                 f"Ask the user if they want to proceed. If they confirm, "
-                                f"include [CONFIRM:{pending_idx}] in your response. "
-                                f"You may also offer to create a standing rule."
+                                f"include [CONFIRM:{pending_idx}] in your response."
                             )
                         tool_results.append({
                             "type": "tool_result",
@@ -2459,22 +2466,13 @@ class ReasoningService:
                         result = f"Kernel tool '{block.name}' not handled."
                 else:
                     # Lazy tool loading: check if this tool is a stub (loads on first use).
-                    # A stub has "additionalProperties": true and empty properties — the agent
-                    # generated a call with best-guess params. Load full schema and re-run.
-                    _is_stub = False
                     _tool_entry = None
                     for _t in tools:
                         if _t.get("name") == block.name:
                             _tool_entry = _t
                             break
-                    if _tool_entry:
-                        _schema = _tool_entry.get("input_schema", {})
-                        _is_stub = (
-                            _schema.get("additionalProperties") is True
-                            and not _schema.get("properties")
-                        )
 
-                    if _is_stub and self._registry:
+                    if _tool_entry and self._is_stub_schema(_tool_entry) and self._registry:
                         full_schema = self._registry.get_tool_schema(block.name)
                         if full_schema:
                             # Replace stub with full schema in the tools list

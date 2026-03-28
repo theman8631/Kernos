@@ -562,16 +562,22 @@ async def _list_triggers(store: TriggerStore, tenant_id: str) -> str:
             source_info = f"source: {t.event_source}"
             filter_info = f" filter: \"{t.event_filter}\"" if t.event_filter else ""
             lead_info = f" lead: {t.event_lead_minutes}min"
+            fired_info = f"fires: {t.fire_count}"
+            if t.last_fired_at:
+                fired_info += f" | last_fired: {t.last_fired_at[:19]}"
             lines.append(
                 f"  {status_icon} [{t.trigger_id}] {t.action_description}\n"
                 f"    event trigger | {source_info}{filter_info}{lead_info} | "
-                f"fires: {t.fire_count}{recur}"
+                f"{fired_info}{recur}"
             )
         else:
+            fired_info = f"fires: {t.fire_count}"
+            if t.last_fired_at:
+                fired_info += f" | last_fired: {t.last_fired_at[:19]}"
             lines.append(
                 f"  {status_icon} [{t.trigger_id}] {t.action_description}\n"
                 f"    next: {t.next_fire_at[:19] if t.next_fire_at else 'N/A'} | "
-                f"type: {t.action_type} | fires: {t.fire_count}{recur}"
+                f"type: {t.action_type} | {fired_info}{recur}"
             )
     return "\n".join(lines)
 
