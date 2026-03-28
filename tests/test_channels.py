@@ -315,11 +315,9 @@ class TestSendToChannelTool:
 
     def test_classified_as_write(self):
         """send_to_channel is a write operation (AC9)."""
-        from kernos.kernel.reasoning import ReasoningService
-        svc = MagicMock(spec=ReasoningService)
-        svc._registry = None
-        svc._classify_tool_effect = ReasoningService._classify_tool_effect.__get__(svc)
-        assert svc._classify_tool_effect("send_to_channel", None) == "soft_write"
+        from kernos.kernel.gate import DispatchGate
+        gate = DispatchGate(reasoning_service=None, registry=None, state=None, events=None)
+        assert gate.classify_tool_effect("send_to_channel", None) == "soft_write"
 
 
 # ---------------------------------------------------------------------------

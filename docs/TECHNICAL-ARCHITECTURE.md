@@ -218,7 +218,11 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - `execute(request)` — full reasoning with tool-use loop. Used for agent conversations. Emits reasoning.request/response and tool.called/result events. Handles multi-turn tool use (agent calls tool, gets result, calls another tool, etc.)
 - `complete_simple(system_prompt, user_content, max_tokens, prefer_cheap)` — stateless single completion. No tools, no history, no task events. Used by kernel infrastructure (LLM router, Tier 2 extraction, Gate 2, session exit, bootstrap consolidation). `prefer_cheap=True` → Haiku (`claude-haiku-4-5-20251001`); `prefer_cheap=False` → Sonnet.
 
-**Provider abstraction:** Provider implementations extracted to `kernos/providers/` package — `Provider` ABC in `base.py`, `AnthropicProvider` in `anthropic_provider.py`, `OpenAICodexProvider` in `codex_provider.py`. ContentBlock and ProviderResponse data classes in `base.py`. Providers are pure transport — no kernel imports needed. Re-exported from reasoning.py for backward compatibility.
+**Provider abstraction:** Provider implementations in `kernos/providers/` package — `Provider` ABC in `base.py`, `AnthropicProvider` in `anthropic_provider.py`, `OpenAICodexProvider` in `codex_provider.py`. Providers are pure transport — no kernel imports. Re-exported from reasoning.py for backward compatibility.
+
+**Dispatch gate:** `kernos/kernel/gate.py` — `DispatchGate` class with loss-cost evaluation, approval token lifecycle, tool effect classification. Receives narrow dependencies via constructor (reasoning_service, registry, state, events). ReasoningService delegates to gate via `self._get_gate()` with backward-compat shims.
+
+**Tool schemas:** `kernos/kernel/tools/schemas.py` — all kernel tool JSON schemas (REQUEST_TOOL, READ_DOC_TOOL, etc.) and pure helpers (read_doc, read_source). ReasoningService imports and re-exports. Tool handlers remain in ReasoningService (tight coupling to service context).
 
 **Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
 

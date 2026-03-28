@@ -3,7 +3,6 @@
 The handler calls ``ReasoningService.reason()`` instead of importing any provider SDK.
 ReasoningService owns the full tool-use loop, event emission, and audit logging.
 """
-import hashlib
 from kernos.utils import utc_now
 import json
 import logging
@@ -33,330 +32,14 @@ _OPENAI_SIMPLE_MODEL = "gpt-4o"      # Used by complete_simple() for OpenAI
 _OPENAI_CHEAP_MODEL = "gpt-4o-mini"  # Used by complete_simple(prefer_cheap=True) for OpenAI
 
 
-REQUEST_TOOL = {
-    "name": "request_tool",
-    "description": (
-        "Request activation of a tool capability for the current context space. "
-        "Use this when you need a tool that isn't currently available. "
-        "Describe what you need thoroughly — what the tool should do, why you need it, "
-        "and what context it's for. This helps the system find the right match."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "capability_name": {
-                "type": "string",
-                "description": (
-                    "The name of the capability to activate, if known. "
-                    "Use 'unknown' if you know what you need but not the exact name."
-                ),
-            },
-            "description": {
-                "type": "string",
-                "description": (
-                    "Thorough description of what you need the tool to do. "
-                    "Be exhaustive — include the function needed, the context, "
-                    "and why it's needed. This helps match the right tool."
-                ),
-            },
-        },
-        "required": ["capability_name", "description"],
-    },
-}
-
-
-READ_DOC_TOOL = {
-    "name": "read_doc",
-    "description": (
-        "Read Kernos documentation. Use when you need to understand a capability, "
-        "behavior, or how the system works. Your docs are at docs/ — read the "
-        "relevant section to answer accurately. "
-        "Examples: 'index.md', 'capabilities/web-browsing.md', 'behaviors/covenants.md', "
-        "'architecture/memory.md', 'identity/who-you-are.md', 'roadmap/vision.md'"
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": (
-                    "Path relative to docs/. "
-                    "Examples: 'index.md', 'capabilities/web-browsing.md', "
-                    "'behaviors/covenants.md', 'architecture/context-spaces.md'"
-                ),
-            },
-        },
-        "required": ["path"],
-    },
-}
-
-
-REMEMBER_DETAILS_TOOL = {
-    "name": "remember_details",
-    "description": (
-        "Retrieve exact conversation text from a specific archived source log. "
-        "Use after remember() when a Ledger entry includes 'source: log_NNN'. "
-        "Optional query narrows to the relevant section within that log. "
-        "This is a read-only operation — no state is changed."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "source_ref": {
-                "type": "string",
-                "description": (
-                    "The log reference to retrieve, e.g., 'log_003'. "
-                    "Get this from a Ledger entry returned by remember()."
-                ),
-            },
-            "query": {
-                "type": "string",
-                "description": (
-                    "Optional keyword to find the relevant section within "
-                    "the log. Returns matching lines with surrounding context. "
-                    "If omitted, returns the full log (bounded)."
-                ),
-            },
-        },
-        "required": ["source_ref"],
-    },
-}
-
-
-def _read_doc(path: str) -> str:
-    """Read a Kernos documentation file from docs/.
-
-    Security: only allows reads within the docs/ directory.
-    Rejects paths with '..', absolute paths, or paths outside docs/.
-    """
-    from pathlib import Path
-
-    if path.startswith("/") or path.startswith("\\"):
-        return "Error: Absolute paths are not allowed. Use a relative path like 'capabilities/web-browsing.md'."
-
-    if ".." in path:
-        return "Error: Path traversal ('..') is not allowed."
-
-    # Resolve docs/ root relative to the repo
-    import importlib
-    kernos_root = Path(importlib.import_module("kernos").__file__).parent
-    docs_root = kernos_root.parent / "docs"
-    target = (docs_root / path).resolve()
-
-    if not str(target).startswith(str(docs_root.resolve())):
-        return "Error: Path resolves outside the docs/ directory."
-
-    if not target.exists():
-        # List available files to help the agent find the right one
-        available = []
-        for f in sorted(docs_root.rglob("*.md")):
-            available.append(str(f.relative_to(docs_root)))
-        hint = "\n".join(f"  - {a}" for a in available[:30])
-        return f"Error: File not found: docs/{path}\n\nAvailable docs:\n{hint}"
-
-    if not target.is_file():
-        return f"Error: Not a file: docs/{path}"
-
-    return target.read_text(encoding="utf-8")
-
-
-MANAGE_CAPABILITIES_TOOL = {
-    "name": "manage_capabilities",
-    "description": (
-        "Manage connected services — list, enable, disable, install, or remove capabilities. "
-        "Use 'list' to see all services and their connection status. "
-        "Use 'enable' or 'disable' to toggle a service on or off. "
-        "Use 'install' to add a new MCP server. "
-        "Use 'remove' to uninstall a user-added capability "
-        "(defaults can only be disabled, not removed). "
-        "Note: to see which tools are available, check the TOOLS section in your instructions — "
-        "this command manages services, not individual tools."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["list", "enable", "disable", "install", "remove"],
-                "description": "The action to perform.",
-            },
-            "capability": {
-                "type": "string",
-                "description": "The capability name (required for enable/disable/remove).",
-            },
-        },
-        "required": ["action"],
-        "additionalProperties": False,
-    },
-}
-
-
-READ_SOURCE_TOOL = {
-    "name": "read_source",
-    "description": (
-        "Read Kernos source code. Use when the user asks how something works "
-        "technically or wants to see implementation details. Only reads files "
-        "within the kernos/ package directory."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": (
-                    "Relative path within the kernos/ package. "
-                    "Examples: 'kernel/awareness.py', 'kernel/reasoning.py', "
-                    "'messages/handler.py', 'capability/registry.py'"
-                ),
-            },
-            "section": {
-                "type": "string",
-                "description": (
-                    "Optional class or function name to extract. "
-                    "Examples: 'AwarenessEvaluator', 'run_time_pass', '_gate_tool_call'. "
-                    "If omitted, returns the full file."
-                ),
-            },
-        },
-        "required": ["path"],
-    },
-}
-
-
-READ_SOUL_TOOL = {
-    "name": "read_soul",
-    "description": (
-        "Read your own identity — who you are, your personality, your relationship "
-        "with this user. Use this when you want to understand or verify your own state."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-    },
-}
-
-
-UPDATE_SOUL_TOOL = {
-    "name": "update_soul",
-    "description": (
-        "Update your own identity — name, emoji, personality notes, communication "
-        "style. Use when the user asks you to change something about yourself, or "
-        "when you and the user agree on a change."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "field": {
-                "type": "string",
-                "description": (
-                    "The soul field to update. Allowed: agent_name, emoji, "
-                    "personality_notes, communication_style."
-                ),
-            },
-            "value": {
-                "type": "string",
-                "description": "The new value for the field.",
-            },
-        },
-        "required": ["field", "value"],
-    },
-}
-
-
-# Allowed fields for update_soul — lifecycle and user fields are read-only
-_SOUL_UPDATABLE_FIELDS = {"agent_name", "emoji", "personality_notes", "communication_style"}
-
-
-def _read_source(path: str, section: str = "") -> str:
-    """Read Kernos source code. Returns file contents or extracted section.
-
-    Security: only allows reads within the kernos/ package directory.
-    Rejects paths with '..', absolute paths, or paths outside kernos/.
-    """
-    import importlib
-    from pathlib import Path
-
-    # Security: reject absolute paths
-    if path.startswith("/") or path.startswith("\\"):
-        return "Error: Absolute paths are not allowed. Use a relative path like 'kernel/awareness.py'."
-
-    # Security: reject path traversal
-    if ".." in path:
-        return "Error: Path traversal ('..') is not allowed."
-
-    # Resolve kernos package root
-    kernos_root = Path(importlib.import_module("kernos").__file__).parent
-    target = (kernos_root / path).resolve()
-
-    # Security: ensure resolved path is within kernos/
-    if not str(target).startswith(str(kernos_root)):
-        return "Error: Path resolves outside the kernos/ package directory."
-
-    if not target.exists():
-        return f"Error: File not found: kernos/{path}"
-
-    if not target.is_file():
-        return f"Error: Not a file: kernos/{path}"
-
-    if target.suffix not in (".py", ".md", ".txt", ".json", ".toml", ".yaml", ".yml"):
-        return f"Error: Unsupported file type: {target.suffix}"
-
-    content = target.read_text(encoding="utf-8")
-
-    if not section:
-        # Cap at 500 lines for full files
-        lines = content.split("\n")
-        if len(lines) > 500:
-            return "\n".join(lines[:500]) + f"\n\n... (truncated — {len(lines)} total lines)"
-        return content
-
-    # Extract a class or function section
-    lines = content.split("\n")
-    start_idx = None
-    start_indent = None
-
-    for i, line in enumerate(lines):
-        stripped = line.lstrip()
-        if stripped.startswith(f"class {section}") or stripped.startswith(f"def {section}"):
-            start_idx = i
-            start_indent = len(line) - len(stripped)
-            break
-        # Also match async def
-        if stripped.startswith(f"async def {section}"):
-            start_idx = i
-            start_indent = len(line) - len(stripped)
-            break
-
-    if start_idx is None:
-        return f"Error: Section '{section}' not found in kernos/{path}"
-
-    # Find end: next definition at same or lower indent level
-    result_lines = [lines[start_idx]]
-    for i in range(start_idx + 1, len(lines)):
-        line = lines[i]
-        if not line.strip():
-            result_lines.append(line)
-            continue
-        current_indent = len(line) - len(line.lstrip())
-        stripped = line.lstrip()
-        # Same-level or lower-level class/def = end of section
-        if current_indent <= start_indent and (
-            stripped.startswith("class ")
-            or stripped.startswith("def ")
-            or stripped.startswith("async def ")
-            or stripped.startswith("# ---")
-        ):
-            break
-        result_lines.append(line)
-
-    # Strip trailing blank lines
-    while result_lines and not result_lines[-1].strip():
-        result_lines.pop()
-
-    return "\n".join(result_lines)
-
-
+# Tool schemas extracted to kernos/kernel/tools/schemas.py
+from kernos.kernel.tools import (
+    REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL,
+    MANAGE_CAPABILITIES_TOOL, READ_SOURCE_TOOL,
+    READ_SOUL_TOOL, UPDATE_SOUL_TOOL, SOUL_UPDATABLE_FIELDS,
+    read_doc as _read_doc, read_source as _read_source,
+    SOUL_UPDATABLE_FIELDS as _SOUL_UPDATABLE_FIELDS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +53,7 @@ from kernos.providers.base import ContentBlock, Provider, ProviderResponse
 
 from kernos.providers.anthropic_provider import AnthropicProvider  # re-export
 from kernos.providers.codex_provider import OpenAICodexProvider  # re-export
+from kernos.kernel.gate import DispatchGate, GateResult, ApprovalToken  # re-export
 
 
 # OpenAICodexProvider extracted to kernos/providers/codex_provider.py
@@ -396,33 +80,7 @@ class ReasoningRequest:
     user_timezone: str = ""    # IANA timezone from soul — for scheduler extraction
 
 
-@dataclass
-class GateResult:
-    """The outcome of a dispatch gate check."""
-
-    allowed: bool
-    reason: str    # "explicit_instruction", "covenant_authorized", "covenant_conflict", "denied",
-                   # "token_approved"
-    method: str    # "token", "model_check"
-    proposed_action: str = ""    # Human-readable description of what was blocked
-    conflicting_rule: str = ""   # For CONFLICT — which rule conflicts
-    raw_response: str = ""       # Full model response for logging
-
-
-@dataclass
-class ApprovalToken:
-    """Single-use token issued when the dispatch gate blocks an action.
-
-    The agent re-submits the tool call with ``_approval_token: '{token_id}'``
-    in the tool input to bypass the gate after explicit user confirmation.
-    """
-
-    token_id: str          # uuid hex[:12]
-    tool_name: str
-    tool_input_hash: str   # md5 hex[:8] of tool_input (after popping _approval_token)
-    issued_at: datetime
-    used: bool = False
-
+# GateResult and ApprovalToken extracted to kernos/kernel/gate.py (re-exported above)
 
 @dataclass
 class PendingAction:
@@ -505,18 +163,29 @@ class ReasoningService:
         self._channel_registry = None  # Set by handler after construction
         self._trigger_store = None     # Set by handler after construction
         self._handler = None           # Set by handler after construction (for schedule tool)
-        self._approval_tokens: dict[str, ApprovalToken] = {}  # In-memory token store
+        self._gate: DispatchGate | None = None  # Created lazily after registry/state are set
         self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
         self._conflict_raised_this_turn: bool = False  # Set when gate blocks; cleared at turn start
         self._tools_changed: bool = False  # Set by manage_capabilities; handler checks post-reasoning
         # Lazy tool loading: tracks which MCP tools have been loaded per-space session
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
 
+    def _get_gate(self) -> DispatchGate:
+        """Lazy gate creation — registry/state set after construction."""
+        if not hasattr(self, '_gate') or self._gate is None:
+            self._gate = DispatchGate(
+                reasoning_service=self,
+                registry=getattr(self, '_registry', None),
+                state=getattr(self, '_state', None),
+                events=getattr(self, '_events', None),
+                mcp=getattr(self, '_mcp', None),
+            )
+        return self._gate
+
     def cleanup_expired_authorizations(self, tenant_id: str) -> None:
         """Remove expired PendingActions and used/expired ApprovalTokens."""
         now = datetime.now(timezone.utc)
 
-        # Prune pending actions
         if tenant_id in self._pending_actions:
             self._pending_actions[tenant_id] = [
                 a for a in self._pending_actions[tenant_id]
@@ -525,13 +194,7 @@ class ReasoningService:
             if not self._pending_actions[tenant_id]:
                 del self._pending_actions[tenant_id]
 
-        # Prune approval tokens (all tenants, since tokens aren't keyed by tenant)
-        expired_tokens = [
-            tid for tid, token in self._approval_tokens.items()
-            if token.used or (now - token.issued_at).total_seconds() > 300
-        ]
-        for tid in expired_tokens:
-            del self._approval_tokens[tid]
+        self._get_gate().cleanup_expired_tokens()
 
     @staticmethod
     def _is_stub_schema(tool_entry: dict) -> bool:
@@ -628,324 +291,36 @@ class ReasoningService:
     # Dispatch Gate (3D-HOTFIX)
     # ---------------------------------------------------------------------------
 
-    def _classify_tool_effect(self, tool_name: str, active_space: Any, tool_input: dict[str, Any] | None = None) -> str:
-        """Classify a tool call's effect level.
-
-        Returns: "read", "soft_write", "hard_write", or "unknown"
-        Kernel tools have hardcoded classifications.
-        MCP tools use tool_effects from CapabilityInfo.
-        Unknown defaults to "hard_write" (safe default).
-        """
-        _KERNEL_READS = {"remember", "remember_details", "list_files", "read_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "manage_channels"}
-        _KERNEL_WRITES = {"write_file", "delete_file", "manage_covenants", "update_soul", "manage_capabilities", "send_to_channel"}
-
-        if tool_name in _KERNEL_READS:
-            return "read"
-        # manage_covenants: "list" is a read; other actions are writes
-        if tool_name == "manage_covenants":
-            action = (tool_input or {}).get("action", "list")
-            return "read" if action == "list" else "soft_write"
-        # manage_capabilities: "list" is a read; other actions are writes
-        if tool_name == "manage_capabilities":
-            action = (tool_input or {}).get("action", "list")
-            return "read" if action == "list" else "soft_write"
-        # manage_channels: "list" is a read; other actions are writes
-        if tool_name == "manage_channels":
-            action = (tool_input or {}).get("action", "list")
-            return "read" if action == "list" else "soft_write"
-        # manage_schedule: all actions are read bypass. The gate only matters for
-        # the scheduled ACTION at fire time (via covenants), not for managing the
-        # schedule itself. The user explicitly asked to create/remove/pause — that's the intent.
-        if tool_name == "manage_schedule":
-            return "read"
-        if tool_name in _KERNEL_WRITES:
-            return "soft_write"
-
-        if not self._registry:
-            return "unknown"
-
-        for cap in self._registry.get_all():
-            if tool_name in (cap.tool_effects or {}):
-                return cap.tool_effects[tool_name]
-            if tool_name in (cap.tools or []) and tool_name not in (cap.tool_effects or {}):
-                return "unknown"  # Tool exists but no effect declared
-
-        return "unknown"  # Not found at all → safe default
-
-    def _get_capability_for_tool(self, tool_name: str) -> str | None:
-        """Return the capability name that owns this tool, or None."""
-        if not self._registry:
-            return None
-        for cap in self._registry.get_all():
-            if tool_name in (cap.tools or []):
-                return cap.name
-            if tool_name in (cap.tool_effects or {}):
-                return cap.name
-        return None
-
-    def _get_tool_description(self, tool_name: str) -> str:
-        """Return the tool's description from the MCP manifest, or empty string."""
-        if self._mcp:
-            try:
-                for tool in self._mcp.get_tools():
-                    if tool.get("name") == tool_name:
-                        return tool.get("description", "")
-            except Exception:
-                pass
-        return ""
+    # Gate methods extracted to kernos/kernel/gate.py — accessed via self._get_gate()
+    # Delegation methods for backward compatibility (tests call these directly)
+    def _classify_tool_effect(self, tool_name: str, active_space: Any, tool_input: dict | None = None) -> str:
+        return self._get_gate().classify_tool_effect(tool_name, active_space, tool_input)
 
     def _describe_action(self, tool_name: str, tool_input: dict) -> str:
-        """Generate a human-readable description of a proposed tool call."""
-        if tool_name == "create-event":
-            summary = tool_input.get("summary", "an event")
-            start = tool_input.get("start", "unspecified time")
-            return f"Create calendar event: '{summary}' at {start}"
-        if tool_name == "update-event":
-            summary = tool_input.get("summary", "an event")
-            return f"Update calendar event: '{summary}'"
-        if tool_name == "delete-event":
-            summary = tool_input.get("summary", "an event")
-            return f"Delete calendar event: '{summary}'"
-        if tool_name == "send-email":
-            to = tool_input.get("to", "someone")
-            subject = tool_input.get("subject", "no subject")
-            return f"Send email to {to}: '{subject}'"
-        if tool_name == "delete-email":
-            msg_id = tool_input.get("id", "a message")
-            return f"Delete email: {msg_id}"
-        if tool_name == "delete_file":
-            name = tool_input.get("name", "a file")
-            return f"Delete file: {name}"
-        if tool_name == "write_file":
-            name = tool_input.get("name", "a file")
-            return f"Write/update file: {name}"
-        return f"Execute {tool_name} with {json.dumps(tool_input)[:200]}"
+        return self._get_gate()._describe_action(tool_name, tool_input)
 
-    async def _gate_tool_call(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        effect: str,
-        user_message: str,
-        tenant_id: str,
-        active_space_id: str,
-        messages: list[dict] | None = None,
-        approval_token_id: str | None = None,
-        agent_reasoning: str = "",
-    ) -> GateResult:
-        """Authorization gate for write tool calls.
+    def _get_capability_for_tool(self, tool_name: str) -> str | None:
+        return self._get_gate()._get_capability_for_tool(tool_name)
 
-        Step 1: Approval token check (mechanical — user confirmed this specific action)
-        Step 2: Permission override check (mechanical — capability set to always-allow)
-        Step 3: Model evaluation — the correctness check (EXPLICIT/AUTHORIZED/CONFLICT/DENIED)
+    def _get_tool_description(self, tool_name: str) -> str:
+        return self._get_gate()._get_tool_description(tool_name)
 
-        Steps 1 and 2 are zero-cost mechanical bypasses. Step 3 is the only LLM call.
-        Permission overrides are NOT included in rules_text — they bypass the model entirely.
-        This ensures high-volume automation (50 emails, always-allow) doesn't trigger 50 model calls.
-        """
-        # Step 1: Approval token check (user confirmed this specific action previously)
-        if approval_token_id and self._validate_approval_token(
-            approval_token_id, tool_name, tool_input
-        ):
-            logger.info("GATE: token_validated tool=%s token=%s", tool_name, approval_token_id)
-            return GateResult(allowed=True, reason="token_approved", method="token")
+    async def _gate_tool_call(self, *args, **kwargs) -> GateResult:
+        return await self._get_gate().evaluate(*args, **kwargs)
 
-        # Step 2: Permission override (always-allow = zero-cost mechanical bypass, no model call)
-        cap_name = self._get_capability_for_tool(tool_name)
-        if cap_name and self._state:
-            try:
-                tenant = await self._state.get_tenant_profile(tenant_id)
-                if tenant and tenant.permission_overrides.get(cap_name) == "always-allow":
-                    logger.info("GATE: permission_override tool=%s cap=%s", tool_name, cap_name)
-                    return GateResult(allowed=True, reason="permission_override", method="always_allow")
-            except Exception as exc:
-                logger.warning("Gate: permission override check failed: %s", exc)
-
-        # Step 3: Model evaluation — the only LLM call
-        return await self._evaluate_gate(
-            tool_name, tool_input, effect, messages, agent_reasoning, tenant_id, active_space_id,
-        )
-
-    async def _evaluate_gate(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        effect: str,
-        messages: list[dict] | None,
-        agent_reasoning: str,
-        tenant_id: str,
-        active_space_id: str,
-    ) -> GateResult:
-        """Step 2 of the dispatch gate: lightweight model evaluation.
-
-        One LLM call. Sees everything. Returns EXPLICIT / AUTHORIZED / CONFLICT / DENIED.
-        Permission overrides are included in rules_text so the model sees them too.
-        """
-        # Build recent_messages_text (last 5 user turns)
-        recent_messages_text = "No recent messages."
-        if messages:
-            user_msgs = [m for m in messages if m.get("role") == "user"][-5:]
-            if user_msgs:
-                lines = []
-                for m in user_msgs:
-                    content = m.get("content", "")
-                    if isinstance(content, str):
-                        lines.append(f'- "{content[:300]}"')
-                    elif isinstance(content, list):
-                        text = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                        if text:
-                            lines.append(f'- "{text[:300]}"')
-                if lines:
-                    recent_messages_text = "\n".join(lines)
-
-        # Build rules_text: covenant rules + permission_overrides as [always-allow] entries
-        rules_text = "No standing covenant rules."
-        rules_count = 0
-        must_not_rules: list[str] = []
-        if self._state:
-            try:
-                rules = await self._state.query_covenant_rules(
-                    tenant_id,
-                    context_space_scope=[active_space_id, None],
-                    active_only=True,
-                )
-                rule_lines = []
-                for r in rules:
-                    rule_lines.append(
-                        f"- [{r.rule_type}] {r.description} (scope: {r.context_space or 'global'})"
-                    )
-                    if r.rule_type == "must_not":
-                        must_not_rules.append(r.description)
-                if rule_lines:
-                    rules_count = len(rule_lines)
-                    rules_text = "\n".join(rule_lines)
-            except Exception as exc:
-                logger.warning("Gate: covenant query failed: %s", exc)
-
-        action_desc = self._describe_action(tool_name, tool_input)
-        tool_description = self._get_tool_description(tool_name)
-
-        system_prompt = (
-            "You are a safety check for an AI assistant's actions. Your job is to "
-            "assess LOSS COST — what happens if the assistant misunderstood the "
-            "user's intent.\n\n"
-            "Answer with ONE of these:\n\n"
-            "APPROVE — The user's intent is clear AND if the assistant misunderstood, "
-            "the cost is low (easily reversible, minor data, user's own resources).\n"
-            "CONFIRM — The action affects someone other than the user (sending messages, "
-            "sharing data with third parties), OR could cause significant data loss or "
-            "is hard to reverse (bulk deletion), OR has financial cost.\n"
-            "CONFLICT: <exact rule text> — The user asked for this, BUT a standing "
-            "must_not covenant rule applies. Copy the exact rule text after the colon.\n"
-            "CLARIFY — The user's request is ambiguous — it could mean multiple things "
-            "with meaningfully different outcomes.\n\n"
-            "Important:\n"
-            "- If the user explicitly addresses a restriction (\"no need to review, "
-            "just send it\"), that is an override — return APPROVE, not CONFLICT.\n"
-            "- If a must_not rule genuinely applies and the user did NOT address it, "
-            "return CONFLICT: <that rule's exact text>.\n"
-            "- This check is for loss-cost calibration only. Standing rules and "
-            "covenant conflicts are handled separately. You are only assessing: how "
-            "costly is a misunderstanding here?\n"
-            "- When in doubt between APPROVE and CONFIRM, choose CONFIRM.\n\n"
-            "For CONFLICT, use format: CONFLICT: <rule text>\n"
-            "For all others, answer with ONLY the one word."
-        )
-        user_content = (
-            f"Recent user messages (oldest to newest):\n{recent_messages_text}\n\n"
-            f"Agent's reasoning for this action:\n{agent_reasoning}\n\n"
-            f"Proposed action: {tool_name}\n"
-            f"Tool description: {tool_description}\n"
-            f"Action details: {action_desc}\n\n"
-            f"Active covenant rules:\n{rules_text}"
-        )
-
-        raw = ""
-        logger.info("GATE_MODEL: max_tokens=512, has_schema=False, rules=%d", rules_count)
-        try:
-            raw = await self.complete_simple(
-                system_prompt=system_prompt,
-                user_content=user_content,
-                max_tokens=512,
-                prefer_cheap=True,
-            )
-        except Exception as exc:
-            logger.warning("Gate: model evaluation failed: %s", exc)
-        logger.info("GATE_MODEL: raw_response=%r", raw[:300])
-
-        stripped = raw.strip()
-        first_word = stripped.split()[0].upper() if stripped else ""
-        # APPROVE (or legacy EXPLICIT/AUTHORIZED) = allow
-        if first_word in ("APPROVE", "EXPLICIT", "AUTHORIZED"):
-            return GateResult(
-                allowed=True, reason="approved", method="model_check",
-                raw_response=raw,
-            )
-        if first_word.startswith("CONFLICT"):
-            # Extract rule text from "CONFLICT: <rule text>" format.
-            conflicting_rule = ""
-            if ":" in stripped:
-                conflicting_rule = stripped.split(":", 1)[1].strip()
-            if not conflicting_rule:
-                conflicting_rule = must_not_rules[0] if must_not_rules else ""
-            return GateResult(
-                allowed=False, reason="covenant_conflict", method="model_check",
-                proposed_action=action_desc, conflicting_rule=conflicting_rule, raw_response=raw,
-            )
-        if first_word == "CLARIFY":
-            return GateResult(
-                allowed=False, reason="clarify", method="model_check",
-                proposed_action=action_desc, raw_response=raw,
-            )
-        # CONFIRM, DENIED, or anything unexpected = block and ask
-        return GateResult(
-            allowed=False, reason="confirm", method="model_check",
-            proposed_action=action_desc, raw_response=raw,
-        )
+    async def _evaluate_gate(self, *args, **kwargs) -> GateResult:
+        return await self._get_gate()._evaluate_model(*args, **kwargs)
 
     def _issue_approval_token(self, tool_name: str, tool_input: dict) -> ApprovalToken:
-        """Issue a single-use approval token for a blocked tool call."""
-        token_id = uuid.uuid4().hex[:12]
-        input_hash = hashlib.md5(
-            json.dumps(tool_input, sort_keys=True).encode()
-        ).hexdigest()[:8]
-        token = ApprovalToken(
-            token_id=token_id,
-            tool_name=tool_name,
-            tool_input_hash=input_hash,
-            issued_at=datetime.now(timezone.utc),
-        )
-        self._approval_tokens[token_id] = token
-        return token
+        return self._get_gate().issue_approval_token(tool_name, tool_input)
 
-    def _validate_approval_token(
-        self, token_id: str, tool_name: str, tool_input: dict
-    ) -> bool:
-        """Validate an approval token. Marks it used on success.
+    def _validate_approval_token(self, token_id: str, tool_name: str, tool_input: dict) -> bool:
+        return self._get_gate().validate_approval_token(token_id, tool_name, tool_input)
 
-        Returns True only if the token exists, is unused, is < 5 minutes old,
-        matches the tool name, and the tool_input hash matches.
-        """
-        token = self._approval_tokens.get(token_id)
-        if not token:
-            return False
-        if token.used:
-            return False
-        if token.tool_name != tool_name:
-            return False
-        age_seconds = (datetime.now(timezone.utc) - token.issued_at).total_seconds()
-        if age_seconds > 300:  # 5-minute TTL
-            return False
-        input_hash = hashlib.md5(
-            json.dumps(tool_input, sort_keys=True).encode()
-        ).hexdigest()[:8]
-        if token.tool_input_hash != input_hash:
-            return False
-        token.used = True
-        return True
+    @property
+    def _approval_tokens(self) -> dict:
+        """Backward compat — tokens now live on the gate."""
+        return self._get_gate()._approval_tokens
 
     async def execute_tool(
         self, tool_name: str, tool_input: dict, request: "ReasoningRequest"
@@ -1650,7 +1025,7 @@ class ReasoningService:
                                 continue  # Skip gate and execution for stub call
 
                 # Dispatch Gate: classify and check write tools before execution
-                tool_effect = self._classify_tool_effect(block.name, request.active_space, tool_input)
+                tool_effect = self._get_gate().classify_tool_effect(block.name, request.active_space, tool_input)
                 if tool_effect in ("soft_write", "hard_write", "unknown"):
                     # Check gate cache (lazy-load re-runs skip redundant gate evaluation)
                     if block.name in _gate_cache and _gate_cache[block.name].allowed:
@@ -1659,7 +1034,7 @@ class ReasoningService:
                             "GATE_CACHED: tool=%s (approved on stub call)", block.name,
                         )
                     else:
-                        gate_result = await self._gate_tool_call(
+                        gate_result = await self._get_gate().evaluate(
                             block.name, tool_input, tool_effect,
                             request.input_text, request.tenant_id,
                             request.active_space_id,
@@ -1693,7 +1068,7 @@ class ReasoningService:
 
                     if not gate_result.allowed:
                         # Keep token for programmatic callers (Step 1 of the gate)
-                        self._issue_approval_token(block.name, tool_input)
+                        self._get_gate().issue_approval_token(block.name, tool_input)
                         # Store PendingAction for kernel-owned replay
                         tenant_id = request.tenant_id
                         if tenant_id not in self._pending_actions:

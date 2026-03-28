@@ -130,8 +130,8 @@ class TestReadSourceSections:
         assert "not found" in result
 
     def test_extract_read_source_itself(self):
-        result = _read_source("kernel/reasoning.py", "_read_source")
-        assert "def _read_source" in result
+        result = _read_source("kernel/tools/schemas.py", "read_source")
+        assert "def read_source" in result
         assert "Security" in result or "security" in result.lower()
 
 
