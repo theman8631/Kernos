@@ -145,6 +145,27 @@ NOT WORTH PERSISTING:
 - Questions they asked or information you provided
 - Greetings, pleasantries, filler
 - Things that were true only in the moment ("I'm running late")
+- One-off task requests or confirmations ("create a calendar entry for banana bread at 6:10", "set up a reminder for tomorrow")
+- Meta-conversation about testing or debugging ("let's test the calendar", "can you try that again", "that worked")
+- Instructions to the system about system behavior ("update the rule", "your authorization should be inherent", "make that permanent")
+- Conversation summaries ("we discussed reminders", "user asked about calendar integration")
+- System friction or complaints unless they reveal a stable user preference ("your reminder system needs work" = not a fact; "I prefer getting reminders by text not email" = a fact)
+
+THE CORE TEST: Is this true about the user BEYOND this conversation?
+If it only describes what happened IN this conversation, do not extract it.
+
+GOOD extractions (true about the user beyond this conversation):
+- "I always forget appointments" → fact about user behavior
+- "I just moved to Portland" → structural life change
+- "I prefer text reminders" → durable preference
+- "My wife's name is Liana" → relationship identity
+
+BAD extractions (only true about this conversation):
+- "User requested a calendar entry for banana bread" → task execution
+- "We discussed setting up reminders" → conversation summary
+- "The user thinks authorization should be inherent" → system friction
+- "Let's test the calendar" → meta-conversation
+- "User wants to assume everything works again" → test framing
 
 CORRECTIONS:
 If the user corrects something previously stated ("actually call me JT", "wait, I meant Tuesday"),
@@ -154,8 +175,14 @@ LIFECYCLE ARCHETYPES — classify each fact:
 - identity: name, birthday, defining traits — rarely changes (~2 years stable)
 - structural: employer, city, life role — changes infrequently (~4 months stable)
 - habitual: preferences, routines, work patterns — gradual drift (~6 weeks stable)
-- contextual: current project, upcoming event — changes regularly (~2 weeks stable)
-- ephemeral: current mood, today's plan — expires quickly (~1 day stable)
+- contextual: current project, active life situation — changes regularly (~2 weeks stable). Must be about the user's life context, not about the current conversation or task.
+- ephemeral: DO NOT USE for extraction. If something is only true for a day, it is not worth persisting. The knowledge store is for facts that matter beyond the current session.
+
+Preference-like entries must represent durable tendencies, not single requests. "Prefers SMS reminders" = habitual (good). "Asked for a reminder at 3pm" = one-off request (do not extract).
+
+If a request clearly implies a durable preference, extract the PREFERENCE in generalized form:
+  "Set up SMS reminders 5 min before events" → extract as: "Prefers SMS reminders before calendar events"
+  NOT as: "User requested SMS reminders be set up"
 
 FORESIGHT SIGNALS — if a fact has a time-bounded forward-looking implication:
 Include foresight_signal (e.g., "Avoid recommending alcohol") and foresight_expires
@@ -184,6 +211,84 @@ These are conversation context, not standing rules.
 
 Return your analysis first in "reasoning", then populate the arrays.
 Empty arrays are correct when nothing is worth persisting."""
+
+
+# ---------------------------------------------------------------------------
+# Knowledge durability filter (Part B)
+# ---------------------------------------------------------------------------
+
+# Heuristic triage signals — NOT the definition of bad knowledge.
+# These markers trigger a second-pass durability check, not automatic rejection.
+_SUSPICIOUS_MARKERS = [
+    "discussed", "asked about", "set up", "requested", "tested", "tried",
+    "authorization", "update the rule", "we talked", "conversation",
+    "let's test", "try again", "that worked", "wants to assume",
+    "should be inherent", "make that permanent",
+]
+
+
+def _is_suspicious_candidate(item: dict) -> bool:
+    """Check if a knowledge candidate should go through the durability gate.
+
+    Returns True for candidates that MIGHT be conversation-specific rather
+    than durably true about the user. Uses cheap heuristic signals only.
+    """
+    archetype = item.get("lifecycle_archetype", "")
+    category = item.get("category", "")
+    content = item.get("content", "").lower()
+
+    # Ephemeral archetype = always suspicious (shouldn't be extracted at all)
+    if archetype == "ephemeral":
+        return True
+
+    # Contextual archetype = risky category
+    if archetype == "contextual":
+        return True
+
+    # Habitual preferences with conversation/task framing
+    if archetype == "habitual" and category == "preference":
+        for marker in _SUSPICIOUS_MARKERS:
+            if marker in content:
+                return True
+
+    # Content contains conversation/system/task framing
+    for marker in _SUSPICIOUS_MARKERS:
+        if marker in content:
+            return True
+
+    return False
+
+
+async def _passes_durability_check(content: str, reasoning_service) -> bool:
+    """Cheap YES/NO durability check for suspicious knowledge candidates.
+
+    Returns True if the fact is durably true about the user.
+    Returns False if it's a transient task, conversation event, or system detail.
+    Falls back to True (allow) if the check fails.
+    """
+    try:
+        result = await reasoning_service.complete_simple(
+            system_prompt=(
+                "You are a knowledge durability filter. Answer YES or NO only."
+            ),
+            user_content=(
+                "Is this a durable fact about the user — a trait, preference, "
+                "life context, or standing pattern — or is it a transient task, "
+                "interaction, system event, or conversation-specific detail?\n\n"
+                f'Fact: "{content}"\n\n'
+                "Answer YES if this reveals something durable about who the user is, "
+                "what they value, or how they operate — true beyond this conversation.\n"
+                "Answer NO if this describes a one-off task, a conversation event, "
+                "a system interaction, or a transient request."
+            ),
+            max_tokens=8,
+            prefer_cheap=True,
+        )
+        answer = result.strip().upper()
+        return answer.startswith("YES")
+    except Exception as exc:
+        logger.warning("Durability check failed, allowing: %s", exc)
+        return True  # Fail open — better to store than to lose
 
 
 _VALID_CONFIDENCE = {"stated", "inferred", "observed"}
@@ -416,6 +521,23 @@ async def run_tier2_extraction(
             if not content:
                 continue
 
+            # Ephemeral archetype = reject outright
+            if lifecycle_archetype == "ephemeral":
+                logger.info(
+                    "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=ephemeral_archetype",
+                    tenant_id, content[:80],
+                )
+                continue
+
+            # Durability filter for suspicious candidates
+            if _is_suspicious_candidate(item) and reasoning_service:
+                if not await _passes_durability_check(content, reasoning_service):
+                    logger.info(
+                        "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=durability_check",
+                        tenant_id, content[:80],
+                    )
+                    continue
+
             # Link to resolved entity if subject matches a known entity name
             entity_node_id = entity_name_to_node_id.get(subject.lower(), "")
 
@@ -457,6 +579,24 @@ async def run_tier2_extraction(
             lifecycle_archetype = item.get("lifecycle_archetype", "habitual")
             if not content:
                 continue
+
+            # Ephemeral archetype = reject outright
+            if lifecycle_archetype == "ephemeral":
+                logger.info(
+                    "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=ephemeral_archetype",
+                    tenant_id, content[:80],
+                )
+                continue
+
+            # Durability filter for suspicious candidates
+            item["category"] = "preference"  # ensure category set for heuristic check
+            if _is_suspicious_candidate(item) and reasoning_service:
+                if not await _passes_durability_check(content, reasoning_service):
+                    logger.info(
+                        "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=durability_check",
+                        tenant_id, content[:80],
+                    )
+                    continue
             if enhanced:
                 wrote_count += await _write_entry_enhanced(
                     state=state, events=events, tenant_id=tenant_id,

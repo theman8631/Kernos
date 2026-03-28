@@ -812,3 +812,50 @@ def test_name_ask_not_appended_if_response_asks_who_am_i_talking():
     response = "Hey! Who am I talking to today?"
     result = _maybe_append_name_ask(response, soul)
     assert result == response
+
+
+# ---------------------------------------------------------------------------
+# Knowledge extraction filtering (SPEC-KNOWLEDGE-FILTERING)
+# ---------------------------------------------------------------------------
+
+from kernos.kernel.projectors.llm_extractor import _is_suspicious_candidate
+
+
+class TestSuspiciousCandidate:
+    def test_ephemeral_always_suspicious(self):
+        assert _is_suspicious_candidate({"lifecycle_archetype": "ephemeral", "content": "anything"})
+
+    def test_contextual_always_suspicious(self):
+        assert _is_suspicious_candidate({"lifecycle_archetype": "contextual", "content": "anything"})
+
+    def test_identity_not_suspicious(self):
+        assert not _is_suspicious_candidate({
+            "lifecycle_archetype": "identity", "content": "User's name is Kabe"
+        })
+
+    def test_structural_not_suspicious_without_markers(self):
+        assert not _is_suspicious_candidate({
+            "lifecycle_archetype": "structural", "content": "Lives in San Jose"
+        })
+
+    def test_content_with_task_markers_suspicious(self):
+        assert _is_suspicious_candidate({
+            "lifecycle_archetype": "structural", "content": "User requested a calendar entry"
+        })
+
+    def test_content_with_discussion_markers_suspicious(self):
+        assert _is_suspicious_candidate({
+            "lifecycle_archetype": "habitual", "content": "We discussed setting up reminders"
+        })
+
+    def test_habitual_preference_with_test_marker(self):
+        assert _is_suspicious_candidate({
+            "lifecycle_archetype": "habitual", "category": "preference",
+            "content": "User tested the calendar integration"
+        })
+
+    def test_clean_preference_not_suspicious(self):
+        assert not _is_suspicious_candidate({
+            "lifecycle_archetype": "habitual", "category": "preference",
+            "content": "Prefers SMS reminders before calendar events"
+        })

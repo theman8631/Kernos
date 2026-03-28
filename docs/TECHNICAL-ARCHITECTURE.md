@@ -262,6 +262,18 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Flow:** Tier 2 extraction detects `behavioral_instruction` category → coordinator fires `parse_behavioral_instruction()` → Haiku call with `CONTRACT_PARSER_SCHEMA` → creates CovenantRule with `source="user_stated"`. `must_not` rules get `enforcement_tier="confirm"`, others get `"silent"`. Global rules have `context_space=None`, space-scoped rules inherit the active space.
 
+### Knowledge Extraction Filtering
+
+**File:** `kernos/kernel/projectors/llm_extractor.py`
+
+Three-layer defense against storing conversation-specific facts as durable knowledge:
+
+1. **Prompt tightening:** Expanded NOT WORTH PERSISTING section with explicit negative examples (task requests, meta-conversation, system friction, conversation summaries). Core test: "Is this true about the user BEYOND this conversation?" Good/bad example pairs included.
+
+2. **Archetype tightening:** "ephemeral" archetype rejected outright (logged as `KNOWLEDGE_FILTERED: reason=ephemeral_archetype`). "contextual" constrained to user life context only. Preference entries must be in durable-preference form, not request/action form.
+
+3. **Durability gate:** `_is_suspicious_candidate()` uses cheap heuristic markers (not semantic truth) to flag candidates with conversation/task framing. Suspicious candidates get a lightweight Haiku YES/NO durability check (`_passes_durability_check()`). ~10-20% of candidates gated. Clearly-good candidates (identity, structural, high-confidence) bypass the gate.
+
 ### Covenant Management
 
 **What it does:** Dedup, contradiction detection, and user-facing management of covenant rules. Prevents duplicate rules, resolves MUST/MUST_NOT contradictions (newer rule wins), and provides the `manage_covenants` kernel tool.
