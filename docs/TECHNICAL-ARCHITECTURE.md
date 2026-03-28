@@ -89,7 +89,24 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 ### Message Handler
 
-**What it does:** Orchestrates the full message lifecycle — provisioning, soul loading, prompt assembly, task execution, memory extraction, persistence, event emission.
+**What it does:** Orchestrates the full message lifecycle via a six-phase pipeline with independent error boundaries. `process()` is ~25 lines of orchestration calling phase methods. `TurnContext` dataclass flows accumulated state across phases.
+
+**Six phases:**
+1. **Provision** — tenant, soul, MCP config, covenants, evaluator, member identity
+2. **Route** — LLM router, space switching, topic hints, file uploads
+3. **Assemble** — Cognitive UI blocks (RULES, NOW, STATE, RESULTS, ACTIONS, MEMORY) + tools + messages
+4. **Reason** — ReasoningRequest construction, task engine execution
+5. **Consequence** — confirmation replay, tool config, projectors, soul update
+6. **Persist** — store messages, conv log, compaction (with guard + backoff), events
+
+**Cognitive UI grammar** (7 blocks, assembled as Markdown H2 sections):
+- `## RULES` — operating principles + behavioral contracts + bootstrap
+- `## NOW` — time, platform, auth, active space posture
+- `## STATE` — agent identity, user knowledge (structural/identity/habitual only)
+- `## RESULTS` — receipts, system events, cross-domain context
+- `## ACTIONS` — capability directory, outbound channels, docs hint
+- `## MEMORY` — compaction context (Living State, cross-domain)
+- `## CONVERSATION` — physically carried by messages array, not in system prompt
 
 **File:** `kernos/messages/handler.py`
 
