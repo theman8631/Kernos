@@ -863,6 +863,39 @@ async def _store_scheduled_message(handler, trigger: Trigger, content: str) -> N
         )
 
 
+async def _write_receipt(
+    handler, trigger: Trigger, outcome: str,
+    event_summary: str = "", channel: str = "", error: str = "",
+) -> None:
+    """Write a structured [RECEIPT] entry to the conversation log."""
+    if not hasattr(handler, "conv_logger") or not trigger.space_id:
+        return
+    try:
+        parts = [
+            f"[RECEIPT] trigger_fired | {trigger.trigger_id}",
+            f"| {trigger.action_description}",
+        ]
+        if event_summary:
+            parts.append(f"| event={event_summary}")
+        parts.append(f"| channel={channel or 'default'}")
+        parts.append(f"| outcome={outcome}")
+        if error:
+            parts.append(f"| error={error}")
+        parts.append(f"| fire_count={trigger.fire_count}")
+        parts.append(f"| timestamp={utc_now()}")
+        receipt_content = " ".join(parts)
+
+        await handler.conv_logger.append(
+            tenant_id=trigger.tenant_id,
+            space_id=trigger.space_id,
+            speaker="system",
+            channel="receipt",
+            content=receipt_content,
+        )
+    except Exception as exc:
+        logger.warning("RECEIPT_WRITE_FAILED: trigger=%s error=%s", trigger.trigger_id, exc)
+
+
 async def _fire_trigger(trigger: Trigger, handler) -> bool:
     """Execute a trigger's action. Returns True on success."""
     if trigger.action_type == "notify":
@@ -877,9 +910,19 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
             await _store_scheduled_message(
                 handler, trigger, f"[SCHEDULED] {message}",
             )
+            # Execution receipt
+            await _write_receipt(
+                handler, trigger, outcome="success",
+                channel=trigger.notify_via or "default",
+            )
         else:
             # Hold for delivery on next user message
             trigger.pending_delivery = message
+            await _write_receipt(
+                handler, trigger, outcome="failed",
+                channel=trigger.notify_via or "default",
+                error="outbound_delivery_failed",
+            )
             logger.warning(
                 "TRIGGER_DELIVERY_PENDING: id=%s reason=outbound_failed",
                 trigger.trigger_id,
@@ -1347,6 +1390,13 @@ async def _evaluate_calendar_trigger(
                         content=f"[EVENT] {message}",
                     )
 
+                # Execution receipt
+                await _write_receipt(
+                    handler, trigger, outcome="success",
+                    event_summary=event.summary,
+                    channel=channel or "default",
+                )
+
                 # Recovery from degraded state
                 if trigger.degraded:
                     logger.info(
@@ -1376,6 +1426,12 @@ async def _evaluate_calendar_trigger(
                 logger.error(
                     "EVENT_FIRE_FAILED: trigger=%s event=%s error=%s",
                     trigger.trigger_id, event.id, exc,
+                )
+                await _write_receipt(
+                    handler, trigger, outcome="failed",
+                    event_summary=event.summary,
+                    channel=channel or "default",
+                    error=str(exc)[:100],
                 )
 
     # 6. Handle one-shot completion

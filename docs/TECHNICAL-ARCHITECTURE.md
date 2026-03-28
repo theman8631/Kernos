@@ -701,6 +701,16 @@ Per-space `asyncio.Lock` serializes the full read-modify-write section in `appen
 
 **Compaction concurrency guard:** `handler._compacting: set[str]` prevents concurrent compactions for the same space. Cleared in `finally` block regardless of success or failure.
 
+### Background Execution Receipts
+
+**File:** `kernos/kernel/scheduler.py`
+
+When scheduler fires succeed or fail, a structured `[RECEIPT]` entry is written to the conversation log (`speaker="system"`, `channel="receipt"`). Receipts are execution-shaped — they record what the system DID, not the notification text the user SAW.
+
+Format: `[RECEIPT] trigger_fired | {trigger_id} | {description} | event={summary} | channel={channel} | outcome={success|failed} | fire_count={n} | timestamp={utc}`
+
+`_write_receipt()` helper called after both event trigger fires and time trigger fires. Failure receipts include error class. Receipts age out through compaction naturally — no special preservation. The agent can cite them as evidence of scheduler-executed actions.
+
 **Member ID**: `resolve_owner_member_id(tenant_id)` — canonical resolver. All callers (scheduler, reasoning, handler) use this instead of inline `f"member:{...}:owner"` construction.
 
 **NL creation**: `manage_schedule create` uses Haiku extraction. Schema includes `condition_type`, `event_source`, `event_filter`, `event_lead_minutes` for event triggers. `event_filter` matches event title/summary only.

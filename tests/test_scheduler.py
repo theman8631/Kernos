@@ -1360,6 +1360,122 @@ class TestAdaptiveCadence:
         assert result == 30  # floor
 
 
+class TestExecutionReceipts:
+    """SPEC-BACKGROUND-EXECUTION-RECEIPTS: structured [RECEIPT] entries."""
+
+    async def test_event_fire_writes_receipt(self, tmp_path):
+        """Event trigger fire produces a [RECEIPT] log entry."""
+        now = datetime.now(timezone.utc)
+        store = TriggerStore(tmp_path)
+        trigger = Trigger(
+            trigger_id="trig_rcpt", tenant_id="t1",
+            condition_type="event", event_source="calendar",
+            event_lead_minutes=10, status="active", recurrence="standing",
+            action_description="SMS 5 min before events",
+            space_id="space1", notify_via="sms",
+        )
+        await store.save(trigger)
+
+        raw = json.dumps([
+            {"id": "ev1", "summary": "Team standup",
+             "start": {"dateTime": (now + timedelta(minutes=5)).isoformat()}}
+        ])
+
+        receipt_calls = []
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conv_logger = MagicMock()
+        handler.conv_logger.append = AsyncMock(side_effect=lambda **kw: receipt_calls.append(kw))
+        mcp = MagicMock()
+        mcp.call_tool = AsyncMock(return_value=raw)
+
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
+        assert fired == 1
+
+        # Find the receipt entry
+        receipt_entries = [c for c in receipt_calls if c.get("channel") == "receipt"]
+        assert len(receipt_entries) == 1
+        r = receipt_entries[0]
+        assert r["speaker"] == "system"
+        assert "[RECEIPT] trigger_fired" in r["content"]
+        assert "trig_rcpt" in r["content"]
+        assert "Team standup" in r["content"]
+        assert "outcome=success" in r["content"]
+
+    async def test_event_fire_failure_writes_receipt(self, tmp_path):
+        """Failed event fire produces a failure receipt."""
+        now = datetime.now(timezone.utc)
+        store = TriggerStore(tmp_path)
+        trigger = Trigger(
+            trigger_id="trig_fail", tenant_id="t1",
+            condition_type="event", event_source="calendar",
+            event_lead_minutes=10, status="active", recurrence="standing",
+            action_description="Notify before events",
+            space_id="space1",
+        )
+        await store.save(trigger)
+
+        raw = json.dumps([
+            {"id": "ev1", "summary": "Meeting",
+             "start": {"dateTime": (now + timedelta(minutes=5)).isoformat()}}
+        ])
+
+        receipt_calls = []
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(side_effect=RuntimeError("network down"))
+        handler.conv_logger = MagicMock()
+        handler.conv_logger.append = AsyncMock(side_effect=lambda **kw: receipt_calls.append(kw))
+        mcp = MagicMock()
+        mcp.call_tool = AsyncMock(return_value=raw)
+
+        fired, _ = await evaluate_event_triggers(store, "t1", handler, mcp)
+
+        receipt_entries = [c for c in receipt_calls if c.get("channel") == "receipt"]
+        assert len(receipt_entries) == 1
+        assert "outcome=failed" in receipt_entries[0]["content"]
+        assert "network down" in receipt_entries[0]["content"]
+
+    async def test_time_trigger_fire_writes_receipt(self, tmp_path):
+        """Time trigger fire produces a [RECEIPT] log entry."""
+        store = TriggerStore(tmp_path)
+        t = Trigger(
+            trigger_id="trig_time_rcpt", tenant_id="t1",
+            condition_type="time", next_fire_at=_past_iso(),
+            status="active", action_type="notify",
+            action_params={"message": "Hello"},
+            action_description="Reminder: Hello",
+            space_id="space1", conversation_id="conv1",
+        )
+        await store.save(t)
+
+        receipt_calls = []
+        handler = MagicMock()
+        handler.send_outbound = AsyncMock(return_value=True)
+        handler.conversations = MagicMock()
+        handler.conversations.append = AsyncMock()
+        handler.conv_logger = MagicMock()
+        handler.conv_logger.append = AsyncMock(side_effect=lambda **kw: receipt_calls.append(kw))
+
+        await evaluate_triggers(store, "t1", handler)
+
+        receipt_entries = [c for c in receipt_calls if c.get("channel") == "receipt"]
+        assert len(receipt_entries) >= 1
+        r = receipt_entries[0]
+        assert "[RECEIPT] trigger_fired" in r["content"]
+        assert "outcome=success" in r["content"]
+
+    def test_receipt_format(self):
+        """Receipt content follows the structured tag format."""
+        content = (
+            "[RECEIPT] trigger_fired | trig_abc | Reminder"
+            " | channel=sms | outcome=success | fire_count=1"
+            " | timestamp=2026-03-27T01:00:00+00:00"
+        )
+        assert content.startswith("[RECEIPT]")
+        assert "trigger_fired" in content
+        assert "outcome=success" in content
+
+
 class TestEventPollTimeFormat:
     """Bug fix: MCP rejects timezone offsets and microseconds in timeMin/timeMax."""
 
