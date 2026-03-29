@@ -1342,14 +1342,19 @@ async def _evaluate_calendar_trigger(
     for event in events:
         is_matched = event.id in trigger.event_matched_ids
         minutes_until = (event.start - now).total_seconds() / 60
-        logger.info(
-            "EVENT_CHECK: trigger=%s event=%s summary=%r "
-            "minutes_until=%.1f lead=%d matched=%s",
-            trigger.trigger_id, event.id, event.summary,
-            minutes_until, trigger.event_lead_minutes, is_matched,
-        )
 
         if is_matched:
+            # Already fired for this event — skip silently
+            continue
+
+        if minutes_until > trigger.event_lead_minutes:
+            # Outside lead window — not yet time to fire
+            logger.info(
+                "EVENT_WAIT: trigger=%s event=%s summary=%r "
+                "minutes_until=%.1f lead=%d",
+                trigger.trigger_id, event.id, event.summary,
+                minutes_until, trigger.event_lead_minutes,
+            )
             continue
 
         if minutes_until <= trigger.event_lead_minutes:
@@ -1359,13 +1364,15 @@ async def _evaluate_calendar_trigger(
                 time_str = format_user_time(event.start, user_timezone)
             except (ValueError, Exception):
                 time_str = event.start.strftime("%I:%M %p")
-            mins = int(minutes_until)
-            if mins == 0:
+            # Use configured lead for display (stable), not live delta (lossy).
+            # Fall back to "starting now" if event has already started.
+            lead = trigger.event_lead_minutes if minutes_until > 0 else 0
+            if lead <= 0:
                 time_note = "starting now"
-            elif mins == 1:
+            elif lead == 1:
                 time_note = "in 1 minute"
             else:
-                time_note = f"in {mins} minutes"
+                time_note = f"in {lead} minutes"
             message = f"Upcoming: {event.summary} at {time_str}"
             if event.location:
                 message += f" ({event.location})"

@@ -132,7 +132,8 @@ class TurnContext:
     system_prompt: str = ""
     tools: list[dict] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
-    cross_domain_prefix: str | None = None
+    results_prefix: str | None = None
+    memory_prefix: str | None = None
 
     # Phase 4: Reason
     response_text: str = ""
@@ -338,17 +339,11 @@ def _build_state_block(
     return "## STATE\n" + "\n\n".join(parts)
 
 
-def _build_results_block(cross_domain_prefix: str | None) -> str:
-    """## RESULTS — receipts + pending notices.
-
-    Receipts and system events are injected into cross_domain_prefix
-    by _assemble_space_context. This block wraps them with the header.
-    Additional receipt/pending content is added by the handler after
-    this block is built.
-    """
+def _build_results_block(results_prefix: str | None) -> str:
+    """## RESULTS — receipts, system events, awareness whispers, pending notices."""
     parts: list[str] = []
-    if cross_domain_prefix:
-        parts.append(cross_domain_prefix)
+    if results_prefix:
+        parts.append(results_prefix)
     if not parts:
         return ""
     return "## RESULTS\n" + "\n\n".join(parts)
@@ -378,20 +373,14 @@ def _build_actions_block(
     return "## ACTIONS\n" + "\n\n".join(parts)
 
 
-def _build_memory_block(cross_domain_prefix: str | None) -> str:
-    """## MEMORY — compaction context (Living State, cross-domain).
-
-    The cross_domain_prefix already contains compaction document and
-    cross-domain injections. This block is a subset of RESULTS for
-    background context. In practice, cross_domain_prefix is shared
-    between RESULTS (receipts/awareness) and MEMORY (compaction).
-    To avoid duplication, MEMORY is populated only if cross_domain_prefix
-    contains compaction content, which it always does after first compaction.
-    """
-    # MEMORY content is already in cross_domain_prefix which was placed in RESULTS.
-    # This placeholder exists for the grammar. Future: split cross_domain_prefix
-    # into receipt vs compaction content.
-    return ""
+def _build_memory_block(memory_prefix: str | None) -> str:
+    """## MEMORY — compaction context (Living State, archived history index)."""
+    parts: list[str] = []
+    if memory_prefix:
+        parts.append(memory_prefix)
+    if not parts:
+        return ""
+    return "## MEMORY\n" + "\n\n".join(parts)
 
 
 def _compose_blocks(*blocks: str) -> str:
@@ -420,7 +409,7 @@ def _build_system_prompt(
     state_block = _build_state_block(soul, template, user_knowledge_entries)
     results = _build_results_block(cross_domain_prefix)
     actions = _build_actions_block(capability_prompt, message, channel_registry)
-    memory = _build_memory_block(cross_domain_prefix)
+    memory = _build_memory_block(cross_domain_prefix)  # compat: uses same prefix
     return _compose_blocks(rules, now_block, state_block, results, actions, memory)
 
 
@@ -1234,49 +1223,41 @@ class MessageHandler:
         conversation_id: str,
         active_space_id: str,
         active_space: ContextSpace | None,
-    ) -> tuple[list[dict], str | None]:
+    ) -> tuple[list[dict], str | None, str | None]:
         """Assemble the agent's conversation context for the active space.
 
-        Context window layout (top to bottom):
-        [System prompt]                    <- primacy zone
-        [Compaction index] (if exists)     <- historical awareness
-        [Cross-domain injections]          <- background, low attention
-        [Compaction document]
-          |-- Ledger (oldest -> newest)    <- middle zone (archival)
-          |-- Living State                 <- approaching recency zone
-        [Recent conversation messages]     <- strongest recency zone
-
-        Returns (recent_messages, system_prefix) where:
+        Returns (recent_messages, results_prefix, memory_prefix) where:
         - recent_messages: messages since last compaction (the live thread)
-        - system_prefix: index + cross-domain + compaction doc for system prompt
+        - results_prefix: receipts, system events, awareness (for ## RESULTS)
+        - memory_prefix: compaction index + document (for ## MEMORY)
         """
-        prefix_parts: list[str] = []
+        results_parts: list[str] = []
+        memory_parts: list[str] = []
 
-        # 1. Compaction index (if archives exist)
+        # 1. Compaction index → MEMORY
         comp_state = await self.compaction.load_state(tenant_id, active_space_id)
         if comp_state and comp_state.index_tokens > 0:
             index_text = await self.compaction.load_index(tenant_id, active_space_id)
             if index_text:
-                prefix_parts.append(
-                    f"## Archived history (summaries — full archives available on request):\n"
+                memory_parts.append(
+                    f"Archived history (summaries — full archives available on request):\n"
                     f"{index_text}"
                 )
 
-        # 2. Proactive awareness — pending whispers for session-start injection
+        # 2. Proactive awareness → RESULTS
         awareness_block = await self._get_pending_awareness(tenant_id, active_space_id)
         if awareness_block:
-            prefix_parts.append(awareness_block)
+            results_parts.append(awareness_block)
 
-        # 2b. Pending system events — internal notifications for agent awareness
+        # 2b. System events → RESULTS
         system_events = self.drain_system_events(tenant_id)
         if system_events:
             events_block = "RECENT SYSTEM EVENTS:\n" + "\n".join(system_events)
-            prefix_parts.append(events_block)
+            results_parts.append(events_block)
             logger.info(
                 "SYSTEM_EVENTS_INJECTED: tenant=%s count=%d",
                 tenant_id, len(system_events),
             )
-            # Write to conversation log with [system] speaker
             for evt in system_events:
                 try:
                     await self.conv_logger.append(
@@ -1289,14 +1270,15 @@ class MessageHandler:
                 except Exception:
                     pass
 
-        # 3. Compaction document (Ledger -> Living State)
+        # 3. Compaction document → MEMORY
         active_doc = await self.compaction.load_document(tenant_id, active_space_id)
         if active_doc:
-            prefix_parts.append(
-                f"## Context history for this space:\n{active_doc}"
+            memory_parts.append(
+                f"Context history for this space:\n{active_doc}"
             )
 
-        system_prefix = "\n\n".join(prefix_parts) if prefix_parts else None
+        results_prefix = "\n\n".join(results_parts) if results_parts else None
+        memory_prefix = "\n\n".join(memory_parts) if memory_parts else None
 
         # 4. Recent messages — read from space log (P2), fallback to legacy store
         recent_messages: list[dict] = []
@@ -1369,7 +1351,7 @@ class MessageHandler:
             )
             recent_messages.pop()
 
-        return recent_messages, system_prefix
+        return recent_messages, results_prefix, memory_prefix
 
     async def _get_pending_awareness(self, tenant_id: str, active_space_id: str) -> str:
         """Get pending whispers formatted for the agent's context."""
@@ -1896,7 +1878,7 @@ class MessageHandler:
         active_space_id = ctx.active_space_id
 
         # Space context (compaction, cross-domain, system events, receipts)
-        space_messages, ctx.cross_domain_prefix = await self._assemble_space_context(
+        space_messages, ctx.results_prefix, ctx.memory_prefix = await self._assemble_space_context(
             tenant_id, ctx.conversation_id, active_space_id, active_space
         )
 
@@ -1970,9 +1952,9 @@ class MessageHandler:
         rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul)
         now_block = _build_now_block(message, soul, active_space)
         state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries)
-        results = _build_results_block(ctx.cross_domain_prefix)
+        results = _build_results_block(ctx.results_prefix)
         actions = _build_actions_block(capability_prompt, message, self._channel_registry)
-        memory = _build_memory_block(ctx.cross_domain_prefix)
+        memory = _build_memory_block(ctx.memory_prefix)
 
         ctx.system_prompt = _compose_blocks(rules, now_block, state_block, results, actions, memory)
 
