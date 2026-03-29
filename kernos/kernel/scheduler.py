@@ -480,7 +480,8 @@ async def handle_manage_schedule(
     For create/update: description is parsed via Haiku into structured params.
     """
     if action == "list":
-        return await _list_triggers(trigger_store, tenant_id)
+        include_inactive = "retired" in description.lower() or "inactive" in description.lower() or "all" in description.lower()
+        return await _list_triggers(trigger_store, tenant_id, include_inactive=include_inactive)
 
     if action == "create":
         if not description:
@@ -549,8 +550,12 @@ async def handle_manage_schedule(
     return f"Error: Unknown action '{action}'. Use list, create, update, pause, resume, or remove."
 
 
-async def _list_triggers(store: TriggerStore, tenant_id: str) -> str:
-    triggers = await store.list_all(tenant_id)
+async def _list_triggers(store: TriggerStore, tenant_id: str, include_inactive: bool = False) -> str:
+    all_triggers = await store.list_all(tenant_id)
+    if include_inactive:
+        triggers = all_triggers
+    else:
+        triggers = [t for t in all_triggers if t.status in ("active", "paused")]
     if not triggers:
         return "No scheduled actions."
 

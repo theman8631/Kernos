@@ -1338,18 +1338,21 @@ class MessageHandler:
             sanitized.append(m)
         recent_messages = sanitized
 
-        # Sanitize: drop any trailing user messages (orphaned from a previous failed request).
-        # The Anthropic API requires alternating roles. If a rate limit or provider error
-        # prevented storing the assistant response, the thread ends with a stale user message
-        # that would create consecutive user messages when the current message is appended.
+        # Sanitize: merge any trailing user messages (orphaned from rapid-fire or failed request).
+        # The Anthropic API requires alternating roles. If consecutive user messages exist,
+        # merge them into one so the content isn't lost. The agent sees all user input.
+        merged_orphans: list[str] = []
         while recent_messages and recent_messages[-1]["role"] == "user":
-            logger.warning(
-                "ORPHANED_USER_MSG: dropping trailing user message from space thread "
-                "(no assistant response — likely a previous rate-limit or provider error). "
+            orphan = recent_messages.pop()
+            merged_orphans.insert(0, orphan["content"])
+            logger.info(
+                "ORPHANED_USER_MSG: merging trailing user message into next turn. "
                 "Content: %.100s",
-                recent_messages[-1]["content"],
+                orphan["content"],
             )
-            recent_messages.pop()
+        # Orphaned content will be prepended to the current user message in _phase_assemble
+        if merged_orphans:
+            self._orphaned_user_content = merged_orphans
 
         return recent_messages, results_prefix, memory_prefix
 
@@ -1979,9 +1982,15 @@ class MessageHandler:
 
         # Build messages array (CONVERSATION block — carried by messages, not system prompt)
         final_user_content = message.content
+        # Prepend orphaned user messages from rapid-fire input
+        orphans = getattr(self, '_orphaned_user_content', None)
+        if orphans:
+            prefix = "\n".join(f"(Earlier message: {o})" for o in orphans)
+            final_user_content = prefix + "\n\n" + (message.content or "")
+            self._orphaned_user_content = None
         if ctx.upload_notifications:
             final_user_content = "\n".join(ctx.upload_notifications) + (
-                "\n\n" + message.content if message.content else "")
+                "\n\n" + final_user_content if final_user_content else "")
         ctx.messages = space_messages + [{"role": "user", "content": final_user_content}]
 
     async def _phase_reason(self, ctx: TurnContext) -> None:
@@ -2117,6 +2126,15 @@ class MessageHandler:
                             log_text, log_num = await self.conv_logger.read_current_log_text(tenant_id, ctx.active_space_id)
                             if log_text.strip() and ctx.active_space:
                                 self._compacting.add(ctx.active_space_id)
+                                # UX signal: notify user on Discord (not SMS)
+                                if message.platform == "discord":
+                                    try:
+                                        await self.send_outbound(
+                                            tenant_id, ctx.member_id, "discord",
+                                            "(Compacting...)",
+                                        )
+                                    except Exception:
+                                        pass
                                 try:
                                     comp_state = await self.compaction.compact_from_log(
                                         tenant_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)

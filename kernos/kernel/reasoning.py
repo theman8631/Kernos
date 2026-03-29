@@ -1629,21 +1629,19 @@ class ReasoningService:
         # Logs detection + Haiku analysis for monitoring. Does NOT intervene or block.
         if iterations == 0 and response.stop_reason == "end_turn":
             _TOOL_CLAIM_PHRASES = (
-                # Agent claims it used a specific tool
-                "used write_file", "used delete_file", "used read_file",
-                "used list_files", "used create-event", "used send-email",
-                "used manage_schedule", "used remember",
-                # Agent claims it performed an action (subject + past tense)
+                # Agent claims it PERFORMED an action (first person + past tense)
+                # These indicate the agent believes it did something, not that it's
+                # discussing a tool conceptually. Mentioning a tool by name without
+                # claiming action is NOT a hallucination signal.
                 "i created", "i deleted", "i wrote", "i removed",
                 "i've created", "i've deleted", "i've written", "i've removed",
                 "i scheduled", "i've scheduled", "i set a reminder",
-                "i've set a reminder", "i'll remind",
+                "i've set a reminder",
+                "i sent", "i've sent",
                 # Completion claims at start of response
-                "done —", "✅",
-                # Schedule-specific: agent describes timing of a future action
-                "scheduled —", "fires at",
-                "incoming at", "coming at", "will fire at",
-                "set for", "reminder set", "you'll get",
+                "done —", "done.", "✅",
+                # Schedule-specific: agent describes a COMPLETED future action
+                "reminder set", "event created",
                 "heads up at", "alert at", "notification at",
                 "locked in", "lands at", "queued for",
                 "on its way", "will arrive at", "dropping at",

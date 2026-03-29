@@ -206,8 +206,10 @@ Ledger rules:
 3. One line per topic. Maximum one sentence per bullet. If a topic needs more detail, the source log has it.
 4. Preserve in every bullet: named entities mentioned, decisions made, commitments given, and key facts (numbers, dates, names). These are the searchable anchors that help remember() find the right Ledger entry.
 5. Do NOT preserve: reasoning, back-and-forth discussion, suggestions, emotional context, analysis, or how conclusions were reached. Those live in the source log.
-6. Include the source log reference in the header.
-7. Sequential numbering starting from 1.
+6. Do NOT preserve: retry sequences, troubleshooting steps, tool errors, testing play-by-play, or operational narrative. If the conversation was primarily testing/debugging, summarize the OUTCOME only: what worked, what was decided, what changed.
+7. Do NOT restate facts or decisions already established in prior Ledger entries unless they materially changed. If a preference or fact is unchanged from earlier entries, skip it.
+8. Include the source log reference in the header.
+9. Sequential numbering starting from 1.
 
 Example of a GOOD Ledger entry:
 
@@ -237,7 +239,7 @@ A reader who only reads the Living State should be able to step into this conver
 
 The Living State is not a summary of the conversation. It is a maintained snapshot of current reality as understood through this context space's domain. Old information that is no longer active does not persist here — it lives in the Ledger (and in full fidelity in the source logs).
 
-The Living State should feel rich and detailed. Unlike the Ledger (which is deliberately minimal), the Living State is the working document — it needs enough detail that a future agent can continue operating without re-reading the source logs.
+The Living State should be detailed enough that a future agent can continue operating, but not so detailed that it recreates the conversation. Focus on current truth, active threads, and pending items. Drop testing/debugging narratives, resolved troubleshooting, and operational play-by-play. Deep history is recoverable from source logs — the Living State is for orientation, not reconstruction.
 
 The context space definition determines the character of the Living State:
 - In a transactional/operational context, the Living State reads like a dashboard — specific, data-dense, covering recent activity at full fidelity.
