@@ -455,12 +455,12 @@ class MessageHandler:
         self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
         from kernos.kernel.channels import ChannelRegistry
         self._channel_registry = ChannelRegistry()
-        reasoning._channel_registry = self._channel_registry
+        reasoning.set_channel_registry(self._channel_registry)
 
         from kernos.kernel.scheduler import TriggerStore
         self._trigger_store = TriggerStore(os.getenv("KERNOS_DATA_DIR", "./data"))
-        reasoning._trigger_store = self._trigger_store
-        reasoning._handler = self
+        reasoning.set_trigger_store(self._trigger_store)
+        reasoning.set_handler(self)
 
         from kernos.kernel.compaction import CompactionService
         from kernos.kernel.tokens import EstimateTokenAdapter
@@ -760,6 +760,11 @@ class MessageHandler:
         """
         from kernos.kernel.scheduler import resolve_owner_member_id
         return resolve_owner_member_id(tenant_id)
+
+    async def read_log_text(self, tenant_id: str, space_id: str, log_number: int) -> str:
+        """Read conversation log text — satisfies HandlerProtocol."""
+        result = await self.conv_logger.read_log_text(tenant_id, space_id, log_number)
+        return result or ""
 
     def queue_system_event(self, tenant_id: str, event: str) -> None:
         """Queue a system event for injection into the next system prompt."""
@@ -1747,7 +1752,7 @@ class MessageHandler:
         ctx.conversation_id = conversation_id
 
         # Housekeeping
-        self.reasoning._conflict_raised_this_turn = False
+        self.reasoning.reset_conflict_raised()
         self.reasoning.cleanup_expired_authorizations(tenant_id)
         self._error_buffer.set_tenant(tenant_id)
         message.member_id = self._resolve_member(tenant_id, message.platform, message.sender)
@@ -2003,7 +2008,7 @@ class MessageHandler:
         request = ReasoningRequest(
             tenant_id=ctx.tenant_id, conversation_id=ctx.conversation_id,
             system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
-            model=getattr(self.reasoning._provider, "main_model", _MODEL),
+            model=self.reasoning.main_model,
             trigger="user_message", active_space_id=ctx.active_space_id,
             input_text=ctx.message.content, active_space=ctx.active_space,
             user_timezone=ctx.soul.timezone,
@@ -2022,8 +2027,8 @@ class MessageHandler:
         )
 
         # Confirmation replay
-        pending = self.reasoning._pending_actions.get(tenant_id)
-        conflict_this_turn = self.reasoning._conflict_raised_this_turn
+        pending = self.reasoning.get_pending_actions(tenant_id)
+        conflict_this_turn = self.reasoning.get_conflict_raised()
         if pending and conflict_this_turn:
             confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
             ctx.response_text = confirm_pattern.sub("", ctx.response_text).strip()
@@ -2055,19 +2060,19 @@ class MessageHandler:
                     else:
                         execution_results.append(f"Expired: {action.proposed_action}")
                         logger.warning("CONFIRM_EXPIRED: tool=%s idx=%d", action.tool_name, idx)
-                del self.reasoning._pending_actions[tenant_id]
+                self.reasoning.clear_pending_actions(tenant_id)
                 ctx.response_text = confirm_pattern.sub("", ctx.response_text).strip()
                 if execution_results:
                     ctx.response_text += "\n\n" + "\n".join(execution_results)
             else:
                 all_expired = all(datetime.now(timezone.utc) >= a.expires_at for a in pending)
                 if all_expired:
-                    del self.reasoning._pending_actions[tenant_id]
+                    self.reasoning.clear_pending_actions(tenant_id)
                     logger.info("PENDING_CLEARED: tenant=%s reason=all_expired", tenant_id)
 
         # Tool config persistence
-        if self.reasoning._tools_changed:
-            self.reasoning._tools_changed = False
+        if self.reasoning.get_tools_changed():
+            self.reasoning.reset_tools_changed()
             try:
                 await self._persist_mcp_config(tenant_id)
                 system_space = await self._get_system_space(tenant_id)

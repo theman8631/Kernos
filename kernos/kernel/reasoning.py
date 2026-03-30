@@ -218,6 +218,52 @@ class ReasoningService:
         """Wire up the state store for request_tool activation."""
         self._state = state
 
+    def set_channel_registry(self, registry: Any) -> None:
+        """Wire up the channel registry for send_to_channel."""
+        self._channel_registry = registry
+
+    def set_trigger_store(self, store: Any) -> None:
+        """Wire up the trigger store for manage_schedule."""
+        self._trigger_store = store
+
+    def set_handler(self, handler: Any) -> None:
+        """Wire up the handler (implements HandlerProtocol)."""
+        self._handler = handler
+
+    # --- Public state accessors (replace private attribute access from handler) ---
+
+    def get_pending_actions(self, tenant_id: str) -> list[PendingAction] | None:
+        """Return a copy of pending actions for a tenant, or None."""
+        actions = self._pending_actions.get(tenant_id)
+        if actions is None:
+            return None
+        return list(actions)  # copy — caller cannot mutate internal list
+
+    def clear_pending_actions(self, tenant_id: str) -> None:
+        """Remove all pending actions for a tenant."""
+        self._pending_actions.pop(tenant_id, None)
+
+    def get_conflict_raised(self) -> bool:
+        """Whether a gate conflict was raised this turn."""
+        return self._conflict_raised_this_turn
+
+    def reset_conflict_raised(self) -> None:
+        """Reset the per-turn conflict flag."""
+        self._conflict_raised_this_turn = False
+
+    def get_tools_changed(self) -> bool:
+        """Whether manage_capabilities changed tool state this turn."""
+        return self._tools_changed
+
+    def reset_tools_changed(self) -> None:
+        """Reset the tools-changed flag."""
+        self._tools_changed = False
+
+    @property
+    def main_model(self) -> str:
+        """The primary model name from the provider."""
+        return getattr(self._provider, "main_model", "unknown")
+
     def get_loaded_tools(self, space_id: str) -> set[str]:
         """Get the set of MCP tool names currently loaded for a space."""
         return self._loaded_tools.get(space_id, set())
@@ -715,11 +761,11 @@ class ReasoningService:
                 f"Call remember() first to find the correct source reference."
             )
 
-        # Read via public ConversationLogger API
-        if not self._handler or not hasattr(self._handler, "conv_logger"):
+        # Read via HandlerProtocol.read_log_text
+        if not self._handler or not hasattr(self._handler, "read_log_text"):
             return "Conversation logger is not available."
 
-        log_text = await self._handler.conv_logger.read_log_text(
+        log_text = await self._handler.read_log_text(
             tenant_id, space_id, log_number,
         )
 

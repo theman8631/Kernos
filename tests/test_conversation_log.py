@@ -437,7 +437,7 @@ class TestRememberDetailsHandler:
 
     async def test_retrieves_from_archived_log(self, tmp_path):
         from kernos.kernel.reasoning import ReasoningService
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, AsyncMock
 
         conv_logger = ConversationLogger(data_dir=str(tmp_path))
         await conv_logger.append("t1", "s1", "user", "discord", "Henderson discussed")
@@ -445,8 +445,11 @@ class TestRememberDetailsHandler:
 
         svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         handler_mock = MagicMock()
-        handler_mock.conv_logger = conv_logger
-        svc._handler = handler_mock
+        # Satisfy HandlerProtocol: read_log_text delegates to conv_logger
+        async def _read_log(tid, sid, num):
+            return await conv_logger.read_log_text(tid, sid, num) or ""
+        handler_mock.read_log_text = _read_log
+        svc.set_handler(handler_mock)
 
         result = await svc._handle_remember_details("t1", "s1", {
             "source_ref": "log_001", "query": "Henderson",
@@ -463,8 +466,10 @@ class TestRememberDetailsHandler:
 
         svc = ReasoningService(MagicMock(), MagicMock(), MagicMock(), MagicMock())
         handler_mock = MagicMock()
-        handler_mock.conv_logger = conv_logger
-        svc._handler = handler_mock
+        async def _read_log(tid, sid, num):
+            return await conv_logger.read_log_text(tid, sid, num) or ""
+        handler_mock.read_log_text = _read_log
+        svc.set_handler(handler_mock)
 
         result = await svc._handle_remember_details("t1", "s1", {"source_ref": "1"})
         assert "Short log" in result
