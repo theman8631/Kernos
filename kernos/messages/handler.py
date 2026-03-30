@@ -272,6 +272,21 @@ def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
     )
 
 
+def _is_stale_knowledge(entry, days: int = 14) -> bool:
+    """Check if a knowledge entry's last_referenced is older than N days."""
+    ref = getattr(entry, "last_referenced", "") or ""
+    if not ref:
+        return False
+    try:
+        from kernos.utils import utc_now_dt
+        ref_dt = datetime.fromisoformat(ref)
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+        return (utc_now_dt() - ref_dt).days > days
+    except (ValueError, TypeError):
+        return False
+
+
 def _build_rules_block(
     template: AgentTemplate, contract_rules: list[CovenantRule], soul: Soul,
 ) -> str:
@@ -1954,8 +1969,30 @@ class MessageHandler:
         space_scope = [active_space_id, None] if active_space_id else None
         contract_rules = await self.state.query_covenant_rules(
             tenant_id, context_space_scope=space_scope, active_only=True)
-        user_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=50)
-        user_knowledge_entries = [e for e in user_ke if e.lifecycle_archetype in ("structural", "identity", "habitual")]
+        # Three-tier selective knowledge injection (SPEC-SELECTIVE-KNOWLEDGE-INJECTION)
+        all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
+
+        # Tier 1: Always inject — identity facts (name, age, timezone, location)
+        always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
+
+        # Tier 2: Never inject — ephemeral, expired, stale contextual
+        _never_archetypes = {"ephemeral"}
+        candidates = [
+            e for e in all_ke
+            if e not in always_inject
+            and e.lifecycle_archetype not in _never_archetypes
+            and not getattr(e, "expired_at", "")
+            and not (e.lifecycle_archetype == "contextual"
+                     and _is_stale_knowledge(e, days=14))
+        ]
+
+        # Tier 3: LLM shaping — select relevant entries for this turn
+        shaped = []
+        if candidates:
+            relevant_ids = await self._shape_knowledge(candidates, message, ctx)
+            shaped = [e for e in candidates if e.id in relevant_ids]
+
+        user_knowledge_entries = always_inject + shaped
 
         rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul)
         now_block = _build_now_block(message, soul, active_space)
@@ -2174,6 +2211,63 @@ class MessageHandler:
             logger.warning("Failed to emit message.sent: %s", exc)
 
         await self._update_conversation_summary(tenant_id, ctx.conversation_id, message.platform)
+
+    # --- Selective knowledge injection helpers ---
+
+    async def _shape_knowledge(
+        self, candidates: list, message: NormalizedMessage, ctx: TurnContext,
+    ) -> set[str]:
+        """Use cheap LLM to select relevant knowledge entries for this turn.
+
+        Returns set of entry IDs to inject. On failure, returns empty set
+        (Tier 1 only fallback — NOT full Tier 3 dump).
+        """
+        try:
+            candidate_lines = "\n".join(
+                f"- [{e.id}] \"{e.content}\" ({e.lifecycle_archetype})"
+                for e in candidates
+            )
+            recent_topic = self._get_recent_topic_hint(ctx)
+
+            result = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Select which user knowledge entries are relevant to "
+                    "this conversation turn. Return ONLY the IDs of relevant "
+                    "entries as a comma-separated list, or NONE if nothing "
+                    "is relevant.\nExample: know_abc, know_def"
+                ),
+                user_content=(
+                    f"User's message: \"{message.content[:200]}\"\n"
+                    f"Recent topic: {recent_topic}\n\n"
+                    f"Candidates:\n{candidate_lines}"
+                ),
+                max_tokens=128,
+                prefer_cheap=True,
+            )
+
+            if not result or "NONE" in result.upper():
+                return set()
+
+            ids: set[str] = set()
+            for token in result.replace(",", " ").split():
+                token = token.strip()
+                if token.startswith("know_"):
+                    ids.add(token)
+            logger.info("KNOWLEDGE_SHAPED: selected=%d/%d ids=%s",
+                        len(ids), len(candidates), ",".join(sorted(ids)[:5]))
+            return ids
+        except Exception as exc:
+            logger.warning("KNOWLEDGE_SHAPING_FAILED: %s — falling back to Tier 1 only", exc)
+            return set()  # fail-safe: Tier 1 only, NOT full dump
+
+    def _get_recent_topic_hint(self, ctx: TurnContext) -> str:
+        """Extract a brief topic hint from recent conversation."""
+        if not ctx.messages:
+            return "new conversation"
+        recent = ctx.messages[-3:]
+        texts = [m.get("content", "")[:100] for m in recent
+                 if isinstance(m.get("content"), str)]
+        return " | ".join(texts)[-200:] if texts else "general"
 
     async def _handle_reasoning_error(self, ctx: TurnContext, exc: Exception, user_msg: str) -> str:
         """Handle reasoning errors with event emission and user-facing message."""

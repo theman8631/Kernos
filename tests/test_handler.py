@@ -530,3 +530,53 @@ async def test_handler_uses_task_result_text_as_response():
 
     response = await handler.process(_make_message())
     assert response == "The answer from the task"
+
+
+# ---------------------------------------------------------------------------
+# Selective knowledge injection (SPEC-SELECTIVE-KNOWLEDGE-INJECTION)
+# ---------------------------------------------------------------------------
+
+
+from kernos.messages.handler import _is_stale_knowledge
+
+
+class TestStaleKnowledgeCheck:
+    def test_recent_not_stale(self):
+        from kernos.utils import utc_now
+        entry = MagicMock()
+        entry.last_referenced = utc_now()
+        assert not _is_stale_knowledge(entry, days=14)
+
+    def test_old_is_stale(self):
+        entry = MagicMock()
+        entry.last_referenced = "2020-01-01T00:00:00+00:00"
+        assert _is_stale_knowledge(entry, days=14)
+
+    def test_no_reference_not_stale(self):
+        entry = MagicMock()
+        entry.last_referenced = ""
+        assert not _is_stale_knowledge(entry, days=14)
+
+    def test_missing_attr_not_stale(self):
+        entry = MagicMock(spec=[])
+        assert not _is_stale_knowledge(entry, days=14)
+
+
+class TestTopicHint:
+    def test_empty_messages(self):
+        from kernos.messages.handler import MessageHandler, TurnContext
+        handler = MagicMock(spec=MessageHandler)
+        handler._get_recent_topic_hint = MessageHandler._get_recent_topic_hint.__get__(handler)
+        ctx = TurnContext(messages=[])
+        assert handler._get_recent_topic_hint(ctx) == "new conversation"
+
+    def test_extracts_from_recent(self):
+        from kernos.messages.handler import MessageHandler, TurnContext
+        handler = MagicMock(spec=MessageHandler)
+        handler._get_recent_topic_hint = MessageHandler._get_recent_topic_hint.__get__(handler)
+        ctx = TurnContext(messages=[
+            {"role": "user", "content": "Tell me about guitar"},
+            {"role": "assistant", "content": "Guitar is great"},
+        ])
+        hint = handler._get_recent_topic_hint(ctx)
+        assert "guitar" in hint.lower()

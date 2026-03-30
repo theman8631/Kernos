@@ -224,6 +224,16 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Tool schemas:** `kernos/kernel/tools/schemas.py` — all kernel tool JSON schemas (REQUEST_TOOL, READ_DOC_TOOL, etc.) and pure helpers (read_doc, read_source). ReasoningService imports and re-exports. Tool handlers remain in ReasoningService (tight coupling to service context).
 
+### Selective Knowledge Injection
+
+Three-tier system for STATE block knowledge loading:
+
+- **Tier 1 (always):** Identity facts (`lifecycle_archetype == "identity"`) — name, age, timezone, location. Always in STATE regardless of turn content.
+- **Tier 2 (never):** Ephemeral, expired, stale contextual (>14 days unreferenced). Never in STATE, still retrievable via remember_details.
+- **Tier 3 (LLM shapes):** Habitual/structural/recent contextual. A cheap Haiku call (`_shape_knowledge()`) selects which are relevant to the current turn. Returns entry IDs; only those are injected.
+
+Fail-safe: on shaping failure, falls back to Tier 1 only (NOT full dump). Documented scale trigger: when Tier 3 candidates exceed ~100, add embedding-based narrowing before the LLM call.
+
 **Handler↔Reasoning protocols:** `kernos/kernel/protocols.py` — explicit boundary contracts for testability and maintainability. `HandlerProtocol` (send_outbound, read_log_text) defines what reasoning needs from the handler. `ReasoningProtocol` defines what the handler needs from reasoning (execute_tool, complete_simple, pending state, tool state, model info). No private attribute access across the boundary — all interaction through public methods. `get_pending_actions()` returns a copy to prevent mutable state leakage.
 
 **Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
