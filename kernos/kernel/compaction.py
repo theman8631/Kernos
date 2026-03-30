@@ -370,10 +370,11 @@ class CompactionService:
                 cumulative_new_tokens=data.get("cumulative_new_tokens", 0),
                 last_compaction_at=data.get("last_compaction_at", ""),
                 index_tokens=data.get("index_tokens", 0),
-                compaction_threshold=data.get(
-                    "compaction_threshold",
-                    int(os.getenv("KERNOS_COMPACTION_THRESHOLD", "8000")),
-                ),
+                # Environment variable is authoritative — overrides persisted value
+                compaction_threshold=int(os.getenv(
+                    "KERNOS_COMPACTION_THRESHOLD",
+                    str(data.get("compaction_threshold", 8000)),
+                )),
                 _context_def_tokens=data.get("_context_def_tokens", 0),
                 _system_overhead=data.get("_system_overhead", 0),
                 consecutive_failures=data.get("consecutive_failures", 0),
