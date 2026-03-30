@@ -1276,7 +1276,7 @@ class MessageHandler:
                     pass
 
         # 3. Compaction document → MEMORY
-        active_doc = await self.compaction.load_document(tenant_id, active_space_id)
+        active_doc = await self.compaction.load_context_document(tenant_id, active_space_id)
         if active_doc:
             memory_parts.append(
                 f"Context history for this space:\n{active_doc}"

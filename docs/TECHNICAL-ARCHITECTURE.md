@@ -696,6 +696,18 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 
 **Adaptive cadence**: After each poll, `_compute_adaptive_cadence()` computes next poll interval based on nearest upcoming event and max lead time across triggers. Floor: 30s (imminent). Ceiling: 15min (nothing upcoming). Approaching lead window: 60s. Far away: capped at 5min.
 
+### Ledger Architecture — Bounded Hot Tail + Archive Story
+
+Context-loaded MEMORY uses three layers instead of loading all ledger entries:
+
+1. **Archive story** (~400 token cap): Short narrative synopsis of older eras. Stored in `archive_story.json`. Generated once from all archived entries, then updated incrementally (one cheap LLM call per archived entry). Not an exhaustive recap — an orientation artifact.
+
+2. **Hot ledger tail** (~2000 token budget): Most recent N entries that fit within budget. Typically 4-8 entries at current compaction-thinned size. Everything older falls off into the archive.
+
+3. **Living State**: Unchanged — rewritten every compaction cycle.
+
+`load_context_document()` returns the bounded version. Full document remains on disk for deep retrieval via `remember_details`. Target: MEMORY drops from ~42% to ~15% of context.
+
 ### Timezone Architecture
 
 **File:** `kernos/utils.py`

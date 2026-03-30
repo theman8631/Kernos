@@ -420,6 +420,179 @@ class CompactionService:
             return None
         return doc_path.read_text(encoding="utf-8")
 
+    # --- Bounded context loading (SPEC-LEDGER-ARCHITECTURE) ---
+
+    HOT_TAIL_BUDGET = 2000  # tokens
+
+    async def load_context_document(
+        self, tenant_id: str, space_id: str,
+        hot_tail_budget: int = 0,
+    ) -> str:
+        """Load a context-ready version: archive story + hot tail + Living State.
+
+        Full document remains on disk unchanged. Only the context-loaded
+        version is bounded.
+        """
+        if hot_tail_budget <= 0:
+            hot_tail_budget = self.HOT_TAIL_BUDGET
+
+        document = await self.load_document(tenant_id, space_id)
+        if not document:
+            return ""
+
+        entries = self._parse_ledger_entries(document)
+        living_state = self._extract_living_state(document)
+
+        # Select hot tail (most recent entries within budget)
+        hot_entries = self._select_hot_tail(entries, hot_tail_budget)
+        archived_count = len(entries) - len(hot_entries)
+
+        parts: list[str] = []
+
+        # Archive story (if we have archived entries)
+        if archived_count > 0:
+            story = self._load_archive_story(tenant_id, space_id)
+            if story:
+                parts.append(
+                    f"Archive: [{story.get('date_range_start', '?')} → "
+                    f"{story.get('date_range_end', '?')}]\n"
+                    f"{story.get('story', '')}"
+                )
+            elif archived_count > 0:
+                # First load — generate archive story
+                archived_entries = entries[:archived_count]
+                story = await self._generate_initial_archive_story(
+                    tenant_id, space_id, archived_entries,
+                )
+                if story:
+                    parts.append(
+                        f"Archive: [{story.get('date_range_start', '?')} → "
+                        f"{story.get('date_range_end', '?')}]\n"
+                        f"{story.get('story', '')}"
+                    )
+
+        if hot_entries:
+            parts.append("# Recent Ledger\n" + "\n\n".join(hot_entries))
+        if living_state:
+            parts.append("# Living State\n" + living_state)
+
+        return "\n\n".join(parts)
+
+    def _select_hot_tail(self, entries: list[str], budget_tokens: int) -> list[str]:
+        """Select most recent entries that fit within token budget."""
+        selected: list[str] = []
+        total = 0
+        for entry in reversed(entries):
+            entry_tokens = len(entry) // 4  # rough estimate
+            if total + entry_tokens > budget_tokens:
+                break
+            selected.insert(0, entry)
+            total += entry_tokens
+        # Always include at least the most recent entry
+        if not selected and entries:
+            selected = [entries[-1]]
+        return selected
+
+    def _load_archive_story(self, tenant_id: str, space_id: str) -> dict | None:
+        """Load the archive story from disk."""
+        path = self._space_dir(tenant_id, space_id) / "archive_story.json"
+        if not path.exists():
+            return None
+        try:
+            import json as _json
+            return _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _save_archive_story(self, tenant_id: str, space_id: str, story: dict) -> None:
+        """Save archive story to disk."""
+        import json as _json
+        path = self._space_dir(tenant_id, space_id) / "archive_story.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(story, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    async def _generate_initial_archive_story(
+        self, tenant_id: str, space_id: str, archived_entries: list[str],
+    ) -> dict | None:
+        """One-time generation of archive story from all archived entries."""
+        if not self.reasoning or not archived_entries:
+            return None
+        try:
+            entries_text = "\n\n".join(archived_entries[:30])  # cap input
+            result = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Summarize the following ledger entries into a short archive "
+                    "synopsis (under 100 words). Capture the story of this period "
+                    "— what kind of work/conversation it represents, key milestones, "
+                    "and the durable through-line. Not a list of every topic — a "
+                    "narrative orientation."
+                ),
+                user_content=entries_text,
+                max_tokens=256,
+                prefer_cheap=True,
+            )
+            # Extract date range from entries
+            import re as _re
+            dates = _re.findall(r'(\d{4}-\d{2}-\d{2})', entries_text)
+            date_start = dates[0] if dates else "?"
+            date_end = dates[-1] if dates else "?"
+
+            story = {
+                "date_range_start": date_start,
+                "date_range_end": date_end,
+                "story": result.strip(),
+                "archived_entry_count": len(archived_entries),
+                "last_updated_at": utc_now(),
+                "last_archived_compaction": len(archived_entries),
+            }
+            self._save_archive_story(tenant_id, space_id, story)
+            logger.info(
+                "ARCHIVE_STORY_CREATED: space=%s entries=%d",
+                space_id, len(archived_entries),
+            )
+            return story
+        except Exception as exc:
+            logger.warning("ARCHIVE_STORY_FAILED: %s", exc)
+            return None
+
+    async def update_archive_story(
+        self, tenant_id: str, space_id: str, newly_archived_entry: str,
+    ) -> None:
+        """Incrementally update archive story when an entry falls off hot tail."""
+        existing = self._load_archive_story(tenant_id, space_id)
+        if not existing or not self.reasoning:
+            return
+        try:
+            result = await self.reasoning.complete_simple(
+                system_prompt=(
+                    f"You maintain an archive synopsis for a conversation space.\n\n"
+                    f"Current archive synopsis ({existing['date_range_start']} → "
+                    f"{existing['date_range_end']}):\n"
+                    f"{existing['story']}\n\n"
+                    f"A new ledger entry has been archived:\n{newly_archived_entry}\n\n"
+                    f"Does this entry materially change or add to the archive synopsis?\n"
+                    f"- If YES: rewrite the synopsis incorporating the new information. "
+                    f"Keep it under 100 words.\n"
+                    f"- If NO: respond with exactly NO_UPDATE"
+                ),
+                user_content="",
+                max_tokens=256,
+                prefer_cheap=True,
+            )
+            if "NO_UPDATE" not in result.upper():
+                # Extract new date range end
+                import re as _re
+                dates = _re.findall(r'(\d{4}-\d{2}-\d{2})', newly_archived_entry)
+                if dates:
+                    existing["date_range_end"] = dates[-1]
+                existing["story"] = result.strip()
+                existing["archived_entry_count"] = existing.get("archived_entry_count", 0) + 1
+                existing["last_updated_at"] = utc_now()
+                self._save_archive_story(tenant_id, space_id, existing)
+                logger.info("ARCHIVE_STORY_UPDATED: space=%s", space_id)
+        except Exception as exc:
+            logger.warning("ARCHIVE_STORY_UPDATE_FAILED: %s", exc)
+
     async def load_index(
         self, tenant_id: str, space_id: str
     ) -> str | None:

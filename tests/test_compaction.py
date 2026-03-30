@@ -1006,3 +1006,102 @@ class TestSpaceThreadTimestamp:
         thread = await store.get_space_thread("t1", "c1", "sp1", include_timestamp=True)
         assert len(thread) == 1
         assert thread[0]["timestamp"] == "2026-03-10T10:00:00"
+
+
+# ---------------------------------------------------------------------------
+# Ledger Architecture — bounded hot tail + archive story
+# ---------------------------------------------------------------------------
+
+
+class TestHotTailSelection:
+    def test_selects_recent_within_budget(self, tmp_path):
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import EstimateTokenAdapter
+        svc = CompactionService(
+            state=MagicMock(), reasoning=None,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        entries = [f"## Compaction #{i}\n- Topic {i}: short summary" for i in range(10)]
+        # Each entry ~10 tokens
+        hot = svc._select_hot_tail(entries, budget_tokens=50)
+        assert len(hot) >= 1
+        assert hot[-1] == entries[-1]  # most recent always included
+
+    def test_always_includes_most_recent(self, tmp_path):
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import EstimateTokenAdapter
+        svc = CompactionService(
+            state=MagicMock(), reasoning=None,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        entries = ["## Compaction #1\n" + "x" * 10000]  # huge entry
+        hot = svc._select_hot_tail(entries, budget_tokens=10)
+        assert len(hot) == 1  # still includes the one entry
+
+    def test_empty_entries(self, tmp_path):
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import EstimateTokenAdapter
+        svc = CompactionService(
+            state=MagicMock(), reasoning=None,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        assert svc._select_hot_tail([], budget_tokens=2000) == []
+
+
+class TestArchiveStoryStorage:
+    def test_save_and_load(self, tmp_path):
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import EstimateTokenAdapter
+        svc = CompactionService(
+            state=MagicMock(), reasoning=None,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        story = {
+            "date_range_start": "2026-03-25",
+            "date_range_end": "2026-03-27",
+            "story": "Early relationship established.",
+            "archived_entry_count": 10,
+        }
+        svc._save_archive_story("t1", "sp1", story)
+        loaded = svc._load_archive_story("t1", "sp1")
+        assert loaded is not None
+        assert loaded["story"] == "Early relationship established."
+        assert loaded["archived_entry_count"] == 10
+
+    def test_load_missing_returns_none(self, tmp_path):
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import EstimateTokenAdapter
+        svc = CompactionService(
+            state=MagicMock(), reasoning=None,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        assert svc._load_archive_story("t1", "sp1") is None
+
+
+class TestContextDocument:
+    async def test_loads_bounded_document(self, tmp_path):
+        """load_context_document returns archive + hot tail + living state."""
+        from kernos.kernel.compaction import CompactionService
+        from kernos.kernel.tokens import EstimateTokenAdapter
+        svc = CompactionService(
+            state=MagicMock(), reasoning=None,
+            token_adapter=EstimateTokenAdapter(), data_dir=str(tmp_path),
+        )
+        # Write a document with many entries
+        entries = "\n\n".join(
+            f"## Compaction #{i} (source: log_{i:03d}) — 2026-03-{25+i//10}\n- Topic {i}"
+            for i in range(1, 21)
+        )
+        doc = f"# Ledger\n{entries}\n\n# Living State\nUser likes bananas."
+        doc_path = svc._space_dir("t1", "sp1") / "active_document.md"
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        doc_path.write_text(doc, encoding="utf-8")
+
+        # No reasoning → no archive story generated
+        result = await svc.load_context_document("t1", "sp1", hot_tail_budget=200)
+        assert "Living State" in result
+        assert "User likes bananas" in result
+        # Should have recent entries but not all 20
+        assert "Compaction #20" in result
+        # Very old entries should not be present
+        assert "Compaction #1\n" not in result or "Compaction #2\n" not in result
