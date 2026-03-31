@@ -1852,6 +1852,19 @@ class MessageHandler:
         if ctx.space_switched:
             import asyncio
             asyncio.create_task(self._run_session_exit(tenant_id, ctx.previous_space_id, conversation_id))
+            # Harvest facts from departing space
+            try:
+                from kernos.kernel.fact_harvest import harvest_facts
+                log_text = await self.conv_logger.read_current_log_text(tenant_id, ctx.previous_space_id)
+                if isinstance(log_text, tuple):
+                    log_text = log_text[0]
+                asyncio.create_task(harvest_facts(
+                    self.reasoning, self.state, self.events,
+                    tenant_id, ctx.previous_space_id, log_text or "",
+                    data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+                ))
+            except Exception:
+                pass
 
         if tenant_profile and ctx.active_space_id and ctx.active_space_id != ctx.previous_space_id:
             tenant_profile.last_active_space_id = ctx.active_space_id
@@ -2178,6 +2191,17 @@ class MessageHandler:
                                     except Exception:
                                         pass
                                 try:
+                                    # Harvest durable facts before compaction
+                                    try:
+                                        from kernos.kernel.fact_harvest import harvest_facts
+                                        await harvest_facts(
+                                            self.reasoning, self.state, self.events,
+                                            tenant_id, ctx.active_space_id, log_text,
+                                            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+                                        )
+                                    except Exception as _hx:
+                                        logger.warning("FACT_HARVEST: pre-compaction failed: %s", _hx)
+
                                     comp_state = await self.compaction.compact_from_log(
                                         tenant_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)
                                     old_num, new_num = await self.conv_logger.roll_log(tenant_id, ctx.active_space_id)

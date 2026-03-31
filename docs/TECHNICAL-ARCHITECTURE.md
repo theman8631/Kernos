@@ -234,6 +234,12 @@ Three-tier system for STATE block knowledge loading:
 
 Fail-safe: on shaping failure, falls back to Tier 1 only (NOT full dump). Documented scale trigger: when Tier 3 candidates exceed ~100, add embedding-based narrowing before the LLM call.
 
+### Checkpointed Fact Harvest
+
+**File:** `kernos/kernel/fact_harvest.py` | **Design:** `docs/DESIGN-LEDGER-VS-FACTS.md`
+
+Replaces per-turn fact/preference extraction with boundary-driven harvest. Per-turn Tier 2 extractor now only handles corrections + entities. Facts/preferences harvested at compaction boundaries and space switches via one reconciliation LLM call that sees the full unharvested span + all active facts. Outputs reconciled add/update/reinforce set. Existing embedding dedup preserved as fallback only.
+
 **Handler↔Reasoning protocols:** `kernos/kernel/protocols.py` — explicit boundary contracts for testability and maintainability. `HandlerProtocol` (send_outbound, read_log_text) defines what reasoning needs from the handler. `ReasoningProtocol` defines what the handler needs from reasoning (execute_tool, complete_simple, pending state, tool state, model info). No private attribute access across the boundary — all interaction through public methods. `get_pending_actions()` returns a copy to prevent mutable state leakage.
 
 **Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.

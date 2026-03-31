@@ -890,8 +890,10 @@ async def test_tier2_legacy_path_unchanged(tmp_path):
         tenant_id="t1",
     )
 
+    # SPEC-CHECKPOINTED-FACT-HARVEST: facts no longer extracted per-turn
     entries = await state.query_knowledge("t1")
-    assert any("teacher" in e.content.lower() for e in entries)
+    # Teacher fact NOT written per-turn (harvested at boundaries)
+    assert not any("teacher" in e.content.lower() for e in entries)
 
 
 async def test_tier2_enhanced_path_entity_resolution(tmp_path):

@@ -809,11 +809,9 @@ async def test_tier2_extraction_populates_lifecycle_archetype(tmp_path):
         reasoning_service=mock_rs, tenant_id="t1",
     )
 
+    # SPEC-CHECKPOINTED-FACT-HARVEST: facts no longer extracted per-turn
     entries = await store.query_knowledge("t1")
-    assert len(entries) == 1
-    assert entries[0].lifecycle_archetype == "structural"
-    assert entries[0].salience == pytest.approx(0.7)
-    assert entries[0].content == "Works as a carpenter"
+    assert len(entries) == 0  # harvested at boundaries, not per-turn
 
 
 # ---------------------------------------------------------------------------

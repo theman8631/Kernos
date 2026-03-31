@@ -506,8 +506,9 @@ async def run_tier2_extraction(
                     context_space=_space_for_entry(name, lifecycle_archetype),
                 )
 
-        # Facts
-        for item in extracted.get("facts", []):
+        # Facts — SKIPPED per-turn. Harvested at compaction boundaries.
+        # (SPEC-CHECKPOINTED-FACT-HARVEST)
+        for item in []:
             subject = item.get("subject", "user").strip()
             content = item.get("content", "").strip()
             confidence = _normalize_confidence(item.get("confidence", "inferred"))
@@ -571,8 +572,9 @@ async def run_tier2_extraction(
             # User-subject facts are written as KnowledgeEntries above.
             # soul.user_context is deprecated — no longer appended to.
 
-        # Preferences
-        for item in extracted.get("preferences", []):
+        # Preferences — SKIPPED per-turn. Harvested at compaction boundaries.
+        # (SPEC-CHECKPOINTED-FACT-HARVEST)
+        for item in []:
             subject = item.get("subject", "user").strip()
             content = item.get("content", "").strip()
             confidence = _normalize_confidence(item.get("confidence", "stated"))

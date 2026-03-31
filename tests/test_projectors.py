@@ -453,6 +453,8 @@ async def test_apply_correction_emits_event():
 
 
 async def test_tier2_writes_facts():
+    """SPEC-CHECKPOINTED-FACT-HARVEST: facts are NO LONGER extracted per-turn.
+    They are harvested at compaction boundaries instead."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
@@ -471,9 +473,8 @@ async def test_tier2_writes_facts():
         reasoning_service=reasoning, tenant_id="t1",
     )
 
-    state.save_knowledge_entry.assert_called()
-    saved = state.save_knowledge_entry.call_args[0][0]
-    assert saved.content == "runs a bakery"
+    # Facts are no longer written per-turn — harvested at boundaries
+    state.save_knowledge_entry.assert_not_called()
 
 
 async def test_tier2_does_not_append_to_soul_user_context():
@@ -496,9 +497,10 @@ async def test_tier2_does_not_append_to_soul_user_context():
         reasoning_service=reasoning, tenant_id="t1",
     )
 
-    # Fact is written as KnowledgeEntry, NOT appended to soul.user_context
+    # soul.user_context still not touched (deprecated)
     assert soul.user_context == ""
-    state.save_knowledge_entry.assert_called()
+    # Facts no longer written per-turn (boundary harvest)
+    state.save_knowledge_entry.assert_not_called()
 
 
 async def test_tier2_skips_empty_turns():
@@ -563,10 +565,12 @@ async def test_tier2_emits_knowledge_extracted_on_writes():
         reasoning_service=reasoning, tenant_id="t1",
     )
 
-    events.emit.assert_called()
-    event = events.emit.call_args[0][0]
-    assert event.type == "knowledge.extracted"
-    assert event.payload["entries_written"] == 1
+    # Facts no longer extracted per-turn → no knowledge.extracted event for facts
+    # (entities and corrections can still emit events)
+    if events.emit.called:
+        event = events.emit.call_args[0][0]
+        # Should NOT have written fact entries
+        assert event.payload.get("entries_written", 0) == 0
 
 
 async def test_tier2_no_emit_when_nothing_written():
@@ -611,7 +615,7 @@ async def test_tier2_deduplicates_via_hash():
 
 
 async def test_tier2_writes_teacher_fact():
-    """Structured output (no code fences) writes knowledge correctly."""
+    """SPEC-CHECKPOINTED-FACT-HARVEST: facts no longer written per-turn."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
@@ -632,7 +636,8 @@ async def test_tier2_writes_teacher_fact():
         reasoning_service=reasoning, tenant_id="t1",
     )
 
-    state.save_knowledge_entry.assert_called()
+    # Facts harvested at boundaries, not per-turn
+    state.save_knowledge_entry.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
