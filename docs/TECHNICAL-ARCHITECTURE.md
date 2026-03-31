@@ -240,6 +240,18 @@ Fail-safe: on shaping failure, falls back to Tier 1 only (NOT full dump). Docume
 
 Replaces per-turn fact/preference extraction with boundary-driven harvest. Per-turn Tier 2 extractor now only handles corrections + entities. Facts/preferences harvested at compaction boundaries and space switches via one reconciliation LLM call that sees the full unharvested span + all active facts. Outputs reconciled add/update/reinforce set. Existing embedding dedup preserved as fallback only.
 
+### Dynamic Tool Surfacing
+
+Three-tier system for context-aware tool visibility:
+
+- **Tier 1 (always):** Core kernel tools — `request_tool`, `remember`, `remember_details`, `read_doc`, `manage_capabilities`, `dismiss_whisper`. ~1,000 tokens.
+- **Tier 2 (category-matched):** MCP + kernel tools surfaced via keyword matching against user message + recent topic. Categories: calendar, search, browser, messaging, identity, source, files, covenants. Pure string matching — no LLM call, <1ms.
+- **Tier 3 (on-demand):** Everything else, accessible via `request_tool`. Agent sees capability directory but not schemas.
+
+Session continuity: already-loaded tools persist through the session. ACTIONS block includes "additional tools available via request_tool" notice.
+
+Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
+
 **Handler↔Reasoning protocols:** `kernos/kernel/protocols.py` — explicit boundary contracts for testability and maintainability. `HandlerProtocol` (send_outbound, read_log_text) defines what reasoning needs from the handler. `ReasoningProtocol` defines what the handler needs from reasoning (execute_tool, complete_simple, pending state, tool state, model info). No private attribute access across the boundary — all interaction through public methods. `get_pending_actions()` returns a copy to prevent mutable state leakage.
 
 **Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.

@@ -537,7 +537,42 @@ async def test_handler_uses_task_result_text_as_response():
 # ---------------------------------------------------------------------------
 
 
-from kernos.messages.handler import _is_stale_knowledge
+from kernos.messages.handler import _is_stale_knowledge, _select_tool_categories
+
+
+class TestToolCategorySelection:
+    """SPEC-DYNAMIC-TOOL-SURFACING: category matching for tool visibility."""
+
+    def test_calendar_signals(self):
+        cats = _select_tool_categories("Create a meeting tomorrow at 3pm", "")
+        assert "calendar" in cats
+
+    def test_search_signals(self):
+        cats = _select_tool_categories("Search for good Italian restaurants", "")
+        assert "search" in cats
+
+    def test_browser_signals(self):
+        cats = _select_tool_categories("Open the website https://example.com", "")
+        assert "browser" in cats
+
+    def test_messaging_signals(self):
+        cats = _select_tool_categories("Send me a text about the meeting", "")
+        assert "messaging" in cats
+
+    def test_no_categories_for_casual(self):
+        cats = _select_tool_categories("Hey how's it going?", "")
+        # Should have no or minimal categories
+        assert "calendar" not in cats
+        assert "browser" not in cats
+
+    def test_recent_topic_included(self):
+        cats = _select_tool_categories("yes please", "calendar event discussion")
+        assert "calendar" in cats
+
+    def test_multiple_categories(self):
+        cats = _select_tool_categories("Search for a meeting room and schedule it tomorrow", "")
+        assert "search" in cats
+        assert "calendar" in cats
 
 
 class TestStaleKnowledgeCheck:

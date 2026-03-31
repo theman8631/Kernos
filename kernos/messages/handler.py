@@ -272,6 +272,51 @@ def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
     )
 
 
+# Category → tool name mapping for dynamic tool surfacing (V1 policy)
+CATEGORY_TOOLS: dict[str, set[str]] = {
+    "calendar": {
+        "list-events", "search-events", "create-event",
+        "update-event", "delete-event", "get-event",
+        "get-freebusy", "get-current-time", "list-calendars",
+        "list-colors", "respond-to-event", "manage-accounts",
+        "create-events", "manage_schedule",
+    },
+    "search": {"brave_web_search", "brave_local_search"},
+    "browser": {
+        "goto", "markdown", "links", "evaluate",
+        "semantic_tree", "interactiveElements", "structuredData",
+    },
+    "messaging": {"send_to_channel", "manage_channels"},
+    "identity": {"read_soul", "update_soul"},
+    "source": {"read_source"},
+    "files": {"write_file", "read_file", "list_files", "delete_file"},
+    "covenants": {"manage_covenants"},
+}
+
+_CATEGORY_SIGNALS: dict[str, list[str]] = {
+    "calendar": ["calendar", "event", "schedule", "appointment", "meeting",
+                 "remind", "at ", "tomorrow", "today", "next week", "pm", "am"],
+    "search": ["search", "find", "look up", "what is", "who is",
+               "how to", "research", "google"],
+    "browser": ["website", "page", "browse", "open", "http", "www", ".com", ".org"],
+    "messaging": ["text", "sms", "message", "send", "tell", "notify", "channel"],
+    "identity": ["personality", "who are you", "your name", "identity", "soul"],
+    "source": ["code", "source", "implementation", "debug", "read_source"],
+    "files": ["file", "write", "save", "draft", "note", "config"],
+    "covenants": ["rule", "covenant", "never", "always", "don't"],
+}
+
+
+def _select_tool_categories(message_text: str, recent_topic: str) -> set[str]:
+    """Select tool categories based on turn context. Pure string matching — no LLM."""
+    combined = f"{message_text.lower()} {recent_topic.lower()}"
+    categories: set[str] = set()
+    for cat, signals in _CATEGORY_SIGNALS.items():
+        if any(sig in combined for sig in signals):
+            categories.add(cat)
+    return categories
+
+
 def _is_stale_knowledge(entry, days: int = 14) -> bool:
     """Check if a knowledge entry's last_referenced is older than N days."""
     ref = getattr(entry, "last_referenced", "") or ""
@@ -385,6 +430,11 @@ def _build_actions_block(
             "specific channel):\n" + "\n".join(channel_lines)
         )
     parts.append(DOCS_HINT)
+    parts.append(
+        "TOOL AVAILABILITY: Your current tool set is filtered to match this "
+        "turn's context. Additional tools from connected services are available "
+        "— use request_tool to load a specific tool if needed."
+    )
     return "## ACTIONS\n" + "\n\n".join(parts)
 
 
@@ -1948,33 +1998,68 @@ class MessageHandler:
             speaker="user", channel=message.platform, content=user_content,
             timestamp=message.timestamp.isoformat())
 
-        # Build tools list
-        from kernos.kernel.files import FILE_TOOLS
-        from kernos.kernel.reasoning import READ_SOURCE_TOOL, READ_DOC_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL
+        # Build tools list — three-tier dynamic surfacing
+        from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
-        from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
-        from kernos.kernel.channels import MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL
-        from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
-        tools: list[dict] = []
+
+        # Tier 1: Always-surface (minimal universal kernel tools)
+        tools: list[dict] = [REQUEST_TOOL, READ_DOC_TOOL, DISMISS_WHISPER_TOOL,
+                              MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL]
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             tools.append(REMEMBER_TOOL)
-        tools.extend(FILE_TOOLS)
-        tools.extend([DISMISS_WHISPER_TOOL, READ_DOC_TOOL, READ_SOURCE_TOOL,
-                       READ_SOUL_TOOL, UPDATE_SOUL_TOOL, MANAGE_COVENANTS_TOOL,
-                       MANAGE_CAPABILITIES_TOOL, MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL,
-                       MANAGE_SCHEDULE_TOOL, REMEMBER_DETAILS_TOOL])
-        tools.extend(self.registry.get_preloaded_tools(space=active_space))
+
+        # Tier 2: Category-surfaced based on turn context
+        recent_topic = self._get_recent_topic_hint(ctx)
+        categories = _select_tool_categories(message.content or "", recent_topic)
+
+        # Collect category-matched tool names
+        surfaced_names: set[str] = set()
+        for cat in categories:
+            surfaced_names.update(CATEGORY_TOOLS.get(cat, set()))
+
+        # Session continuity: already-loaded tools always surface
         loaded_names = self.reasoning.get_loaded_tools(active_space_id)
+        surfaced_names.update(loaded_names)
+
+        # Map surfaced names to actual tool schemas
+        # Kernel tools matched by category
+        _kernel_tool_map: dict[str, dict] = {}
+        from kernos.kernel.files import FILE_TOOLS
+        from kernos.kernel.reasoning import READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL
+        from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
+        from kernos.kernel.channels import MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL
+        from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
+        for t in FILE_TOOLS + [READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL,
+                                MANAGE_COVENANTS_TOOL, MANAGE_CHANNELS_TOOL,
+                                SEND_TO_CHANNEL_TOOL, MANAGE_SCHEDULE_TOOL]:
+            _kernel_tool_map[t["name"]] = t
+
+        for name in surfaced_names:
+            if name in _kernel_tool_map:
+                # Add kernel tool if not already in Tier 1
+                kt = _kernel_tool_map[name]
+                if kt not in tools:
+                    tools.append(kt)
+
+        # MCP tools: preloaded (full schema) + loaded (full) + stubs for category matches
+        preloaded = self.registry.get_preloaded_tools(space=active_space)
+        for t in preloaded:
+            if t["name"] in surfaced_names and t not in tools:
+                tools.append(t)
         for tn in loaded_names:
             schema = self.registry.get_tool_schema(tn)
-            if schema:
+            if schema and schema not in tools:
                 tools.append(schema)
-        stubs = self.registry.get_lazy_tool_stubs(space=active_space, loaded_names=loaded_names)
-        tools.extend(stubs)
-        logger.info("TOOL_DIRECTORY: tools=%d preloaded=%d loaded=%d stubs=%d",
-            len(tools), len(self.registry.get_preloaded_tools(space=active_space)),
-            len(loaded_names), len(stubs))
+        # Stubs only for category-matched MCP tools not already loaded
+        all_stubs = self.registry.get_lazy_tool_stubs(space=active_space, loaded_names=loaded_names)
+        for stub in all_stubs:
+            if stub["name"] in surfaced_names and stub not in tools:
+                tools.append(stub)
+
+        logger.info("TOOL_SURFACING: categories=%s surfaced=%d total_available=%d",
+            categories, len(tools),
+            len(self.registry.get_preloaded_tools(space=active_space)) + len(all_stubs) + len(loaded_names))
         ctx.tools = tools
 
         # Build system prompt blocks (Cognitive UI grammar)
