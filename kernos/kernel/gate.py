@@ -74,7 +74,7 @@ class DispatchGate:
         _KERNEL_READS = {
             "remember", "remember_details", "list_files", "read_file",
             "dismiss_whisper", "read_source", "read_doc", "read_soul",
-            "manage_channels",
+            "manage_channels", "request_tool",
         }
         _KERNEL_WRITES = {
             "write_file", "delete_file", "manage_covenants",

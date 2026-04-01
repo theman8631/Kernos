@@ -36,11 +36,20 @@ The LRU cap is 40 active spaces. When reached, the least-recently-active space i
 When processing a message, the handler assembles the space's conversation context:
 
 1. **Compaction index** — summary of archived compaction documents
-2. **Cross-domain injections** — recent signals from other spaces (last 5 turns from each)
-3. **Active compaction document** — the current Living State + Ledger
-4. **Recent messages** — the most recent conversation turns in this space
+2. **Active compaction document** — the current Living State + Ledger
+3. **Recent messages** — the most recent conversation turns in this space
 
 This assembled context goes into the system prompt, giving the agent full awareness of the space's history.
+
+## Departure Context Bridge
+
+On space switch, the handler injects the last 2–3 exchange pairs from the departing space into the assembled message array. This ephemeral context provides discourse continuity — the agent sees what was just discussed, preventing it from re-surfacing facts it already acknowledged.
+
+Properties:
+- **Ephemeral** — exists only in assembled context for the first turn after switch, not written to the new space's conversation log
+- **Tagged** — labeled with source space name so the agent knows it's cross-space context
+- **Budget-bounded** — up to 6 entries, capped at ~1200 characters (~300 tokens)
+- **Compaction-safe** — never in the log, so compaction never sees it. No cross-space narrative pollution
 
 ## System Space
 

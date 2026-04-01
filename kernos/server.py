@@ -308,8 +308,23 @@ _TEXT_EXTENSIONS = {
 }
 
 
+# Guard against duplicate Discord gateway deliveries.
+# Discord can re-deliver events on gateway reconnect or missed ACKs.
+_seen_message_ids: set[int] = set()
+_SEEN_MAX = 200
+
+
 @client.event
 async def on_message(message):
+    # Deduplicate gateway re-deliveries
+    if message.id in _seen_message_ids:
+        return
+    _seen_message_ids.add(message.id)
+    if len(_seen_message_ids) > _SEEN_MAX:
+        # Discard oldest half to bound memory
+        to_remove = sorted(_seen_message_ids)[:_SEEN_MAX // 2]
+        _seen_message_ids.difference_update(to_remove)
+
     # Don't respond to ourselves
     if message.author == client.user:
         return

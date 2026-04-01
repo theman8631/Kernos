@@ -615,3 +615,184 @@ class TestTopicHint:
         ])
         hint = handler._get_recent_topic_hint(ctx)
         assert "guitar" in hint.lower()
+
+
+# --- /dump diagnostic command ---
+
+
+async def test_dump_writes_context_file(tmp_path, monkeypatch):
+    """'/dump' writes assembled context to a diagnostics file and skips reasoning."""
+    monkeypatch.setenv("KERNOS_DATA_DIR", str(tmp_path))
+    handler, mock_provider = _make_handler()
+
+    result = await handler.process(_make_message(content="/dump"))
+
+    # Reasoning model should NOT have been called
+    mock_provider.complete.assert_not_called()
+
+    # Response tells the user where the file is
+    assert "Context dumped to" in result
+    assert "diagnostics" in result
+
+    # File was written and contains expected sections
+    diag_dir = tmp_path / "diagnostics"
+    assert diag_dir.exists()
+    dump_files = list(diag_dir.glob("context_*.txt"))
+    assert len(dump_files) == 1
+
+    content = dump_files[0].read_text()
+    assert "=== SYSTEM PROMPT ===" in content
+    assert "=== MESSAGES ===" in content
+    assert "=== TOOLS ===" in content
+    assert "=== SUMMARY ===" in content
+    # Summary should contain token estimates and tool count
+    assert "tokens" in content
+    assert "schemas" in content
+
+
+async def test_dump_does_not_persist_message(tmp_path, monkeypatch):
+    """/dump should not be stored in conversation history."""
+    monkeypatch.setenv("KERNOS_DATA_DIR", str(tmp_path))
+    handler, mock_provider = _make_handler()
+
+    await handler.process(_make_message(content="/dump"))
+
+    # conversations.append should NOT have been called (no user message persisted)
+    handler.conversations.append.assert_not_called()
+
+
+async def test_dump_case_insensitive():
+    """/DUMP and /Dump both trigger the diagnostic."""
+    handler, mock_provider = _make_handler()
+
+    for variant in ["/DUMP", " /dump ", "/Dump"]:
+        result = await handler.process(_make_message(content=variant))
+        assert "Context dumped to" in result
+    mock_provider.complete.assert_not_called()
+
+
+# --- SPEC-LIVE-AUDIT-POLISH-4D ---
+
+
+class TestCategorySignalTightening:
+    """Tightened signals should not over-trigger on common words."""
+
+    def test_dinner_does_not_trigger_calendar(self):
+        cats = _select_tool_categories("What should I have for dinner?", "")
+        assert "calendar" not in cats
+
+    def test_message_does_not_trigger_messaging(self):
+        cats = _select_tool_categories("What is your message?", "")
+        assert "messaging" not in cats
+
+    def test_write_does_not_trigger_files(self):
+        cats = _select_tool_categories("Write me a poem about the ocean", "")
+        assert "files" not in cats
+
+    def test_open_does_not_trigger_browser(self):
+        cats = _select_tool_categories("I am open to suggestions", "")
+        assert "browser" not in cats
+
+    def test_dont_does_not_trigger_covenants(self):
+        cats = _select_tool_categories("I don't know what to do", "")
+        assert "covenants" not in cats
+
+    def test_legitimate_signals_still_work(self):
+        cats = _select_tool_categories("Create an event for Friday", "")
+        assert "calendar" in cats
+        cats = _select_tool_categories("Send me a text about lunch", "")
+        assert "messaging" in cats
+        cats = _select_tool_categories("Write file notes.txt with the summary", "")
+        assert "files" in cats
+
+
+class TestGateRequestToolBypass:
+    """request_tool is a meta-tool — should be classified as read."""
+
+    def test_request_tool_classified_as_read(self):
+        from kernos.kernel.gate import DispatchGate
+        gate = DispatchGate(
+            reasoning_service=MagicMock(), registry=MagicMock(),
+            state=MagicMock(), events=MagicMock(),
+        )
+        effect = gate.classify_tool_effect("request_tool", None)
+        assert effect == "read"
+
+
+class TestDepartureContext:
+    """Space-switch departure context bridge."""
+
+    async def test_departure_context_on_space_switch(self):
+        handler, mock_provider = _make_handler()
+        mock_provider.complete.return_value = _mock_provider_response("Got it!")
+
+        handler.conv_logger = AsyncMock()
+        handler.conv_logger.read_recent.return_value = [
+            {"role": "user", "content": "My sister is Tina", "timestamp": "T1", "channel": "discord"},
+            {"role": "assistant", "content": "Got it — Tina is your sister", "timestamp": "T2", "channel": "discord"},
+        ]
+
+        from kernos.kernel.spaces import ContextSpace
+        from kernos.messages.handler import TurnContext
+        ctx_obj = TurnContext()
+        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.active_space_id = "space-b"
+        ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Architecture")
+
+        handler.state.get_context_space.return_value = ContextSpace(id="space-a", tenant_id="test-tenant", name="Daily")
+
+        result = await handler._build_departure_context(ctx_obj, "space-a")
+
+        assert result is not None
+        assert result["role"] == "user"
+        assert "Previous context — from space: Daily" in result["content"]
+        assert "Tina" in result["content"]
+        assert "Conversation continues in current space: Architecture" in result["content"]
+
+    async def test_no_departure_context_without_switch(self):
+        handler, _ = _make_handler()
+        from kernos.messages.handler import TurnContext
+        ctx_obj = TurnContext()
+        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.active_space_id = "space-a"
+
+        result = await handler._build_departure_context(ctx_obj, "space-a")
+        assert result is None
+
+    async def test_no_departure_context_when_empty(self):
+        handler, _ = _make_handler()
+        handler.conv_logger = AsyncMock()
+        handler.conv_logger.read_recent.return_value = []
+
+        from kernos.messages.handler import TurnContext
+        from kernos.kernel.spaces import ContextSpace
+        ctx_obj = TurnContext()
+        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.active_space_id = "space-b"
+        ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Other")
+
+        result = await handler._build_departure_context(ctx_obj, "space-a")
+        assert result is None
+
+    async def test_departure_context_respects_char_budget(self):
+        handler, _ = _make_handler()
+        handler.conv_logger = AsyncMock()
+        handler.conv_logger.read_recent.return_value = [
+            {"role": "user", "content": "A" * 300, "timestamp": f"T{i}", "channel": "discord"}
+            for i in range(6)
+        ]
+
+        handler.state.get_context_space.return_value = None
+
+        from kernos.messages.handler import TurnContext
+        from kernos.kernel.spaces import ContextSpace
+        ctx_obj = TurnContext()
+        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.active_space_id = "space-b"
+        ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Other")
+
+        result = await handler._build_departure_context(ctx_obj, "space-a")
+        assert result is not None
+        # With 300 chars each and 1200 budget, should get at most 4 entries
+        entry_lines = [l for l in result["content"].split("\n") if l.startswith("[User]:") or l.startswith("[Assistant]:")]
+        assert len(entry_lines) <= 4

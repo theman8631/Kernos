@@ -295,15 +295,18 @@ CATEGORY_TOOLS: dict[str, set[str]] = {
 
 _CATEGORY_SIGNALS: dict[str, list[str]] = {
     "calendar": ["calendar", "event", "schedule", "appointment", "meeting",
-                 "remind", "at ", "tomorrow", "today", "next week", "pm", "am"],
-    "search": ["search", "find", "look up", "what is", "who is",
+                 "remind me", "tomorrow", "today", "next week",
+                 "this week", "free time", "busy", "block off"],
+    "search": ["search", "look up", "what is", "who is",
                "how to", "research", "google"],
-    "browser": ["website", "page", "browse", "open", "http", "www", ".com", ".org"],
-    "messaging": ["text", "sms", "message", "send", "tell", "notify", "channel"],
+    "browser": ["website", "page", "browse", "http", "www", ".com", ".org"],
+    "messaging": ["text me", "a text", "sms", "send a message", "notify",
+                  "tell them", "send to channel", "discord"],
     "identity": ["personality", "who are you", "your name", "identity", "soul"],
     "source": ["code", "source", "implementation", "debug", "read_source"],
-    "files": ["file", "write", "save", "draft", "note", "config"],
-    "covenants": ["rule", "covenant", "never", "always", "don't"],
+    "files": ["write file", "read file", "save file", "draft", "my notes",
+              "my files", "list files", "delete file"],
+    "covenants": ["rule", "covenant", "never", "always", "don't ever"],
 }
 
 
@@ -1792,6 +1795,10 @@ class MessageHandler:
         await self._phase_route(ctx)
         await self._phase_assemble(ctx)
 
+        # /dump diagnostic intercept — write assembled context, skip reasoning
+        if message.content and message.content.strip().lower() == "/dump":
+            return await self._handle_dump(ctx)
+
         try:
             await self._phase_reason(ctx)
         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
@@ -1856,6 +1863,88 @@ class MessageHandler:
                 f"it will go directly to encrypted storage as your {cap_name} API key. Send your key now."
             )
         return None
+
+    async def _handle_dump(self, ctx: TurnContext) -> str:
+        """Write the fully assembled context to a diagnostic file, skip reasoning."""
+        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+        # Second-precision timestamp — duplicate deliveries overwrite the same file
+        ts = utc_now()[:19].replace(":", "-")
+        dump_path = Path(data_dir) / "diagnostics" / f"context_{ts}.txt"
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(dump_path, "w") as f:
+            f.write("=== SYSTEM PROMPT ===\n\n")
+            f.write(ctx.system_prompt)
+            f.write("\n\n=== MESSAGES ===\n\n")
+            for msg in ctx.messages:
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    f.write(f"[{role}]\n{content}\n\n")
+                elif isinstance(content, list):
+                    f.write(f"[{role}] <{len(content)} content blocks>\n\n")
+                else:
+                    f.write(f"[{role}] <non-text content>\n\n")
+            f.write("\n=== TOOLS ===\n\n")
+            for tool in ctx.tools:
+                f.write(f"{json.dumps(tool, indent=2)}\n\n")
+            f.write("\n=== SUMMARY ===\n")
+            f.write(f"System prompt: ~{len(ctx.system_prompt) // 4} tokens\n")
+            msg_chars = sum(len(str(m.get('content', ''))) for m in ctx.messages)
+            f.write(f"Messages: {len(ctx.messages)} entries, ~{msg_chars // 4} tokens\n")
+            f.write(f"Tools: {len(ctx.tools)} schemas\n")
+
+        logger.info("DUMP: context written to %s", dump_path)
+        return f"Context dumped to {dump_path}"
+
+    async def _build_departure_context(
+        self, ctx: TurnContext, prev_space_id: str,
+    ) -> dict | None:
+        """Build ephemeral context from departing space for discourse continuity.
+
+        Bounded by both count (up to 6 entries / 3 pairs) and character
+        budget (~1200 chars / ~300 tokens). Not persisted to the new space.
+        """
+        if not prev_space_id or prev_space_id == ctx.active_space_id:
+            return None
+
+        # read_recent returns [{role, content, timestamp, channel}, ...]
+        recent = await self.conv_logger.read_recent(
+            ctx.tenant_id, prev_space_id, token_budget=1200, max_messages=6,
+        )
+        if not recent:
+            return None
+
+        DEPARTURE_CHAR_BUDGET = 1200
+        PER_MSG_CAP = 300
+
+        prev_space = await self.state.get_context_space(ctx.tenant_id, prev_space_id)
+        prev_name = prev_space.name if prev_space else prev_space_id
+
+        # Walk backward, stop when budget exhausted
+        selected: list[dict] = []
+        char_total = 0
+        for entry in reversed(recent):
+            content = entry.get("content", "")[:PER_MSG_CAP]
+            if char_total + len(content) > DEPARTURE_CHAR_BUDGET and selected:
+                break
+            selected.insert(0, entry)
+            char_total += len(content)
+
+        if not selected:
+            return None
+
+        lines = [f"[Previous context — from space: {prev_name}]"]
+        for entry in selected:
+            role = entry.get("role", "?")
+            content = entry.get("content", "")[:PER_MSG_CAP]
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"[{label}]: {content}")
+        lines.append(f"[Conversation continues in current space: {ctx.active_space.name if ctx.active_space else ctx.active_space_id}]")
+
+        logger.info("DEPARTURE_CONTEXT: from=%s entries=%d chars=%d",
+            prev_space_id, len(selected), char_total)
+        return {"role": "user", "content": "\n".join(lines)}
 
     async def _phase_provision(self, ctx: TurnContext) -> None:
         """Phase 1: Ensure tenant, soul, MCP config, covenants, evaluator ready."""
@@ -1987,16 +2076,19 @@ class MessageHandler:
                 user_content = "(empty message)"
             logger.info("EMPTY_MSG_GUARD: injected content=%r for empty user message", user_content)
 
-        user_entry = {
-            "role": "user", "content": user_content,
-            "timestamp": message.timestamp.isoformat(), "platform": message.platform,
-            "tenant_id": tenant_id, "conversation_id": ctx.conversation_id,
-            "space_tags": ctx.router_result.tags,
-        }
-        await self.conversations.append(tenant_id, ctx.conversation_id, user_entry)
-        await self.conv_logger.append(tenant_id=tenant_id, space_id=active_space_id,
-            speaker="user", channel=message.platform, content=user_content,
-            timestamp=message.timestamp.isoformat())
+        # Skip persisting diagnostic commands — they shouldn't appear in conversation history
+        _is_diagnostic = user_content.strip().lower() == "/dump"
+        if not _is_diagnostic:
+            user_entry = {
+                "role": "user", "content": user_content,
+                "timestamp": message.timestamp.isoformat(), "platform": message.platform,
+                "tenant_id": tenant_id, "conversation_id": ctx.conversation_id,
+                "space_tags": ctx.router_result.tags,
+            }
+            await self.conversations.append(tenant_id, ctx.conversation_id, user_entry)
+            await self.conv_logger.append(tenant_id=tenant_id, space_id=active_space_id,
+                speaker="user", channel=message.platform, content=user_content,
+                timestamp=message.timestamp.isoformat())
 
         # Build tools list — three-tier dynamic surfacing
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
@@ -2057,9 +2149,10 @@ class MessageHandler:
             if stub["name"] in surfaced_names and stub not in tools:
                 tools.append(stub)
 
+        _tier1_count = 6 if self._retrieval else 5  # Tier 1 kernel tools always present
+        _total = _tier1_count + len(_kernel_tool_map) + len(preloaded) + len(all_stubs) + len(loaded_names)
         logger.info("TOOL_SURFACING: categories=%s surfaced=%d total_available=%d",
-            categories, len(tools),
-            len(self.registry.get_preloaded_tools(space=active_space)) + len(all_stubs) + len(loaded_names))
+            categories, len(tools), _total)
         ctx.tools = tools
 
         # Build system prompt blocks (Cognitive UI grammar)
@@ -2131,7 +2224,15 @@ class MessageHandler:
         if ctx.upload_notifications:
             final_user_content = "\n".join(ctx.upload_notifications) + (
                 "\n\n" + final_user_content if final_user_content else "")
-        ctx.messages = space_messages + [{"role": "user", "content": final_user_content}]
+        # Departure context: ephemeral bridge from departing space on switch
+        departure_msg = None
+        if ctx.space_switched and ctx.previous_space_id:
+            departure_msg = await self._build_departure_context(ctx, ctx.previous_space_id)
+
+        if departure_msg:
+            ctx.messages = [departure_msg] + space_messages + [{"role": "user", "content": final_user_content}]
+        else:
+            ctx.messages = space_messages + [{"role": "user", "content": final_user_content}]
 
     async def _phase_reason(self, ctx: TurnContext) -> None:
         """Phase 4: Build ReasoningRequest, execute via task engine."""
