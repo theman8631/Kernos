@@ -4,9 +4,11 @@ The handler calls ``ReasoningService.reason()`` instead of importing any provide
 ReasoningService owns the full tool-use loop, event emission, and audit logging.
 """
 from kernos.utils import utc_now
+import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -30,6 +32,11 @@ _CHEAP_MODEL = "claude-haiku-4-5-20251001"  # Used by complete_simple() when pre
 
 _OPENAI_SIMPLE_MODEL = "gpt-4o"      # Used by complete_simple() for OpenAI
 _OPENAI_CHEAP_MODEL = "gpt-4o-mini"  # Used by complete_simple(prefer_cheap=True) for OpenAI
+
+# Tool result budgeting — Stage 1 of Tool Execution Mediation.
+# MCP results exceeding this threshold are persisted to the space file store
+# and replaced with a bounded preview + file reference.
+TOOL_RESULT_CHAR_BUDGET = 4000  # ~1000 tokens
 
 
 # Tool schemas extracted to kernos/kernel/tools/schemas.py
@@ -466,7 +473,7 @@ class ReasoningService:
                     show_all=tool_input.get("show_all", False),
                 )
                 if cov_action == "update" and "Updated" in cov_result:
-                    import asyncio, re
+                    import asyncio
                     from kernos.kernel.covenant_manager import validate_covenant_set
                     id_match = re.search(r"new ID: (rule_\w+)", cov_result)
                     new_id = id_match.group(1) if id_match else ""
@@ -551,6 +558,542 @@ class ReasoningService:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
             return await self._mcp.call_tool(tool_name, tool_input)
+
+    def _is_concurrent_safe(self, tool_name: str) -> bool:
+        """A tool is concurrent-safe ONLY if explicitly classified as 'read'.
+
+        Unknown, soft_write, hard_write all stay sequential.
+        Conservative: if classification fails, return False.
+        """
+        try:
+            effect = self._get_gate().classify_tool_effect(tool_name, None, None)
+            return effect == "read"
+        except Exception:
+            return False
+
+    async def _execute_single_tool(
+        self,
+        block: ContentBlock,
+        tool_input: dict,
+        request: ReasoningRequest,
+        tools: list[dict],
+        gate_cache: dict,
+        rr_event: Any,
+        iterations: int,
+        agent_reasoning: str,
+    ) -> dict:
+        """Execute a single tool call: gate -> execute -> budget -> return tool_result dict.
+
+        Returns a dict with keys: type, tool_use_id, content.
+        Side effects: may modify gate_cache, _pending_actions, _conflict_raised_this_turn.
+        """
+        approval_token_id = tool_input.pop("_approval_token", None)
+
+        logger.info(
+            "AGENT_ACTION: tool=%s input=%s",
+            block.name, json.dumps(tool_input)[:200],
+        )
+
+        # Dispatch Gate: classify and check write tools before execution
+        tool_effect = self._get_gate().classify_tool_effect(
+            block.name, request.active_space, tool_input)
+        if tool_effect in ("soft_write", "hard_write", "unknown"):
+            if block.name in gate_cache and gate_cache[block.name].allowed:
+                gate_result = gate_cache.pop(block.name)
+                logger.info(
+                    "GATE_CACHED: tool=%s (approved on stub call)", block.name,
+                )
+            else:
+                gate_result = await self._get_gate().evaluate(
+                    block.name, tool_input, tool_effect,
+                    request.input_text, request.tenant_id,
+                    request.active_space_id,
+                    messages=request.messages,
+                    approval_token_id=approval_token_id,
+                    agent_reasoning=agent_reasoning,
+                )
+
+            try:
+                await emit_event(
+                    self._events,
+                    EventType.DISPATCH_GATE,
+                    request.tenant_id,
+                    "dispatch_interceptor",
+                    payload={
+                        "tool_name": block.name,
+                        "effect": tool_effect,
+                        "allowed": gate_result.allowed,
+                        "reason": gate_result.reason,
+                        "method": gate_result.method,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit dispatch.gate: %s", exc)
+
+            logger.info(
+                "GATE: tool=%s effect=%s allowed=%s reason=%s method=%s",
+                block.name, tool_effect, gate_result.allowed,
+                gate_result.reason, gate_result.method,
+            )
+
+            if not gate_result.allowed:
+                self._get_gate().issue_approval_token(block.name, tool_input)
+                tenant_id = request.tenant_id
+                if tenant_id not in self._pending_actions:
+                    self._pending_actions[tenant_id] = []
+                pending_idx = len(self._pending_actions[tenant_id])
+                self._pending_actions[tenant_id].append(PendingAction(
+                    tool_name=block.name,
+                    tool_input=dict(tool_input),
+                    proposed_action=gate_result.proposed_action,
+                    conflicting_rule=gate_result.conflicting_rule,
+                    gate_reason=gate_result.reason,
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+                ))
+                self._conflict_raised_this_turn = True
+                if gate_result.reason == "covenant_conflict":
+                    system_msg = (
+                        f"[SYSTEM] Action blocked — conflict with standing rule. "
+                        f"Proposed: {gate_result.proposed_action}. "
+                        f"Conflicting rule: {gate_result.conflicting_rule}. "
+                        f"Pending action index: {pending_idx}. "
+                        f"Ask the user to confirm. If they confirm, include "
+                        f"[CONFIRM:{pending_idx}] in your response. "
+                        f"Also offer three options: "
+                        f"1. Respect the rule (don't do it). "
+                        f"2. Override this time (confirm the action). "
+                        f"3. Update the rule permanently."
+                    )
+                elif gate_result.reason == "clarify":
+                    system_msg = (
+                        f"[SYSTEM] Action paused — the request is ambiguous. "
+                        f"Proposed: {gate_result.proposed_action}. "
+                        f"Pending action index: {pending_idx}. "
+                        f"Ask the user to clarify what they meant. "
+                        f"Once clear, include [CONFIRM:{pending_idx}] in your response."
+                    )
+                else:
+                    system_msg = (
+                        f"[SYSTEM] Action paused — confirming intent. "
+                        f"Proposed: {gate_result.proposed_action}. "
+                        f"Pending action index: {pending_idx}. "
+                        f"Ask the user if they want to proceed. If they confirm, "
+                        f"include [CONFIRM:{pending_idx}] in your response."
+                    )
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": system_msg,
+                }
+
+        # Emit tool.called
+        try:
+            await emit_event(
+                self._events,
+                EventType.TOOL_CALLED,
+                request.tenant_id,
+                "reasoning_service",
+                payload={
+                    "tool_name": block.name,
+                    "tool_input": tool_input,
+                    "conversation_id": request.conversation_id,
+                    "reasoning_event_id": rr_event.id if rr_event else None,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to emit tool.called: %s", exc)
+
+        await self._audit.log(
+            request.tenant_id,
+            {
+                "type": "tool_call",
+                "timestamp": utc_now(),
+                "tenant_id": request.tenant_id,
+                "conversation_id": request.conversation_id,
+                "tool_name": block.name,
+                "tool_input": tool_input,
+            },
+        )
+
+        t_tool = time.monotonic()
+        _is_mcp_tool = False
+        result = ""
+
+        if block.name in self._KERNEL_TOOLS:
+            logger.info(
+                "KERNEL_TOOL name=%s space=%s",
+                block.name, request.active_space_id,
+            )
+            tool_args = tool_input
+            if block.name == "remember":
+                if self._retrieval:
+                    try:
+                        result = await self._retrieval.search(
+                            request.tenant_id,
+                            tool_args.get("query", ""),
+                            request.active_space_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'remember' failed: %s", exc)
+                        result = "Memory search failed — try asking in a different way."
+                else:
+                    result = "Memory search is not available right now."
+            elif block.name == "remember_details":
+                result = await self._handle_remember_details(
+                    request.tenant_id,
+                    request.active_space_id,
+                    tool_args,
+                )
+            elif block.name == "write_file":
+                if self._files:
+                    try:
+                        result = await self._files.write_file(
+                            request.tenant_id,
+                            request.active_space_id,
+                            tool_args.get("name", ""),
+                            tool_args.get("content", ""),
+                            tool_args.get("description", ""),
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'write_file' failed: %s", exc)
+                        result = "File write failed — try again."
+                else:
+                    result = "File system is not available right now."
+            elif block.name == "read_file":
+                if self._files:
+                    try:
+                        result = await self._files.read_file(
+                            request.tenant_id,
+                            request.active_space_id,
+                            tool_args.get("name", ""),
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'read_file' failed: %s", exc)
+                        result = "File read failed — try again."
+                else:
+                    result = "File system is not available right now."
+            elif block.name == "list_files":
+                if self._files:
+                    try:
+                        result = await self._files.list_files(
+                            request.tenant_id,
+                            request.active_space_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'list_files' failed: %s", exc)
+                        result = "File listing failed — try again."
+                else:
+                    result = "File system is not available right now."
+            elif block.name == "delete_file":
+                if self._files:
+                    try:
+                        result = await self._files.delete_file(
+                            request.tenant_id,
+                            request.active_space_id,
+                            tool_args.get("name", ""),
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'delete_file' failed: %s", exc)
+                        result = "File deletion failed — try again."
+                else:
+                    result = "File system is not available right now."
+            elif block.name == "dismiss_whisper":
+                try:
+                    result = await self._handle_dismiss_whisper(
+                        request.tenant_id,
+                        tool_args.get("whisper_id", ""),
+                        tool_args.get("reason", "user_dismissed"),
+                    )
+                except Exception as exc:
+                    logger.warning("Kernel tool 'dismiss_whisper' failed: %s", exc)
+                    result = "Failed to dismiss whisper — try again."
+            elif block.name == "read_source":
+                result = _read_source(
+                    tool_args.get("path", ""),
+                    tool_args.get("section", ""),
+                )
+            elif block.name == "read_doc":
+                result = _read_doc(tool_args.get("path", ""))
+            elif block.name == "read_soul":
+                if self._state:
+                    soul = await self._state.get_soul(request.tenant_id)
+                    if soul:
+                        from dataclasses import asdict
+                        result = json.dumps(asdict(soul), indent=2)
+                    else:
+                        result = "No soul found for this tenant."
+                else:
+                    result = "State store is not available."
+            elif block.name == "update_soul":
+                if self._state:
+                    field_name = tool_args.get("field", "")
+                    value = tool_args.get("value", "")
+                    if field_name not in _SOUL_UPDATABLE_FIELDS:
+                        result = (
+                            f"Cannot update '{field_name}'. Only these fields can be updated: "
+                            f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
+                        )
+                    else:
+                        soul = await self._state.get_soul(request.tenant_id)
+                        if not soul:
+                            result = "No soul found for this tenant."
+                        else:
+                            setattr(soul, field_name, value)
+                            await self._state.save_soul(soul, source="update_soul", trigger=f"{field_name}={value}")
+                            result = f"Updated {field_name} to: {value}"
+                else:
+                    result = "State store is not available."
+            elif block.name == "manage_covenants":
+                try:
+                    from kernos.kernel.covenant_manager import handle_manage_covenants
+                    cov_action = tool_args.get("action", "list")
+                    result = await handle_manage_covenants(
+                        self._state,
+                        request.tenant_id,
+                        action=cov_action,
+                        rule_id=tool_args.get("rule_id", ""),
+                        new_description=tool_args.get("new_description", ""),
+                        show_all=tool_args.get("show_all", False),
+                    )
+                    if cov_action == "update" and "Updated" in result:
+                        from kernos.kernel.covenant_manager import validate_covenant_set
+                        id_match = re.search(r"new ID: (rule_\w+)", result)
+                        new_id = id_match.group(1) if id_match else ""
+                        if new_id:
+                            asyncio.create_task(
+                                validate_covenant_set(
+                                    state=self._state,
+                                    events=self._events,
+                                    reasoning_service=self,
+                                    tenant_id=request.tenant_id,
+                                    new_rule_id=new_id,
+                                )
+                            )
+                except Exception as exc:
+                    logger.warning("Kernel tool 'manage_covenants' failed: %s", exc)
+                    result = "Failed to manage covenants — try again."
+            elif block.name == "manage_capabilities":
+                try:
+                    result = await self._handle_manage_capabilities(
+                        request.tenant_id,
+                        tool_args.get("action", "list"),
+                        tool_args.get("capability", ""),
+                    )
+                except Exception as exc:
+                    logger.warning("Kernel tool 'manage_capabilities' failed: %s", exc)
+                    result = "Failed to manage tools — try again."
+            elif block.name == "manage_channels":
+                from kernos.kernel.channels import handle_manage_channels
+                if self._channel_registry:
+                    result = handle_manage_channels(
+                        self._channel_registry,
+                        tool_args.get("action", "list"),
+                        tool_args.get("channel", ""),
+                    )
+                else:
+                    result = "Channel registry is not available."
+            elif block.name == "send_to_channel":
+                from kernos.kernel.channels import resolve_channel_alias
+                _ch_input = tool_args.get("channel", "")
+                _ch_msg = tool_args.get("message", "")
+                if not _ch_input or not _ch_msg:
+                    result = "Error: both 'channel' and 'message' are required."
+                elif not self._channel_registry:
+                    result = "Channel registry is not available."
+                else:
+                    _resolved = resolve_channel_alias(_ch_input)
+                    _ch_info = self._channel_registry.get(_resolved)
+                    if not _ch_info:
+                        _avail = [c.name for c in self._channel_registry.get_connected()]
+                        result = (
+                            f"Channel '{_resolved}' (from '{_ch_input}') is not registered. "
+                            f"Available channels: {', '.join(_avail) or 'none'}"
+                        )
+                    elif _ch_info.status != "connected":
+                        result = f"Channel '{_resolved}' exists but is not connected (status: {_ch_info.status})."
+                    elif not _ch_info.can_send_outbound:
+                        result = f"Channel '{_resolved}' is connected but cannot send outbound messages."
+                    elif not self._handler:
+                        result = "Handler not available for outbound delivery."
+                    else:
+                        try:
+                            from kernos.kernel.scheduler import resolve_owner_member_id as _resolve_mid
+                            _member_id = _resolve_mid(request.tenant_id)
+                            await self._handler.send_outbound(
+                                request.tenant_id, _member_id, _resolved, _ch_msg,
+                            )
+                            logger.info(
+                                "CROSS_CHANNEL_SEND: channel=%s resolved_from=%s len=%d",
+                                _resolved, _ch_input, len(_ch_msg),
+                            )
+                            result = f"Message sent to {_ch_info.display_name}."
+                        except Exception as exc:
+                            result = f"Failed to send to {_resolved}: {exc}"
+            elif block.name == "manage_schedule":
+                from kernos.kernel.scheduler import handle_manage_schedule
+                if self._trigger_store:
+                    result = await handle_manage_schedule(
+                        self._trigger_store,
+                        request.tenant_id,
+                        member_id=request.active_space_id,
+                        space_id=request.active_space_id,
+                        action=tool_args.get("action", "list"),
+                        trigger_id=tool_args.get("trigger_id", ""),
+                        description=tool_args.get("description", ""),
+                        reasoning_service=self,
+                        conversation_id=request.conversation_id,
+                        user_timezone=request.user_timezone,
+                    )
+                else:
+                    result = "Scheduler is not available."
+            else:
+                result = f"Kernel tool '{block.name}' not handled."
+        else:
+            # Lazy tool loading: check if this tool is a stub
+            _tool_entry = None
+            for _t in tools:
+                if _t.get("name") == block.name:
+                    _tool_entry = _t
+                    break
+
+            if _tool_entry and self._is_stub_schema(_tool_entry) and self._registry:
+                full_schema = self._registry.get_tool_schema(block.name)
+                if full_schema:
+                    for _i, _t in enumerate(tools):
+                        if _t.get("name") == block.name:
+                            tools[_i] = full_schema
+                            break
+                    self.load_tool(request.active_space_id, block.name)
+                    try:
+                        if tool_effect in ("soft_write", "hard_write", "unknown"):
+                            gate_cache[block.name] = gate_result  # noqa: F821
+                    except NameError:
+                        pass
+                    logger.info(
+                        "TOOL_LOAD: tool=%s space=%s (stub -> full schema, re-running)",
+                        block.name, request.active_space_id,
+                    )
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": (
+                            f"[SYSTEM] The tool {block.name} is now fully loaded. "
+                            "Please retry your call with the correct parameters."
+                        ),
+                    }
+
+            if not _tool_entry and self._registry:
+                schema = self._registry.get_tool_schema(block.name)
+                if schema:
+                    self.load_tool(request.active_space_id, block.name)
+                    tools.append(schema)
+                    logger.info(
+                        "TOOL_LOAD: tool=%s space=%s (not in list, schema loaded)",
+                        block.name, request.active_space_id,
+                    )
+                else:
+                    result = f"Tool '{block.name}' is not available."
+                    tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
+                    logger.info(
+                        "AGENT_RESULT: tool=%s success=%s preview=%s",
+                        block.name, False, result[:100],
+                    )
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    }
+            result = await self._mcp.call_tool(block.name, tool_input)
+            _is_mcp_tool = True
+
+        tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
+        is_error = result.startswith("Tool error:") or result.startswith(
+            "Calendar tool error:")
+
+        logger.info(
+            "AGENT_RESULT: tool=%s success=%s preview=%s",
+            block.name, not is_error, result[:100],
+        )
+
+        # Emit tool.result
+        try:
+            await emit_event(
+                self._events,
+                EventType.TOOL_RESULT,
+                request.tenant_id,
+                "reasoning_service",
+                payload={
+                    "tool_name": block.name,
+                    "success": not is_error,
+                    "result_length": len(result),
+                    "duration_ms": tool_duration_ms,
+                    "conversation_id": request.conversation_id,
+                    "error": result if is_error else None,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to emit tool.result: %s", exc)
+
+        await self._audit.log(
+            request.tenant_id,
+            {
+                "type": "tool_result",
+                "timestamp": utc_now(),
+                "tenant_id": request.tenant_id,
+                "conversation_id": request.conversation_id,
+                "tool_name": block.name,
+                "tool_output": str(result)[:2000],
+            },
+        )
+
+        # Tool result budgeting: persist oversized MCP results
+        injected = result
+        if (
+            _is_mcp_tool
+            and not is_error
+            and len(result) > TOOL_RESULT_CHAR_BUDGET
+            and self._files
+            and request.active_space_id
+        ):
+            ts = re.sub(r"[^0-9T-]", "", utc_now()[:19])
+            slug = uuid.uuid4().hex[:6]
+            safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", block.name)
+            filename = f"tr_{safe_name}_{ts}_{slug}.txt"
+            try:
+                write_msg = await self._files.write_file(
+                    request.tenant_id,
+                    request.active_space_id,
+                    filename,
+                    result,
+                    f"Persisted tool result from {block.name} ({len(result)} chars)",
+                )
+                if write_msg.startswith("Error:"):
+                    raise RuntimeError(write_msg)
+                preview_chars = TOOL_RESULT_CHAR_BUDGET - 200
+                raw_preview = result[:preview_chars]
+                cleaned = re.sub(r"\n{3,}", "\n\n", raw_preview).rstrip()
+                injected = (
+                    f"[Tool result from {block.name} — {len(result)} chars, persisted]\n"
+                    f"{cleaned}\n"
+                    f"...\n"
+                    f"[Full result saved as {filename}. "
+                    f"Use read_file to access the full content.]"
+                )
+                logger.info(
+                    "RESULT_BUDGETED: tool=%s original=%d preview=%d path=%s",
+                    block.name, len(result), len(injected), filename,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Result budgeting failed, injecting raw: tool=%s err=%s",
+                    block.name, exc,
+                )
+
+        return {
+            "type": "tool_result",
+            "tool_use_id": block.id,
+            "content": injected,
+        }
 
     async def _handle_request_tool(
         self,
@@ -1004,11 +1547,9 @@ class ReasoningService:
             and iterations < self.MAX_TOOL_ITERATIONS
         ):
             iterations += 1
-            tool_results = []
+            tool_results: list[dict] = []
 
             # Build a per-tool-call index of agent reasoning.
-            # For each tool_use block: the most recent text block immediately before it.
-            # If there's no text block before a tool_use, use "No explicit reasoning provided."
             _last_text = "No explicit reasoning provided."
             _tool_reasoning: dict[str, str] = {}
             for _b in response.content:
@@ -1016,32 +1557,18 @@ class ReasoningService:
                     _last_text = _b.text.strip() or "No explicit reasoning provided."
                 elif _b.type == "tool_use" and _b.id:
                     _tool_reasoning[_b.id] = _last_text
-                    _last_text = "No explicit reasoning provided."  # reset for next tool call
+                    _last_text = "No explicit reasoning provided."
 
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
+            # Collect all tool_use blocks with their original index
+            indexed_blocks: list[tuple[int, ContentBlock]] = []
+            for i, block in enumerate(response.content):
+                if block.type == "tool_use":
+                    indexed_blocks.append((i, block))
 
-                agent_reasoning = _tool_reasoning.get(block.id or "", "No explicit reasoning provided.")
-
-                logger.info(
-                    "TOOL_LOOP iter=%d tool=%s kernel=%s",
-                    iterations, block.name, block.name in self._KERNEL_TOOLS,
-                )
-
-                # Extract and clean tool_input — pop _approval_token before gate or exec
-                tool_input = dict(block.input or {})
-                approval_token_id = tool_input.pop("_approval_token", None)
-
-                # Console logging: every tool call the agent makes
-                logger.info(
-                    "AGENT_ACTION: tool=%s input=%s",
-                    block.name, json.dumps(tool_input)[:200],
-                )
-
-                # Early stub detection: if this is a stub call (empty input, open schema),
-                # skip the gate and go straight to reload. Stub calls have no meaningful
-                # params for the gate to evaluate.
+            # Pre-pass: handle stubs (modifies shared tools list — must be sequential)
+            stub_results: dict[int, dict] = {}
+            non_stub_blocks: list[tuple[int, ContentBlock]] = []
+            for idx, block in indexed_blocks:
                 if block.name not in self._KERNEL_TOOLS:
                     _stub_entry = None
                     for _t in tools:
@@ -1049,498 +1576,101 @@ class ReasoningService:
                             _stub_entry = _t
                             break
                     if _stub_entry and self._is_stub_schema(_stub_entry) and self._registry:
-                            full_schema = self._registry.get_tool_schema(block.name)
-                            if full_schema:
-                                for _i, _t in enumerate(tools):
-                                    if _t.get("name") == block.name:
-                                        tools[_i] = full_schema
-                                        break
-                                self.load_tool(request.active_space_id, block.name)
-                                logger.info(
-                                    "TOOL_LOAD: tool=%s space=%s (stub -> full schema, re-running)",
-                                    block.name, request.active_space_id,
-                                )
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": block.id,
-                                    "content": (
-                                        f"[SYSTEM] The tool {block.name} is now fully loaded. "
-                                        "Please retry your call with the correct parameters."
-                                    ),
-                                })
-                                continue  # Skip gate and execution for stub call
-
-                # Dispatch Gate: classify and check write tools before execution
-                tool_effect = self._get_gate().classify_tool_effect(block.name, request.active_space, tool_input)
-                if tool_effect in ("soft_write", "hard_write", "unknown"):
-                    # Check gate cache (lazy-load re-runs skip redundant gate evaluation)
-                    if block.name in _gate_cache and _gate_cache[block.name].allowed:
-                        gate_result = _gate_cache.pop(block.name)
-                        logger.info(
-                            "GATE_CACHED: tool=%s (approved on stub call)", block.name,
-                        )
-                    else:
-                        gate_result = await self._get_gate().evaluate(
-                            block.name, tool_input, tool_effect,
-                            request.input_text, request.tenant_id,
-                            request.active_space_id,
-                            messages=request.messages,
-                            approval_token_id=approval_token_id,
-                            agent_reasoning=agent_reasoning,
-                        )
-
-                    try:
-                        await emit_event(
-                            self._events,
-                            EventType.DISPATCH_GATE,
-                            request.tenant_id,
-                            "dispatch_interceptor",
-                            payload={
-                                "tool_name": block.name,
-                                "effect": tool_effect,
-                                "allowed": gate_result.allowed,
-                                "reason": gate_result.reason,
-                                "method": gate_result.method,
-                            },
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to emit dispatch.gate: %s", exc)
-
-                    logger.info(
-                        "GATE: tool=%s effect=%s allowed=%s reason=%s method=%s",
-                        block.name, tool_effect, gate_result.allowed,
-                        gate_result.reason, gate_result.method,
-                    )
-
-                    if not gate_result.allowed:
-                        # Keep token for programmatic callers (Step 1 of the gate)
-                        self._get_gate().issue_approval_token(block.name, tool_input)
-                        # Store PendingAction for kernel-owned replay
-                        tenant_id = request.tenant_id
-                        if tenant_id not in self._pending_actions:
-                            self._pending_actions[tenant_id] = []
-                        pending_idx = len(self._pending_actions[tenant_id])
-                        self._pending_actions[tenant_id].append(PendingAction(
-                            tool_name=block.name,
-                            tool_input=dict(tool_input),
-                            proposed_action=gate_result.proposed_action,
-                            conflicting_rule=gate_result.conflicting_rule,
-                            gate_reason=gate_result.reason,
-                            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
-                        ))
-                        self._conflict_raised_this_turn = True
-                        if gate_result.reason == "covenant_conflict":
-                            system_msg = (
-                                f"[SYSTEM] Action blocked — conflict with standing rule. "
-                                f"Proposed: {gate_result.proposed_action}. "
-                                f"Conflicting rule: {gate_result.conflicting_rule}. "
-                                f"Pending action index: {pending_idx}. "
-                                f"Ask the user to confirm. If they confirm, include "
-                                f"[CONFIRM:{pending_idx}] in your response. "
-                                f"Also offer three options: "
-                                f"1. Respect the rule (don't do it). "
-                                f"2. Override this time (confirm the action). "
-                                f"3. Update the rule permanently."
-                            )
-                        elif gate_result.reason == "clarify":
-                            system_msg = (
-                                f"[SYSTEM] Action paused — the request is ambiguous. "
-                                f"Proposed: {gate_result.proposed_action}. "
-                                f"Pending action index: {pending_idx}. "
-                                f"Ask the user to clarify what they meant. "
-                                f"Once clear, include [CONFIRM:{pending_idx}] in your response."
-                            )
-                        else:
-                            system_msg = (
-                                f"[SYSTEM] Action paused — confirming intent. "
-                                f"Proposed: {gate_result.proposed_action}. "
-                                f"Pending action index: {pending_idx}. "
-                                f"Ask the user if they want to proceed. If they confirm, "
-                                f"include [CONFIRM:{pending_idx}] in your response."
-                            )
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": system_msg,
-                        })
-                        continue
-
-                # Emit tool.called
-                try:
-                    await emit_event(
-                        self._events,
-                        EventType.TOOL_CALLED,
-                        request.tenant_id,
-                        "reasoning_service",
-                        payload={
-                            "tool_name": block.name,
-                            "tool_input": tool_input,
-                            "conversation_id": request.conversation_id,
-                            "reasoning_event_id": rr_event.id if rr_event else None,
-                        },
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to emit tool.called: %s", exc)
-
-                await self._audit.log(
-                    request.tenant_id,
-                    {
-                        "type": "tool_call",
-                        "timestamp": utc_now(),
-                        "tenant_id": request.tenant_id,
-                        "conversation_id": request.conversation_id,
-                        "tool_name": block.name,
-                        "tool_input": tool_input,
-                    },
-                )
-
-                t_tool = time.monotonic()
-                # Kernel tool routing: remember + file tools handled internally
-                if block.name in self._KERNEL_TOOLS:
-                    logger.info(
-                        "KERNEL_TOOL name=%s space=%s",
-                        block.name, request.active_space_id,
-                    )
-                    tool_args = tool_input
-                    if block.name == "remember":
-                        if self._retrieval:
-                            try:
-                                result = await self._retrieval.search(
-                                    request.tenant_id,
-                                    tool_args.get("query", ""),
-                                    request.active_space_id,
-                                )
-                            except Exception as exc:
-                                logger.warning("Kernel tool 'remember' failed: %s", exc)
-                                result = "Memory search failed — try asking in a different way."
-                        else:
-                            result = "Memory search is not available right now."
-                    elif block.name == "remember_details":
-                        result = await self._handle_remember_details(
-                            request.tenant_id,
-                            request.active_space_id,
-                            tool_args,
-                        )
-                    elif block.name == "write_file":
-                        if self._files:
-                            try:
-                                result = await self._files.write_file(
-                                    request.tenant_id,
-                                    request.active_space_id,
-                                    tool_args.get("name", ""),
-                                    tool_args.get("content", ""),
-                                    tool_args.get("description", ""),
-                                )
-                            except Exception as exc:
-                                logger.warning("Kernel tool 'write_file' failed: %s", exc)
-                                result = "File write failed — try again."
-                        else:
-                            result = "File system is not available right now."
-                    elif block.name == "read_file":
-                        if self._files:
-                            try:
-                                result = await self._files.read_file(
-                                    request.tenant_id,
-                                    request.active_space_id,
-                                    tool_args.get("name", ""),
-                                )
-                            except Exception as exc:
-                                logger.warning("Kernel tool 'read_file' failed: %s", exc)
-                                result = "File read failed — try again."
-                        else:
-                            result = "File system is not available right now."
-                    elif block.name == "list_files":
-                        if self._files:
-                            try:
-                                result = await self._files.list_files(
-                                    request.tenant_id,
-                                    request.active_space_id,
-                                )
-                            except Exception as exc:
-                                logger.warning("Kernel tool 'list_files' failed: %s", exc)
-                                result = "File listing failed — try again."
-                        else:
-                            result = "File system is not available right now."
-                    elif block.name == "delete_file":
-                        if self._files:
-                            try:
-                                result = await self._files.delete_file(
-                                    request.tenant_id,
-                                    request.active_space_id,
-                                    tool_args.get("name", ""),
-                                )
-                            except Exception as exc:
-                                logger.warning("Kernel tool 'delete_file' failed: %s", exc)
-                                result = "File deletion failed — try again."
-                        else:
-                            result = "File system is not available right now."
-                    elif block.name == "dismiss_whisper":
-                        try:
-                            result = await self._handle_dismiss_whisper(
-                                request.tenant_id,
-                                tool_args.get("whisper_id", ""),
-                                tool_args.get("reason", "user_dismissed"),
-                            )
-                        except Exception as exc:
-                            logger.warning("Kernel tool 'dismiss_whisper' failed: %s", exc)
-                            result = "Failed to dismiss whisper — try again."
-                    elif block.name == "read_source":
-                        result = _read_source(
-                            tool_args.get("path", ""),
-                            tool_args.get("section", ""),
-                        )
-                    elif block.name == "read_doc":
-                        result = _read_doc(tool_args.get("path", ""))
-                    elif block.name == "read_soul":
-                        if self._state:
-                            soul = await self._state.get_soul(request.tenant_id)
-                            if soul:
-                                from dataclasses import asdict
-                                result = json.dumps(asdict(soul), indent=2)
-                            else:
-                                result = "No soul found for this tenant."
-                        else:
-                            result = "State store is not available."
-                    elif block.name == "update_soul":
-                        if self._state:
-                            field = tool_args.get("field", "")
-                            value = tool_args.get("value", "")
-                            if field not in _SOUL_UPDATABLE_FIELDS:
-                                result = (
-                                    f"Cannot update '{field}'. Only these fields can be updated: "
-                                    f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
-                                )
-                            else:
-                                soul = await self._state.get_soul(request.tenant_id)
-                                if not soul:
-                                    result = "No soul found for this tenant."
-                                else:
-                                    setattr(soul, field, value)
-                                    await self._state.save_soul(soul, source="update_soul", trigger=f"{field}={value}")
-                                    result = f"Updated {field} to: {value}"
-                        else:
-                            result = "State store is not available."
-                    elif block.name == "manage_covenants":
-                        try:
-                            from kernos.kernel.covenant_manager import handle_manage_covenants
-                            cov_action = tool_args.get("action", "list")
-                            result = await handle_manage_covenants(
-                                self._state,
-                                request.tenant_id,
-                                action=cov_action,
-                                rule_id=tool_args.get("rule_id", ""),
-                                new_description=tool_args.get("new_description", ""),
-                                show_all=tool_args.get("show_all", False),
-                            )
-                            # Fire post-write validation after update (not remove)
-                            if cov_action == "update" and "Updated" in result:
-                                import asyncio
-                                from kernos.kernel.covenant_manager import validate_covenant_set
-                                # Extract new_id from result text
-                                import re
-                                id_match = re.search(r"new ID: (rule_\w+)", result)
-                                new_id = id_match.group(1) if id_match else ""
-                                if new_id:
-                                    asyncio.create_task(
-                                        validate_covenant_set(
-                                            state=self._state,
-                                            events=self._events,
-                                            reasoning_service=self,
-                                            tenant_id=request.tenant_id,
-                                            new_rule_id=new_id,
-                                        )
-                                    )
-                        except Exception as exc:
-                            logger.warning("Kernel tool 'manage_covenants' failed: %s", exc)
-                            result = "Failed to manage covenants — try again."
-                    elif block.name == "manage_capabilities":
-                        try:
-                            result = await self._handle_manage_capabilities(
-                                request.tenant_id,
-                                tool_args.get("action", "list"),
-                                tool_args.get("capability", ""),
-                            )
-                        except Exception as exc:
-                            logger.warning("Kernel tool 'manage_capabilities' failed: %s", exc)
-                            result = "Failed to manage tools — try again."
-                    elif block.name == "manage_channels":
-                        from kernos.kernel.channels import handle_manage_channels
-                        if self._channel_registry:
-                            result = handle_manage_channels(
-                                self._channel_registry,
-                                tool_args.get("action", "list"),
-                                tool_args.get("channel", ""),
-                            )
-                        else:
-                            result = "Channel registry is not available."
-                    elif block.name == "send_to_channel":
-                        from kernos.kernel.channels import resolve_channel_alias
-                        _ch_input = tool_args.get("channel", "")
-                        _ch_msg = tool_args.get("message", "")
-                        if not _ch_input or not _ch_msg:
-                            result = "Error: both 'channel' and 'message' are required."
-                        elif not self._channel_registry:
-                            result = "Channel registry is not available."
-                        else:
-                            _resolved = resolve_channel_alias(_ch_input)
-                            _ch_info = self._channel_registry.get(_resolved)
-                            if not _ch_info:
-                                _avail = [c.name for c in self._channel_registry.get_connected()]
-                                result = (
-                                    f"Channel '{_resolved}' (from '{_ch_input}') is not registered. "
-                                    f"Available channels: {', '.join(_avail) or 'none'}"
-                                )
-                            elif _ch_info.status != "connected":
-                                result = f"Channel '{_resolved}' exists but is not connected (status: {_ch_info.status})."
-                            elif not _ch_info.can_send_outbound:
-                                result = f"Channel '{_resolved}' is connected but cannot send outbound messages."
-                            elif not self._handler:
-                                result = "Handler not available for outbound delivery."
-                            else:
-                                try:
-                                    from kernos.kernel.scheduler import resolve_owner_member_id as _resolve_mid
-                                    _member_id = _resolve_mid(request.tenant_id)
-                                    await self._handler.send_outbound(
-                                        request.tenant_id, _member_id, _resolved, _ch_msg,
-                                    )
-                                    logger.info(
-                                        "CROSS_CHANNEL_SEND: channel=%s resolved_from=%s len=%d",
-                                        _resolved, _ch_input, len(_ch_msg),
-                                    )
-                                    result = f"Message sent to {_ch_info.display_name}."
-                                except Exception as exc:
-                                    result = f"Failed to send to {_resolved}: {exc}"
-                    elif block.name == "manage_schedule":
-                        from kernos.kernel.scheduler import handle_manage_schedule
-                        if self._trigger_store:
-                            result = await handle_manage_schedule(
-                                self._trigger_store,
-                                request.tenant_id,
-                                member_id=request.active_space_id,
-                                space_id=request.active_space_id,
-                                action=tool_args.get("action", "list"),
-                                trigger_id=tool_args.get("trigger_id", ""),
-                                description=tool_args.get("description", ""),
-                                reasoning_service=self,
-                                conversation_id=request.conversation_id,
-                                user_timezone=request.user_timezone,
-                            )
-                        else:
-                            result = "Scheduler is not available."
-                    else:
-                        result = f"Kernel tool '{block.name}' not handled."
-                else:
-                    # Lazy tool loading: check if this tool is a stub (loads on first use).
-                    _tool_entry = None
-                    for _t in tools:
-                        if _t.get("name") == block.name:
-                            _tool_entry = _t
-                            break
-
-                    if _tool_entry and self._is_stub_schema(_tool_entry) and self._registry:
                         full_schema = self._registry.get_tool_schema(block.name)
                         if full_schema:
-                            # Replace stub with full schema in the tools list
                             for _i, _t in enumerate(tools):
                                 if _t.get("name") == block.name:
                                     tools[_i] = full_schema
                                     break
                             self.load_tool(request.active_space_id, block.name)
-                            # Cache gate result so re-run doesn't re-evaluate
-                            try:
-                                if tool_effect in ("soft_write", "hard_write", "unknown"):
-                                    _gate_cache[block.name] = gate_result
-                            except NameError:
-                                pass  # gate_result not set (read tool)
                             logger.info(
                                 "TOOL_LOAD: tool=%s space=%s (stub -> full schema, re-running)",
                                 block.name, request.active_space_id,
                             )
-                            # Return a tool result asking the agent to retry with full schema
-                            tool_results.append({
+                            stub_results[idx] = {
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": (
                                     f"[SYSTEM] The tool {block.name} is now fully loaded. "
                                     "Please retry your call with the correct parameters."
                                 ),
-                            })
-                            continue  # Skip execution — agent will retry with full schema
-
-                    if not _tool_entry and self._registry:
-                        # Tool not in list at all — check if it exists in registry
-                        schema = self._registry.get_tool_schema(block.name)
-                        if schema:
-                            self.load_tool(request.active_space_id, block.name)
-                            tools.append(schema)
-                            logger.info(
-                                "TOOL_LOAD: tool=%s space=%s (not in list, schema loaded)",
-                                block.name, request.active_space_id,
-                            )
-                        else:
-                            result = f"Tool '{block.name}' is not available."
-                            tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
-                            logger.info(
-                                "AGENT_RESULT: tool=%s success=%s preview=%s",
-                                block.name, False, result[:100],
-                            )
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": result,
-                            })
+                            }
                             continue
-                    result = await self._mcp.call_tool(block.name, tool_input)
-                tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
+                non_stub_blocks.append((idx, block))
 
-                is_error = result.startswith("Tool error:") or result.startswith(
-                    "Calendar tool error:"
-                )
+            # Classify non-stub blocks into concurrent-safe vs sequential
+            concurrent: list[tuple[int, ContentBlock]] = []
+            sequential: list[tuple[int, ContentBlock]] = []
+            for idx, block in non_stub_blocks:
+                if self._is_concurrent_safe(block.name):
+                    concurrent.append((idx, block))
+                else:
+                    sequential.append((idx, block))
 
-                # Console logging: tool result
+            results_by_index: dict[int, dict] = dict(stub_results)
+
+            # Log concurrency decision when multiple tools present
+            total_tools = len(indexed_blocks)
+            if total_tools > 1:
                 logger.info(
-                    "AGENT_RESULT: tool=%s success=%s preview=%s",
-                    block.name, not is_error, result[:100],
+                    "TOOL_CONCURRENT: parallel=%d sequential=%d stubs=%d total=%d",
+                    len(concurrent), len(sequential), len(stub_results), total_tools,
                 )
 
-                # Emit tool.result
-                try:
-                    await emit_event(
-                        self._events,
-                        EventType.TOOL_RESULT,
-                        request.tenant_id,
-                        "reasoning_service",
-                        payload={
-                            "tool_name": block.name,
-                            "success": not is_error,
-                            "result_length": len(result),
-                            "duration_ms": tool_duration_ms,
-                            "conversation_id": request.conversation_id,
-                            "error": result if is_error else None,
-                        },
+            # Execute concurrent-safe (read) tools in parallel
+            if concurrent:
+                async def _run_concurrent(
+                    idx: int, block: ContentBlock,
+                ) -> tuple[int, dict]:
+                    tool_input = dict(block.input or {})
+                    agent_reasoning = _tool_reasoning.get(
+                        block.id or "", "No explicit reasoning provided.")
+                    logger.info(
+                        "TOOL_LOOP iter=%d tool=%s kernel=%s",
+                        iterations, block.name, block.name in self._KERNEL_TOOLS,
                     )
-                except Exception as exc:
-                    logger.warning("Failed to emit tool.result: %s", exc)
+                    try:
+                        tr = await self._execute_single_tool(
+                            block, tool_input, request, tools,
+                            _gate_cache, rr_event, iterations, agent_reasoning,
+                        )
+                    except Exception as exc:
+                        logger.warning("Concurrent tool error: tool=%s err=%s", block.name, exc)
+                        tr = {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Tool error: {exc}",
+                        }
+                    return idx, tr
 
-                await self._audit.log(
-                    request.tenant_id,
-                    {
-                        "type": "tool_result",
-                        "timestamp": utc_now(),
-                        "tenant_id": request.tenant_id,
-                        "conversation_id": request.conversation_id,
-                        "tool_name": block.name,
-                        "tool_output": str(result)[:2000],
-                    },
+                gather_results = await asyncio.gather(
+                    *[_run_concurrent(idx, block) for idx, block in concurrent],
+                    return_exceptions=True,
                 )
+                for item in gather_results:
+                    if isinstance(item, Exception):
+                        logger.warning("Concurrent gather exception: %s", item)
+                        continue
+                    c_idx, c_result = item
+                    results_by_index[c_idx] = c_result
 
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    }
+            # Execute sequential (write/unknown) tools one at a time
+            for idx, block in sequential:
+                tool_input = dict(block.input or {})
+                agent_reasoning = _tool_reasoning.get(
+                    block.id or "", "No explicit reasoning provided.")
+                logger.info(
+                    "TOOL_LOOP iter=%d tool=%s kernel=%s",
+                    iterations, block.name, block.name in self._KERNEL_TOOLS,
                 )
+                tr = await self._execute_single_tool(
+                    block, tool_input, request, tools,
+                    _gate_cache, rr_event, iterations, agent_reasoning,
+                )
+                results_by_index[idx] = tr
+
+            # Emit tool_results in original block order
+            tool_results = [results_by_index[idx] for idx, _ in indexed_blocks]
 
             messages.append(
                 {
@@ -1712,7 +1842,6 @@ class ReasoningService:
                     sig in _input_lower for sig in _ACTION_REQUEST_SIGNALS
                 )
                 if _user_wants_action and len(response_text) < 200:
-                    import re
                     _has_time = bool(re.search(r'\d{1,2}:\d{2}', response_text))
                     if _has_time:
                         _phrase_match = True

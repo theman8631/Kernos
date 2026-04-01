@@ -133,3 +133,126 @@ async def test_connect_all_emits_capability_error_on_failure(tmp_path):
     assert ev.payload["server_name"] == "bad-server"
     assert "connection refused" in ev.payload["error"]
     assert ev.metadata == {}
+
+
+# ---------------------------------------------------------------------------
+# Per-tool timeout (Fix 2)
+# ---------------------------------------------------------------------------
+
+
+async def test_call_tool_timeout_returns_clean_error():
+    """AC5: Timeout wraps MCP call and returns clean error string."""
+    mcp = MCPClientManager()
+    mock_session = AsyncMock()
+
+    async def _slow_tool(name, args):
+        import asyncio
+        await asyncio.sleep(10)
+
+    mock_session.call_tool = _slow_tool
+    mcp._sessions["srv"] = mock_session
+    mcp._tool_to_session["slow_tool"] = "srv"
+
+    result = await mcp.call_tool("slow_tool", {}, timeout=0.05)
+    assert "timed out" in result
+    assert "slow_tool" in result
+
+
+async def test_call_tool_cancelled_error_propagates():
+    """AC7: CancelledError is never swallowed — always re-raised."""
+    import asyncio as _asyncio
+    mcp = MCPClientManager()
+    mock_session = AsyncMock()
+    mock_session.call_tool.side_effect = _asyncio.CancelledError()
+    mcp._sessions["srv"] = mock_session
+    mcp._tool_to_session["t1"] = "srv"
+
+    with pytest.raises(_asyncio.CancelledError):
+        await mcp.call_tool("t1", {})
+
+
+# ---------------------------------------------------------------------------
+# Automatic retry with backoff (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_transient_failure_retries_then_succeeds():
+    """AC8: Transient failure (timeout) retries once and succeeds."""
+    import asyncio as _asyncio
+    mcp = MCPClientManager()
+    mock_session = AsyncMock()
+
+    call_count = 0
+    mock_content = MagicMock()
+    mock_content.text = "success"
+    mock_result = MagicMock()
+    mock_result.content = [mock_content]
+
+    async def _flaky_tool(name, args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _asyncio.TimeoutError()
+        return mock_result
+
+    mock_session.call_tool = _flaky_tool
+    mcp._sessions["srv"] = mock_session
+    mcp._tool_to_session["flaky"] = "srv"
+
+    # Use short backoff for test speed — patch at module level
+    from kernos.capability import client as _client_mod
+    orig_backoff = _client_mod.RETRY_BACKOFF_S
+    _client_mod.RETRY_BACKOFF_S = 0.01
+    try:
+        result = await mcp.call_tool("flaky", {}, timeout=0.05)
+    finally:
+        _client_mod.RETRY_BACKOFF_S = orig_backoff
+
+    assert result == "success"
+    assert call_count == 2
+
+
+async def test_non_transient_failure_does_not_retry():
+    """AC9: Non-transient failure (validation error) does not retry."""
+    mcp = MCPClientManager()
+    mock_session = AsyncMock()
+
+    call_count = 0
+    async def _bad_tool(name, args):
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("Invalid parameter 'date': validation failed")
+
+    mock_session.call_tool = _bad_tool
+    mcp._sessions["srv"] = mock_session
+    mcp._tool_to_session["bad"] = "srv"
+
+    result = await mcp.call_tool("bad", {})
+    assert call_count == 1  # No retry
+    assert "error" in result.lower()
+
+
+def test_is_transient_classification():
+    """Test _is_transient classifies correctly."""
+    import asyncio as _asyncio
+    assert MCPClientManager._is_transient("503 service unavailable") is True
+    assert MCPClientManager._is_transient("429 rate limit exceeded") is True
+    assert MCPClientManager._is_transient("connection refused") is True
+    assert MCPClientManager._is_transient("timeout") is True
+    assert MCPClientManager._is_transient("", _asyncio.TimeoutError()) is True
+    assert MCPClientManager._is_transient("", ConnectionResetError()) is True
+
+    # Not transient
+    assert MCPClientManager._is_transient("tool not found") is False
+    assert MCPClientManager._is_transient("permission denied") is False
+    assert MCPClientManager._is_transient("invalid parameter") is False
+    assert MCPClientManager._is_transient("unauthorized") is False
+
+
+async def test_timeout_override_per_tool():
+    """Timeout overrides apply per-tool."""
+    mcp = MCPClientManager()
+    assert mcp._get_timeout("goto") == 45
+    assert mcp._get_timeout("brave_web_search") == 15
+    assert mcp._get_timeout("get-current-time") == 5
+    assert mcp._get_timeout("some-random-tool") == 30

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
@@ -11,6 +12,19 @@ if TYPE_CHECKING:
     from kernos.kernel.events import EventStream
 
 logger = logging.getLogger(__name__)
+
+# Per-tool timeout defaults
+TOOL_TIMEOUT_SECONDS: float = 30  # Default for most tools
+TOOL_TIMEOUT_OVERRIDES: dict[str, float] = {
+    "goto": 45,              # Browser navigation can be slow
+    "markdown": 45,          # Page rendering can be slow
+    "brave_web_search": 15,  # Search should be fast
+    "get-current-time": 5,   # Should be instant
+}
+
+# Retry policy for transient failures
+MAX_RETRIES = 1          # One retry only
+RETRY_BACKOFF_S = 1.5    # Wait 1.5 seconds before retry
 
 
 class MCPClientManager:
@@ -268,10 +282,45 @@ class MCPClientManager:
             result.setdefault(server, []).append(tool)
         return result
 
-    async def call_tool(self, tool_name: str, tool_args: dict) -> str:
+    @staticmethod
+    def _is_transient(error_msg: str, exc: Exception | None = None) -> bool:
+        """Distinguish transport failure from valid tool error.
+
+        Transport failures are retryable. Application errors are not.
+        """
+        if isinstance(exc, asyncio.TimeoutError):
+            return True
+        if isinstance(exc, (ConnectionError, ConnectionResetError,
+                            ConnectionRefusedError)):
+            return True
+
+        lower = error_msg.lower()
+
+        # Explicitly NOT transient
+        if any(s in lower for s in [
+            "not found", "not available", "validation",
+            "permission", "unauthorized", "forbidden",
+            "invalid", "auth",
+        ]):
+            return False
+
+        # Transient indicators
+        return any(s in lower for s in [
+            "503", "429", "rate limit", "timeout",
+            "temporarily unavailable", "connection reset",
+            "connection refused", "service unavailable",
+        ])
+
+    def _get_timeout(self, tool_name: str) -> float:
+        """Return the timeout for a given tool."""
+        return TOOL_TIMEOUT_OVERRIDES.get(tool_name, TOOL_TIMEOUT_SECONDS)
+
+    async def call_tool(self, tool_name: str, tool_args: dict,
+                        timeout: float | None = None) -> str:
         """Call an MCP tool by name. Returns result text or an error string.
 
         Never raises — all errors are returned as descriptive strings.
+        Retries once on transient transport failures with 1.5s backoff.
         """
         server_name = self._tool_to_session.get(tool_name)
         if server_name is None:
@@ -283,17 +332,57 @@ class MCPClientManager:
             logger.error("Session not found for server: %s", server_name)
             return f"Tool error: server '{server_name}' is not connected."
 
-        try:
-            result = await session.call_tool(tool_name, tool_args)
-            parts = []
-            for content in result.content:
-                if hasattr(content, "text"):
-                    parts.append(content.text)
-                else:
-                    parts.append(str(content))
-            return "\n".join(parts) if parts else "(empty result)"
-        except Exception as exc:
-            logger.error(
-                "MCP tool call failed tool=%s: %s", tool_name, exc, exc_info=True
+        effective_timeout = timeout or self._get_timeout(tool_name)
+
+        for attempt in range(1 + MAX_RETRIES):
+            exc_ref: Exception | None = None
+            error_msg = ""
+            try:
+                # Timeout wraps ONLY the actual MCP session call
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, tool_args),
+                    timeout=effective_timeout,
+                )
+                # Formatting/processing happens OUTSIDE timeout
+                parts = []
+                for content in result.content:
+                    if hasattr(content, "text"):
+                        parts.append(content.text)
+                    else:
+                        parts.append(str(content))
+                return "\n".join(parts) if parts else "(empty result)"
+
+            except asyncio.CancelledError:
+                raise  # Never swallow cancellation
+
+            except asyncio.TimeoutError as exc:
+                error_msg = f"Tool error: '{tool_name}' timed out after {effective_timeout}s."
+                exc_ref = exc
+                logger.warning(
+                    "TOOL_TIMEOUT: tool=%s timeout=%.1fs",
+                    tool_name, effective_timeout,
+                )
+
+            except Exception as exc:
+                error_msg = f"Tool error: {exc}"
+                exc_ref = exc
+
+            # Check if retryable
+            if attempt < MAX_RETRIES and self._is_transient(error_msg, exc_ref):
+                logger.info(
+                    "TOOL_RETRY: tool=%s attempt=%d/%d backoff=%.1fs error=%s",
+                    tool_name, attempt + 1, MAX_RETRIES + 1,
+                    RETRY_BACKOFF_S, error_msg[:100],
+                )
+                await asyncio.sleep(RETRY_BACKOFF_S)
+                continue
+
+            # Not retryable or retries exhausted
+            logger.warning(
+                "TOOL_FAILED: tool=%s attempts=%d error=%s",
+                tool_name, attempt + 1, error_msg[:200],
             )
-            return f"Calendar tool error: {exc}"
+            return error_msg
+
+        # Should not reach here, but satisfy type checker
+        return error_msg  # type: ignore[possibly-undefined]

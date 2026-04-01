@@ -380,3 +380,414 @@ class TestHallucinationDetector:
         assert "I've created" in result.text
         # Only 2 calls: tool_use + final response (no detection overhead)
         assert mock_provider.complete.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Tool Result Budgeting
+# ---------------------------------------------------------------------------
+
+
+from kernos.kernel.reasoning import TOOL_RESULT_CHAR_BUDGET
+
+
+async def test_mcp_result_under_budget_injected_raw():
+    """MCP results under the budget are injected as-is."""
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["web_search"])
+    short_result = "x" * (TOOL_RESULT_CHAR_BUDGET - 1)
+    mcp.call_tool.return_value = short_result
+
+    mock_provider.complete.side_effect = [
+        _tool_response("web_search", "tu_ws1", {"q": "test"}),
+        _text_response("Done."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "web_search", "description": "Search", "input_schema": {}}],
+            active_space_id="space-1",
+        )
+    )
+
+    # The continuation message should contain the raw result
+    continuation_msg = mock_provider.complete.call_args_list[1]
+    user_msg = continuation_msg.kwargs.get("messages", continuation_msg.args[2] if len(continuation_msg.args) > 2 else None)
+    # Find the tool_result in messages
+    tool_result_content = None
+    for msg in user_msg:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+    assert tool_result_content == short_result
+
+
+async def test_mcp_result_over_budget_persisted_and_preview_injected(tmp_path):
+    """MCP results over the budget are persisted and a preview is injected."""
+    from kernos.kernel.files import FileService
+
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["markdown"])
+    big_result = "Line of content here.\n" * 500  # Well over 4000 chars
+    mcp.call_tool.return_value = big_result
+
+    files = FileService(str(tmp_path))
+    service.set_files(files)
+
+    mock_provider.complete.side_effect = [
+        _tool_response("markdown", "tu_md1", {"url": "https://example.com"}),
+        _text_response("Here's a summary."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "markdown", "description": "Get markdown", "input_schema": {}}],
+            active_space_id="space-1",
+        )
+    )
+
+    # Continuation message should contain preview, not raw result
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    tool_result_content = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+
+    assert tool_result_content is not None
+    assert "[Tool result from markdown" in tool_result_content
+    assert "persisted]" in tool_result_content
+    assert "read_file" in tool_result_content
+    assert len(tool_result_content) <= TOOL_RESULT_CHAR_BUDGET + 200  # preview + wrapper
+
+    # Verify file was persisted to disk
+    space_files = tmp_path / "sms_+15555550100" / "spaces" / "space-1" / "files"
+    persisted = list(space_files.glob("tr_markdown_*.txt"))
+    assert len(persisted) == 1
+    assert persisted[0].read_text() == big_result
+
+
+async def test_kernel_tool_results_not_budgeted():
+    """Kernel tool results are never budgeted, even if large."""
+    service, mock_provider, events, mcp, audit = _make_service()
+    service._retrieval = MagicMock()
+    big_knowledge = "Fact " * 2000  # Over budget
+    service._retrieval.search = AsyncMock(return_value=big_knowledge)
+
+    mock_provider.complete.side_effect = [
+        _tool_response("remember", "tu_r1", {"query": "test"}),
+        _text_response("Noted."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "remember", "input_schema": {"type": "object", "properties": {}}}],
+            active_space_id="space-1",
+        )
+    )
+
+    # Kernel tool result should be injected raw (no budgeting)
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    tool_result_content = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+    assert tool_result_content == big_knowledge
+
+
+async def test_mcp_error_result_not_budgeted():
+    """Error results are never budgeted, even if over threshold."""
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["browser"])
+    error_result = "Tool error: " + "x" * 5000
+    mcp.call_tool.return_value = error_result
+
+    mock_provider.complete.side_effect = [
+        _tool_response("browser", "tu_b1", {}),
+        _text_response("Error occurred."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "browser", "description": "Browse", "input_schema": {}}],
+            active_space_id="space-1",
+        )
+    )
+
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    tool_result_content = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+    assert tool_result_content == error_result
+
+
+async def test_budgeting_logs_result_budgeted(tmp_path, caplog):
+    """RESULT_BUDGETED log line emitted when a result is budgeted."""
+    import logging
+    from kernos.kernel.files import FileService
+
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["markdown"])
+    mcp.call_tool.return_value = "x" * 10000
+
+    files = FileService(str(tmp_path))
+    service.set_files(files)
+
+    mock_provider.complete.side_effect = [
+        _tool_response("markdown", "tu_md2", {"url": "https://example.com"}),
+        _text_response("Done."),
+    ]
+
+    with caplog.at_level(logging.INFO):
+        await service.reason(
+            _make_request(
+                tools=[{"name": "markdown", "description": "Markdown", "input_schema": {}}],
+                active_space_id="space-1",
+            )
+        )
+
+    assert any("RESULT_BUDGETED" in r.message for r in caplog.records)
+
+
+async def test_budgeting_preview_collapses_excessive_newlines(tmp_path):
+    """Preview collapses runs of 3+ newlines to double newlines."""
+    from kernos.kernel.files import FileService
+
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["scraper"])
+    # Content with excessive blank lines
+    big_result = ("content\n\n\n\n\ncontent\n" * 300)
+    mcp.call_tool.return_value = big_result
+
+    files = FileService(str(tmp_path))
+    service.set_files(files)
+
+    mock_provider.complete.side_effect = [
+        _tool_response("scraper", "tu_sc1", {}),
+        _text_response("Done."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "scraper", "description": "Scrape", "input_schema": {}}],
+            active_space_id="space-1",
+        )
+    )
+
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    tool_result_content = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+
+    # No runs of 3+ newlines in the preview body
+    assert "\n\n\n" not in tool_result_content
+
+
+async def test_budgeting_graceful_when_file_service_unavailable():
+    """If file service is None, oversized results are still injected raw."""
+    service, mock_provider, events, mcp, audit = _make_service(read_tool_names=["fetcher"])
+    big_result = "z" * 10000
+    mcp.call_tool.return_value = big_result
+    # _files is None by default
+
+    mock_provider.complete.side_effect = [
+        _tool_response("fetcher", "tu_f1", {}),
+        _text_response("Done."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "fetcher", "description": "Fetch", "input_schema": {}}],
+            active_space_id="space-1",
+        )
+    )
+
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    tool_result_content = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+    # Falls back to raw injection
+    assert tool_result_content == big_result
+
+
+# ---------------------------------------------------------------------------
+# Concurrent tool execution (Fix 1)
+# ---------------------------------------------------------------------------
+
+
+def _multi_tool_response(
+    tool_specs: list[tuple[str, str, dict]],
+) -> ProviderResponse:
+    """Create a response with multiple tool_use blocks.
+
+    tool_specs: list of (name, id, input) tuples.
+    """
+    content = [
+        ContentBlock(type="tool_use", name=name, id=tid, input=inp)
+        for name, tid, inp in tool_specs
+    ]
+    return ProviderResponse(
+        content=content,
+        stop_reason="tool_use",
+        input_tokens=15,
+        output_tokens=10,
+    )
+
+
+async def test_two_read_tools_execute_concurrently():
+    """AC1: Multiple read-only tool_use blocks execute via asyncio.gather."""
+    service, mock_provider, events, mcp, audit = _make_service(
+        read_tool_names=["tool_a", "tool_b"],
+    )
+
+    call_order = []
+    async def _track_call(name, args, **kwargs):
+        call_order.append(name)
+        return f"result_{name}"
+
+    mcp.call_tool = _track_call
+
+    mock_provider.complete.side_effect = [
+        _multi_tool_response([
+            ("tool_a", "tu_a", {}),
+            ("tool_b", "tu_b", {}),
+        ]),
+        _text_response("Done."),
+    ]
+
+    result = await service.reason(
+        _make_request(tools=[
+            {"name": "tool_a", "description": "A", "input_schema": {}},
+            {"name": "tool_b", "description": "B", "input_schema": {}},
+        ])
+    )
+
+    assert result.text == "Done."
+    # Both tools were called
+    assert "tool_a" in call_order
+    assert "tool_b" in call_order
+
+
+async def test_tool_results_order_matches_block_order():
+    """AC2: Returned tool_result order matches original tool_use block order."""
+    service, mock_provider, events, mcp, audit = _make_service(
+        read_tool_names=["first_tool", "second_tool"],
+    )
+
+    async def _return_name(name, args, **kwargs):
+        return f"result_{name}"
+
+    mcp.call_tool = _return_name
+
+    mock_provider.complete.side_effect = [
+        _multi_tool_response([
+            ("first_tool", "tu_1", {}),
+            ("second_tool", "tu_2", {}),
+        ]),
+        _text_response("Done."),
+    ]
+
+    await service.reason(
+        _make_request(tools=[
+            {"name": "first_tool", "description": "First", "input_schema": {}},
+            {"name": "second_tool", "description": "Second", "input_schema": {}},
+        ])
+    )
+
+    # Check continuation message has results in original order
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    user_msg = [m for m in messages if m.get("role") == "user"][-1]
+    tool_results = user_msg["content"]
+    assert tool_results[0]["tool_use_id"] == "tu_1"
+    assert tool_results[1]["tool_use_id"] == "tu_2"
+    assert "result_first_tool" in tool_results[0]["content"]
+    assert "result_second_tool" in tool_results[1]["content"]
+
+
+def test_write_tool_not_concurrent_safe():
+    """AC3: Write tools are classified as NOT concurrent-safe."""
+    from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, CapabilityStatus
+
+    service, _, _, _, _ = _make_service()
+
+    cap = CapabilityInfo(
+        name="test-cap",
+        display_name="Test",
+        description="Test",
+        category="test",
+        status=CapabilityStatus.CONNECTED,
+        tools=["read_tool", "write_tool"],
+        server_name="test",
+        tool_effects={"read_tool": "read", "write_tool": "soft_write"},
+    )
+    registry = CapabilityRegistry(mcp=None)
+    registry.register(cap)
+    service.set_registry(registry)
+
+    assert service._is_concurrent_safe("read_tool") is True
+    assert service._is_concurrent_safe("write_tool") is False
+
+
+def test_unknown_effect_tool_not_concurrent_safe():
+    """AC4: Unknown-effect tool stays sequential (not concurrent-safe)."""
+    service, _, _, _, _ = _make_service()
+    # No registry — tool effect will be "unknown"
+    assert service._is_concurrent_safe("mystery_tool") is False
+    # Kernel reads are concurrent-safe
+    assert service._is_concurrent_safe("remember") is True
+    assert service._is_concurrent_safe("read_doc") is True
+    # Kernel writes are not
+    assert service._is_concurrent_safe("write_file") is False
+    assert service._is_concurrent_safe("delete_file") is False
+
+
+async def test_budgeting_still_applies_per_tool_in_concurrent(tmp_path):
+    """AC12: Result budgeting still applies per-tool, post-execution."""
+    from kernos.kernel.files import FileService
+
+    service, mock_provider, events, mcp, audit = _make_service(
+        read_tool_names=["big_tool"],
+    )
+    file_service = FileService(str(tmp_path))
+    service.set_files(file_service)
+
+    big_result = "x" * 10000
+    mcp.call_tool = AsyncMock(return_value=big_result)
+
+    mock_provider.complete.side_effect = [
+        _tool_response("big_tool", "tu_big", {}),
+        _text_response("Done."),
+    ]
+
+    await service.reason(
+        _make_request(
+            tools=[{"name": "big_tool", "description": "Big", "input_schema": {}}],
+            active_space_id="space-1",
+        )
+    )
+
+    continuation_call = mock_provider.complete.call_args_list[1]
+    messages = continuation_call.kwargs.get("messages", continuation_call.args[2] if len(continuation_call.args) > 2 else None)
+    tool_result_content = None
+    for msg in messages:
+        if msg.get("role") == "user":
+            for item in msg.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_result":
+                    tool_result_content = item["content"]
+    # Should be budgeted (not the raw 10000 chars)
+    assert tool_result_content is not None
+    assert len(tool_result_content) < 5000
+    assert "persisted" in tool_result_content

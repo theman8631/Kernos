@@ -224,6 +224,8 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 **Tool schemas:** `kernos/kernel/tools/schemas.py` — all kernel tool JSON schemas (REQUEST_TOOL, READ_DOC_TOOL, etc.) and pure helpers (read_doc, read_source). ReasoningService imports and re-exports. Tool handlers remain in ReasoningService (tight coupling to service context).
 
+**Tool result budgeting:** Stage 1 of Tool Execution Mediation. MCP tool results exceeding `TOOL_RESULT_CHAR_BUDGET` (4000 chars, ~1000 tokens) are persisted to the space file store as `tr_{tool}_{timestamp}_{slug}.txt` and replaced in the context with a bounded preview + file reference. The agent can drill deeper via `read_file`. Kernel tool results are exempt (already bounded). Error results are exempt. Graceful fallback: if FileService is unavailable or write fails, raw result is injected. `RESULT_BUDGETED` log line emitted on every persistence event.
+
 ### Selective Knowledge Injection
 
 Three-tier system for STATE block knowledge loading:
@@ -254,7 +256,7 @@ Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
 
 **Handler↔Reasoning protocols:** `kernos/kernel/protocols.py` — explicit boundary contracts for testability and maintainability. `HandlerProtocol` (send_outbound, read_log_text) defines what reasoning needs from the handler. `ReasoningProtocol` defines what the handler needs from reasoning (execute_tool, complete_simple, pending state, tool state, model info). No private attribute access across the boundary — all interaction through public methods. `get_pending_actions()` returns a copy to prevent mutable state leakage.
 
-**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, the **dispatch gate** fires first for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
+**Tool-use loop:** ReasoningService handles the full tool-use cycle internally. When the LLM returns a tool_use stop reason, blocks are classified as concurrent-safe (read) or sequential (write/unknown). Read-only tools execute in parallel via `asyncio.gather`; write/unknown tools execute sequentially. Stub detection happens in a pre-pass before parallelization. Tool results are reassembled in original block order regardless of execution order. `_execute_single_tool()` handles one tool end-to-end: gate → execute → budget → return. The **dispatch gate** fires for write tools, then kernel-managed tools are handled internally, then MCP tools are routed to MCPClientManager. Feeds the result back and continues until the LLM returns end_turn.
 
 **Dispatch gate (loss-cost evaluator):** Inserted between tool call proposal and execution. Three-step check: (1) approval token bypass, (2) permission_override fast path, (3) lightweight model call evaluating LOSS COST — not authorization. Produces APPROVE (low cost, clear intent), CONFIRM (high cost, third-party, financial), CLARIFY (ambiguous request), or CONFLICT (covenant rule applies). `_is_stub_schema()` shared helper detects lazy-loaded tool stubs; stubs skip the gate entirely and go straight to schema reload. See Dispatch Interceptor section below for full details.
 
@@ -270,6 +272,10 @@ Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
 - `LLM_BLOCK:` — per-block detail: text (len + 300-char preview) or tool_use (name + 300-char input preview)
 - `REASON_START:` — tool_count, max_tokens, msg_count, ctx_tokens_est (reasoning service)
 - `TOOL_LOOP:` — iteration + exit + exhaustion (reasoning service)
+- `TOOL_CONCURRENT:` — parallel/sequential/stub/total counts when >1 tool in response (reasoning service)
+- `TOOL_TIMEOUT:` — tool hit timeout limit (client.py)
+- `TOOL_RETRY:` — transient failure triggered automatic retry (client.py)
+- `TOOL_FAILED:` — all retry attempts exhausted (client.py)
 - `KERNEL_TOOL:` — kernel tool interceptions
 - `GATE:` — dispatch gate decisions (tool, effect, allowed, reason, method)
 - `GATE_MODEL:` — gate model call details (max_tokens, rules count, raw response)
@@ -388,7 +394,7 @@ Three-layer defense against storing conversation-specific facts as durable knowl
 - `connect_one(server_name) -> bool` — connects a single server by name. Used by MCP Installation (SPEC-3B+) when a new capability is installed at runtime.
 - `disconnect_one(server_name) -> bool` — disconnects a single server. Used when the user uninstalls a capability.
 
-**Tool flow:** ReasoningService calls `mcp_manager.call_tool(name, args)` → MCPClientManager routes to the correct server → server executes → result returned → ReasoningService feeds result back to LLM.
+**Tool flow:** ReasoningService calls `mcp_manager.call_tool(name, args)` → MCPClientManager routes to the correct server → server executes → result returned → ReasoningService feeds result back to LLM. Each MCP call is wrapped with `asyncio.wait_for` (default 30s, per-tool overrides for browser/search). Transient transport failures (timeout, 503, connection reset) retry once with 1.5s backoff. Non-transient failures (validation, auth, not-found) return immediately. `CancelledError` always propagates.
 
 ### Memory Projectors
 
