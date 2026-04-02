@@ -2133,6 +2133,10 @@ class MessageHandler:
         tenant_profile = await self.state.get_tenant_profile(tenant_id)
         current_focus_id = tenant_profile.last_active_space_id if tenant_profile else ""
 
+        logger.info(
+            "ROUTE_INPUT: message=%s recent=%d current_focus=%s",
+            (message.content or "")[:80], len(recent_full), current_focus_id or "none",
+        )
         ctx.router_result = await self._router.route(tenant_id, message.content, recent_full, current_focus_id)
         ctx.active_space_id = ctx.router_result.focus
         ctx.previous_space_id = current_focus_id
@@ -2529,6 +2533,10 @@ class MessageHandler:
                     if not _skip:
                         log_info = await self.conv_logger.get_current_log_info(tenant_id, ctx.active_space_id)
                         new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
+                        logger.info(
+                            "COMPACTION_INPUT: space=%s tokens_est=%d threshold=%d",
+                            ctx.active_space_id, new_tokens, comp_state.compaction_threshold,
+                        )
                         if new_tokens >= comp_state.compaction_threshold:
                             log_text, log_num = await self.conv_logger.read_current_log_text(tenant_id, ctx.active_space_id)
                             if log_text.strip() and ctx.active_space:
@@ -2605,6 +2613,10 @@ class MessageHandler:
             )
             recent_topic = self._get_recent_topic_hint(ctx)
 
+            logger.info(
+                "SHAPE_INPUT: candidates=%d message=%s",
+                len(candidates), (message.content or "")[:80],
+            )
             result = await self.reasoning.complete_simple(
                 system_prompt=(
                     "Select which user knowledge entries are relevant to "

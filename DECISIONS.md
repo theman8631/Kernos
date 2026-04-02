@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Runtime Hardening active. Phase 4D complete. 1418 tests.
+**Status:** Runtime Hardening track RT1 COMPLETE. 1429 tests.
 **Owner:** Founder
-**Action:** SPEC-TURN-SERIALIZATION just shipped (1418 tests). Next: live validation, then structured tool error handling or blocking budget.
-**Tests:** 1418
+**Action:** RT1 closeout shipped (error-in-result, proactive budget, trace enrichment). Next: live validation.
+**Tests:** 1429
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -29,7 +29,7 @@ None currently active. Next spec will be assigned by founder.
 | 4B | Code Health — knowledge filtering, gate calibration, template cleanup, receipts | 1359 | 2026-03-27 |
 | 4C | Structural Refactor — handler decompose, reasoning extract, handler protocol | 1359 | 2026-03-28 |
 | 4D | Context Quality — ledger architecture, selective injection, fact harvest, tool surfacing | 1392 | 2026-03-31 |
-| RT1 | Runtime Hardening — result budgeting, concurrency, timeouts, retry, turn serialization | 1418 | ongoing |
+| RT1 | Runtime Hardening — result budgeting, concurrency, timeouts, retry, turn serialization, closeout | 1429 | 2026-04-02 |
 
 ---
 

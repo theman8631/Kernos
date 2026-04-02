@@ -604,6 +604,10 @@ class ReasoningService:
                     "GATE_CACHED: tool=%s (approved on stub call)", block.name,
                 )
             else:
+                logger.info(
+                    "GATE_INPUT: tool=%s effect=%s reasoning=%s",
+                    block.name, tool_effect, agent_reasoning[:80],
+                )
                 gate_result = await self._get_gate().evaluate(
                     block.name, tool_input, tool_effect,
                     request.input_text, request.tenant_id,

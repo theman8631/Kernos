@@ -754,6 +754,7 @@ async def evaluate_triggers(
     trigger_store: TriggerStore,
     tenant_id: str,
     handler,  # MessageHandler — for send_outbound and tool execution
+    proactive_budget_check=None,  # Optional: () -> bool, gates outbound delivery
 ) -> int:
     """Evaluate and fire all due triggers. Returns count of triggers fired."""
     now = utc_now()
@@ -761,6 +762,10 @@ async def evaluate_triggers(
     fired = 0
 
     for trigger in due:
+        # Proactive budget check — defer if over budget
+        if proactive_budget_check and not proactive_budget_check("scheduler"):
+            break  # Defer remaining triggers to next tick
+
         try:
             success = await _fire_trigger(trigger, handler)
 
@@ -1208,6 +1213,7 @@ async def evaluate_event_triggers(
     handler,
     mcp_client,   # MCPClientManager — explicit contract
     user_timezone: str = "",
+    proactive_budget_check=None,  # Optional: (str) -> bool
 ) -> tuple[int, int]:
     """Evaluate event-based triggers.
 
@@ -1251,7 +1257,7 @@ async def evaluate_event_triggers(
                 try:
                     fired += await _evaluate_calendar_trigger(
                         trigger, trigger_store, handler, relevant_events,
-                        user_timezone,
+                        user_timezone, proactive_budget_check,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -1303,6 +1309,7 @@ async def _evaluate_calendar_trigger(
     handler,
     all_events: list[CalendarEvent],
     user_timezone: str = "",
+    proactive_budget_check=None,
 ) -> int:
     """Evaluate a single calendar event trigger against pre-fetched events."""
     now = datetime.now(timezone.utc)
@@ -1386,6 +1393,10 @@ async def _evaluate_calendar_trigger(
             # Deliver via send_outbound — canonical member ID
             channel = trigger.notify_via or None
             member_id = resolve_owner_member_id(trigger.tenant_id)
+
+            # Proactive budget check
+            if proactive_budget_check and not proactive_budget_check("event_trigger"):
+                continue  # Defer to next poll
 
             try:
                 await handler.send_outbound(

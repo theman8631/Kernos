@@ -26,6 +26,16 @@ TOOL_TIMEOUT_OVERRIDES: dict[str, float] = {
 MAX_RETRIES = 1          # One retry only
 RETRY_BACKOFF_S = 1.5    # Wait 1.5 seconds before retry
 
+# Error-in-success detection: tool returns error text as "successful" output
+ERROR_IN_RESULT_PATTERNS = [
+    "error: rate limit",
+    "error: too many requests",
+    "error: 429",
+    "error: 503",
+    "error: service unavailable",
+    "error: temporarily unavailable",
+]
+
 
 class MCPClientManager:
     """Manages connections to MCP servers and exposes their tools.
@@ -311,6 +321,18 @@ class MCPClientManager:
             "connection refused", "service unavailable",
         ])
 
+    @staticmethod
+    def _is_error_in_result(result_text: str) -> bool:
+        """Detect error responses returned as successful tool output.
+
+        Short results (<500 chars): check contains.
+        Long results: only match if error is at the very start.
+        """
+        lower = result_text.strip().lower()
+        if len(lower) < 500:
+            return any(p in lower for p in ERROR_IN_RESULT_PATTERNS)
+        return any(lower.startswith(p) for p in ERROR_IN_RESULT_PATTERNS)
+
     def _get_timeout(self, tool_name: str) -> float:
         """Return the timeout for a given tool."""
         return TOOL_TIMEOUT_OVERRIDES.get(tool_name, TOOL_TIMEOUT_SECONDS)
@@ -350,7 +372,19 @@ class MCPClientManager:
                         parts.append(content.text)
                     else:
                         parts.append(str(content))
-                return "\n".join(parts) if parts else "(empty result)"
+                formatted = "\n".join(parts) if parts else "(empty result)"
+
+                # Check for error-shaped successful results
+                if self._is_error_in_result(formatted):
+                    logger.warning(
+                        "TOOL_ERROR_IN_RESULT: tool=%s result=%s",
+                        tool_name, formatted[:200],
+                    )
+                    error_msg = f"Tool error: {formatted}"
+                    exc_ref = None
+                    # Fall through to retry check below
+                else:
+                    return formatted
 
             except asyncio.CancelledError:
                 raise  # Never swallow cancellation

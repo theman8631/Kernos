@@ -285,6 +285,12 @@ Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
 - `TURN_MERGED:` — multiple messages merged into one turn (space, count)
 - `TURN_ERROR:` — turn processing failed in runner (space, error)
 - `RUNNER_ERROR:` — unrecoverable runner loop error (space, error)
+- `ROUTE_INPUT:` — router input (message preview, recent count, current focus)
+- `SHAPE_INPUT:` — knowledge shaper input (candidate count, message preview)
+- `GATE_INPUT:` — dispatch gate input (tool, effect, agent reasoning preview)
+- `COMPACTION_INPUT:` — compaction input (space, tokens_est, threshold)
+- `TOOL_ERROR_IN_RESULT:` — error-shaped successful tool output detected (client.py)
+- `PROACTIVE_BUDGET:` — proactive outbound message blocked by rate budget (awareness.py)
 - `CONFIRM_EXECUTE:` / `PENDING_CLEARED:` — confirmation replay outcomes (handler)
 - `HALLUCINATION_CHECK:` / `HALLUCINATION_RETRY:` — hallucination detection and corrective retry
 - `SOUL_WRITE:` / `CAP_WRITE:` / `COVENANT_WRITE:` — state mutation tracing with source/trigger
@@ -400,7 +406,7 @@ Three-layer defense against storing conversation-specific facts as durable knowl
 - `connect_one(server_name) -> bool` — connects a single server by name. Used by MCP Installation (SPEC-3B+) when a new capability is installed at runtime.
 - `disconnect_one(server_name) -> bool` — disconnects a single server. Used when the user uninstalls a capability.
 
-**Tool flow:** ReasoningService calls `mcp_manager.call_tool(name, args)` → MCPClientManager routes to the correct server → server executes → result returned → ReasoningService feeds result back to LLM. Each MCP call is wrapped with `asyncio.wait_for` (default 30s, per-tool overrides for browser/search). Transient transport failures (timeout, 503, connection reset) retry once with 1.5s backoff. Non-transient failures (validation, auth, not-found) return immediately. `CancelledError` always propagates.
+**Tool flow:** ReasoningService calls `mcp_manager.call_tool(name, args)` → MCPClientManager routes to the correct server → server executes → result returned → ReasoningService feeds result back to LLM. Each MCP call is wrapped with `asyncio.wait_for` (default 30s, per-tool overrides for browser/search). Transient transport failures (timeout, 503, connection reset) retry once with 1.5s backoff. Non-transient failures (validation, auth, not-found) return immediately. `CancelledError` always propagates. Error-in-result detection catches error-shaped "successful" outputs (e.g., rate limit responses from Brave Search) and routes them through the transient retry path.
 
 ### Memory Projectors
 

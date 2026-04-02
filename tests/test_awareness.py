@@ -1116,3 +1116,44 @@ class TestEvaluateWithInterrupt:
         pending = await store.get_pending_whispers("test_tenant")
         assert len(pending) == 1
         assert pending[0].delivery_class == "stage"
+
+
+# ---------------------------------------------------------------------------
+# Proactive Budget (Closeout Fix 2)
+# ---------------------------------------------------------------------------
+
+
+class TestProactiveBudget:
+    """Tests for the proactive outbound budget on AwarenessEvaluator."""
+
+    def test_first_message_allowed(self):
+        evaluator = AwarenessEvaluator(AsyncMock(), AsyncMock())
+        assert evaluator._check_proactive_budget("test") is True
+
+    def test_second_message_allowed(self):
+        evaluator = AwarenessEvaluator(AsyncMock(), AsyncMock())
+        evaluator._check_proactive_budget("test")
+        assert evaluator._check_proactive_budget("test") is True
+
+    def test_third_message_blocked(self):
+        evaluator = AwarenessEvaluator(AsyncMock(), AsyncMock())
+        evaluator._check_proactive_budget("test")
+        evaluator._check_proactive_budget("test")
+        assert evaluator._check_proactive_budget("test") is False
+
+    def test_budget_resets_after_window(self):
+        import time as _time
+        evaluator = AwarenessEvaluator(AsyncMock(), AsyncMock())
+        evaluator.PROACTIVE_BUDGET_WINDOW_S = 0.05  # Very short for test
+        evaluator._check_proactive_budget("test")
+        evaluator._check_proactive_budget("test")
+        assert evaluator._check_proactive_budget("test") is False
+        _time.sleep(0.06)  # Wait for window to expire
+        assert evaluator._check_proactive_budget("test") is True
+
+    def test_budget_configurable(self):
+        evaluator = AwarenessEvaluator(AsyncMock(), AsyncMock())
+        evaluator.PROACTIVE_BUDGET_MAX = 5
+        for _ in range(5):
+            assert evaluator._check_proactive_budget("test") is True
+        assert evaluator._check_proactive_budget("test") is False

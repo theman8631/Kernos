@@ -989,3 +989,23 @@ async def test_turn_submitted_logging(caplog):
 
     assert any("TURN_SUBMITTED" in rec.message for rec in caplog.records)
     await handler.shutdown_runners()
+
+
+# ---------------------------------------------------------------------------
+# Cohort Trace Enrichment (Closeout Fix 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_route_input_logged(caplog):
+    """Fix 3: ROUTE_INPUT log line emitted before routing."""
+    import logging
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
+
+    with caplog.at_level(logging.INFO):
+        await handler.process(_make_message("What time is it?"))
+
+    assert any("ROUTE_INPUT" in rec.message for rec in caplog.records)
+    route_input_rec = [r for r in caplog.records if "ROUTE_INPUT" in r.message][0]
+    assert "What time is it?" in route_input_rec.message
+    await handler.shutdown_runners()

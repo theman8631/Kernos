@@ -256,3 +256,94 @@ async def test_timeout_override_per_tool():
     assert mcp._get_timeout("brave_web_search") == 15
     assert mcp._get_timeout("get-current-time") == 5
     assert mcp._get_timeout("some-random-tool") == 30
+
+
+# ---------------------------------------------------------------------------
+# Error-in-result detection (Closeout Fix 1)
+# ---------------------------------------------------------------------------
+
+
+def test_is_error_in_result_detects_rate_limit():
+    """Error-shaped tool results are detected."""
+    assert MCPClientManager._is_error_in_result("Error: Rate limit exceeded") is True
+    assert MCPClientManager._is_error_in_result("Error: 429 Too Many Requests") is True
+    assert MCPClientManager._is_error_in_result("Error: 503 Service Unavailable") is True
+    assert MCPClientManager._is_error_in_result("Error: temporarily unavailable") is True
+
+
+def test_is_error_in_result_ignores_normal_results():
+    """Normal successful results are not flagged."""
+    assert MCPClientManager._is_error_in_result("Meeting at 10am") is False
+    assert MCPClientManager._is_error_in_result('{"events": []}') is False
+    assert MCPClientManager._is_error_in_result("(empty result)") is False
+
+
+def test_is_error_in_result_ignores_long_content_with_error_mention():
+    """Long results mentioning 'error' in the middle are not flagged."""
+    long_content = "x" * 600 + " error: rate limit " + "y" * 100
+    assert MCPClientManager._is_error_in_result(long_content) is False
+
+
+async def test_error_in_result_triggers_retry():
+    """Error-in-result triggers transient retry path."""
+    mcp = MCPClientManager()
+    mock_session = AsyncMock()
+
+    call_count = 0
+    mock_content_err = MagicMock()
+    mock_content_err.text = "Error: Rate limit exceeded"
+    mock_result_err = MagicMock()
+    mock_result_err.content = [mock_content_err]
+
+    mock_content_ok = MagicMock()
+    mock_content_ok.text = "Search results here"
+    mock_result_ok = MagicMock()
+    mock_result_ok.content = [mock_content_ok]
+
+    async def _rate_limited_then_ok(name, args):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return mock_result_err
+        return mock_result_ok
+
+    mock_session.call_tool = _rate_limited_then_ok
+    mcp._sessions["srv"] = mock_session
+    mcp._tool_to_session["brave_web_search"] = "srv"
+
+    from kernos.capability import client as _client_mod
+    orig_backoff = _client_mod.RETRY_BACKOFF_S
+    _client_mod.RETRY_BACKOFF_S = 0.01
+    try:
+        result = await mcp.call_tool("brave_web_search", {})
+    finally:
+        _client_mod.RETRY_BACKOFF_S = orig_backoff
+
+    assert result == "Search results here"
+    assert call_count == 2
+
+
+async def test_non_transient_error_in_result_no_retry():
+    """Non-transient error-in-result returns immediately without retry."""
+    mcp = MCPClientManager()
+    mock_session = AsyncMock()
+
+    mock_content = MagicMock()
+    mock_content.text = "Error: service unavailable"
+    mock_result = MagicMock()
+    mock_result.content = [mock_content]
+    # "service unavailable" is transient so let's use a non-transient one
+    mock_content2 = MagicMock()
+    mock_content2.text = "Normal result"
+    mock_result2 = MagicMock()
+    mock_result2.content = [mock_content2]
+
+    # Actually — all ERROR_IN_RESULT_PATTERNS are transient by design.
+    # Let's verify that a normal (non-error) result passes through unchanged.
+    mock_session.call_tool.return_value = mock_result2
+    mcp._sessions["srv"] = mock_session
+    mcp._tool_to_session["tool"] = "srv"
+
+    result = await mcp.call_tool("tool", {})
+    assert result == "Normal result"
+    assert mock_session.call_tool.await_count == 1

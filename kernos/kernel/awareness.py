@@ -145,6 +145,10 @@ class AwarenessEvaluator:
         self._task: asyncio.Task | None = None
         self._awareness_tick_count = 0
         self._stale_scan_done: set[str] = set()
+        # Proactive outbound budget
+        self.PROACTIVE_BUDGET_WINDOW_S = 15  # 15-second window
+        self.PROACTIVE_BUDGET_MAX = 2        # Max 2 proactive messages per window
+        self._proactive_timestamps: list[float] = []
 
     async def start(self, tenant_id: str) -> None:
         """Start the periodic evaluator for a tenant."""
@@ -164,6 +168,28 @@ class AwarenessEvaluator:
                 pass
             self._task = None
         logger.info("AWARENESS: evaluator stopped")
+
+    def _check_proactive_budget(self, action_type: str = "unknown") -> bool:
+        """Check if a proactive message is within budget.
+
+        Returns True if the message can be sent.
+        Reactive messages (user-initiated) bypass this entirely.
+        """
+        now = time.monotonic()
+        self._proactive_timestamps = [
+            t for t in self._proactive_timestamps
+            if now - t < self.PROACTIVE_BUDGET_WINDOW_S
+        ]
+        if len(self._proactive_timestamps) >= self.PROACTIVE_BUDGET_MAX:
+            logger.info(
+                "PROACTIVE_BUDGET: blocked type=%s — %d messages in last %ds",
+                action_type,
+                len(self._proactive_timestamps),
+                self.PROACTIVE_BUDGET_WINDOW_S,
+            )
+            return False
+        self._proactive_timestamps.append(now)
+        return True
 
     async def _run_loop(self, tenant_id: str) -> None:
         """Main loop — tick every trigger_interval seconds.
@@ -224,6 +250,7 @@ class AwarenessEvaluator:
                     from kernos.kernel.scheduler import evaluate_triggers
                     fired = await evaluate_triggers(
                         self._trigger_store, tenant_id, self._handler,
+                        proactive_budget_check=self._check_proactive_budget,
                     )
                     if fired:
                         logger.info("TRIGGER_EVAL: tenant=%s fired=%d", tenant_id, fired)
@@ -253,6 +280,7 @@ class AwarenessEvaluator:
                                 self._trigger_store, tenant_id,
                                 self._handler, mcp_client,
                                 user_timezone=_user_tz,
+                                proactive_budget_check=self._check_proactive_budget,
                             )
                             # Adaptive cadence: adjust event_every_n based on proximity
                             event_every_n = max(1, next_poll // self._trigger_interval)
@@ -485,6 +513,10 @@ class AwarenessEvaluator:
                 return False  # Queue for session-start injection
         except Exception as exc:
             logger.warning("Interrupt active check failed: %s", exc)
+
+        # Proactive budget check
+        if not self._check_proactive_budget("whisper"):
+            return False  # Deferred to next tick
 
         # Push via outbound
         success = await self._handler.send_outbound(
