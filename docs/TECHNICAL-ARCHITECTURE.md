@@ -89,15 +89,17 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 
 ### Message Handler
 
-**What it does:** Orchestrates the full message lifecycle via a six-phase pipeline with independent error boundaries. `process()` is ~25 lines of orchestration calling phase methods. `TurnContext` dataclass flows accumulated state across phases.
+**What it does:** Orchestrates the full message lifecycle via a six-phase pipeline with independent error boundaries. `process()` runs lightweight phases (provision, route), then submits to a per-(tenant, space) `SpaceRunner` that serializes the heavy phases. `TurnContext` dataclass flows accumulated state across phases.
+
+**Turn serialization:** Each (tenant, space) pair has a dedicated `SpaceRunner` with an `asyncio.Queue` mailbox. Messages arriving while a turn is in progress queue and merge into the next turn (300ms merge window). The runner processes one turn at a time: assemble → reason → consequence → persist. Primary message gets the response; merged messages get `""` (adapter sends nothing). Different spaces run concurrently. `shutdown_runners()` cancels all runners on app shutdown.
 
 **Six phases:**
-1. **Provision** — tenant, soul, MCP config, covenants, evaluator, member identity
-2. **Route** — LLM router, space switching, topic hints, file uploads
-3. **Assemble** — Cognitive UI blocks (RULES, NOW, STATE, RESULTS, ACTIONS, MEMORY) + tools + messages
-4. **Reason** — ReasoningRequest construction, task engine execution
-5. **Consequence** — confirmation replay, tool config, projectors, soul update
-6. **Persist** — store messages, conv log, compaction (with guard + backoff), events
+1. **Provision** — tenant, soul, MCP config, covenants, evaluator, member identity (outside runner)
+2. **Route** — LLM router, space switching, topic hints, file uploads (outside runner)
+3. **Assemble** — Cognitive UI blocks (RULES, NOW, STATE, RESULTS, ACTIONS, MEMORY) + tools + messages (inside runner)
+4. **Reason** — ReasoningRequest construction, task engine execution (inside runner)
+5. **Consequence** — confirmation replay, tool config, projectors, soul update (inside runner)
+6. **Persist** — store messages, conv log, compaction (with guard + backoff), events (inside runner)
 
 **Cognitive UI grammar** (7 blocks, assembled as Markdown H2 sections):
 - `## RULES` — operating principles + behavioral contracts + bootstrap
@@ -279,6 +281,10 @@ Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
 - `KERNEL_TOOL:` — kernel tool interceptions
 - `GATE:` — dispatch gate decisions (tool, effect, allowed, reason, method)
 - `GATE_MODEL:` — gate model call details (max_tokens, rules count, raw response)
+- `TURN_SUBMITTED:` — message submitted to space runner mailbox (tenant, space, queue_depth)
+- `TURN_MERGED:` — multiple messages merged into one turn (space, count)
+- `TURN_ERROR:` — turn processing failed in runner (space, error)
+- `RUNNER_ERROR:` — unrecoverable runner loop error (space, error)
 - `CONFIRM_EXECUTE:` / `PENDING_CLEARED:` — confirmation replay outcomes (handler)
 - `HALLUCINATION_CHECK:` / `HALLUCINATION_RETRY:` — hallucination detection and corrective retry
 - `SOUL_WRITE:` / `CAP_WRITE:` / `COVENANT_WRITE:` — state mutation tracing with source/trigger

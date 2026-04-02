@@ -1,3 +1,4 @@
+import asyncio
 import json
 from kernos.utils import utc_now
 import logging
@@ -138,6 +139,20 @@ class TurnContext:
     # Phase 4: Reason
     response_text: str = ""
     task: Task | None = None
+
+
+# Turn serialization: per-(tenant, space) mailbox/runner
+MERGE_WINDOW_MS = 300  # Wait up to 300ms for follow-up messages
+
+
+@dataclass
+class SpaceRunner:
+    """Per-(tenant, space) turn runner with mailbox."""
+
+    tenant_id: str
+    space_id: str
+    mailbox: asyncio.Queue  # (NormalizedMessage, TurnContext, asyncio.Future) items
+    _task: asyncio.Task | None = field(default=None, repr=False)
 
 
 _MODEL = "claude-sonnet-4-6"
@@ -520,6 +535,7 @@ class MessageHandler:
         self._error_buffer = ErrorBuffer()
         self._pending_system_events: dict[str, list[str]] = {}
         self._compacting: set[str] = set()  # space_ids currently compacting
+        self._runners: dict[str, SpaceRunner] = {}  # "tenant:space" → SpaceRunner
         self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
         from kernos.kernel.channels import ChannelRegistry
         self._channel_registry = ChannelRegistry()
@@ -1770,19 +1786,174 @@ class MessageHandler:
             logger.warning("Failed to update conversation summary: %s", exc)
 
     # -----------------------------------------------------------------------
+    # Turn Serialization — Per-Space Mailbox/Runner
+    # -----------------------------------------------------------------------
+
+    def _get_runner(self, tenant_id: str, space_id: str) -> SpaceRunner:
+        """Get or create the runner for a (tenant, space) pair."""
+        key = f"{tenant_id}:{space_id}"
+        if key not in self._runners:
+            runner = SpaceRunner(
+                tenant_id=tenant_id,
+                space_id=space_id,
+                mailbox=asyncio.Queue(),
+            )
+            runner._task = asyncio.create_task(
+                self._run_space_loop(runner),
+                name=f"runner:{key}",
+            )
+            self._runners[key] = runner
+        return self._runners[key]
+
+    async def _run_space_loop(self, runner: SpaceRunner) -> None:
+        """Process turns sequentially for one (tenant, space) pair.
+
+        Pulls messages from the mailbox, merges rapid follow-ups,
+        processes one turn at a time, delivers responses.
+        """
+        while True:
+            merged_messages: list[tuple[NormalizedMessage, TurnContext, asyncio.Future]] = []
+            try:
+                # Block until at least one message arrives
+                msg, ctx, future = await runner.mailbox.get()
+                merged_messages = [(msg, ctx, future)]
+
+                # Merge window: wait briefly for follow-up messages
+                try:
+                    await asyncio.sleep(MERGE_WINDOW_MS / 1000)
+                except asyncio.CancelledError:
+                    raise
+
+                # Drain any additional messages that arrived during the window
+                while not runner.mailbox.empty():
+                    extra = runner.mailbox.get_nowait()
+                    merged_messages.append(extra)
+
+                if len(merged_messages) > 1:
+                    logger.info(
+                        "TURN_MERGED: space=%s merged=%d",
+                        runner.space_id, len(merged_messages),
+                    )
+
+                # Process as one turn using the first message's context
+                primary_msg, primary_ctx, primary_future = merged_messages[0]
+
+                # Log merged messages to conversation log so agent sees them
+                for extra_msg, extra_ctx, extra_future in merged_messages[1:]:
+                    try:
+                        await self.conv_logger.append(
+                            runner.tenant_id, runner.space_id,
+                            speaker="user",
+                            channel=extra_msg.platform,
+                            content=extra_msg.content,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to log merged message: %s", exc)
+
+                # Execute the full turn (assemble → reason → persist)
+                try:
+                    await self._phase_assemble(primary_ctx)
+
+                    # /dump intercept — write assembled context, skip reasoning
+                    if primary_msg.content and primary_msg.content.strip().lower() == "/dump":
+                        response = await self._handle_dump(primary_ctx)
+                    else:
+                        try:
+                            await self._phase_reason(primary_ctx)
+                        except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
+                            response = await self._handle_reasoning_error(
+                                primary_ctx, exc, "try again in a moment")
+                            if not primary_future.done():
+                                primary_future.set_result(response)
+                            for _, _, ef in merged_messages[1:]:
+                                if not ef.done():
+                                    ef.set_result("")
+                            continue
+                        except ReasoningRateLimitError as exc:
+                            response = await self._handle_reasoning_error(
+                                primary_ctx, exc, "overloaded right now. Try again in a minute")
+                            if not primary_future.done():
+                                primary_future.set_result(response)
+                            for _, _, ef in merged_messages[1:]:
+                                if not ef.done():
+                                    ef.set_result("")
+                            continue
+                        except ReasoningProviderError as exc:
+                            response = await self._handle_reasoning_error(
+                                primary_ctx, exc, "try again in a moment")
+                            if not primary_future.done():
+                                primary_future.set_result(response)
+                            for _, _, ef in merged_messages[1:]:
+                                if not ef.done():
+                                    ef.set_result("")
+                            continue
+                        except Exception as exc:
+                            response = await self._handle_reasoning_error(
+                                primary_ctx, exc, "something unexpected happened")
+                            if not primary_future.done():
+                                primary_future.set_result(response)
+                            for _, _, ef in merged_messages[1:]:
+                                if not ef.done():
+                                    ef.set_result("")
+                            continue
+
+                        await self._phase_consequence(primary_ctx)
+                        await self._phase_persist(primary_ctx)
+                        response = primary_ctx.response_text or ""
+                except Exception as exc:
+                    logger.error(
+                        "TURN_ERROR: space=%s error=%s",
+                        runner.space_id, exc, exc_info=True,
+                    )
+                    response = "Something went wrong. Try again in a moment."
+
+                # Resolve all futures — primary gets the response,
+                # merged messages get empty (adapter sends nothing)
+                if not primary_future.done():
+                    primary_future.set_result(response)
+                for _, _, extra_future in merged_messages[1:]:
+                    if not extra_future.done():
+                        extra_future.set_result("")
+
+            except asyncio.CancelledError:
+                # Resolve any pending futures before exiting
+                for item in merged_messages:
+                    _, _, f = item
+                    if not f.done():
+                        f.set_result("")
+                break
+            except Exception as exc:
+                logger.error(
+                    "RUNNER_ERROR: space=%s error=%s",
+                    runner.space_id, exc, exc_info=True,
+                )
+                # Resolve any pending futures so callers don't hang
+                for item in merged_messages:
+                    _, _, f = item
+                    if not f.done():
+                        f.set_result("Something went wrong. Try again.")
+
+    async def shutdown_runners(self) -> None:
+        """Cancel all space runners. Call on application shutdown."""
+        for key, runner in list(self._runners.items()):
+            if runner._task and not runner._task.done():
+                runner._task.cancel()
+                try:
+                    await runner._task
+                except asyncio.CancelledError:
+                    pass
+        self._runners.clear()
+
+    # -----------------------------------------------------------------------
     # Six-Phase Pipeline (SPEC-HANDLER-DECOMPOSE)
     # -----------------------------------------------------------------------
 
     async def process(self, message: NormalizedMessage) -> str:
         """Process a NormalizedMessage and return a response string.
 
-        Six phases with independent error boundaries:
-        1. Provision — tenant, soul, MCP, member identity
-        2. Route — determine context space, handle uploads
-        3. Assemble — build Cognitive UI blocks (system prompt, tools, messages)
-        4. Reason — execute via task engine
-        5. Consequence — confirmation replay, projectors, soul update
-        6. Persist — store messages, compaction, events
+        Lightweight phases (provision, route) run immediately. The heavy
+        phases (assemble → reason → consequence → persist) are submitted
+        to a per-(tenant, space) runner that serializes turns.
         """
         ctx = TurnContext(message=message)
 
@@ -1791,29 +1962,24 @@ class MessageHandler:
         if early is not None:
             return early
 
+        # Lightweight phases — safe to run concurrently
         await self._phase_provision(ctx)
         await self._phase_route(ctx)
-        await self._phase_assemble(ctx)
 
-        # /dump diagnostic intercept — write assembled context, skip reasoning
-        if message.content and message.content.strip().lower() == "/dump":
-            return await self._handle_dump(ctx)
+        # Submit to the space runner's mailbox
+        runner = self._get_runner(ctx.tenant_id, ctx.active_space_id)
 
-        try:
-            await self._phase_reason(ctx)
-        except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
-            return await self._handle_reasoning_error(ctx, exc, "try again in a moment")
-        except ReasoningRateLimitError as exc:
-            return await self._handle_reasoning_error(ctx, exc, "overloaded right now. Try again in a minute")
-        except ReasoningProviderError as exc:
-            return await self._handle_reasoning_error(ctx, exc, "try again in a moment")
-        except Exception as exc:
-            return await self._handle_reasoning_error(ctx, exc, "something unexpected happened")
+        response_future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+        await runner.mailbox.put((message, ctx, response_future))
 
-        await self._phase_consequence(ctx)
-        await self._phase_persist(ctx)
+        logger.info(
+            "TURN_SUBMITTED: tenant=%s space=%s queue_depth=%d",
+            ctx.tenant_id, ctx.active_space_id,
+            runner.mailbox.qsize(),
+        )
 
-        return ctx.response_text
+        # Await the response — runner will resolve the future
+        return await response_future
 
     async def _check_early_return(self, ctx: TurnContext) -> str | None:
         """Secure input intercepts — return early without LLM."""

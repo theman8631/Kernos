@@ -116,6 +116,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Failed to emit system.stopped: %s", exc)
 
+    await app.state.handler.shutdown_runners()
     await mcp_manager.disconnect_all()
 
 

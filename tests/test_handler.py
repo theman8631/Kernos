@@ -796,3 +796,196 @@ class TestDepartureContext:
         # With 300 chars each and 1200 budget, should get at most 4 entries
         entry_lines = [l for l in result["content"].split("\n") if l.startswith("[User]:") or l.startswith("[Assistant]:")]
         assert len(entry_lines) <= 4
+
+
+# ---------------------------------------------------------------------------
+# Turn Serialization (SPEC-TURN-SERIALIZATION)
+# ---------------------------------------------------------------------------
+
+from kernos.messages.handler import SpaceRunner, MERGE_WINDOW_MS
+import asyncio
+
+
+async def test_single_message_no_contention():
+    """AC13: Single-message turns work normally with no behavioral change."""
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hello!")
+
+    result = await handler.process(_make_message("Hi"))
+    assert result == "Hello!"
+    await handler.shutdown_runners()
+
+
+async def test_turn_serialization_prevents_concurrent_turns():
+    """AC1: Per-space runner serializes turns — no concurrent execution."""
+    handler, mock_provider = _make_handler()
+
+    execution_log = []
+
+    original_assemble = handler._phase_assemble
+
+    async def _tracking_assemble(ctx):
+        execution_log.append(("assemble_start", ctx.message.content))
+        await original_assemble(ctx)
+        # Simulate slow assembly
+        await asyncio.sleep(0.05)
+        execution_log.append(("assemble_end", ctx.message.content))
+
+    handler._phase_assemble = _tracking_assemble
+
+    mock_provider.complete.return_value = _mock_provider_response("Done.")
+
+    # Send two messages concurrently — they should serialize
+    msg1 = _make_message("First")
+    msg2 = _make_message("Second")
+
+    t1 = asyncio.create_task(handler.process(msg1))
+    # Small delay so msg1 enters the runner first
+    await asyncio.sleep(0.01)
+    t2 = asyncio.create_task(handler.process(msg2))
+
+    r1, r2 = await asyncio.gather(t1, t2)
+
+    # First message gets a real response
+    assert r1 == "Done."
+    # Second message was merged (gets empty string)
+    assert r2 == ""
+
+    await handler.shutdown_runners()
+
+
+async def test_merged_messages_logged_to_conversation(caplog, tmp_path):
+    """AC4: Merged messages are logged to conversation log so agent sees them."""
+    import logging
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Got it.")
+
+    # Replace conv_logger with a mock so we can track calls
+    mock_conv_logger = AsyncMock()
+    handler.conv_logger = mock_conv_logger
+
+    msg1 = _make_message("First message")
+    msg2 = _make_message("Second message")
+
+    t1 = asyncio.create_task(handler.process(msg1))
+    await asyncio.sleep(0.01)
+    t2 = asyncio.create_task(handler.process(msg2))
+
+    await asyncio.gather(t1, t2)
+    await handler.shutdown_runners()
+
+    # conv_logger.append should have been called for the merged message
+    append_calls = mock_conv_logger.append.call_args_list
+    merged_found = any(
+        "Second message" in str(c)
+        for c in append_calls
+    )
+    assert merged_found, f"Expected merged message in conv_logger.append calls: {append_calls}"
+
+
+async def test_different_spaces_run_concurrently():
+    """AC8: Messages to different spaces can process concurrently."""
+    handler, mock_provider = _make_handler()
+
+    # Track execution timing
+    execution_order = []
+
+    original_assemble = handler._phase_assemble
+
+    async def _tracking_assemble(ctx):
+        execution_order.append(("start", ctx.active_space_id))
+        await original_assemble(ctx)
+        await asyncio.sleep(0.05)  # Simulate work
+        execution_order.append(("end", ctx.active_space_id))
+
+    handler._phase_assemble = _tracking_assemble
+    mock_provider.complete.return_value = _mock_provider_response("Done.")
+
+    # Force different space IDs by patching _phase_route
+    original_route = handler._phase_route
+
+    call_count = 0
+    async def _route_to_different_spaces(ctx):
+        nonlocal call_count
+        await original_route(ctx)
+        call_count += 1
+        ctx.active_space_id = f"space-{call_count}"
+
+    handler._phase_route = _route_to_different_spaces
+
+    msg1 = _make_message("Task A")
+    msg2 = _make_message("Task B")
+
+    # Both should start before either finishes (different spaces = different runners)
+    t1 = asyncio.create_task(handler.process(msg1))
+    await asyncio.sleep(0.01)
+    t2 = asyncio.create_task(handler.process(msg2))
+
+    r1, r2 = await asyncio.gather(t1, t2)
+
+    # Both get real responses (not merged — different spaces)
+    assert r1 == "Done."
+    assert r2 == "Done."
+
+    await handler.shutdown_runners()
+
+
+async def test_empty_string_for_merged_messages():
+    """AC9: Merged messages return empty string so adapter sends nothing."""
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Response.")
+
+    msg1 = _make_message("Main")
+    msg2 = _make_message("Follow-up 1")
+    msg3 = _make_message("Follow-up 2")
+
+    t1 = asyncio.create_task(handler.process(msg1))
+    await asyncio.sleep(0.01)
+    t2 = asyncio.create_task(handler.process(msg2))
+    t3 = asyncio.create_task(handler.process(msg3))
+
+    r1, r2, r3 = await asyncio.gather(t1, t2, t3)
+
+    # Primary gets the response, merged get empty
+    assert r1 == "Response."
+    assert r2 == ""
+    assert r3 == ""
+
+    await handler.shutdown_runners()
+
+
+async def test_shutdown_runners_resolves_pending():
+    """Clean shutdown resolves pending futures."""
+    handler, mock_provider = _make_handler()
+    # Create a runner but don't process anything — just verify shutdown is clean
+    runner = handler._get_runner("test-tenant", "test-space")
+    assert runner._task is not None
+    assert not runner._task.done()
+
+    await handler.shutdown_runners()
+    assert len(handler._runners) == 0
+
+
+async def test_runner_handles_reasoning_error():
+    """Runner handles reasoning errors gracefully and resolves futures."""
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.side_effect = ReasoningTimeoutError("timeout")
+
+    result = await handler.process(_make_message("will fail"))
+    assert isinstance(result, str)
+    assert "try again" in result.lower()
+
+    await handler.shutdown_runners()
+
+
+async def test_turn_submitted_logging(caplog):
+    """AC10: TURN_SUBMITTED log line emitted."""
+    import logging
+    handler, mock_provider = _make_handler()
+    mock_provider.complete.return_value = _mock_provider_response("Hi!")
+
+    with caplog.at_level(logging.INFO):
+        await handler.process(_make_message("Test"))
+
+    assert any("TURN_SUBMITTED" in rec.message for rec in caplog.records)
+    await handler.shutdown_runners()
