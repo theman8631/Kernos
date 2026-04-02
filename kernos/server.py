@@ -371,6 +371,8 @@ async def on_message(message):
 
     async with message.channel.typing():
         response_text = await handler.process(normalized)
+    if not response_text:  # Merged message — response comes from primary turn
+        return
     for chunk in _chunk_response(response_text):
         await message.channel.send(chunk)
 

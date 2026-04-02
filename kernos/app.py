@@ -145,6 +145,8 @@ async def sms_inbound(request: Request) -> Response:
         handler: MessageHandler = request.app.state.handler
         message = _twilio_adapter.inbound(raw)
         response_text = await handler.process(message)
+        if not response_text:  # Merged message — no reply needed
+            return Response(content="<Response/>", media_type="application/xml")
         twiml = _twilio_adapter.outbound(response_text, message)
         logger.info("Response to=%s twiml=%r", message.sender, twiml)
         return Response(content=twiml, media_type="application/xml")
