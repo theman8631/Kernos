@@ -1029,7 +1029,7 @@ class TestTemplateInstruction:
     def test_operating_principles_include_remember(self):
         from kernos.kernel.template import PRIMARY_TEMPLATE
         assert "remember" in PRIMARY_TEMPLATE.operating_principles.lower()
-        assert "search your memory" in PRIMARY_TEMPLATE.operating_principles.lower()
+        assert "asking the user to repeat" in PRIMARY_TEMPLATE.operating_principles.lower()
 
 
 # ─── Extraction prompt includes behavioral_instruction ───────────────

@@ -185,14 +185,12 @@ class TestReadSourceToolDefinition:
 class TestDocsHint:
     def test_docs_hint_exists(self):
         from kernos.messages.reference import DOCS_HINT
-        assert len(DOCS_HINT) > 100
+        assert len(DOCS_HINT) > 20
 
-    def test_docs_hint_references_key_sections(self):
+    def test_docs_hint_references_docs_and_read_doc(self):
         from kernos.messages.reference import DOCS_HINT
-        assert "capabilities/" in DOCS_HINT
-        assert "behaviors/" in DOCS_HINT
-        assert "architecture/" in DOCS_HINT
-        assert "identity/" in DOCS_HINT
+        assert "docs/" in DOCS_HINT
+        assert "read_doc" in DOCS_HINT
 
 
 class TestDocsDirectory:

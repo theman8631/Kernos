@@ -135,6 +135,7 @@ class TurnContext:
     messages: list[dict] = field(default_factory=list)
     results_prefix: str | None = None
     memory_prefix: str | None = None
+    merged_count: int = 0  # Number of user messages merged into this turn
 
     # Phase 4: Reason
     response_text: str = ""
@@ -699,6 +700,20 @@ class MessageHandler:
             env=resolved_env,
         )
         self.mcp.register_server(capability_name, params)
+
+        # Register auth command if the capability defines one
+        if cap.auth_args:
+            from kernos.capability.client import AuthCommand
+            self.mcp.register_auth_command(
+                capability_name,
+                AuthCommand(
+                    command=cap.server_command,
+                    args=list(cap.auth_args),
+                    env=resolved_env,
+                    probe_tool=cap.auth_probe_tool,
+                ),
+            )
+
         success = await self.mcp.connect_one(capability_name)
 
         if success:
@@ -992,6 +1007,20 @@ class MessageHandler:
                     env=resolved_env,
                 ),
             )
+
+            # Register auth command if capability defines one
+            if cap and cap.auth_args:
+                from kernos.capability.client import AuthCommand
+                self.mcp.register_auth_command(
+                    name,
+                    AuthCommand(
+                        command=cap.server_command,
+                        args=list(cap.auth_args),
+                        env=resolved_env,
+                        probe_tool=cap.auth_probe_tool,
+                    ),
+                )
+
             success = await self.mcp.connect_one(name)
             if success:
                 tools = self.mcp.get_tool_definitions().get(name, [])
@@ -1838,6 +1867,7 @@ class MessageHandler:
 
                 # Process as one turn using the first message's context
                 primary_msg, primary_ctx, primary_future = merged_messages[0]
+                primary_ctx.merged_count = len(merged_messages)
 
                 # Log merged messages to conversation log so agent sees them
                 for extra_msg, extra_ctx, extra_future in merged_messages[1:]:
@@ -2349,6 +2379,14 @@ class MessageHandler:
         loaded_names = self.reasoning.get_loaded_tools(active_space_id)
         surfaced_names.update(loaded_names)
 
+        # Space-activated capabilities: tools from capabilities explicitly activated
+        # for this space (via request_tool) persist across turns without keyword matching
+        if active_space and active_space.active_tools:
+            for cap_name in active_space.active_tools:
+                cap = self.registry.get(cap_name)
+                if cap and cap.tools:
+                    surfaced_names.update(cap.tools)
+
         # Map surfaced names to actual tool schemas
         # Kernel tools matched by category
         _kernel_tool_map: dict[str, dict] = {}
@@ -2419,6 +2457,19 @@ class MessageHandler:
             shaped = [e for e in candidates if e.id in relevant_ids]
 
         user_knowledge_entries = always_inject + shaped
+
+        # Inject merge note so agent knows multiple messages need addressing
+        if ctx.merged_count > 1:
+            merge_note = (
+                f"IMPORTANT: This turn contains {ctx.merged_count} user messages "
+                f"(merged from rapid input). You MUST address ALL of them in your "
+                f"response. Do not skip any. Read through all the user messages in "
+                f"the conversation before responding."
+            )
+            if ctx.results_prefix:
+                ctx.results_prefix += "\n\n" + merge_note
+            else:
+                ctx.results_prefix = merge_note
 
         rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul)
         now_block = _build_now_block(message, soul, active_space)

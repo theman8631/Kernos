@@ -961,6 +961,7 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
                 model="",
                 trigger="scheduler",
                 active_space_id=trigger.space_id,
+                is_reactive=False,
             )
             result = await handler.reasoning.execute_tool(tool_name, tool_args, request)
 

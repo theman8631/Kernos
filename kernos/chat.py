@@ -37,7 +37,7 @@ async def build_handler():
     """Construct the full handler stack — same as server.py."""
     from mcp import StdioServerParameters
 
-    from kernos.capability.client import MCPClientManager
+    from kernos.capability.client import AuthCommand, MCPClientManager
     from kernos.capability.known import KNOWN_CAPABILITIES
     from kernos.capability.registry import CapabilityRegistry, CapabilityStatus
     from kernos.kernel.credentials import resolve_anthropic_credential
@@ -73,6 +73,15 @@ async def build_handler():
                 command="npx",
                 args=["@cocal/google-calendar-mcp"],
                 env={"GOOGLE_OAUTH_CREDENTIALS": credentials_path},
+            ),
+        )
+        mcp_manager.register_auth_command(
+            "google-calendar",
+            AuthCommand(
+                command="npx",
+                args=["@cocal/google-calendar-mcp", "auth", "normal"],
+                env={"GOOGLE_OAUTH_CREDENTIALS": credentials_path},
+                probe_tool="get-current-time",
             ),
         )
 

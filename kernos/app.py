@@ -22,7 +22,7 @@ import dataclasses
 from kernos.messages.adapters.twilio_sms import TwilioSMSAdapter
 from kernos.kernel.credentials import resolve_anthropic_credential
 from kernos.messages.handler import MessageHandler
-from kernos.capability.client import MCPClientManager
+from kernos.capability.client import AuthCommand, MCPClientManager
 from kernos.capability.known import KNOWN_CAPABILITIES
 from kernos.capability.registry import CapabilityRegistry, CapabilityStatus
 from kernos.kernel.event_types import EventType
@@ -67,6 +67,15 @@ async def lifespan(app: FastAPI):
                 command="npx",
                 args=["@cocal/google-calendar-mcp"],
                 env={"GOOGLE_OAUTH_CREDENTIALS": credentials_path},
+            ),
+        )
+        mcp_manager.register_auth_command(
+            "google-calendar",
+            AuthCommand(
+                command="npx",
+                args=["@cocal/google-calendar-mcp", "auth", "normal"],
+                env={"GOOGLE_OAUTH_CREDENTIALS": credentials_path},
+                probe_tool="get-current-time",
             ),
         )
     else:

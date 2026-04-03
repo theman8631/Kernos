@@ -85,6 +85,7 @@ class ReasoningRequest:
     input_text: str = ""       # Current user message — used by dispatch gate
     active_space: Any = None   # ContextSpace | None — for gate tool effect classification
     user_timezone: str = ""    # IANA timezone from soul — for scheduler extraction
+    is_reactive: bool = True   # True when responding to a user message; False for scheduler/background
 
 
 # GateResult and ApprovalToken extracted to kernos/kernel/gate.py (re-exported above)
@@ -338,7 +339,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -554,6 +555,13 @@ class ReasoningService:
                         user_timezone=request.user_timezone,
                     )
                 return "Scheduler is not available."
+            elif tool_name == "request_tool":
+                return await self._handle_request_tool(
+                    request.tenant_id,
+                    request.active_space_id,
+                    tool_input.get("capability_name", "unknown"),
+                    tool_input.get("description", ""),
+                )
             else:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
@@ -615,6 +623,7 @@ class ReasoningService:
                     messages=request.messages,
                     approval_token_id=approval_token_id,
                     agent_reasoning=agent_reasoning,
+                    is_reactive=request.is_reactive,
                 )
 
             try:
@@ -962,6 +971,13 @@ class ReasoningService:
                 except Exception as exc:
                     logger.warning("Kernel tool 'inspect_state' failed: %s", exc)
                     result = "State inspection failed — try again."
+            elif block.name == "request_tool":
+                result = await self._handle_request_tool(
+                    request.tenant_id,
+                    request.active_space_id,
+                    tool_args.get("capability_name", "unknown"),
+                    tool_args.get("description", ""),
+                )
             else:
                 result = f"Kernel tool '{block.name}' not handled."
         else:

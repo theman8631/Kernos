@@ -370,10 +370,10 @@ class TestRequestTool:
             "t1", "space_test", {"active_tools": ["google-calendar"]}
         )
 
-    def test_request_tool_removed_from_kernel_tools(self):
-        """request_tool replaced by lazy loading — no longer a kernel tool."""
+    def test_request_tool_in_kernel_tools(self):
+        """request_tool must be a kernel tool — it's the recovery mechanism for tool surfacing."""
         from kernos.kernel.reasoning import ReasoningService
-        assert "request_tool" not in ReasoningService._KERNEL_TOOLS
+        assert "request_tool" in ReasoningService._KERNEL_TOOLS
 
 
 # ===========================

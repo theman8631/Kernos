@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mcp import ClientSession, StdioServerParameters
@@ -10,6 +12,15 @@ from mcp.client.stdio import stdio_client
 
 if TYPE_CHECKING:
     from kernos.kernel.events import EventStream
+
+
+@dataclass
+class AuthCommand:
+    """Shell command to run when a server needs OAuth re-authentication."""
+    command: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    probe_tool: str = ""  # Tool to call at boot to verify auth (e.g. "get-current-time")
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +63,16 @@ class MCPClientManager:
         self._exit_stack = AsyncExitStack()
         self._events = events
         self._runtime_stacks: dict[str, AsyncExitStack] = {}
+        self._auth_commands: dict[str, AuthCommand] = {}
 
     def register_server(self, name: str, params: StdioServerParameters) -> None:
         """Register an MCP server configuration. Does not connect."""
         self._servers[name] = params
         logger.info("Registered MCP server: %s", name)
+
+    def register_auth_command(self, server_name: str, auth: AuthCommand) -> None:
+        """Register an auth command to run when a server returns invalid_grant."""
+        self._auth_commands[server_name] = auth
 
     async def connect_all(self) -> None:
         """Connect to all registered servers and discover their tools."""
@@ -136,6 +152,23 @@ class MCPClientManager:
                         )
                     except Exception as emit_exc:
                         logger.warning("Failed to emit capability.error: %s", emit_exc)
+
+        # Probe auth on servers that have a probe_tool configured
+        for name in list(self._sessions.keys()):
+            auth = self._auth_commands.get(name)
+            if not auth or not auth.probe_tool:
+                continue
+            probe_result = await self.call_tool(auth.probe_tool, {})
+            if "invalid_grant" in probe_result.lower():
+                logger.warning(
+                    "TOOL_AUTH_PROBE: server=%s probe returned invalid_grant, triggering re-auth",
+                    name,
+                )
+                reconnected = await self._reconnect_server(name)
+                if not reconnected:
+                    logger.error("TOOL_AUTH_PROBE: server=%s re-auth failed at boot", name)
+            else:
+                logger.info("TOOL_AUTH_PROBE: server=%s auth verified OK", name)
 
     async def connect_one(self, server_name: str) -> bool:
         """Connect a single MCP server at runtime. Returns True on success."""
@@ -333,13 +366,61 @@ class MCPClientManager:
             return any(p in lower for p in ERROR_IN_RESULT_PATTERNS)
         return any(lower.startswith(p) for p in ERROR_IN_RESULT_PATTERNS)
 
-    async def _reconnect_server(self, server_name: str) -> bool:
-        """Disconnect and reconnect an MCP server to refresh auth state.
+    async def _run_auth_command(self, server_name: str) -> bool:
+        """Run the registered auth command for a server (OAuth re-auth flow).
 
-        Used when invalid_grant is detected — restarting the server process
-        forces a fresh OAuth token exchange.
+        Spawns the auth process (which typically opens a browser for user consent),
+        waits up to AUTH_TIMEOUT_S for completion, then returns success/failure.
+        """
+        auth = self._auth_commands.get(server_name)
+        if not auth:
+            logger.warning("TOOL_AUTH_REAUTH: no auth command registered for %s", server_name)
+            return False
+
+        import os
+        env = {**os.environ, **auth.env}
+        cmd = [auth.command] + auth.args
+        logger.info("TOOL_AUTH_REAUTH: running %s for server=%s", cmd, server_name)
+
+        try:
+            # Don't capture stdout/stderr — the auth command may print a URL
+            # the user needs to see, or open a browser automatically.
+            proc = await asyncio.create_subprocess_exec(*cmd, env=env)
+            await asyncio.wait_for(proc.wait(), timeout=120)
+            if proc.returncode == 0:
+                logger.info("TOOL_AUTH_REAUTH: server=%s auth succeeded", server_name)
+                return True
+            else:
+                logger.warning(
+                    "TOOL_AUTH_REAUTH: server=%s auth failed (rc=%d)",
+                    server_name, proc.returncode,
+                )
+                return False
+        except asyncio.TimeoutError:
+            logger.warning("TOOL_AUTH_REAUTH: server=%s auth timed out after 120s", server_name)
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            return False
+        except Exception as exc:
+            logger.warning("TOOL_AUTH_REAUTH: server=%s auth error: %s", server_name, exc)
+            return False
+
+    async def _reconnect_server(self, server_name: str) -> bool:
+        """Re-authenticate (if auth command exists) then reconnect an MCP server.
+
+        Used when invalid_grant is detected — the refresh token is dead,
+        so we need to run the OAuth flow before restarting the server.
         """
         try:
+            # Run auth flow first to get fresh tokens on disk
+            if server_name in self._auth_commands:
+                auth_ok = await self._run_auth_command(server_name)
+                if not auth_ok:
+                    logger.warning("TOOL_AUTH_RECONNECT: server=%s re-auth failed, skipping reconnect", server_name)
+                    return False
+
             await self.disconnect_one(server_name)
             success = await self.connect_one(server_name)
             if success:

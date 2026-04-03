@@ -159,8 +159,9 @@ class DispatchGate:
         messages: list[dict] | None = None,
         approval_token_id: str | None = None,
         agent_reasoning: str = "",
+        is_reactive: bool = True,
     ) -> GateResult:
-        """Full gate evaluation: token → override → model check."""
+        """Full gate evaluation: token → override → reactive bypass → model check."""
         # Step 1: Approval token
         if approval_token_id and self.validate_approval_token(
             approval_token_id, tool_name, tool_input
@@ -179,10 +180,33 @@ class DispatchGate:
             except Exception as exc:
                 logger.warning("Gate: permission override check failed: %s", exc)
 
-        # Step 3: Model evaluation
+        # Step 3: Reactive soft_write bypass
+        # When the agent acts in response to user interaction and the action is
+        # reversible (soft_write), skip the gate model.  The user established
+        # intent through conversation — don't second-guess it.
+        # must_not covenants still block; hard_write/unknown still go to model.
+        if is_reactive and effect == "soft_write":
+            has_blocking_rule = False
+            if self._state:
+                try:
+                    rules = await self._state.query_covenant_rules(
+                        tenant_id, context_space_scope=[active_space_id, None], active_only=True,
+                    )
+                    has_blocking_rule = any(r.rule_type == "must_not" for r in rules)
+                except Exception:
+                    pass
+            if not has_blocking_rule:
+                logger.info(
+                    "GATE: reactive_soft_write tool=%s — user-initiated, skipping gate model",
+                    tool_name,
+                )
+                return GateResult(allowed=True, reason="approved", method="reactive_soft_write")
+            # has must_not rules — fall through to model to check relevance
+
+        # Step 4: Model evaluation
         return await self._evaluate_model(
             tool_name, tool_input, effect, messages, agent_reasoning,
-            tenant_id, active_space_id,
+            tenant_id, active_space_id, user_message=user_message,
         )
 
     async def _evaluate_model(
@@ -194,6 +218,7 @@ class DispatchGate:
         agent_reasoning: str,
         tenant_id: str,
         active_space_id: str,
+        user_message: str = "",
     ) -> GateResult:
         """Lightweight model evaluation for loss-cost assessment."""
         # Build recent_messages_text
@@ -242,32 +267,39 @@ class DispatchGate:
         tool_description = self._get_tool_description(tool_name)
 
         system_prompt = (
-            "You are a safety check for an AI assistant's actions. Your job is to "
-            "assess LOSS COST — what happens if the assistant misunderstood the "
-            "user's intent.\n\n"
+            "You are a safety gate for an AI assistant's actions.\n\n"
+            "FIRST, determine: is this action a direct fulfillment of the user's "
+            "current request? The user's request IS the authorization — do not "
+            "re-confirm what the user already asked for.\n\n"
             "Answer with ONE of these:\n\n"
-            "APPROVE — The user's intent is clear AND if the assistant misunderstood, "
-            "the cost is low (easily reversible, minor data, user's own resources).\n"
-            "CONFIRM — The action affects someone other than the user (sending messages, "
-            "sharing data with third parties), OR could cause significant data loss or "
-            "is hard to reverse (bulk deletion), OR has financial cost.\n"
-            "CONFLICT: <exact rule text> — The user asked for this, BUT a standing "
-            "must_not covenant rule applies. Copy the exact rule text after the colon.\n"
+            "APPROVE — The action directly fulfills what the user asked for in their "
+            "current message. The user said 'set an appointment' and the agent is "
+            "creating the appointment. Or: the action is low-cost and easily reversible.\n"
+            "CONFIRM — The action was NOT requested by the user (agent is acting "
+            "proactively), OR goes beyond what the user asked for, OR affects someone "
+            "other than the user (sending messages to third parties), OR could cause "
+            "significant irreversible data loss.\n"
+            "CONFLICT: <exact rule text> — A standing must_not covenant rule blocks "
+            "this action. Copy the exact rule text after the colon.\n"
             "CLARIFY — The user's request is ambiguous — it could mean multiple things "
             "with meaningfully different outcomes.\n\n"
-            "Important:\n"
+            "Key principle: reactive actions that serve the user's request → APPROVE. "
+            "Proactive actions the user didn't ask for → evaluate normally.\n\n"
+            "Rules:\n"
             "- If the user explicitly addresses a restriction (\"no need to review, "
             "just send it\"), that is an override — return APPROVE, not CONFLICT.\n"
             "- If a must_not rule genuinely applies and the user did NOT address it, "
             "return CONFLICT: <that rule's exact text>.\n"
-            "- This check is for loss-cost calibration only. Standing rules and "
-            "covenant conflicts are handled separately. You are only assessing: how "
-            "costly is a misunderstanding here?\n"
             "- When in doubt between APPROVE and CONFIRM, choose CONFIRM.\n\n"
             "For CONFLICT, use format: CONFLICT: <rule text>\n"
             "For all others, answer with ONLY the one word."
         )
+        current_request = ""
+        if user_message:
+            current_request = f"Current user request:\n\"{user_message[:500]}\"\n\n"
+
         user_content = (
+            f"{current_request}"
             f"Recent user messages (oldest to newest):\n{recent_messages_text}\n\n"
             f"Agent's reasoning for this action:\n{agent_reasoning}\n\n"
             f"Proposed action: {tool_name}\n"

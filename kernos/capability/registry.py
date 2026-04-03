@@ -4,6 +4,7 @@ Tier 1 — Connected: MCP server running, tools discovered, ready to use.
 Tier 2 — Available: Known capability, not yet connected. Agent can offer setup.
 Tier 3 — Discoverable: Exists in ecosystem. Phase 4 — not implemented.
 """
+import copy
 import dataclasses
 import logging
 from dataclasses import dataclass, field
@@ -57,6 +58,8 @@ class CapabilityInfo:
     server_args: list[str] = field(default_factory=list)   # e.g., ["@cocal/google-calendar-mcp"]
     credentials_key: str = ""         # e.g., "google-calendar" — key file name in secrets/
     env_template: dict[str, str] = field(default_factory=dict)  # e.g., {"GOOGLE_OAUTH_CREDENTIALS": "{credentials}"}
+    auth_args: list[str] = field(default_factory=list)  # e.g., ["auth", "normal"] — appended to server_command for re-auth
+    auth_probe_tool: str = ""  # Tool to call at boot to verify auth (e.g. "get-current-time")
 
 
 def _is_self_explanatory(name: str) -> bool:
@@ -94,6 +97,52 @@ PRELOADED_TOOLS: set[str] = {
     "list-calendars",
     "get-current-time",
 }
+
+# ---------------------------------------------------------------------------
+# Schema pruning — strip enterprise-only fields from MCP tool schemas to
+# reduce context window usage.  create-event is 2,648 tokens unpruned;
+# keeping only common fields brings it under 600.
+# ---------------------------------------------------------------------------
+
+# Fields to KEEP in create-event / create-events input_schema.properties
+_CREATE_EVENT_KEEP = {
+    "account", "calendarId", "summary", "description", "start", "end",
+    "timeZone", "location", "attendees", "recurrence", "reminders",
+    "colorId", "sendUpdates",
+}
+
+
+def _prune_schema(tool: dict) -> dict:
+    """Return a pruned copy of a tool schema if pruning rules apply, else return as-is."""
+    name = tool.get("name", "")
+    if name not in ("create-event", "create-events"):
+        return tool
+
+    schema = tool.get("input_schema")
+    if not schema or "properties" not in schema:
+        return tool
+
+    props = schema["properties"]
+
+    # For create-events, the event fields are nested inside an items schema
+    if name == "create-events" and "events" in props:
+        events_prop = props["events"]
+        if "items" in events_prop and "properties" in events_prop["items"]:
+            pruned = copy.deepcopy(tool)
+            item_props = pruned["input_schema"]["properties"]["events"]["items"]["properties"]
+            for key in list(item_props.keys()):
+                if key not in _CREATE_EVENT_KEEP:
+                    del item_props[key]
+            return pruned
+        return tool
+
+    # create-event: prune top-level properties
+    pruned = copy.deepcopy(tool)
+    pruned_props = pruned["input_schema"]["properties"]
+    for key in list(pruned_props.keys()):
+        if key not in _CREATE_EVENT_KEEP:
+            del pruned_props[key]
+    return pruned
 
 
 class CapabilityRegistry:
@@ -238,16 +287,16 @@ class CapabilityRegistry:
             if not cap or cap.status != CapabilityStatus.CONNECTED:
                 continue
             server_tools = tool_defs_by_server.get(cap.server_name, [])
-            result.extend(server_tools)
+            result.extend(_prune_schema(t) for t in server_tools)
         return result
 
     def get_tool_schema(self, tool_name: str) -> dict | None:
-        """Get the full schema for a specific tool by name."""
+        """Get the full schema for a specific tool by name (pruned if applicable)."""
         if not self._mcp:
             return None
         for tool in self._mcp.get_tools():
             if tool["name"] == tool_name:
-                return tool
+                return _prune_schema(tool)
         return None
 
     def get_lazy_tool_stubs(
@@ -312,7 +361,7 @@ class CapabilityRegistry:
                 continue
             for tool in tool_defs_by_server.get(cap.server_name, []):
                 if tool["name"] in PRELOADED_TOOLS:
-                    result.append(tool)
+                    result.append(_prune_schema(tool))
         return result
 
     def get_all_tool_names(self, space: "ContextSpace | None" = None) -> set[str]:

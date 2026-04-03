@@ -53,8 +53,12 @@ PREFERENCE_DETECT_SCHEMA = {
             "description": "What should happen.",
         },
         "parameters": {
-            "type": "object",
-            "description": "Extracted specifics: lead_time_minutes, channel, frequency, etc.",
+            "type": "string",
+            "description": (
+                "JSON string of extracted specifics: lead_time_minutes, channel, "
+                "frequency, etc. Example: '{\"lead_time_minutes\": 30}'. "
+                "Use '{}' if no specific parameters extracted."
+            ),
         },
         "scope_hint": {
             "type": "string",
@@ -75,6 +79,17 @@ PREFERENCE_DETECT_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+
+
+def _parse_parameters(value: str | dict) -> dict:
+    """Parse parameters from structured output (string or dict)."""
+    if isinstance(value, dict):
+        return value
+    try:
+        result = json.loads(value)
+        return result if isinstance(result, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +159,7 @@ async def detect_preference(
             category=parsed.get("category", "behavior"),
             subject=parsed.get("subject", ""),
             action=parsed.get("action", "prefer"),
-            parameters=parsed.get("parameters", {}),
+            parameters=_parse_parameters(parsed.get("parameters", "{}")),
             scope_hint=parsed.get("scope_hint", "unclear"),
             reasoning=parsed.get("reasoning", ""),
         )

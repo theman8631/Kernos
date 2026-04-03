@@ -176,7 +176,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 - Reserved: `workspace_id` (Phase 2)
 
 **Template layers (PRIMARY_TEMPLATE):**
-- `operating_principles` — universal KERNOS values (stewardship, intent over instruction, conservative by default, honest, be yourself, memory is your responsibility)
+- `operating_principles` — lean KERNOS values (stewardship, intent over instruction, honest, be yourself, do don't describe, memory, scheduling, gate handling). Reduced in 6A-5 for token efficiency (~630 tokens vs prior ~1,500)
 - `default_personality` — permission-based, not prescriptive ("you have a real voice — trust it")
 - `bootstrap_prompt` — first-meeting guidance (presence, curiosity, competence through action)
 
@@ -654,7 +654,7 @@ The `uninstalled` list tracks servers the user has explicitly removed — they a
 - System space: all CONNECTED capabilities
 - Other spaces: universal CONNECTED capabilities + `active_tools` intersected with CONNECTED
 
-**`get_tools_for_space(space)`** — replaces `get_connected_tools()` in the handler. Returns MCP tool definitions filtered to the space's visible capabilities.
+**`get_tools_for_space(space)`** — replaces `get_connected_tools()` in the handler. Returns MCP tool definitions filtered to the space's visible capabilities. Schemas are pruned via `_prune_schema()` — enterprise-only fields (workingLocationProperties, focusTimeProperties, conferenceData, etc.) stripped from `create-event`/`create-events` to reduce token usage (~2,648 → ~500 tokens).
 
 **`build_capability_prompt(space=)`** — space-aware capability section for the system prompt. System space gets all; others get filtered.
 

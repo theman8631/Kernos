@@ -29,6 +29,8 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         server_args=["@cocal/google-calendar-mcp"],
         credentials_key="google-calendar",
         env_template={"GOOGLE_OAUTH_CREDENTIALS": "{credentials}"},
+        auth_args=["@cocal/google-calendar-mcp", "auth", "normal"],
+        auth_probe_tool="get-current-time",
         tool_effects={
             "get-current-time": "read",
             "list-events": "read",

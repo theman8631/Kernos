@@ -2,10 +2,10 @@
 REQUEST_TOOL = {
     "name": "request_tool",
     "description": (
-        "Request activation of a tool capability for the current context space. "
-        "Use this when you need a tool that isn't currently available. "
-        "Describe what you need thoroughly — what the tool should do, why you need it, "
-        "and what context it's for. This helps the system find the right match."
+        "Request activation of a tool capability that is NOT in your current tool set. "
+        "Only use this as a LAST RESORT when no existing tool in your set can do what "
+        "you need. If a tool like create-event or list-events is already available to "
+        "you, call it directly — do not use request_tool."
     ),
     "input_schema": {
         "type": "object",

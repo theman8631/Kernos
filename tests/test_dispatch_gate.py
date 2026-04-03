@@ -220,8 +220,27 @@ class TestGetCapabilityForTool:
 # ===========================
 
 class TestGateToolCall:
-    async def test_model_explicit_allows(self):
-        """Model returning EXPLICIT allows the action."""
+    async def test_reactive_soft_write_skips_model(self):
+        """Reactive soft_write bypasses the gate model — user asked for it."""
+        svc = _make_service()
+        state = AsyncMock()
+        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
+            tenant_id="t1", status="active", created_at="2026-01-01",
+        ))
+        state.query_covenant_rules = AsyncMock(return_value=[])
+        svc.set_state(state)
+        svc.complete_simple = AsyncMock(return_value="CONFIRM")  # should never be called
+
+        result = await svc._gate_tool_call(
+            "create-event", {"summary": "Meeting"}, "soft_write",
+            "book a meeting for Thursday", "t1", "space_1",
+        )
+        assert result.allowed is True
+        assert result.method == "reactive_soft_write"
+        svc.complete_simple.assert_not_called()
+
+    async def test_proactive_soft_write_goes_to_model(self):
+        """Proactive (non-reactive) soft_write still calls the gate model."""
         svc = _make_service()
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -233,13 +252,15 @@ class TestGateToolCall:
 
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
-            "book a meeting for Thursday", "t1", "space_1",
+            "sounds good", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is True
         assert result.method == "model_check"
         assert result.reason == "approved"
 
-    async def test_blocked_without_instruction_or_covenant(self):
+    async def test_proactive_soft_write_blocked(self):
+        """Proactive soft_write: model can deny."""
         svc = _make_service()
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -252,6 +273,7 @@ class TestGateToolCall:
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking about meetings", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is False
         assert result.method == "model_check"
@@ -302,12 +324,13 @@ class TestGateToolCall:
         await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking", "t1", "space_1",
+            is_reactive=False,
         )
         assert captured
         assert "[always-allow]" not in captured[0]
 
-    async def test_covenant_authorized(self):
-        """Model returns AUTHORIZED for covenant check → allowed."""
+    async def test_covenant_authorized_proactive(self):
+        """Model returns AUTHORIZED for proactive covenant check → allowed."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -327,13 +350,14 @@ class TestGateToolCall:
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking about meetings", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is True
         assert result.reason == "approved"
         assert result.method == "model_check"
 
-    async def test_covenant_denied(self):
-        """Model returns DENIED → blocked with reason='denied'."""
+    async def test_covenant_denied_proactive(self):
+        """Model returns DENIED on proactive → blocked."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -353,13 +377,14 @@ class TestGateToolCall:
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking about meetings", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is False
         assert result.reason == "confirm"
         assert result.method == "model_check"
 
-    async def test_unexpected_response_denies(self):
-        """Any response other than EXPLICIT/AUTHORIZED/CONFLICT → denied."""
+    async def test_unexpected_response_denies_proactive(self):
+        """Any unexpected model response on proactive → denied."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -372,6 +397,7 @@ class TestGateToolCall:
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking about meetings", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is False
         assert result.reason == "confirm"
@@ -587,7 +613,7 @@ class TestConflictResponse:
         assert result.reason == "approved"
 
     async def test_no_must_not_rules_without_conflict(self):
-        """Without must_not rules, CONFLICT is never returned."""
+        """Without must_not rules, proactive soft_write goes to model; CONFLICT never returned."""
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -606,6 +632,7 @@ class TestConflictResponse:
 
         result = await svc._gate_tool_call(
             "send-email", {}, "soft_write", "thinking about sending", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.reason == "confirm"
         assert result.conflicting_rule == ""
@@ -672,8 +699,8 @@ class TestAsyncAnthropicClient:
 # ===========================
 
 class TestModelGateAuthority:
-    async def test_natural_language_request_explicit(self):
-        """Model correctly identifies 'make an entry at 4:00' as EXPLICIT."""
+    async def test_reactive_soft_write_approved_without_model(self):
+        """Reactive soft_write is approved without calling the model."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -681,17 +708,18 @@ class TestModelGateAuthority:
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
-        svc.complete_simple = AsyncMock(return_value="EXPLICIT")
+        svc.complete_simple = AsyncMock(return_value="CONFIRM")  # should not be called
 
         result = await svc._gate_tool_call(
             "create-event", {"summary": "dentist"}, "soft_write",
             "make an entry at 4:00 for dentist", "t1", "space_1",
         )
         assert result.allowed is True
-        assert result.method == "model_check"
+        assert result.method == "reactive_soft_write"
+        svc.complete_simple.assert_not_called()
 
-    async def test_model_always_consulted(self):
-        """Model is always consulted — no fast path."""
+    async def test_gate_prompt_includes_user_message(self):
+        """Gate model prompt includes the current user message (proactive path)."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -699,18 +727,26 @@ class TestModelGateAuthority:
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
-        svc.complete_simple = AsyncMock(return_value="EXPLICIT")
 
-        result = await svc._gate_tool_call(
+        captured = []
+
+        async def capture_simple(system_prompt, user_content, **kwargs):
+            captured.append({"system": system_prompt, "user": user_content})
+            return "APPROVE"
+
+        svc.complete_simple = capture_simple
+
+        await svc._gate_tool_call(
             "create-event", {"summary": "reminder"}, "soft_write",
             "schedule a meeting for Thursday", "t1", "space_1",
+            is_reactive=False,
         )
-        assert result.allowed is True
-        assert result.method == "model_check"
-        svc.complete_simple.assert_called_once()
+        assert captured
+        assert "schedule a meeting for Thursday" in captured[0]["user"]
+        assert "direct fulfillment" in captured[0]["system"].lower()
 
-    async def test_model_explicit_in_spanish(self):
-        """Model handles non-English instructions — no keyword list to miss."""
+    async def test_model_explicit_in_spanish_proactive(self):
+        """Model handles non-English instructions on proactive path."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -723,12 +759,13 @@ class TestModelGateAuthority:
         result = await svc._gate_tool_call(
             "create-event", {"summary": "reunion"}, "soft_write",
             "ponme algo en el calendario mañana a las 3pm", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is True
         assert result.method == "model_check"
 
-    async def test_indirect_request_denied(self):
-        """Indirect/vague requests are correctly denied by model."""
+    async def test_indirect_request_denied_proactive(self):
+        """Indirect/vague requests denied by model on proactive path."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -741,12 +778,13 @@ class TestModelGateAuthority:
         result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking about meetings", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.allowed is False
         assert result.reason == "confirm"
 
     def test_model_max_tokens_is_512(self):
-        """Model is called with max_tokens=512 (raised from 256 for richer gate responses)."""
+        """Model is called with max_tokens=512 on proactive path."""
         svc = _make_service()
         calls = []
 
@@ -756,16 +794,17 @@ class TestModelGateAuthority:
 
         svc.complete_simple = capture_simple
         import asyncio
+        # Use hard_write to always reach model regardless of reactive flag
         asyncio.get_event_loop().run_until_complete(
             svc._gate_tool_call(
-                "create-event", {}, "soft_write",
+                "delete-event", {}, "hard_write",
                 "I was thinking", "t1", "space_1",
             )
         )
         assert calls[0] == 512
 
-    async def test_denied_reason_is_simple(self):
-        """When DENIED, reason is simply 'denied'."""
+    async def test_denied_reason_is_simple_proactive(self):
+        """When DENIED on proactive, reason is 'confirm'."""
         svc = _make_service()
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -777,11 +816,12 @@ class TestModelGateAuthority:
 
         result = await svc._gate_tool_call(
             "create-event", {}, "soft_write", "I was thinking", "t1", "space_1",
+            is_reactive=False,
         )
         assert result.reason == "confirm"
 
     async def test_first_word_parsing_denied_with_explanation(self):
-        """'DENIED\\n\\nThe user...EXPLICIT...' → reason is 'denied' not 'explicit_instruction'."""
+        """'DENIED\\n...EXPLICIT...' → reason is 'confirm' not 'approved'."""
         svc = _make_service()
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -789,14 +829,14 @@ class TestModelGateAuthority:
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
-        # Critical safety case: EXPLICIT appears in denial explanation
         svc.complete_simple = AsyncMock(
             return_value='DENIED\n\nThe user\'s message "again?" is ambiguous and does not '
                          'constitute an EXPLICIT request to create a calendar event.'
         )
 
+        # Use hard_write to always reach model
         result = await svc._gate_tool_call(
-            "create-event", {}, "soft_write", "again?", "t1", "space_1",
+            "delete-event", {}, "hard_write", "again?", "t1", "space_1",
         )
         assert result.allowed is False
         assert result.reason == "confirm"
@@ -819,10 +859,12 @@ class TestModelGateAuthority:
 
         svc.complete_simple = capture_simple
 
+        # Use is_reactive=False to reach the model
         await svc._gate_tool_call(
             "create-event", {}, "soft_write",
-            "make an entry", "t1", "space_1",
+            "sounds good, do it", "t1", "space_1",
             agent_reasoning="User wants to book a 4pm dentist appointment.",
+            is_reactive=False,
         )
         assert captured
         assert "User wants to book a 4pm dentist appointment." in captured[0]
@@ -850,10 +892,12 @@ class TestModelGateAuthority:
             {"role": "assistant", "content": "You have a team meeting at 2pm."},
             {"role": "user", "content": "Add dentist at 4pm please"},
         ]
+        # Use is_reactive=False to exercise model path
         await svc._gate_tool_call(
             "create-event", {}, "soft_write",
             "Add dentist at 4pm please", "t1", "space_1",
             messages=messages,
+            is_reactive=False,
         )
         assert captured
         assert "Add dentist at 4pm please" in captured[0]
@@ -932,7 +976,7 @@ class TestApprovalToken:
         assert svc._validate_approval_token(token.token_id, "create-event", tool_input) is True
 
     async def test_denied_system_message_format(self):
-        """DENIED: gate produces result with reason='denied'; [CONFIRM:N] is in system message."""
+        """DENIED: gate produces result with reason='confirm'; [CONFIRM:N] is in system message."""
         svc = _make_service()
         state = AsyncMock()
         state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
@@ -942,9 +986,11 @@ class TestApprovalToken:
         svc.set_state(state)
         svc.complete_simple = AsyncMock(return_value="DENIED")
 
+        # Use is_reactive=False to reach the model
         gate_result = await svc._gate_tool_call(
             "create-event", {"summary": "Meeting"}, "soft_write",
             "I was thinking", "t1", "space_1",
+            is_reactive=False,
         )
         assert not gate_result.allowed
         assert gate_result.reason == "confirm"
