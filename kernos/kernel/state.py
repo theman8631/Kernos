@@ -215,6 +215,9 @@ class CovenantRule:
     superseded_by: str = ""              # rule_id that replaced this, "user_removed", or "" (active)
     version: int = 1
 
+    # --- Preference linkage (Phase 6A) ---
+    source_preference_id: str = ""       # Preference ID that generated this rule, or ""
+
     # --- Reserved for future phases ---
     agent_id: str = ""
     precondition: str = ""

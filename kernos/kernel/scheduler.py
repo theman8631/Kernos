@@ -79,6 +79,9 @@ class Trigger:
     # Replacement chain
     replaced_by: str = ""               # trigger_id that superseded this one
 
+    # Preference linkage (Phase 6A)
+    source_preference_id: str = ""      # Preference ID that generated this trigger, or ""
+
     # Audit
     created_by_tool_call: str = ""
 

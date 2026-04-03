@@ -282,3 +282,265 @@ async def test_persistence_survives_reload(tmp_path):
     assert loaded is not None
     assert loaded.id == pref.id
     assert loaded.intent == pref.intent
+
+
+# ---------------------------------------------------------------------------
+# Preference Linkage (SPEC-6A-2)
+# ---------------------------------------------------------------------------
+
+from kernos.kernel.preference_reconcile import (
+    reconcile_preference_change,
+    classify_preference_change,
+)
+from kernos.kernel.scheduler import Trigger, TriggerStore
+
+
+async def test_source_preference_id_on_trigger(tmp_path):
+    """AC1: Trigger has source_preference_id field."""
+    trigger_store = TriggerStore(str(tmp_path))
+    t = Trigger(
+        trigger_id="trig_test01",
+        tenant_id="sms:+15555550100",
+        condition_type="time",
+        condition="every day at 9am",
+        action_type="notify",
+        action_description="Daily reminder",
+        source_preference_id="pref_abc12345",
+    )
+    await trigger_store.save(t)
+    loaded = await trigger_store.get("sms:+15555550100", "trig_test01")
+    assert loaded.source_preference_id == "pref_abc12345"
+
+
+async def test_source_preference_id_on_covenant(tmp_path):
+    """AC2: CovenantRule has source_preference_id field."""
+    from kernos.kernel.state import CovenantRule
+    store = JsonStateStore(str(tmp_path))
+    rule = CovenantRule(
+        id="rule_test01",
+        tenant_id="sms:+15555550100",
+        capability="general",
+        rule_type="preference",
+        description="Keep responses short",
+        active=True,
+        source="user_stated",
+        created_at=utc_now(),
+        source_preference_id="pref_xyz99999",
+    )
+    await store.add_contract_rule(rule)
+    rules = await store.get_contract_rules("sms:+15555550100")
+    matched = [r for r in rules if r.id == "rule_test01"]
+    assert len(matched) == 1
+    assert matched[0].source_preference_id == "pref_xyz99999"
+
+
+async def test_legacy_trigger_has_empty_source_preference_id(tmp_path):
+    """AC10: Legacy triggers without linkage continue to work."""
+    trigger_store = TriggerStore(str(tmp_path))
+    t = Trigger(
+        trigger_id="trig_legacy",
+        tenant_id="sms:+15555550100",
+        condition_type="time",
+        condition="once",
+        action_type="notify",
+        action_description="Old trigger",
+    )
+    await trigger_store.save(t)
+    loaded = await trigger_store.get("sms:+15555550100", "trig_legacy")
+    assert loaded.source_preference_id == ""
+
+
+async def test_revocation_cascade_deactivates_trigger(tmp_path):
+    """AC7: Revoking a preference deactivates linked triggers."""
+    store = JsonStateStore(str(tmp_path))
+    trigger_store = TriggerStore(str(tmp_path))
+    t = "sms:+15555550100"
+
+    trigger = Trigger(
+        trigger_id="trig_linked",
+        tenant_id=t,
+        condition_type="time",
+        condition="daily",
+        action_type="notify",
+        action_description="Calendar notification",
+        source_preference_id="pref_revoke01",
+        status="active",
+    )
+    await trigger_store.save(trigger)
+
+    pref = _make_pref(
+        id="pref_revoke01",
+        tenant_id=t,
+        status="revoked",
+        derived_trigger_ids=["trig_linked"],
+    )
+
+    result = await reconcile_preference_change(
+        pref, store, trigger_store, "revoke",
+    )
+    assert result is True
+
+    loaded = await trigger_store.get(t, "trig_linked")
+    assert loaded.status == "paused"
+
+
+async def test_revocation_cascade_deactivates_covenant(tmp_path):
+    """AC7: Revoking a preference deactivates linked covenants."""
+    from kernos.kernel.state import CovenantRule
+    store = JsonStateStore(str(tmp_path))
+    t = "sms:+15555550100"
+
+    rule = CovenantRule(
+        id="rule_linked01",
+        tenant_id=t,
+        capability="general",
+        rule_type="preference",
+        description="Allowed to send proactive SMS",
+        active=True,
+        source="user_stated",
+        created_at=utc_now(),
+        source_preference_id="pref_revoke02",
+    )
+    await store.add_contract_rule(rule)
+
+    pref = _make_pref(
+        id="pref_revoke02",
+        tenant_id=t,
+        status="revoked",
+        derived_covenant_ids=["rule_linked01"],
+    )
+
+    result = await reconcile_preference_change(
+        pref, store, None, "revoke",
+    )
+    assert result is True
+
+    rules = await store.get_contract_rules(t, active_only=False)
+    matched = [r for r in rules if r.id == "rule_linked01"]
+    assert len(matched) == 1
+    assert matched[0].active is False
+
+
+async def test_parameter_update_modifies_trigger_in_place(tmp_path):
+    """AC4: Parameter-preserving changes update linked triggers in place."""
+    store = JsonStateStore(str(tmp_path))
+    trigger_store = TriggerStore(str(tmp_path))
+    t = "sms:+15555550100"
+
+    trigger = Trigger(
+        trigger_id="trig_param01",
+        tenant_id=t,
+        condition_type="time",
+        condition="before event",
+        action_type="notify",
+        action_description="Notify 4 minutes before",
+        action_params={"lead_time_minutes": 4},
+        source_preference_id="pref_param01",
+        status="active",
+    )
+    await trigger_store.save(trigger)
+
+    pref = _make_pref(
+        id="pref_param01",
+        tenant_id=t,
+        intent="Notify me 10 minutes before appointments",
+        parameters={"lead_time_minutes": 10},
+        derived_trigger_ids=["trig_param01"],
+    )
+
+    result = await reconcile_preference_change(
+        pref, store, trigger_store, "parameter_update",
+    )
+    assert result is True
+
+    loaded = await trigger_store.get(t, "trig_param01")
+    assert loaded.action_params["lead_time_minutes"] == 10
+    assert loaded.status == "active"  # Same object, not retired
+
+
+async def test_supersession_cascade(tmp_path):
+    """AC8: Superseding a preference deactivates old derived objects."""
+    store = JsonStateStore(str(tmp_path))
+    trigger_store = TriggerStore(str(tmp_path))
+    t = "sms:+15555550100"
+
+    old_trigger = Trigger(
+        trigger_id="trig_old",
+        tenant_id=t,
+        condition_type="time",
+        condition="daily",
+        action_type="notify",
+        action_description="Old notification",
+        source_preference_id="pref_old",
+        status="active",
+    )
+    await trigger_store.save(old_trigger)
+
+    old_pref = _make_pref(
+        id="pref_old",
+        tenant_id=t,
+        status="superseded",
+        derived_trigger_ids=["trig_old"],
+    )
+    new_pref = _make_pref(
+        id="pref_new",
+        tenant_id=t,
+        supersedes="pref_old",
+    )
+
+    result = await reconcile_preference_change(
+        new_pref, store, trigger_store, "supersede", old_preference=old_pref,
+    )
+    assert result is True
+
+    loaded = await trigger_store.get(t, "trig_old")
+    assert loaded.status == "paused"
+
+
+async def test_stale_marker_on_failure(tmp_path):
+    """AC9: Failed reconciliation returns False (stale marker)."""
+    from unittest.mock import AsyncMock
+
+    store = JsonStateStore(str(tmp_path))
+
+    # Use a trigger store that fails on save
+    bad_trigger_store = AsyncMock()
+    bad_trigger_store.get.side_effect = RuntimeError("store unavailable")
+    bad_trigger_store.list_all = AsyncMock(return_value=[])
+
+    pref = _make_pref(
+        derived_trigger_ids=["trig_broken"],
+    )
+    await store.add_preference(pref)
+
+    result = await reconcile_preference_change(
+        pref, store, bad_trigger_store, "revoke",
+    )
+    assert result is False  # Stale — reconciliation failed
+
+
+def test_classify_preference_change_parameter():
+    """AC6: Parameter change correctly classified."""
+    result = classify_preference_change(
+        old_params={"lead_time": 4}, new_params={"lead_time": 10},
+        old_action="notify", new_action="notify",
+        old_category="notification", new_category="notification",
+    )
+    assert result == "parameter_update"
+
+
+def test_classify_preference_change_structural():
+    """AC5: Structural intent change correctly classified."""
+    result = classify_preference_change(
+        old_params={}, new_params={},
+        old_action="notify", new_action="schedule",
+        old_category="notification", new_category="notification",
+    )
+    assert result == "structural_replace"
+
+    result2 = classify_preference_change(
+        old_params={}, new_params={},
+        old_action="notify", new_action="notify",
+        old_category="notification", new_category="behavior",
+    )
+    assert result2 == "structural_replace"
