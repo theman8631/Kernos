@@ -1854,11 +1854,14 @@ class MessageHandler:
                 try:
                     await self._phase_assemble(primary_ctx)
 
-                    # /dump and /status intercepts — skip reasoning
-                    if primary_msg.content and primary_msg.content.strip().lower() == "/dump":
+                    # Slash command intercepts — skip reasoning
+                    _cmd = (primary_msg.content or "").strip().lower()
+                    if _cmd == "/dump":
                         response = await self._handle_dump(primary_ctx)
-                    elif primary_msg.content and primary_msg.content.strip().lower() == "/status":
+                    elif _cmd == "/status":
                         response = await self._handle_status(primary_ctx)
+                    elif _cmd == "/help":
+                        response = self._handle_help()
                     else:
                         try:
                             await self._phase_reason(primary_ctx)
@@ -2064,6 +2067,23 @@ class MessageHandler:
 
         logger.info("DUMP: context written to %s", dump_path)
         return f"Context dumped to {dump_path}"
+
+    @staticmethod
+    def _handle_help() -> str:
+        """Return a summary of available slash commands."""
+        return (
+            "**Available Commands**\n\n"
+            "**/help** — Show this message.\n\n"
+            "**/dump** — Write the fully assembled context (system prompt, "
+            "messages, tools) to a diagnostic file. Useful for inspecting "
+            "exactly what the agent sees on a given turn. Skips reasoning.\n\n"
+            "**/status** — Write the operator state view to a diagnostic "
+            "file. Shows active preferences, triggers, covenants, key facts, "
+            "connected capabilities, legacy artifacts, stale reconciliation, "
+            "and degraded services. Skips reasoning.\n\n"
+            "These commands bypass the reasoning engine and are not stored "
+            "in conversation history."
+        )
 
     async def _handle_status(self, ctx: TurnContext) -> str:
         """Write operator state view to diagnostic file, return summary."""
@@ -2273,7 +2293,7 @@ class MessageHandler:
             logger.info("EMPTY_MSG_GUARD: injected content=%r for empty user message", user_content)
 
         # Skip persisting diagnostic commands — they shouldn't appear in conversation history
-        _is_diagnostic = user_content.strip().lower() in ("/dump", "/status")
+        _is_diagnostic = user_content.strip().lower() in ("/dump", "/status", "/help")
         if not _is_diagnostic:
             user_entry = {
                 "role": "user", "content": user_content,
