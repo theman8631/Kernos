@@ -159,6 +159,8 @@ GOOD extractions (true about the user beyond this conversation):
 - "I just moved to Portland" → structural life change
 - "I prefer text reminders" → durable preference
 - "My wife's name is Liana" → relationship identity
+- "I'm in zip code 94203" → structural location fact
+- "I live in Eureka" → structural location fact
 
 BAD extractions (only true about this conversation):
 - "User requested a calendar entry for banana bread" → task execution

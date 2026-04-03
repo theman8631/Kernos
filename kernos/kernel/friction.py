@@ -291,13 +291,17 @@ class FrictionObserver:
         tool_names = {t["name"] for t in tool_trace}
 
         # Preference/state queries without inspect_state
+        # Note: remember now delegates to inspect_state for preference-shaped queries
+        # internally, so calling remember IS using structured state.
         state_keywords = ["what preferences", "what settings", "what's set up",
                          "what do i have set", "my notifications", "my triggers"]
         if any(kw in msg_lower for kw in state_keywords):
-            if "inspect_state" in surfaced and "inspect_state" not in tool_names:
+            if "inspect_state" in tool_names or "remember" in tool_names:
+                return None  # Agent used a tool that provides state data
+            if "inspect_state" in surfaced:
                 return FrictionSignal(
                     signal_type="TOOL_AVAILABLE_BUT_NOT_USED",
-                    description="Agent answered a state query without calling inspect_state",
+                    description="Agent answered a state query without calling inspect_state or remember",
                     evidence=[
                         f"User asked about state: {user_message[:100]}",
                         f"inspect_state: surfaced but NOT called",
@@ -312,8 +316,9 @@ class FrictionObserver:
         # "my reminders" / "what triggers" → trigger query, manage_schedule expected
         sched_keywords = ["what reminders", "my reminders", "what triggers"]
         if any(kw in msg_lower for kw in sched_keywords):
-            # If agent used list-events, it answered a calendar query — not a trigger miss
-            if "list-events" in tool_names:
+            # If agent used any calendar read tool, it answered the query with the right tool
+            _calendar_reads = {"list-events", "search-events", "get-event", "get-freebusy"}
+            if tool_names & _calendar_reads:
                 return None
             if "manage_schedule" in surfaced and "manage_schedule" not in tool_names:
                 return FrictionSignal(

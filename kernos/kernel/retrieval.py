@@ -180,9 +180,31 @@ class RetrievalService:
         query: str,
         active_space_id: str,
     ) -> str:
-        """Execute a remember() query. Returns formatted readable text."""
+        """Execute a remember() query. Returns formatted readable text.
+
+        Preference/state-shaped queries are automatically augmented with
+        structured state from inspect_state — the agent gets authoritative
+        data regardless of which tool it called.
+        """
         now = utc_now()
         query_lower = query.lower()
+
+        # Structural intercept: preference/state queries get inspect_state data
+        _state_keywords = ["preference", "setting", "notification", "trigger",
+                          "what's set up", "what do i have", "what is set"]
+        if any(kw in query_lower for kw in _state_keywords):
+            try:
+                from kernos.kernel.introspection import build_user_truth_view
+                state_view = await build_user_truth_view(
+                    tenant_id, self.state,
+                    getattr(self.reasoning, '_trigger_store', None),
+                    getattr(self.reasoning, '_registry', None),
+                )
+                if state_view:
+                    logger.info("REMEMBER_STATE_AUGMENT: query=%s — augmenting with inspect_state", query[:60])
+                    return f"[Structured state — authoritative]\n{state_view}"
+            except Exception as exc:
+                logger.warning("REMEMBER_STATE_AUGMENT: failed: %s", exc)
 
         # Embed the query
         try:

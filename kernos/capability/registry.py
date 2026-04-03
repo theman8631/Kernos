@@ -108,7 +108,7 @@ PRELOADED_TOOLS: set[str] = {
 _CREATE_EVENT_KEEP = {
     "account", "calendarId", "summary", "description", "start", "end",
     "timeZone", "location", "attendees", "recurrence", "reminders",
-    "colorId", "sendUpdates",
+    "sendUpdates",
 }
 
 
