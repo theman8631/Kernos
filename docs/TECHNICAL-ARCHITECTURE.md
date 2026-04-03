@@ -886,8 +886,9 @@ In-memory queue (`_pending_system_events`) for internal notifications. Events fr
 - `spaces.json` — list of ContextSpace (Phase 2B; daily + system spaces auto-created on soul init)
 - `topic_hints.json` — `{hint_string: count}` for Gate 1 topic accumulation (Phase 2B-v2)
 - `embeddings.json` — map of entry_id → embedding vector (Phase 2A; separate from knowledge.json to avoid bloat)
+- `preferences.json` — list of Preference (Phase 6A; first-class user preferences)
 
-**Four domains:**
+**Five domains:**
 
 **TenantProfile:** tenant_id, status, created_at, platforms, preferences, capabilities, model_config, last_active_space_id (persists focus space across messages), `permission_overrides: dict[str, str]` (Phase 3D — capability_name → "ask" | "always-allow", system-wide permission for the dispatch gate).
 
@@ -902,6 +903,8 @@ In-memory queue (`_pending_system_events`) for internal notifications. Events fr
 **ContractRule:** id, tenant_id, capability, rule_type (must/must_not/preference/escalation), description, active, source (default/user_stated/evolved), context_space (reserved, always None in Phase 1B).
 
 **ConversationSummary:** tenant_id, conversation_id, platform, message_count, timestamps, topics, active.
+
+**Preference** (Phase 6A): id, tenant_id, intent (original user language), category (notification/behavior/format/access/schedule), subject, action (notify/always_do/never_do/prefer/schedule), parameters (dict), scope (global or space-specific), status (active/superseded/revoked), supersedes/superseded_by chain, provenance (created_at, source_turn_id, source_knowledge_id), derived_trigger_ids, derived_covenant_ids. Upstream of KnowledgeEntry, CovenantRule, and Trigger — captures WHAT the user wants to remain true. Lazy migration from category="preference" KnowledgeEntries on first access.
 
 ### Conversation Store
 

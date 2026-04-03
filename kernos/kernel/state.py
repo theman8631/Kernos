@@ -310,6 +310,57 @@ class ConversationSummary:
 
 
 # ---------------------------------------------------------------------------
+# Domain 5: First-Class Preferences
+# ---------------------------------------------------------------------------
+
+
+def generate_preference_id() -> str:
+    """Generate a unique preference ID."""
+    return f"pref_{uuid.uuid4().hex[:8]}"
+
+
+@dataclass
+class Preference:
+    """A first-class user preference — upstream of covenants, triggers, and knowledge.
+
+    Preferences capture WHAT the user wants to remain true. They have different
+    lifecycle, supersession, and introspection needs than KnowledgeEntry.
+    """
+
+    # Identity
+    id: str                       # "pref_{uuid8}"
+    tenant_id: str
+
+    # Intent
+    intent: str                   # Original user language that created this
+
+    # Classification
+    category: str                 # "notification", "behavior", "format", "access", "schedule"
+    subject: str                  # What it's about: "calendar_events", "email", "responses", etc.
+    action: str                   # "notify", "always_do", "never_do", "prefer", "schedule"
+    parameters: dict = field(default_factory=dict)  # Specific values: lead_time, channel, etc.
+
+    # Scope
+    scope: str = "global"         # "global" or space_id
+    context_space: str = ""       # If scope is space-specific, which space
+
+    # Lifecycle
+    status: str = "active"        # "active", "superseded", "revoked"
+    supersedes: str = ""          # Preference ID this replaces (if any)
+    superseded_by: str = ""       # Preference ID that replaced this (if any)
+
+    # Provenance
+    created_at: str = ""          # ISO 8601 UTC
+    updated_at: str = ""          # Last modification
+    source_turn_id: str = ""      # Conversation turn / event that created this
+    source_knowledge_id: str = "" # If migrated from KnowledgeEntry, the original ID
+
+    # Derived artifacts
+    derived_trigger_ids: list[str] = field(default_factory=list)
+    derived_covenant_ids: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # StateStore interface
 # ---------------------------------------------------------------------------
 
@@ -547,3 +598,32 @@ class StateStore(ABC):
     async def list_conversations(
         self, tenant_id: str, active_only: bool = True, limit: int = 20
     ) -> list[ConversationSummary]: ...
+
+    # Preferences (Phase 6A)
+    @abstractmethod
+    async def add_preference(self, pref: Preference) -> None:
+        """Persist a new preference."""
+        ...
+
+    @abstractmethod
+    async def save_preference(self, pref: Preference) -> None:
+        """Upsert a preference by ID."""
+        ...
+
+    @abstractmethod
+    async def get_preference(self, tenant_id: str, pref_id: str) -> Preference | None:
+        """Get a single preference by ID."""
+        ...
+
+    @abstractmethod
+    async def query_preferences(
+        self,
+        tenant_id: str,
+        status: str = "",
+        subject: str = "",
+        category: str = "",
+        scope: str = "",
+        active_only: bool = True,
+    ) -> list[Preference]:
+        """Query preferences with optional filters. active_only filters status='active'."""
+        ...

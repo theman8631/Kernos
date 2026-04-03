@@ -9,6 +9,7 @@ Files per tenant under {data_dir}/{tenant_id}/state/:
   entities.json        — list of EntityNode
   identity_edges.json  — list of IdentityEdge (per-tenant, Phase 2A)
   pending_actions.json — list of PendingAction
+  preferences.json     — list of Preference (Phase 6A)
 
 The interface abstracts the backend — a future MemOS or database integration
 changes only this file.
@@ -28,6 +29,7 @@ from kernos.kernel.state import (
     CovenantRule,
     KnowledgeEntry,
     PendingAction,
+    Preference,
     StateStore,
     TenantProfile,
 )
@@ -130,6 +132,7 @@ class JsonStateStore(StateStore):
 
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
+        self._preference_migration_done: set[str] = set()
 
     # -----------------------------------------------------------------------
     # Internal helpers
@@ -718,3 +721,135 @@ class JsonStateStore(StateStore):
         # Most recent first
         results.sort(key=lambda c: c.last_message_at, reverse=True)
         return results[:limit]
+
+    # --- Preferences (Phase 6A) ---
+
+    def _preferences_path(self, tenant_id: str) -> Path:
+        return self._state_dir(tenant_id) / "preferences.json"
+
+    async def _maybe_migrate_preferences(self, tenant_id: str) -> None:
+        """Lazy migration: convert category='preference' KnowledgeEntries to Preferences."""
+        if tenant_id in self._preference_migration_done:
+            return
+        self._preference_migration_done.add(tenant_id)
+
+        from kernos.kernel.state import generate_preference_id
+        from kernos.utils import utc_now
+
+        knowledge = await self.query_knowledge(tenant_id, category="preference")
+        if not knowledge:
+            return
+
+        existing_prefs = self._load_preferences(tenant_id)
+        # Skip if migration already happened (check for source_knowledge_id matches)
+        existing_source_ids = {e.get("source_knowledge_id", "") for e in existing_prefs}
+
+        migrated_count = 0
+        for entry in knowledge:
+            if entry.id in existing_source_ids:
+                continue  # Already migrated
+            pref = Preference(
+                id=generate_preference_id(),
+                tenant_id=tenant_id,
+                intent=entry.content,
+                category="general",
+                subject=entry.subject,
+                action="prefer",
+                parameters={},
+                scope="global" if not entry.context_space else entry.context_space,
+                context_space=entry.context_space or "",
+                status="active",
+                created_at=entry.created_at,
+                updated_at=utc_now(),
+                source_knowledge_id=entry.id,
+            )
+            existing_prefs.append(asdict(pref))
+
+            # Mark original as migrated (no destructive deletion)
+            entry.category = "preference_migrated"
+            await self.save_knowledge_entry(entry)
+            migrated_count += 1
+
+        if migrated_count:
+            self._save_preferences(tenant_id, existing_prefs)
+            logger.info(
+                "PREF_MIGRATION: tenant=%s migrated=%d from KnowledgeEntry",
+                tenant_id, migrated_count,
+            )
+
+    def _load_preferences(self, tenant_id: str) -> list[dict]:
+        return self._read_json(self._preferences_path(tenant_id), [])
+
+    def _save_preferences(self, tenant_id: str, data: list[dict]) -> None:
+        path = self._preferences_path(tenant_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(path) + ".lock")
+        with lock:
+            path.write_text(json.dumps(data, indent=2))
+
+    @staticmethod
+    def _load_preference(d: dict) -> Preference:
+        """Load a Preference from a dict, handling missing fields gracefully."""
+        known_fields = {f.name for f in Preference.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in d.items() if k in known_fields}
+        return Preference(**filtered)
+
+    async def add_preference(self, pref: Preference) -> None:
+        await self._maybe_migrate_preferences(pref.tenant_id)
+        entries = self._load_preferences(pref.tenant_id)
+        entries.append(asdict(pref))
+        self._save_preferences(pref.tenant_id, entries)
+        logger.info(
+            "PREF_WRITE: id=%s action=ADD subject=%s category=%s tenant=%s",
+            pref.id, pref.subject, pref.category, pref.tenant_id,
+        )
+
+    async def save_preference(self, pref: Preference) -> None:
+        entries = self._load_preferences(pref.tenant_id)
+        found = False
+        for i, e in enumerate(entries):
+            if e.get("id") == pref.id:
+                entries[i] = asdict(pref)
+                found = True
+                break
+        if not found:
+            entries.append(asdict(pref))
+        self._save_preferences(pref.tenant_id, entries)
+        logger.info(
+            "PREF_WRITE: id=%s action=%s subject=%s status=%s tenant=%s",
+            pref.id, "UPDATE" if found else "ADD", pref.subject, pref.status, pref.tenant_id,
+        )
+
+    async def get_preference(self, tenant_id: str, pref_id: str) -> Preference | None:
+        await self._maybe_migrate_preferences(tenant_id)
+        entries = self._load_preferences(tenant_id)
+        for e in entries:
+            if e.get("id") == pref_id:
+                return self._load_preference(e)
+        return None
+
+    async def query_preferences(
+        self,
+        tenant_id: str,
+        status: str = "",
+        subject: str = "",
+        category: str = "",
+        scope: str = "",
+        active_only: bool = True,
+    ) -> list[Preference]:
+        await self._maybe_migrate_preferences(tenant_id)
+        entries = self._load_preferences(tenant_id)
+        results: list[Preference] = []
+        for e in entries:
+            if active_only and e.get("status", "active") != "active":
+                continue
+            if status and e.get("status") != status:
+                continue
+            if subject and e.get("subject") != subject:
+                continue
+            if category and e.get("category") != category:
+                continue
+            if scope and e.get("scope") != scope:
+                continue
+            results.append(self._load_preference(e))
+        return results

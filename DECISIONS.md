@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Runtime Hardening track RT1 COMPLETE. 1429 tests.
+**Status:** Phase 6A started. RT1 complete. 1443 tests.
 **Owner:** Founder
-**Action:** RT1 closeout shipped (error-in-result, proactive budget, trace enrichment). Next: live validation.
-**Tests:** 1429
+**Action:** SPEC-6A-1 shipped (Preference state). Next: 6A-2 (derived artifact linking) or live validation.
+**Tests:** 1443
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -30,6 +30,7 @@ None currently active. Next spec will be assigned by founder.
 | 4C | Structural Refactor — handler decompose, reasoning extract, handler protocol | 1359 | 2026-03-28 |
 | 4D | Context Quality — ledger architecture, selective injection, fact harvest, tool surfacing | 1392 | 2026-03-31 |
 | RT1 | Runtime Hardening — result budgeting, concurrency, timeouts, retry, turn serialization, closeout | 1429 | 2026-04-02 |
+| 6A-1 | Preference State — first-class Preference type, persistence, migration from KnowledgeEntry | 1443 | 2026-04-02 |
 
 ---
 
