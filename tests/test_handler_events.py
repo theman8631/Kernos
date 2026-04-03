@@ -128,6 +128,7 @@ def _make_mock_handler(tools: list[dict] | None = None):
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
+    handler.preference_parsing_enabled = False
     return handler, mock_provider
 
 
@@ -163,6 +164,7 @@ def _make_real_handler(tmp_path):
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
+    handler.preference_parsing_enabled = False
     return handler, mock_provider, events, state
 
 

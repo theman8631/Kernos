@@ -872,6 +872,7 @@ def _make_handler(tmp_path):
         registry=registry,
         engine=engine,
     )
+    handler.preference_parsing_enabled = False
     return handler, mock_provider
 
 

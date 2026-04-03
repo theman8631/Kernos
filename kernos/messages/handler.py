@@ -535,6 +535,7 @@ class MessageHandler:
         self._error_buffer = ErrorBuffer()
         self._pending_system_events: dict[str, list[str]] = {}
         self._compacting: set[str] = set()  # space_ids currently compacting
+        self.preference_parsing_enabled: bool = True  # Bypassable (Agent Card principle)
         self._runners: dict[str, SpaceRunner] = {}  # "tenant:space" → SpaceRunner
         self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
         from kernos.kernel.channels import ChannelRegistry
@@ -2305,6 +2306,24 @@ class MessageHandler:
             await self.conv_logger.append(tenant_id=tenant_id, space_id=active_space_id,
                 speaker="user", channel=message.platform, content=user_content,
                 timestamp=message.timestamp.isoformat())
+
+        # Preference detection — in-turn compile and commit (Phase 6A-4)
+        if self.preference_parsing_enabled and not _is_diagnostic and user_content.strip():
+            try:
+                from kernos.kernel.preference_parser import parse_preferences_in_message
+                trigger_store = getattr(self.reasoning, '_trigger_store', None)
+                pref_note = await parse_preferences_in_message(
+                    user_content, tenant_id, active_space_id,
+                    self.state, self.reasoning, trigger_store,
+                )
+                if pref_note:
+                    # Inject into results prefix so agent sees it during reasoning
+                    if ctx.results_prefix:
+                        ctx.results_prefix += "\n\n" + pref_note
+                    else:
+                        ctx.results_prefix = pref_note
+            except Exception as exc:
+                logger.warning("PREF_DETECT: pipeline error: %s", exc)
 
         # Build tools list — three-tier dynamic surfacing
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL

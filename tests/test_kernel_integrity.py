@@ -93,6 +93,7 @@ def _make_real_handler(tmp_path):
     handler = MessageHandler(
         mcp, conversations, tenants, audit, events, state, reasoning, registry, engine
     )
+    handler.preference_parsing_enabled = False
     return handler, mock_provider, events, state
 
 

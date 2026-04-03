@@ -372,6 +372,7 @@ def _make_handler_with_state():
     handler = MessageHandler(
         mcp, conversations, tenants, audit, events, state, reasoning, registry, engine
     )
+    handler.preference_parsing_enabled = False
     return handler, mock_provider, state
 
 

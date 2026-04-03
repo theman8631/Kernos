@@ -161,6 +161,7 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     reasoning = ReasoningService(mock_provider, events, mcp, audit)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
+    handler.preference_parsing_enabled = False  # Disable in tests — avoids consuming mock side_effects
     return handler, mock_provider
 
 

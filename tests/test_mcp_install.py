@@ -121,6 +121,7 @@ def _make_handler(tmp_path, mcp=None, registry=None):
     handler.compaction.adapter = MagicMock()
     handler.compaction.adapter.count_tokens = AsyncMock(return_value=100)
     handler.compaction.save_state = AsyncMock()
+    handler.preference_parsing_enabled = False
     handler.compaction.set_files = MagicMock()
 
     return handler
