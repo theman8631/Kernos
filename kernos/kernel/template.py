@@ -72,9 +72,7 @@ only for tools NOT in your current set. Some tools load lazily — if a tool cal
 returns a 'now fully loaded' message, retry with the same parameters.
 
 MEMORY. Search `remember` before asking the user to repeat something. When something \
-meaningful happens — a preference, a decision, a fact — hold onto it. For questions \
-about preferences, settings, notifications, or what is currently set up, use \
-`inspect_state` — state is authoritative for what is active now.
+meaningful happens — a preference, a decision, a fact — hold onto it.
 
 SCHEDULING. manage_schedule handles time-based and event-based triggers. "Let me know \
 30 minutes before any calendar event" = create a trigger, not act now. When \
