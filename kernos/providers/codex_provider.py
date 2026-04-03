@@ -1,4 +1,5 @@
 """OpenAI Codex OAuth provider — ChatGPT Codex Responses API."""
+import asyncio
 import json
 import logging
 import os
@@ -228,6 +229,7 @@ class OpenAICodexProvider(Provider):
             "model": model,
             "instructions": system,
             "input": self._translate_input(messages),
+            "max_output_tokens": max_tokens,
             "store": False,
             "stream": True,
             "tool_choice": "auto",
@@ -248,30 +250,38 @@ class OpenAICodexProvider(Provider):
         headers = self._headers()
         headers["accept"] = "text/event-stream"
 
-        try:
-            async with http.stream("POST", url, headers=headers, json=body) as resp:
-                if resp.status_code == 401:
-                    await resp.aread()
-                    raise ReasoningProviderError(
-                        f"Codex auth failed (401): {resp.text[:300]}"
-                    )
-                if resp.status_code == 429:
-                    await resp.aread()
-                    raise ReasoningRateLimitError(
-                        f"Codex rate limited (429): {resp.text[:300]}"
-                    )
-                if resp.status_code >= 400:
-                    await resp.aread()
-                    raise ReasoningProviderError(
-                        f"Codex API error ({resp.status_code}): {resp.text[:300]}"
-                    )
-                data = await self._collect_sse_response(resp)
-        except (ReasoningRateLimitError, ReasoningProviderError):
-            raise
-        except Exception as exc:
-            raise ReasoningConnectionError(f"Codex request failed: {exc}") from exc
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                async with http.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code == 401:
+                        await resp.aread()
+                        raise ReasoningProviderError(
+                            f"Codex auth failed (401): {resp.text[:300]}"
+                        )
+                    if resp.status_code == 429:
+                        await resp.aread()
+                        raise ReasoningRateLimitError(
+                            f"Codex rate limited (429): {resp.text[:300]}"
+                        )
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        raise ReasoningProviderError(
+                            f"Codex API error ({resp.status_code}): {resp.text[:300]}"
+                        )
+                    data = await self._collect_sse_response(resp)
+                return self._parse_response(data)
+            except (ReasoningRateLimitError, ReasoningProviderError):
+                raise  # 4xx / known errors — don't retry
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning("REASON_RETRY: attempt=2 error=%s", exc)
+                    await asyncio.sleep(1.5)
+                    continue
+                raise ReasoningConnectionError(f"Codex request failed: {exc}") from exc
 
-        return self._parse_response(data)
+        raise ReasoningConnectionError(f"Codex request failed: {last_exc}") from last_exc
 
     @staticmethod
     async def _collect_sse_response(resp: Any) -> dict:
@@ -314,7 +324,9 @@ class OpenAICodexProvider(Provider):
                         f"Codex response failed: {msg or event_type}"
                     )
                 elif event_type == "error":
-                    msg = event.get("message", event.get("code", "unknown"))
+                    err = event.get("error", {})
+                    msg = err.get("message", event.get("message", event.get("code", "unknown")))
+                    logger.warning("CODEX_STREAM_ERROR: event=%s", json.dumps(event)[:500])
                     raise ReasoningProviderError(f"Codex stream error: {msg}")
 
         if not final_response:

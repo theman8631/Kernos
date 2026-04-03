@@ -238,6 +238,108 @@ class TestPrefMissed:
 
 
 # ===========================
+# Signal 8: PROVIDER_ERROR_REPEATED
+# ===========================
+
+class TestProviderErrorRepeated:
+    async def test_detects_repeated_errors(self):
+        obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
+        signals = await obs.observe(
+            tenant_id="t1",
+            user_message="hello",
+            response_text="hi",
+            tool_trace=[],
+            surfaced_tool_names=set(),
+            active_space_id="space_1",
+            merged_count=1,
+            is_reactive=True,
+            pref_detected=False,
+            provider_errors=[
+                "Codex stream error: unknown",
+                "Codex stream error: unknown",
+                "Codex stream error: unknown",
+            ],
+        )
+        types = [s.signal_type for s in signals]
+        assert "PROVIDER_ERROR_REPEATED" in types
+        sig = [s for s in signals if s.signal_type == "PROVIDER_ERROR_REPEATED"][0]
+        assert "3x" in sig.description
+
+    async def test_no_signal_for_single_error(self):
+        obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
+        signals = await obs.observe(
+            tenant_id="t1",
+            user_message="hello",
+            response_text="hi",
+            tool_trace=[],
+            surfaced_tool_names=set(),
+            active_space_id="space_1",
+            merged_count=1,
+            is_reactive=True,
+            pref_detected=False,
+            provider_errors=["Some error"],
+        )
+        types = [s.signal_type for s in signals]
+        assert "PROVIDER_ERROR_REPEATED" not in types
+
+    async def test_no_signal_for_no_errors(self):
+        obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
+        signals = await obs.observe(
+            tenant_id="t1",
+            user_message="hello",
+            response_text="hi",
+            tool_trace=[],
+            surfaced_tool_names=set(),
+            active_space_id="space_1",
+            merged_count=1,
+            is_reactive=True,
+            pref_detected=False,
+        )
+        types = [s.signal_type for s in signals]
+        assert "PROVIDER_ERROR_REPEATED" not in types
+
+
+# ===========================
+# Schedule query false positive fix
+# ===========================
+
+class TestScheduleQueryFalsePositive:
+    async def test_no_signal_when_list_events_called(self):
+        """'What's on my schedule?' + list-events called → no friction."""
+        obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
+        signals = await obs.observe(
+            tenant_id="t1",
+            user_message="What reminders do I have?",
+            response_text="You have a meeting at 3pm",
+            tool_trace=[{"name": "list-events", "input": {}, "success": True}],
+            surfaced_tool_names={"list-events", "manage_schedule"},
+            active_space_id="space_1",
+            merged_count=1,
+            is_reactive=True,
+            pref_detected=False,
+        )
+        types = [s.signal_type for s in signals]
+        assert "TOOL_AVAILABLE_BUT_NOT_USED" not in types
+
+    async def test_signal_when_trigger_query_unanswered(self):
+        """'What reminders do I have?' + no manage_schedule → friction."""
+        obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
+        signals = await obs.observe(
+            tenant_id="t1",
+            user_message="What reminders do I have?",
+            response_text="You don't have any reminders",
+            tool_trace=[],
+            surfaced_tool_names={"manage_schedule"},
+            active_space_id="space_1",
+            merged_count=1,
+            is_reactive=True,
+            pref_detected=False,
+        )
+        types = [s.signal_type for s in signals]
+        assert "TOOL_AVAILABLE_BUT_NOT_USED" in types
+
+
+# ===========================
 # Report writing
 # ===========================
 

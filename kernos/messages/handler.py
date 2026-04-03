@@ -158,6 +158,7 @@ class SpaceRunner:
     space_id: str
     mailbox: asyncio.Queue  # (NormalizedMessage, TurnContext, asyncio.Future) items
     _task: asyncio.Task | None = field(default=None, repr=False)
+    provider_errors: list[str] = field(default_factory=list)  # Session-level error accumulator
 
 
 _MODEL = "claude-sonnet-4-6"
@@ -1909,6 +1910,7 @@ class MessageHandler:
                         try:
                             await self._phase_reason(primary_ctx)
                         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
+                            runner.provider_errors.append(str(exc)[:200])
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "try again in a moment")
                             if not primary_future.done():
@@ -1918,6 +1920,7 @@ class MessageHandler:
                                     ef.set_result("")
                             continue
                         except ReasoningRateLimitError as exc:
+                            runner.provider_errors.append(str(exc)[:200])
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "overloaded right now. Try again in a minute")
                             if not primary_future.done():
@@ -1927,6 +1930,7 @@ class MessageHandler:
                                     ef.set_result("")
                             continue
                         except ReasoningProviderError as exc:
+                            runner.provider_errors.append(str(exc)[:200])
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "try again in a moment")
                             if not primary_future.done():
@@ -1951,7 +1955,8 @@ class MessageHandler:
 
                         # Friction observer — async, non-blocking
                         primary_ctx.tool_calls_trace = self.reasoning.drain_tool_trace()
-                        asyncio.ensure_future(self._run_friction_observer(primary_ctx))
+                        asyncio.ensure_future(self._run_friction_observer(
+                            primary_ctx, provider_errors=runner.provider_errors))
                 except Exception as exc:
                     logger.error(
                         "TURN_ERROR: space=%s error=%s",
@@ -2729,7 +2734,9 @@ class MessageHandler:
 
         await self._update_conversation_summary(tenant_id, ctx.conversation_id, message.platform)
 
-    async def _run_friction_observer(self, ctx: TurnContext) -> None:
+    async def _run_friction_observer(
+        self, ctx: TurnContext, provider_errors: list[str] | None = None,
+    ) -> None:
         """Run friction detection post-turn. Non-blocking — failures are logged and swallowed."""
         try:
             surfaced_names = {t.get("name", "") for t in ctx.tools if t.get("name")}
@@ -2743,6 +2750,7 @@ class MessageHandler:
                 merged_count=ctx.merged_count,
                 is_reactive=True,
                 pref_detected=ctx.pref_detected,
+                provider_errors=provider_errors,
             )
         except Exception as exc:
             logger.debug("FRICTION: observer failed: %s", exc)

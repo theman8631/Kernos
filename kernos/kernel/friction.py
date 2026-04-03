@@ -62,6 +62,7 @@ class FrictionObserver:
         merged_count: int,
         is_reactive: bool,
         pref_detected: bool,
+        provider_errors: list[str] | None = None,
     ) -> list[FrictionSignal]:
         """Run all signal detectors and write reports for any friction found.
 
@@ -115,6 +116,11 @@ class FrictionObserver:
         sig = self._check_tool_not_used(
             tool_trace, surfaced_tool_names, user_message, response_text, ctx_snapshot
         )
+        if sig:
+            signals.append(sig)
+
+        # Signal 8: PROVIDER_ERROR_REPEATED
+        sig = self._check_provider_errors(provider_errors or [], ctx_snapshot)
         if sig:
             signals.append(sig)
 
@@ -302,8 +308,13 @@ class FrictionObserver:
                 )
 
         # Schedule queries without manage_schedule
-        sched_keywords = ["what reminders", "my reminders", "what triggers", "my schedule"]
+        # "my schedule" / "what's on my schedule" → calendar query, list-events is correct
+        # "my reminders" / "what triggers" → trigger query, manage_schedule expected
+        sched_keywords = ["what reminders", "my reminders", "what triggers"]
         if any(kw in msg_lower for kw in sched_keywords):
+            # If agent used list-events, it answered a calendar query — not a trigger miss
+            if "list-events" in tool_names:
+                return None
             if "manage_schedule" in surfaced and "manage_schedule" not in tool_names:
                 return FrictionSignal(
                     signal_type="TOOL_AVAILABLE_BUT_NOT_USED",
@@ -317,6 +328,38 @@ class FrictionObserver:
                     heuristic=True,
                 )
         return None
+
+    def _check_provider_errors(
+        self, errors: list[str], ctx: dict,
+    ) -> FrictionSignal | None:
+        """Signal 8: Same provider error occurs 2+ times — infrastructure bug."""
+        if len(errors) < 2:
+            return None
+
+        # Count error frequencies
+        from collections import Counter
+        counts = Counter(errors)
+        repeated = {msg: count for msg, count in counts.items() if count >= 2}
+        if not repeated:
+            return None
+
+        top_msg, top_count = max(repeated.items(), key=lambda x: x[1])
+        return FrictionSignal(
+            signal_type="PROVIDER_ERROR_REPEATED",
+            description=(
+                f"Provider error occurred {top_count}x in this session: "
+                f"{top_msg[:100]}"
+            ),
+            evidence=[
+                f"Error message: {top_msg[:200]}",
+                f"Occurrences: {top_count}",
+                f"Total errors this session: {len(errors)}",
+                f"Distinct errors: {len(counts)}",
+                "Check provider code for error parsing — if message is always "
+                "'unknown', the parsing code may be reading the wrong field",
+            ],
+            context=ctx,
+        )
 
     # ------------------------------------------------------------------
     # Report writing
@@ -424,5 +467,6 @@ class FrictionObserver:
             "SCHEMA_ERROR_ON_PROVIDER": "STRUCTURAL_ENFORCE",
             "MERGED_MESSAGES_DROPPED": "SIMPLIFY",
             "PREFERENCE_STATED_BUT_NOT_CAPTURED": "SIMPLIFY",
+            "PROVIDER_ERROR_REPEATED": "STRUCTURAL_ENFORCE",
         }
         return defaults.get(signal_type, "SIMPLIFY")
