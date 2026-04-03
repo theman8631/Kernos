@@ -229,7 +229,6 @@ class OpenAICodexProvider(Provider):
             "model": model,
             "instructions": system,
             "input": self._translate_input(messages),
-            "max_output_tokens": max_tokens,
             "store": False,
             "stream": True,
             "tool_choice": "auto",
