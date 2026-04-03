@@ -333,6 +333,24 @@ class MCPClientManager:
             return any(p in lower for p in ERROR_IN_RESULT_PATTERNS)
         return any(lower.startswith(p) for p in ERROR_IN_RESULT_PATTERNS)
 
+    async def _reconnect_server(self, server_name: str) -> bool:
+        """Disconnect and reconnect an MCP server to refresh auth state.
+
+        Used when invalid_grant is detected — restarting the server process
+        forces a fresh OAuth token exchange.
+        """
+        try:
+            await self.disconnect_one(server_name)
+            success = await self.connect_one(server_name)
+            if success:
+                logger.info("TOOL_AUTH_RECONNECT: server=%s reconnected successfully", server_name)
+            else:
+                logger.warning("TOOL_AUTH_RECONNECT: server=%s reconnect failed", server_name)
+            return success
+        except Exception as exc:
+            logger.warning("TOOL_AUTH_RECONNECT: server=%s error: %s", server_name, exc)
+            return False
+
     def _get_timeout(self, tool_name: str) -> float:
         """Return the timeout for a given tool."""
         return TOOL_TIMEOUT_OVERRIDES.get(tool_name, TOOL_TIMEOUT_SECONDS)
@@ -373,6 +391,26 @@ class MCPClientManager:
                     else:
                         parts.append(str(content))
                 formatted = "\n".join(parts) if parts else "(empty result)"
+
+                # Check for auth failure requiring server reconnect
+                if "invalid_grant" in formatted.lower():
+                    logger.warning(
+                        "TOOL_AUTH_RECONNECT: tool=%s — invalid_grant detected, reconnecting server",
+                        tool_name,
+                    )
+                    reconnected = await self._reconnect_server(server_name)
+                    if reconnected and attempt < MAX_RETRIES:
+                        # Update session reference for retry
+                        session = self._sessions.get(server_name)
+                        if session:
+                            logger.info(
+                                "TOOL_AUTH_RECONNECT: server=%s reconnected, retrying",
+                                server_name,
+                            )
+                            await asyncio.sleep(RETRY_BACKOFF_S)
+                            continue
+                    # Reconnect failed or retries exhausted
+                    return f"Tool error: {formatted}"
 
                 # Check for error-shaped successful results
                 if self._is_error_in_result(formatted):
