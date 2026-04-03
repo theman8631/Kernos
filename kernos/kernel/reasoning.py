@@ -179,6 +179,8 @@ class ReasoningService:
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
         # Turn-level tool call trace — accumulated during reasoning, read+cleared by handler
         self._turn_tool_trace: list[dict] = []
+        # Hybrid token counting: real input_tokens from last principal reasoning call per tenant
+        self._last_real_input_tokens: dict[str, int] = {}  # tenant_id → tokens
 
     def _get_gate(self) -> DispatchGate:
         """Lazy gate creation — registry/state set after construction."""
@@ -283,6 +285,10 @@ class ReasoningService:
         if space_id not in self._loaded_tools:
             self._loaded_tools[space_id] = set()
         self._loaded_tools[space_id].add(tool_name)
+
+    def get_last_real_input_tokens(self, tenant_id: str) -> int:
+        """Return the real input_tokens from the last principal reasoning call, or 0."""
+        return self._last_real_input_tokens.get(tenant_id, 0)
 
     def drain_tool_trace(self) -> list[dict]:
         """Return and clear the accumulated tool call trace for the current turn."""
@@ -1480,23 +1486,33 @@ class ReasoningService:
         except Exception as exc:
             logger.warning("Failed to emit reasoning.request: %s", exc)
 
-        # Estimate context size: rough token count of system prompt + messages + tools.
-        # 1 token ≈ 4 chars is a reasonable approximation for English prose.
+        # Token estimation: hybrid (real baseline + delta) when available, char-based fallback.
         _tool_chars = sum(len(json.dumps(t)) for t in tools)
         _ctx_chars = len(request.system_prompt) + sum(
             len(m.get("content", "") if isinstance(m.get("content"), str)
                 else json.dumps(m.get("content", "")))
             for m in messages
         )
-        _ctx_tokens_est = (_ctx_chars + _tool_chars) // 4
+        _char_est = (_ctx_chars + _tool_chars) // 4
+        _last_real = self._last_real_input_tokens.get(request.tenant_id, 0)
+        if _last_real > 0:
+            # Hybrid: real baseline + estimated delta from new content
+            # The last real count covers the full context window at that point.
+            # Delta is new user message + any changed context (estimated).
+            _new_content_chars = len(request.input_text or "")
+            _delta_est = _new_content_chars // 4
+            _ctx_tokens_est = _last_real + _delta_est
+        else:
+            _ctx_tokens_est = _char_est
+
         _tool_sizes = [(t.get("name", "?"), len(json.dumps(t))) for t in tools]
         _tool_sizes.sort(key=lambda x: x[1], reverse=True)
         _top3 = ", ".join(f"{name}={chars//4}tok" for name, chars in _tool_sizes[:3])
         logger.info(
             "REASON_START: tool_count=%d max_tokens=%d msg_count=%d "
-            "ctx_tokens_est=%d (msg=%d tools=%d) top_tools=[%s]",
+            "ctx_tokens_est=%d (hybrid=%d char=%d real_baseline=%d) top_tools=[%s]",
             len(tools), request.max_tokens, len(messages), _ctx_tokens_est,
-            _ctx_chars // 4, _tool_chars // 4, _top3,
+            _ctx_tokens_est, _char_est, _last_real, _top3,
         )
         if logger.isEnabledFor(logging.DEBUG):
             for t in tools:
@@ -1523,6 +1539,11 @@ class ReasoningService:
         duration_ms = int((time.monotonic() - t0) * 1000)
         total_input_tokens += response.input_tokens
         total_output_tokens += response.output_tokens
+
+        # Store real input_tokens for hybrid estimation on next turn
+        # This is the initial API call (full context window), not tool-loop iterations
+        if response.input_tokens > 0:
+            self._last_real_input_tokens[request.tenant_id] = response.input_tokens
 
         logger.info(
             "LLM_RESPONSE: stop_reason=%s tokens_in=%d tokens_out=%d content_types=%s",

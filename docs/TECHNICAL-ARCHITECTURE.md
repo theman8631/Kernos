@@ -272,7 +272,7 @@ Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
 - `LLM_REQUEST:` — messages count, tools count, max_tokens (before every provider call)
 - `LLM_RESPONSE:` — stop_reason, content_types list (after every provider call)
 - `LLM_BLOCK:` — per-block detail: text (len + 300-char preview) or tool_use (name + 300-char input preview)
-- `REASON_START:` — tool_count, max_tokens, msg_count, ctx_tokens_est (reasoning service)
+- `REASON_START:` — tool_count, max_tokens, msg_count, ctx_tokens_est with hybrid/char/real_baseline breakdown (reasoning service)
 - `TOOL_LOOP:` — iteration + exit + exhaustion (reasoning service)
 - `TOOL_CONCURRENT:` — parallel/sequential/stub/total counts when >1 tool in response (reasoning service)
 - `TOOL_TIMEOUT:` — tool hit timeout limit (client.py)

@@ -2112,10 +2112,17 @@ class MessageHandler:
             for tool in ctx.tools:
                 f.write(f"{json.dumps(tool, indent=2)}\n\n")
             f.write("\n=== SUMMARY ===\n")
-            f.write(f"System prompt: ~{len(ctx.system_prompt) // 4} tokens\n")
+            _sys_chars = len(ctx.system_prompt)
             msg_chars = sum(len(str(m.get('content', ''))) for m in ctx.messages)
+            tool_chars = sum(len(json.dumps(t)) for t in ctx.tools)
+            _char_est = (_sys_chars + msg_chars + tool_chars) // 4
+            _real_baseline = self.reasoning.get_last_real_input_tokens(ctx.tenant_id)
+            f.write(f"System prompt: ~{_sys_chars // 4} tokens ({_sys_chars} chars)\n")
             f.write(f"Messages: {len(ctx.messages)} entries, ~{msg_chars // 4} tokens\n")
-            f.write(f"Tools: {len(ctx.tools)} schemas\n")
+            f.write(f"Tools: {len(ctx.tools)} schemas, ~{tool_chars // 4} tokens\n")
+            f.write(f"Char-based estimate: ~{_char_est} tokens\n")
+            if _real_baseline > 0:
+                f.write(f"Last real input_tokens (from API): {_real_baseline}\n")
 
         logger.info("DUMP: context written to %s", dump_path)
         return f"Context dumped to {dump_path}"
@@ -2671,9 +2678,10 @@ class MessageHandler:
                     if not _skip:
                         log_info = await self.conv_logger.get_current_log_info(tenant_id, ctx.active_space_id)
                         new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
+                        _real_ctx = self.reasoning.get_last_real_input_tokens(tenant_id)
                         logger.info(
-                            "COMPACTION_INPUT: space=%s tokens_est=%d threshold=%d",
-                            ctx.active_space_id, new_tokens, comp_state.compaction_threshold,
+                            "COMPACTION_INPUT: space=%s tokens_est=%d threshold=%d real_ctx=%d",
+                            ctx.active_space_id, new_tokens, comp_state.compaction_threshold, _real_ctx,
                         )
                         if new_tokens >= comp_state.compaction_threshold:
                             log_text, log_num = await self.conv_logger.read_current_log_text(tenant_id, ctx.active_space_id)
