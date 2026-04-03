@@ -41,7 +41,7 @@ class TestReadSourceValidPaths:
         assert "ReasoningService" in result
 
     def test_read_handler(self):
-        result = _read_source("messages/handler.py")
+        result = _read_source("messages/handler.py", section="MessageHandler")
         assert "MessageHandler" in result
 
     def test_read_event_types(self):

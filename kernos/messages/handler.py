@@ -141,6 +141,10 @@ class TurnContext:
     response_text: str = ""
     task: Task | None = None
 
+    # Post-turn trace (for friction observer)
+    tool_calls_trace: list[dict] = field(default_factory=list)  # [{name, input, success}]
+    pref_detected: bool = False  # Whether preference parser detected a preference this turn
+
 
 # Turn serialization: per-(tenant, space) mailbox/runner
 MERGE_WINDOW_MS = 300  # Wait up to 300ms for follow-up messages
@@ -589,6 +593,14 @@ class MessageHandler:
                 reasoning.set_retrieval(self._retrieval)
         except Exception as exc:
             logger.warning("Failed to initialize RetrievalService: %s", exc)
+
+        # Friction observer — post-turn diagnostics
+        from kernos.kernel.friction import FrictionObserver
+        self._friction = FrictionObserver(
+            reasoning=reasoning,
+            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+            enabled=os.getenv("KERNOS_FRICTION_OBSERVER", "1") != "0",
+        )
 
     async def _get_system_space(self, tenant_id: str):
         """Return the system context space for this tenant, or None."""
@@ -1936,6 +1948,10 @@ class MessageHandler:
                         await self._phase_consequence(primary_ctx)
                         await self._phase_persist(primary_ctx)
                         response = primary_ctx.response_text or ""
+
+                        # Friction observer — async, non-blocking
+                        primary_ctx.tool_calls_trace = self.reasoning.drain_tool_trace()
+                        asyncio.ensure_future(self._run_friction_observer(primary_ctx))
                 except Exception as exc:
                     logger.error(
                         "TURN_ERROR: space=%s error=%s",
@@ -2347,6 +2363,7 @@ class MessageHandler:
                     self.state, self.reasoning, trigger_store,
                 )
                 if pref_note:
+                    ctx.pref_detected = True
                     # Inject into results prefix so agent sees it during reasoning
                     if ctx.results_prefix:
                         ctx.results_prefix += "\n\n" + pref_note
@@ -2711,6 +2728,24 @@ class MessageHandler:
             logger.warning("Failed to emit message.sent: %s", exc)
 
         await self._update_conversation_summary(tenant_id, ctx.conversation_id, message.platform)
+
+    async def _run_friction_observer(self, ctx: TurnContext) -> None:
+        """Run friction detection post-turn. Non-blocking — failures are logged and swallowed."""
+        try:
+            surfaced_names = {t.get("name", "") for t in ctx.tools if t.get("name")}
+            await self._friction.observe(
+                tenant_id=ctx.tenant_id,
+                user_message=ctx.message.content or "",
+                response_text=ctx.response_text,
+                tool_trace=ctx.tool_calls_trace,
+                surfaced_tool_names=surfaced_names,
+                active_space_id=ctx.active_space_id,
+                merged_count=ctx.merged_count,
+                is_reactive=True,
+                pref_detected=ctx.pref_detected,
+            )
+        except Exception as exc:
+            logger.debug("FRICTION: observer failed: %s", exc)
 
     # --- Selective knowledge injection helpers ---
 

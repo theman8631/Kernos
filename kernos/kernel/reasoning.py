@@ -177,6 +177,8 @@ class ReasoningService:
         self._tools_changed: bool = False  # Set by manage_capabilities; handler checks post-reasoning
         # Lazy tool loading: tracks which MCP tools have been loaded per-space session
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
+        # Turn-level tool call trace — accumulated during reasoning, read+cleared by handler
+        self._turn_tool_trace: list[dict] = []
 
     def _get_gate(self) -> DispatchGate:
         """Lazy gate creation — registry/state set after construction."""
@@ -281,6 +283,12 @@ class ReasoningService:
         if space_id not in self._loaded_tools:
             self._loaded_tools[space_id] = set()
         self._loaded_tools[space_id].add(tool_name)
+
+    def drain_tool_trace(self) -> list[dict]:
+        """Return and clear the accumulated tool call trace for the current turn."""
+        trace = self._turn_tool_trace
+        self._turn_tool_trace = []
+        return trace
 
     def clear_loaded_tools(self, space_id: str) -> None:
         """Clear loaded tools for a space (session boundary)."""
@@ -1120,6 +1128,13 @@ class ReasoningService:
                     "Result budgeting failed, injecting raw: tool=%s err=%s",
                     block.name, exc,
                 )
+
+        # Accumulate trace for friction observer
+        self._turn_tool_trace.append({
+            "name": block.name,
+            "input": tool_input,
+            "success": not is_error,
+        })
 
         return {
             "type": "tool_result",

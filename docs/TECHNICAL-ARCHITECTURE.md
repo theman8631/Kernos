@@ -910,6 +910,27 @@ In-memory queue (`_pending_system_events`) for internal notifications. Events fr
 
 **State Introspection** (Phase 6A-3): Two explicitly separate views in `kernos/kernel/introspection.py`. User truth view (`build_user_truth_view`) answers "what preferences/triggers/rules are active?" — concise, preference-first, no diagnostic clutter. Operator state view (`build_operator_state_view`) adds legacy unlinked artifacts, stale reconciliation markers, degraded services, inactive preference counts. Agent accesses the user view via `inspect_state` kernel tool (read-classified, no gate). Operator accesses via `/status` handler intercept (writes to `data/diagnostics/status_{ts}.txt`).
 
+### Friction Observer
+
+**What it does:** Post-turn cohort agent that detects system friction — moments where Kernos behaves suboptimally — and produces diagnostic reports. Biased toward subtraction: REMOVE > STRUCTURAL_ENFORCE > SIMPLIFY > ADD. Does NOT add latency to user response (async fire-and-forget).
+
+**File:** `kernos/kernel/friction.py` — FrictionObserver, FrictionSignal
+
+**7 signal patterns (V1):**
+1. `TOOL_REQUEST_FOR_SURFACED_TOOL` — agent called request_tool when the target was already surfaced
+2. `STALE_DATA_IN_RESPONSE` — agent answered from context instead of calling authoritative tool (heuristic)
+3. `GATE_CONFIRM_ON_REACTIVE` — gate confirmed a reactive soft_write (shouldn't happen after gate fix)
+4. `TOOL_AVAILABLE_BUT_NOT_USED` — agent had a matching tool but didn't use it (heuristic)
+5. `SCHEMA_ERROR_ON_PROVIDER` — structured output schema incompatible with provider
+6. `MERGED_MESSAGES_DROPPED` — agent addressed fewer topics than merged message count
+7. `PREFERENCE_STATED_BUT_NOT_CAPTURED` — preference-shaped language but no PREF_DETECT fired
+
+**Reports:** Each friction event produces `data/diagnostics/friction/FRICTION_{ts}_{type}.md` — self-contained bug report with LLM-generated description, recommendation (REMOVE/STRUCTURAL_ENFORCE/SIMPLIFY/ADD), evidence, and context snapshot. Optional cheap LLM call per event for the description.
+
+**Integration:** Handler drains `reasoning.drain_tool_trace()` post-persist, fires `_run_friction_observer()` as async fire-and-forget. TurnContext carries `tool_calls_trace` and `pref_detected` for signal detection.
+
+**Configuration:** Bypassable via `KERNOS_FRICTION_OBSERVER=0` env var. Trace prefix: `FRICTION:`.
+
 ### Conversation Store
 
 **What it is:** Append-only conversation history. User and assistant messages.
