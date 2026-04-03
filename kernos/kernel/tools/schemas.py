@@ -230,6 +230,24 @@ UPDATE_SOUL_TOOL = {
 }
 
 
+INSPECT_STATE_TOOL = {
+    "name": "inspect_state",
+    "description": (
+        "Inspect what Kernos currently believes is true about this user. "
+        "Returns active preferences (with linked triggers/covenants), "
+        "active triggers, behavioral rules, key facts, and connected "
+        "capabilities. Use this when the user asks 'what notifications "
+        "do I have?', 'what preferences are active?', or 'what do you "
+        "know about me?'"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+
 # Allowed fields for update_soul — lifecycle and user fields are read-only
 SOUL_UPDATABLE_FIELDS = {"agent_name", "emoji", "personality_notes", "communication_style"}
 

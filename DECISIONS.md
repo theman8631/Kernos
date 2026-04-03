@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Phase 6A in progress. 1453 tests.
+**Status:** Phase 6A in progress. 1467 tests.
 **Owner:** Founder
-**Action:** SPEC-6A-2 shipped (preference linkage). Next: 6A-3 (state introspection) or live validation.
-**Tests:** 1453
+**Action:** SPEC-6A-3 shipped (state introspection). Next: 6A-4 (preference parser) or live validation.
+**Tests:** 1467
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -32,6 +32,7 @@ None currently active. Next spec will be assigned by founder.
 | RT1 | Runtime Hardening — result budgeting, concurrency, timeouts, retry, turn serialization, closeout | 1429 | 2026-04-02 |
 | 6A-1 | Preference State — first-class Preference type, persistence, migration from KnowledgeEntry | 1443 | 2026-04-02 |
 | 6A-2 | Preference Linkage — source_preference_id on Trigger/CovenantRule, reconciliation cascade | 1453 | 2026-04-02 |
+| 6A-3 | State Introspection — user truth view, operator state view, inspect_state tool, /status | 1467 | 2026-04-02 |
 
 ---
 

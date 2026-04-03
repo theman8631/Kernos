@@ -338,7 +338,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -950,6 +950,18 @@ class ReasoningService:
                     )
                 else:
                     result = "Scheduler is not available."
+            elif block.name == "inspect_state":
+                try:
+                    from kernos.kernel.introspection import build_user_truth_view
+                    result = await build_user_truth_view(
+                        request.tenant_id,
+                        self._state,
+                        self._trigger_store,
+                        self._registry,
+                    )
+                except Exception as exc:
+                    logger.warning("Kernel tool 'inspect_state' failed: %s", exc)
+                    result = "State inspection failed — try again."
             else:
                 result = f"Kernel tool '{block.name}' not handled."
         else:

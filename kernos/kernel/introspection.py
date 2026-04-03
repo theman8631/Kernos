@@ -1,0 +1,251 @@
+"""State Introspection — unified views of what Kernos believes is true.
+
+Two explicitly separate surfaces:
+- User truth view: preferences, triggers, covenants, key facts, capabilities
+- Operator state view: adds degraded services, legacy artifacts, reconciliation health
+"""
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+async def build_user_truth_view(
+    tenant_id: str,
+    state: Any,              # StateStore
+    trigger_store: Any,      # TriggerStore | None
+    registry: Any = None,    # CapabilityRegistry | None
+) -> str:
+    """Build the user-facing truth view.
+
+    Answers: "What preferences are active? What's set up for me?"
+    Concise, preference-first, no diagnostic clutter.
+    """
+    sections: list[str] = []
+
+    # --- Active Preferences (headline) ---
+    try:
+        prefs = await state.query_preferences(tenant_id, active_only=True)
+        if prefs:
+            lines = ["## Active Preferences"]
+            for p in prefs:
+                param_str = ""
+                if p.parameters:
+                    param_str = " — " + ", ".join(
+                        f"{k}: {v}" for k, v in p.parameters.items()
+                    )
+                lines.append(f'- "{p.intent}"{param_str}')
+                scope_note = f" (space: {p.context_space})" if p.scope != "global" else ""
+                lines.append(f"  [{p.category}/{p.action}]{scope_note}")
+                # Show linked derived objects
+                if p.derived_trigger_ids:
+                    for tid in p.derived_trigger_ids:
+                        trigger_info = await _get_trigger_summary(trigger_store, tenant_id, tid)
+                        lines.append(f"  → Trigger: {trigger_info}")
+                if p.derived_covenant_ids:
+                    for cid in p.derived_covenant_ids:
+                        lines.append(f"  → Covenant: {cid}")
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: preferences query failed: %s", exc)
+
+    # --- Active Triggers ---
+    try:
+        if trigger_store:
+            triggers = await trigger_store.list_active(tenant_id)
+            linked = [t for t in triggers if t.source_preference_id]
+            unlinked = [t for t in triggers if not t.source_preference_id]
+            if unlinked:
+                lines = ["## Active Triggers (standalone)"]
+                for t in unlinked:
+                    next_fire = f", next: {t.next_fire_at[:16]}" if t.next_fire_at else ""
+                    lines.append(f"- {t.trigger_id}: \"{t.action_description}\""
+                                 f" ({t.condition_type}{next_fire})")
+                sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: triggers query failed: %s", exc)
+
+    # --- Active Covenants ---
+    try:
+        rules = await state.get_contract_rules(tenant_id, active_only=True)
+        if rules:
+            lines = ["## Active Rules"]
+            for r in rules:
+                source_tag = f" [{r.source}]" if r.source != "default" else " [default]"
+                linked_tag = f" (from pref {r.source_preference_id})" if getattr(r, "source_preference_id", "") else ""
+                lines.append(f"- {r.rule_type}: {r.description}{source_tag}{linked_tag}")
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: covenants query failed: %s", exc)
+
+    # --- Key Facts (truth-oriented: high confidence, stated) ---
+    try:
+        knowledge = await state.query_knowledge(
+            tenant_id, active_only=True, limit=50,
+        )
+        # Filter to high-confidence, non-preference entries
+        key_facts = [
+            k for k in knowledge
+            if k.confidence == "stated"
+            and k.category in ("entity", "fact", "pattern")
+            and k.lifecycle_archetype in ("identity", "structural", "habitual")
+        ]
+        if key_facts:
+            lines = ["## Key Facts"]
+            for f in key_facts[:15]:  # Cap at 15 for conciseness
+                lines.append(f"- [{f.category}] {f.subject}: {f.content[:120]}")
+            if len(key_facts) > 15:
+                lines.append(f"  ... and {len(key_facts) - 15} more")
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: knowledge query failed: %s", exc)
+
+    # --- Connected Capabilities ---
+    try:
+        if registry:
+            connected = registry.get_connected()
+            if connected:
+                lines = ["## Connected Capabilities"]
+                for cap in connected:
+                    lines.append(f"- {cap.display_name}: {len(cap.tools)} tools")
+                sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: capabilities query failed: %s", exc)
+
+    if not sections:
+        return "No active state found for this tenant."
+
+    return "\n\n".join(sections)
+
+
+async def build_operator_state_view(
+    tenant_id: str,
+    state: Any,
+    trigger_store: Any,
+    registry: Any = None,
+) -> str:
+    """Build the developer/operator state view.
+
+    Answers: "Why did Kernos do that? What is stale? What's degraded?"
+    Includes everything in user view plus diagnostic detail.
+    """
+    sections: list[str] = []
+
+    # --- User truth view first ---
+    user_view = await build_user_truth_view(tenant_id, state, trigger_store, registry)
+    sections.append(user_view)
+
+    # --- Context Spaces ---
+    try:
+        spaces = await state.list_context_spaces(tenant_id)
+        if spaces:
+            lines = ["## Context Spaces"]
+            for s in spaces:
+                status = "active" if s.status == "active" else s.status
+                lines.append(
+                    f"- {s.id}: \"{s.name}\" ({s.space_type}, {status},"
+                    f" last: {s.last_active_at[:16] if s.last_active_at else 'never'})"
+                )
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: spaces query failed: %s", exc)
+
+    # --- Legacy Unlinked Artifacts ---
+    try:
+        legacy_triggers = []
+        if trigger_store:
+            all_triggers = await trigger_store.list_all(tenant_id)
+            legacy_triggers = [
+                t for t in all_triggers
+                if not t.source_preference_id and t.status == "active"
+            ]
+        legacy_covenants = []
+        try:
+            all_rules = await state.get_contract_rules(tenant_id, active_only=True)
+            legacy_covenants = [
+                r for r in all_rules
+                if not getattr(r, "source_preference_id", "")
+                and r.source != "default"
+            ]
+        except Exception:
+            pass
+
+        if legacy_triggers or legacy_covenants:
+            lines = ["## Legacy Unlinked Artifacts"]
+            for t in legacy_triggers:
+                lines.append(f"- Trigger {t.trigger_id}: \"{t.action_description}\" (no preference)")
+            for r in legacy_covenants:
+                lines.append(f"- Covenant {r.id}: \"{r.description}\" (no preference)")
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: legacy artifacts query failed: %s", exc)
+
+    # --- Stale Reconciliation ---
+    try:
+        prefs = await state.query_preferences(tenant_id, active_only=True)
+        stale_items = []
+        if trigger_store:
+            for p in prefs:
+                for tid in p.derived_trigger_ids:
+                    t = await trigger_store.get(tenant_id, tid)
+                    if t and t.status not in ("active", "completed"):
+                        stale_items.append(
+                            f"- Pref {p.id} → Trigger {tid}: status={t.status} (expected active)"
+                        )
+        if stale_items:
+            lines = ["## Stale Reconciliation"]
+            lines.extend(stale_items)
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: stale check failed: %s", exc)
+
+    # --- Degraded Services ---
+    try:
+        if registry:
+            from kernos.capability.registry import CapabilityStatus
+            all_caps = registry.get_all()
+            degraded = [
+                c for c in all_caps
+                if c.status in (CapabilityStatus.ERROR, CapabilityStatus.SUPPRESSED)
+            ]
+            if degraded:
+                lines = ["## Degraded Services"]
+                for c in degraded:
+                    lines.append(f"- {c.display_name}: {c.status.value}")
+                sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: degraded services check failed: %s", exc)
+
+    # --- Superseded Preferences (history note) ---
+    try:
+        superseded = await state.query_preferences(
+            tenant_id, status="superseded", active_only=False,
+        )
+        revoked = await state.query_preferences(
+            tenant_id, status="revoked", active_only=False,
+        )
+        inactive_count = len(superseded) + len(revoked)
+        if inactive_count:
+            sections.append(
+                f"## Inactive Preferences\n{len(superseded)} superseded, {len(revoked)} revoked"
+            )
+    except Exception as exc:
+        pass
+
+    return "\n\n".join(sections)
+
+
+async def _get_trigger_summary(
+    trigger_store: Any, tenant_id: str, trigger_id: str,
+) -> str:
+    """Get a one-line summary of a trigger for display."""
+    if not trigger_store:
+        return trigger_id
+    try:
+        t = await trigger_store.get(tenant_id, trigger_id)
+        if not t:
+            return f"{trigger_id} (not found)"
+        next_fire = f", next: {t.next_fire_at[:16]}" if t.next_fire_at else ""
+        return f"{trigger_id} ({t.status}{next_fire})"
+    except Exception:
+        return f"{trigger_id} (query failed)"

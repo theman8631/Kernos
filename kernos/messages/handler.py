@@ -1854,9 +1854,11 @@ class MessageHandler:
                 try:
                     await self._phase_assemble(primary_ctx)
 
-                    # /dump intercept — write assembled context, skip reasoning
+                    # /dump and /status intercepts — skip reasoning
                     if primary_msg.content and primary_msg.content.strip().lower() == "/dump":
                         response = await self._handle_dump(primary_ctx)
+                    elif primary_msg.content and primary_msg.content.strip().lower() == "/status":
+                        response = await self._handle_status(primary_ctx)
                     else:
                         try:
                             await self._phase_reason(primary_ctx)
@@ -2063,6 +2065,30 @@ class MessageHandler:
         logger.info("DUMP: context written to %s", dump_path)
         return f"Context dumped to {dump_path}"
 
+    async def _handle_status(self, ctx: TurnContext) -> str:
+        """Write operator state view to diagnostic file, return summary."""
+        from kernos.kernel.introspection import build_operator_state_view
+
+        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+        from kernos.utils import utc_now
+        ts = utc_now()[:19].replace(":", "-")
+        status_path = Path(data_dir) / "diagnostics" / f"status_{ts}.txt"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+
+        trigger_store = getattr(self.reasoning, '_trigger_store', None)
+        operator_view = await build_operator_state_view(
+            ctx.tenant_id, self.state, trigger_store, self.registry,
+        )
+
+        with open(status_path, "w") as f:
+            f.write(f"=== OPERATOR STATE VIEW ===\n")
+            f.write(f"Tenant: {ctx.tenant_id}\n")
+            f.write(f"Generated: {utc_now()}\n\n")
+            f.write(operator_view)
+
+        logger.info("STATUS: state view written to %s", status_path)
+        return f"State view written to {status_path}"
+
     async def _build_departure_context(
         self, ctx: TurnContext, prev_space_id: str,
     ) -> dict | None:
@@ -2247,7 +2273,7 @@ class MessageHandler:
             logger.info("EMPTY_MSG_GUARD: injected content=%r for empty user message", user_content)
 
         # Skip persisting diagnostic commands — they shouldn't appear in conversation history
-        _is_diagnostic = user_content.strip().lower() == "/dump"
+        _is_diagnostic = user_content.strip().lower() in ("/dump", "/status")
         if not _is_diagnostic:
             user_entry = {
                 "role": "user", "content": user_content,
