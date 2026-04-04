@@ -36,7 +36,7 @@ def _daily_space(tenant_id: str, space_id: str = "space_daily") -> ContextSpace:
     return ContextSpace(
         id=space_id,
         tenant_id=tenant_id,
-        name="Daily",
+        name="General",
         description="General conversation and daily life",
         space_type="daily",
         status="active",
@@ -87,16 +87,21 @@ def _msg(content: str, platform: str = "discord", sender: str = "user1"):
 
 
 class TestLLMRouterSingleSpace:
-    """Router returns daily with single-space tenant — no LLM call."""
+    """Router calls LLM even with a single space — bypass removed."""
 
-    async def test_single_space_returns_daily_no_llm(self, tmp_path):
+    async def test_single_space_calls_llm(self, tmp_path):
         state = JsonStateStore(tmp_path)
         tid = "t1"
         daily = _daily_space(tid)
         await state.save_context_space(daily)
 
+        llm_response = json.dumps({
+            "tags": [daily.id],
+            "focus": daily.id,
+            "continuation": False,
+        })
         mock_reasoning = AsyncMock()
-        mock_reasoning.complete_simple = AsyncMock()
+        mock_reasoning.complete_simple = AsyncMock(return_value=llm_response)
 
         router = LLMRouter(state, mock_reasoning)
         result = await router.route(tid, "hello world", [], "")
@@ -104,8 +109,25 @@ class TestLLMRouterSingleSpace:
         assert result.focus == daily.id
         assert daily.id in result.tags
         assert result.continuation is False
-        # No LLM call for single space
-        mock_reasoning.complete_simple.assert_not_called()
+        # LLM is called even for single space (bypass removed)
+        mock_reasoning.complete_simple.assert_called_once()
+
+    async def test_single_space_llm_failure_falls_back(self, tmp_path):
+        """When LLM fails with single space, fallback returns default space."""
+        state = JsonStateStore(tmp_path)
+        tid = "t1"
+        daily = _daily_space(tid)
+        await state.save_context_space(daily)
+
+        mock_reasoning = AsyncMock()
+        mock_reasoning.complete_simple = AsyncMock(side_effect=RuntimeError("LLM down"))
+
+        router = LLMRouter(state, mock_reasoning)
+        result = await router.route(tid, "hello", [], "")
+
+        # Falls back to default space
+        assert result.focus == daily.id
+        assert result.continuation is True  # fallback sets continuation=True
 
 
 # ---------------------------------------------------------------------------
@@ -991,35 +1013,30 @@ class TestHandlerSpaceTagsSaved:
 # ---------------------------------------------------------------------------
 
 
-class TestHandlerDailyOnly:
-    """Single-space tenant: no LLM router call (mock confirms), behavior identical."""
+class TestHandlerSingleSpace:
+    """Single-space tenant: LLM router fires (bypass removed), routes to General."""
 
-    async def test_single_space_no_llm_call(self, tmp_path):
+    async def test_single_space_calls_llm_router(self, tmp_path):
         handler, mock_provider = _make_handler(tmp_path)
         tid = "discord:user1"
 
-        # Create only a daily space
-        daily = _daily_space(tid)
-        await handler.state.save_context_space(daily)
+        # Create only a general space
+        general = _daily_space(tid)
+        await handler.state.save_context_space(general)
 
-        # Track complete_simple calls
-        complete_simple_calls = []
-        original_complete_simple = handler.reasoning.complete_simple
-
-        async def track_complete_simple(*args, **kwargs):
-            complete_simple_calls.append(kwargs)
-            return original_complete_simple(*args, **kwargs)
-
-        # Replace only the router's reasoning method to track LLM router calls
+        # Replace router's reasoning to return valid JSON
+        import json
         mock_router_reasoning = AsyncMock()
-        mock_router_reasoning.complete_simple = AsyncMock()
+        mock_router_reasoning.complete_simple = AsyncMock(return_value=json.dumps({
+            "tags": [general.id], "focus": general.id, "continuation": False,
+        }))
         handler._router = LLMRouter(handler.state, mock_router_reasoning)
 
         response = await handler.process(_msg("hello"))
         assert response  # Got a response
 
-        # No LLM router call for single-space tenant
-        mock_router_reasoning.complete_simple.assert_not_called()
+        # LLM router IS called even for single-space tenant (bypass removed)
+        mock_router_reasoning.complete_simple.assert_called_once()
 
     async def test_single_space_no_switch_event(self, tmp_path):
         handler, _ = _make_handler(tmp_path)

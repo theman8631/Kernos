@@ -117,7 +117,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 2. Auto-provision tenant if new (TenantStore + StateStore)
 3. Load or initialize Soul for this tenant
 4. Load conversation history with full metadata (`get_recent_full()` — includes timestamps and space_tags)
-5. **LLM Router:** One Haiku call → `RouterResult(tags, focus, continuation)`. Single-space tenants skip LLM call entirely.
+5. **LLM Router:** One Haiku call → `RouterResult(tags, focus, continuation)`. Always fires, even for single-space tenants.
 6. Detect space switch; if switched: fire `_run_session_exit()` async on outgoing space
 7. Update `last_active_space_id`, emit `context.space.switched` event
 8. **Gate 1:** For each tag not matching a known space ID: increment topic hint count; at threshold (15) fire `_trigger_gate2()` async
@@ -137,7 +137,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 22. Return response string to adapter
 
 **Key methods:**
-- `_get_or_init_soul()` — loads from State Store or creates new unhatched soul; auto-provisions Daily + System spaces on first call
+- `_get_or_init_soul()` — loads from State Store or creates new unhatched soul; auto-provisions General + System spaces on first call; migrates existing "Daily" spaces to "General"
 - `_post_response_soul_update()` — increments interactions, checks hatch, checks graduation
 - `_build_system_prompt()` — 9-layer assembly (includes cross-domain prefix, posture, scoped rules)
 - `_assemble_space_context()` — compaction-aware context assembly: index + cross-domain + compaction document + post-compaction messages; falls back to full thread when no compaction state
@@ -184,7 +184,7 @@ KERNOS is a personal intelligence kernel that receives messages from users via p
 0. **Cross-domain injection** (background context from other spaces — labeled, placed first for lower attention weight)
 1. Operating principles
 2. Soul personality (personality_notes if graduated, default_personality if not)
-3. **Context space posture** (non-daily spaces only — working style override with "does not override core values" label)
+3. **Context space posture** (non-default spaces only — working style override with "does not override core values" label)
 4. User knowledge (user_name, user_context, communication_style from soul)
 5. Platform context (SMS/Discord communication constraints)
 6. Auth context (owner verified/unverified, unknown sender)
@@ -445,9 +445,9 @@ Three-layer defense against storing conversation-specific facts as durable knowl
 - `focus: str` — the single space ID the agent should focus on
 - `continuation: bool` — obvious short continuation (lol, ok, sounds good) → ride momentum, don't re-evaluate
 
-**Single-space tenant fast path:** When only Daily + System exist (no user-created spaces), router returns immediately without calling the LLM. Zero cost, zero latency. System space is included in LLM routing candidates but excluded from the fast-path count — `non_system_spaces` drives the `<= 1` check.
+**No bypass:** The LLM router always fires, even for single-space tenants. One Haiku call per message (~$0.001). This ensures the routing path is always exercised and tested.
 
-**Multi-space routing:** One Haiku call per message (~$0.001). Router sees: active space list with names + descriptions, last 15 messages with their timestamps and existing space_tags, temporal metadata (gap since last message), and the new message. Router produces structured JSON.
+**Routing:** Router sees: active space list with names + descriptions, last 15 messages with their timestamps and existing space_tags, temporal metadata (gap since last message), and the new message. Router produces structured JSON. Default space is named "General" (was "Daily" before SPEC-CONTEXT-SPACES-VALIDATION). Existing tenants are auto-migrated on soul init.
 
 **Topic hints:** When the router encounters a recurring topic that doesn't yet have a dedicated space, it may tag messages with a snake_case hint string (e.g., `dnd_campaign`). The kernel counts these via Gate 1.
 
@@ -909,6 +909,8 @@ In-memory queue (`_pending_system_events`) for internal notifications. Events fr
 **Preference Parser** (Phase 6A-4): Cohort agent in `kernos/kernel/preference_parser.py`. Detects preference-shaped statements in user messages via cheap LLM (`complete_simple`), compiles to structured Preference objects, runs structural candidate matching (add/update/clarify), commits in-turn before agent responds. Conservative: low confidence rejects (casual remarks don't create durable preferences). Structural match on subject+action+category narrows candidates before any LLM judgment. Injects system note into `results_prefix` so agent sees committed state during reasoning. Bypassable via `handler.preference_parsing_enabled = False`. Trace: PREF_DETECT, PREF_MATCH, PREF_COMMIT log lines.
 
 **State Introspection** (Phase 6A-3): Two explicitly separate views in `kernos/kernel/introspection.py`. User truth view (`build_user_truth_view`) answers "what preferences/triggers/rules are active?" — concise, preference-first, no diagnostic clutter. Operator state view (`build_operator_state_view`) adds legacy unlinked artifacts, stale reconciliation markers, degraded services, inactive preference counts. Agent accesses the user view via `inspect_state` kernel tool (read-classified, no gate). Operator accesses via `/status` handler intercept (writes to `data/diagnostics/status_{ts}.txt`).
+
+**Handler Slash Commands:** `/help`, `/dump`, `/status`, `/spaces`. The `/spaces` command lists all context spaces with status, type, and last-active timestamps. `/spaces create "Name" "Description"` manually creates a new domain space (useful for testing multi-space routing without waiting for organic Gate 2 creation). All slash commands bypass reasoning and are not stored in conversation history.
 
 ### Friction Observer
 

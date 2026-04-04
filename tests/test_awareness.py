@@ -1012,7 +1012,7 @@ class TestInterruptPush:
         space = ContextSpace(
             id="space_daily",
             tenant_id="test_tenant",
-            name="Daily",
+            name="General",
             last_active_at=datetime.now(timezone.utc).isoformat(),
             is_default=True,
         )

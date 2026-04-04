@@ -820,7 +820,7 @@ async def test_tier2_extraction_populates_lifecycle_archetype(tmp_path):
 
 
 def test_context_space_defaults():
-    space = ContextSpace(id="space_abc123", tenant_id="t1", name="Daily")
+    space = ContextSpace(id="space_abc123", tenant_id="t1", name="General")
     assert space.space_type == "daily"
     assert space.status == "active"
     assert space.is_default is False
@@ -830,7 +830,7 @@ def test_context_space_defaults():
 
 def test_context_space_daily_default():
     space = ContextSpace(
-        id="space_abc123", tenant_id="t1", name="Daily",
+        id="space_abc123", tenant_id="t1", name="General",
         space_type="daily", is_default=True,
     )
     assert space.is_default is True
@@ -864,7 +864,7 @@ async def test_state_store_context_space_crud(tmp_path):
 async def test_state_store_list_context_spaces(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
-    daily = ContextSpace(id="space_d", tenant_id="t1", name="Daily", is_default=True, created_at=now)
+    daily = ContextSpace(id="space_d", tenant_id="t1", name="General", is_default=True, created_at=now)
     project = ContextSpace(id="space_p", tenant_id="t1", name="Side Project", space_type="project", created_at=now)
     await store.save_context_space(daily)
     await store.save_context_space(project)
@@ -872,7 +872,7 @@ async def test_state_store_list_context_spaces(tmp_path):
     spaces = await store.list_context_spaces("t1")
     assert len(spaces) == 2
     names = {s.name for s in spaces}
-    assert "Daily" in names
+    assert "General" in names
     assert "Side Project" in names
 
 
@@ -893,7 +893,7 @@ async def test_state_store_context_space_upsert(tmp_path):
 
 async def test_state_store_update_context_space(tmp_path):
     store = JsonStateStore(tmp_path)
-    space = ContextSpace(id="space_x", tenant_id="t1", name="Daily", is_default=True)
+    space = ContextSpace(id="space_x", tenant_id="t1", name="General", is_default=True)
     await store.save_context_space(space)
 
     await store.update_context_space("t1", "space_x", {"status": "dormant", "last_active_at": _now()})
@@ -955,7 +955,7 @@ async def test_handler_creates_daily_space_for_new_tenant(tmp_path):
     daily = daily_spaces[0]
     assert daily.is_default is True
     assert daily.space_type == "daily"
-    assert daily.name == "Daily"
+    assert daily.name == "General"
     assert daily.tenant_id == "t1"
     system_spaces = [s for s in spaces if s.space_type == "system"]
     assert len(system_spaces) == 1

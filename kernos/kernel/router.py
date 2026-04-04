@@ -18,16 +18,16 @@ logger = logging.getLogger(__name__)
 
 ROUTER_SYSTEM_PROMPT = """You are a message router for a personal AI assistant. Given the user's message, recent conversation history, and a list of context spaces, do three things:
 
-1. TAG: Which space(s) does this message belong to? A message can belong to multiple spaces. Use space IDs from the list. If the message is about a recurring topic that doesn't yet have its own space, also include a concise snake_case topic hint (e.g., "legal_work", "dnd_campaign"). Don't add a hint if the topic fits in Daily or an existing space.
+1. TAG: Which space(s) does this message belong to? A message can belong to multiple spaces. Use space IDs from the list. If the message is about a recurring topic that doesn't yet have its own space, also include a concise snake_case topic hint (e.g., "legal_work", "dnd_campaign"). Don't add a hint if the topic fits in General or an existing space.
 
-2. FOCUS: Which single space should receive the agent's full attention right now? When in doubt, choose Daily. The cost of defaulting to Daily is low — if the domain continues, it reasserts next message.
+2. FOCUS: Which single space should receive the agent's full attention right now? When in doubt, choose General. The cost of defaulting to General is low — if the domain continues, it reasserts next message.
 
 3. CONTINUATION: Is this an obvious continuation (short affirmation, reaction, "lol", "ok", "sounds good") that should ride conversational momentum? If yes, keep the current focus unchanged.
 
 Rules:
-- When a message signals something NEW within an existing domain ("new campaign", "starting fresh", "not the old one"), tag Daily. Let the new topic accumulate before it earns a space.
-- Ambiguity is not a domain signal. When uncertain, tag Daily.
-- A message mentioning a person or entity from one domain doesn't mean the message IS about that domain. "Henderson plays D&D" while chatting casually is Daily, not Business.
+- When a message signals something NEW within an existing domain ("new campaign", "starting fresh", "not the old one"), tag General. Let the new topic accumulate before it earns a space.
+- Ambiguity is not a domain signal. When uncertain, tag General.
+- A message mentioning a person or entity from one domain doesn't mean the message IS about that domain. "Henderson plays D&D" while chatting casually is General, not Business.
 - Read the message in the context of recent history. A message after a long gap is a fresh start. A message seconds after the last one is a continuation.
 - Never invent space IDs. Only use IDs from the provided space list, or snake_case topic hints for emerging topics.
 """
@@ -108,22 +108,16 @@ class LLMRouter:
         """
         spaces = await self._state.list_context_spaces(tenant_id)
         active_spaces = [s for s in spaces if s.status == "active"]
-        # Non-system spaces: what the user actually works in day-to-day
-        non_system_spaces = [s for s in active_spaces if s.space_type != "system"]
 
-        # If only Daily+System exist (no user-created spaces), skip LLM — always Daily
-        if len(non_system_spaces) <= 1:
-            daily = next((s for s in non_system_spaces if s.is_default), None)
-            if not daily and non_system_spaces:
-                daily = non_system_spaces[0]
-            daily_id = daily.id if daily else ""
-            return RouterResult(tags=[daily_id] if daily_id else [], focus=daily_id, continuation=False)
+        # No spaces at all — nothing to route to
+        if not active_spaces:
+            return RouterResult(tags=[], focus="", continuation=False)
 
         # Build space list for the prompt
         space_lines = []
         for s in active_spaces:
             desc = s.description or "No description yet"
-            default_marker = " [DEFAULT/DAILY]" if s.is_default else ""
+            default_marker = " [DEFAULT]" if s.is_default else ""
             space_lines.append(f"- {s.id}: {s.name}{default_marker} — {desc}")
         space_descriptions = "\n".join(space_lines)
 

@@ -63,6 +63,7 @@ class FrictionObserver:
         is_reactive: bool,
         pref_detected: bool,
         provider_errors: list[str] | None = None,
+        has_now_block_time: bool = False,
     ) -> list[FrictionSignal]:
         """Run all signal detectors and write reports for any friction found.
 
@@ -108,7 +109,7 @@ class FrictionObserver:
             signals.append(sig)
 
         # Signal 2: STALE_DATA_IN_RESPONSE (heuristic)
-        sig = self._check_stale_data(tool_trace, response_text, user_message, ctx_snapshot)
+        sig = self._check_stale_data(tool_trace, response_text, user_message, ctx_snapshot, has_now_block_time)
         if sig:
             signals.append(sig)
 
@@ -260,15 +261,18 @@ class FrictionObserver:
 
     def _check_stale_data(
         self, tool_trace: list[dict], response: str, user_message: str, ctx: dict,
+        has_now_block_time: bool = False,
     ) -> FrictionSignal | None:
         """Signal 2: Agent answered with data from context instead of calling a tool. Heuristic."""
         msg_lower = user_message.lower()
 
-        # Time queries without get-current-time call
+        # Time queries without ANY authoritative time source
+        # The NOW block provides current time in the system prompt — reading it is correct.
+        # Only flag when there's no NOW block time AND no get-current-time call.
         time_keywords = ["what time", "current time", "time is it", "what's the time"]
         if any(kw in msg_lower for kw in time_keywords):
             tool_names = {t["name"] for t in tool_trace}
-            if "get-current-time" not in tool_names:
+            if "get-current-time" not in tool_names and not has_now_block_time:
                 return FrictionSignal(
                     signal_type="STALE_DATA_IN_RESPONSE",
                     description="Agent answered a time query without calling get-current-time",

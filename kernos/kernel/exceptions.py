@@ -22,3 +22,7 @@ class ReasoningRateLimitError(ReasoningError):
 
 class ReasoningProviderError(ReasoningError):
     """API status error or unexpected provider error."""
+
+
+class ReasoningTransientError(ReasoningError):
+    """Transient server-side error that should be retried."""

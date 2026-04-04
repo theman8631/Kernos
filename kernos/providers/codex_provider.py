@@ -10,6 +10,7 @@ from kernos.kernel.exceptions import (
     ReasoningConnectionError,
     ReasoningProviderError,
     ReasoningRateLimitError,
+    ReasoningTransientError,
 )
 from kernos.providers.base import ContentBlock, Provider, ProviderResponse
 
@@ -278,6 +279,13 @@ class OpenAICodexProvider(Provider):
                 return self._parse_response(data)
             except (ReasoningRateLimitError, ReasoningProviderError):
                 raise  # 4xx / known errors — don't retry
+            except ReasoningTransientError as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning("REASON_RETRY: attempt=2 transient=%s", exc)
+                    await asyncio.sleep(1.5)
+                    continue
+                raise ReasoningProviderError(f"Codex transient error after retries: {exc}") from exc
             except Exception as exc:
                 last_exc = exc
                 if attempt == 0:
@@ -331,7 +339,10 @@ class OpenAICodexProvider(Provider):
                 elif event_type == "error":
                     err = event.get("error", {})
                     msg = err.get("message", event.get("message", event.get("code", "unknown")))
+                    error_type = err.get("type", "")
                     logger.warning("CODEX_STREAM_ERROR: event=%s", json.dumps(event)[:500])
+                    if error_type == "server_error":
+                        raise ReasoningTransientError(f"Codex server error: {msg}")
                     raise ReasoningProviderError(f"Codex stream error: {msg}")
 
         if not final_response:

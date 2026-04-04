@@ -740,13 +740,13 @@ class TestDepartureContext:
         ctx_obj.active_space_id = "space-b"
         ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Architecture")
 
-        handler.state.get_context_space.return_value = ContextSpace(id="space-a", tenant_id="test-tenant", name="Daily")
+        handler.state.get_context_space.return_value = ContextSpace(id="space-a", tenant_id="test-tenant", name="General")
 
         result = await handler._build_departure_context(ctx_obj, "space-a")
 
         assert result is not None
         assert result["role"] == "user"
-        assert "Previous context — from space: Daily" in result["content"]
+        assert "Previous context — from space: General" in result["content"]
         assert "Tina" in result["content"]
         assert "Conversation continues in current space: Architecture" in result["content"]
 

@@ -1150,14 +1150,20 @@ class MessageHandler:
             except Exception:
                 pass
 
-        # Ensure a daily context space exists — idempotent
+        # Ensure default context space exists — idempotent
         spaces = await self.state.list_context_spaces(tenant_id)
+        # Migrate existing "Daily" spaces to "General"
+        for s in spaces:
+            if s.is_default and s.name == "Daily":
+                await self.state.update_context_space(tenant_id, s.id, {"name": "General"})
+                s.name = "General"
+                logger.info("SPACE_MIGRATE: renamed Daily→General for tenant=%s space=%s", tenant_id, s.id)
         if not any(s.is_default for s in spaces):
             now = utc_now()
             daily_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
                 tenant_id=tenant_id,
-                name="Daily",
+                name="General",
                 description="General conversation and daily life",
                 space_type="daily",
                 status="active",
@@ -1166,7 +1172,7 @@ class MessageHandler:
                 last_active_at=now,
             )
             await self.state.save_context_space(daily_space)
-            logger.info("Created default daily context space for tenant: %s", tenant_id)
+            logger.info("Created default General context space for tenant: %s", tenant_id)
 
             # Initialize compaction state for daily space with default headroom
             try:
@@ -1677,6 +1683,11 @@ class MessageHandler:
             m for m in recent
             if topic_hint in m.get("space_tags", [])
         ]
+        hint_count = len(hint_messages)
+        logger.info(
+            "SPACE_GATE2: hint=%s count=%d threshold=%d action=evaluating",
+            topic_hint, hint_count, SPACE_CREATION_THRESHOLD,
+        )
         if not hint_messages:
             return
 
@@ -1803,15 +1814,15 @@ class MessageHandler:
                 except Exception as exc:
                     logger.warning("Failed to emit context.space.created: %s", exc)
                 logger.info(
-                    "Gate 2 created space %s (%s) for tenant %s",
-                    new_space.id, new_space.name, tenant_id
+                    "SPACE_CREATE: id=%s name=%s parent=General reason=%r",
+                    new_space.id, new_space.name, parsed.get("reasoning", ""),
                 )
             else:
                 # Not a real domain — clear hint count to avoid re-triggering soon
                 await self.state.clear_topic_hint(tenant_id, topic_hint)
                 logger.info(
-                    "Gate 2 declined space creation for hint '%s' (tenant %s): %s",
-                    topic_hint, tenant_id, parsed.get("reasoning", "")
+                    "SPACE_GATE2: hint=%s action=rejected reason=%r",
+                    topic_hint, parsed.get("reasoning", ""),
                 )
         except Exception as exc:
             logger.warning("Gate 2 failed for hint '%s': %s", topic_hint, exc)
@@ -1914,13 +1925,16 @@ class MessageHandler:
                     primary_ctx.phase_timings["assemble"] = int((time.monotonic() - _t0) * 1000)
 
                     # Slash command intercepts — skip reasoning
-                    _cmd = (primary_msg.content or "").strip().lower()
-                    if _cmd == "/dump":
+                    _cmd = (primary_msg.content or "").strip()
+                    _cmd_lower = _cmd.lower()
+                    if _cmd_lower == "/dump":
                         response = await self._handle_dump(primary_ctx)
-                    elif _cmd == "/status":
+                    elif _cmd_lower == "/status":
                         response = await self._handle_status(primary_ctx)
-                    elif _cmd == "/help":
+                    elif _cmd_lower == "/help":
                         response = self._handle_help()
+                    elif _cmd_lower.startswith("/spaces"):
+                        response = await self._handle_spaces(primary_ctx, _cmd)
                     else:
                         try:
                             _t0 = time.monotonic()
@@ -2191,9 +2205,90 @@ class MessageHandler:
             "file. Shows active preferences, triggers, covenants, key facts, "
             "connected capabilities, legacy artifacts, stale reconciliation, "
             "and degraded services. Skips reasoning.\n\n"
+            "**/spaces** — List all context spaces with status.\n"
+            '**/spaces create "Name" "Description"** — Manually create a '
+            "new context space for testing multi-space routing.\n\n"
             "These commands bypass the reasoning engine and are not stored "
             "in conversation history."
         )
+
+    async def _handle_spaces(self, ctx: TurnContext, raw_cmd: str) -> str:
+        """List spaces or create a new one manually."""
+        import uuid as _uuid
+        import shlex
+
+        tenant_id = ctx.tenant_id
+        parts = raw_cmd.strip().split(None, 1)
+        sub = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub.lower().startswith("create"):
+            # /spaces create "Name" "Description"
+            create_args = sub[len("create"):].strip()
+            try:
+                tokens = shlex.split(create_args)
+            except ValueError:
+                tokens = create_args.split('"')
+                tokens = [t.strip() for t in tokens if t.strip()]
+            if len(tokens) < 1:
+                return 'Usage: /spaces create "Name" "Description"'
+            name = tokens[0]
+            description = tokens[1] if len(tokens) > 1 else ""
+            now = utc_now()
+            new_space = ContextSpace(
+                id=f"space_{_uuid.uuid4().hex[:8]}",
+                tenant_id=tenant_id,
+                name=name,
+                description=description,
+                space_type="domain",
+                status="active",
+                is_default=False,
+                created_at=now,
+                last_active_at=now,
+            )
+            await self.state.save_context_space(new_space)
+
+            # Initialize compaction state for the new space
+            try:
+                from kernos.kernel.compaction import (
+                    CompactionState, compute_document_budget,
+                    MODEL_MAX_TOKENS, COMPACTION_MODEL_USABLE_TOKENS,
+                    COMPACTION_INSTRUCTION_TOKENS, DEFAULT_DAILY_HEADROOM,
+                )
+                headroom = DEFAULT_DAILY_HEADROOM
+                doc_budget = compute_document_budget(MODEL_MAX_TOKENS, 4000, 0, headroom)
+                comp = CompactionState(
+                    space_id=new_space.id,
+                    conversation_headroom=headroom,
+                    document_budget=doc_budget,
+                    message_ceiling=min(
+                        doc_budget,
+                        COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS,
+                    ),
+                    _context_def_tokens=0,
+                    _system_overhead=4000,
+                )
+                await self.compaction.save_state(tenant_id, new_space.id, comp)
+            except Exception as exc:
+                logger.warning("Failed to init compaction for manual space: %s", exc)
+
+            logger.info("SPACE_CREATE: id=%s name=%s source=manual", new_space.id, new_space.name)
+            return f"Created space **{name}** ({new_space.id}). Description: {description or '(none)'}"
+
+        # Default: list all spaces
+        spaces = await self.state.list_context_spaces(tenant_id)
+        if not spaces:
+            return "No context spaces found."
+        lines = ["**Context Spaces**\n"]
+        for s in sorted(spaces, key=lambda x: x.last_active_at or "", reverse=True):
+            default = " [DEFAULT]" if s.is_default else ""
+            lines.append(
+                f"- **{s.name}**{default} ({s.id}) — "
+                f"type={s.space_type} status={s.status} "
+                f"last_active={s.last_active_at or 'never'}"
+            )
+            if s.description:
+                lines.append(f"  {s.description}")
+        return "\n".join(lines)
 
     async def _handle_status(self, ctx: TurnContext) -> str:
         """Write operator state view to diagnostic file, return summary."""
@@ -2317,7 +2412,7 @@ class MessageHandler:
             _route_space = await self.state.get_context_space(tenant_id, ctx.active_space_id)
             _route_space_name = _route_space.name if _route_space else ""
         logger.info(
-            "ROUTE: space=%s (%s) tags=%s confident=%s prev=%s switched=%s",
+            "ROUTE: space=%s (%s) tags=%s confident=%s prev=%s switched=%s router=llm",
             ctx.active_space_id, _route_space_name or "unknown",
             ctx.router_result.tags, ctx.router_result.continuation,
             ctx.previous_space_id, ctx.space_switched,
@@ -2325,6 +2420,13 @@ class MessageHandler:
 
         if ctx.space_switched:
             import asyncio
+            _prev_space = await self.state.get_context_space(tenant_id, ctx.previous_space_id)
+            _prev_name = _prev_space.name if _prev_space else "unknown"
+            logger.info(
+                "SPACE_SWITCH: from=%s (%s) to=%s (%s)",
+                ctx.previous_space_id, _prev_name,
+                ctx.active_space_id, _route_space_name or "unknown",
+            )
             asyncio.create_task(self._run_session_exit(tenant_id, ctx.previous_space_id, conversation_id))
             # Harvest facts from departing space
             try:
@@ -2412,7 +2514,7 @@ class MessageHandler:
             logger.info("EMPTY_MSG_GUARD: injected content=%r for empty user message", user_content)
 
         # Skip persisting diagnostic commands — they shouldn't appear in conversation history
-        _is_diagnostic = user_content.strip().lower() in ("/dump", "/status", "/help")
+        _is_diagnostic = user_content.strip().lower().split()[0] in ("/dump", "/status", "/help", "/spaces") if user_content.strip() else False
         if not _is_diagnostic:
             user_entry = {
                 "role": "user", "content": user_content,
@@ -2425,26 +2527,68 @@ class MessageHandler:
                 speaker="user", channel=message.platform, content=user_content,
                 timestamp=message.timestamp.isoformat())
 
-        # Preference detection — in-turn compile and commit (Phase 6A-4)
-        if self.preference_parsing_enabled and not _is_diagnostic and user_content.strip():
+        # --- Concurrent cohort agents -----------------------------------------
+        # Preference parsing and knowledge shaping are independent LLM pipelines.
+        # Running them concurrently via asyncio.gather cuts ~2-3s from assembly.
+
+        async def _run_pref_parsing() -> str | None:
+            """Preference detection — in-turn compile and commit (Phase 6A-4)."""
+            if not (self.preference_parsing_enabled and not _is_diagnostic and user_content.strip()):
+                return None
             try:
                 from kernos.kernel.preference_parser import parse_preferences_in_message
                 trigger_store = getattr(self.reasoning, '_trigger_store', None)
-                pref_note = await parse_preferences_in_message(
+                return await parse_preferences_in_message(
                     user_content, tenant_id, active_space_id,
                     self.state, self.reasoning, trigger_store,
                 )
-                if pref_note:
-                    ctx.pref_detected = True
-                    # Inject into results prefix so agent sees it during reasoning
-                    if ctx.results_prefix:
-                        ctx.results_prefix += "\n\n" + pref_note
-                    else:
-                        ctx.results_prefix = pref_note
             except Exception as exc:
                 logger.warning("PREF_DETECT: pipeline error: %s", exc)
+                return None
 
-        # Build tools list — three-tier dynamic surfacing
+        async def _run_knowledge_pipeline() -> list:
+            """Three-tier selective knowledge injection (SPEC-SELECTIVE-KNOWLEDGE-INJECTION)."""
+            all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
+
+            # Tier 1: Always inject — identity facts (name, age, timezone, location)
+            always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
+
+            # Tier 2: Never inject — ephemeral, expired, stale contextual
+            _never_archetypes = {"ephemeral"}
+            candidates = [
+                e for e in all_ke
+                if e not in always_inject
+                and e.lifecycle_archetype not in _never_archetypes
+                and not getattr(e, "expired_at", "")
+                and not (e.lifecycle_archetype == "contextual"
+                         and _is_stale_knowledge(e, days=14))
+            ]
+
+            # Tier 3: LLM shaping — select relevant entries for this turn
+            shaped = []
+            if candidates:
+                relevant_ids = await self._shape_knowledge(candidates, message, ctx)
+                shaped = [e for e in candidates if e.id in relevant_ids]
+
+            return always_inject + shaped
+
+        # Fire both LLM pipelines + covenant query concurrently
+        space_scope = [active_space_id, None] if active_space_id else None
+        pref_note, user_knowledge_entries, contract_rules = await asyncio.gather(
+            _run_pref_parsing(),
+            _run_knowledge_pipeline(),
+            self.state.query_covenant_rules(
+                tenant_id, context_space_scope=space_scope, active_only=True),
+        )
+
+        if pref_note:
+            ctx.pref_detected = True
+            if ctx.results_prefix:
+                ctx.results_prefix += "\n\n" + pref_note
+            else:
+                ctx.results_prefix = pref_note
+
+        # --- Tool surfacing (CPU-bound, no LLM) --------------------------------
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
 
@@ -2529,33 +2673,6 @@ class MessageHandler:
 
         # Build system prompt blocks (Cognitive UI grammar)
         capability_prompt = self.registry.build_tool_directory(space=active_space)
-        space_scope = [active_space_id, None] if active_space_id else None
-        contract_rules = await self.state.query_covenant_rules(
-            tenant_id, context_space_scope=space_scope, active_only=True)
-        # Three-tier selective knowledge injection (SPEC-SELECTIVE-KNOWLEDGE-INJECTION)
-        all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
-
-        # Tier 1: Always inject — identity facts (name, age, timezone, location)
-        always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
-
-        # Tier 2: Never inject — ephemeral, expired, stale contextual
-        _never_archetypes = {"ephemeral"}
-        candidates = [
-            e for e in all_ke
-            if e not in always_inject
-            and e.lifecycle_archetype not in _never_archetypes
-            and not getattr(e, "expired_at", "")
-            and not (e.lifecycle_archetype == "contextual"
-                     and _is_stale_knowledge(e, days=14))
-        ]
-
-        # Tier 3: LLM shaping — select relevant entries for this turn
-        shaped = []
-        if candidates:
-            relevant_ids = await self._shape_knowledge(candidates, message, ctx)
-            shaped = [e for e in candidates if e.id in relevant_ids]
-
-        user_knowledge_entries = always_inject + shaped
 
         # Inject merge note so agent knows multiple messages need addressing
         if ctx.merged_count > 1:
@@ -2858,6 +2975,7 @@ class MessageHandler:
                 is_reactive=True,
                 pref_detected=ctx.pref_detected,
                 provider_errors=provider_errors,
+                has_now_block_time=True,
             )
         except Exception as exc:
             logger.debug("FRICTION: observer failed: %s", exc)

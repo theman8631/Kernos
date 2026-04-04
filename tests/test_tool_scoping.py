@@ -401,7 +401,7 @@ class TestLRUExemption:
     def test_system_space_not_in_lru_filter(self):
         from kernos.kernel.spaces import ContextSpace
         system = ContextSpace(id="sys", tenant_id="t1", name="System", space_type="system", status="active", is_default=False)
-        daily = ContextSpace(id="daily", tenant_id="t1", name="Daily", space_type="daily", status="active", is_default=True)
+        daily = ContextSpace(id="daily", tenant_id="t1", name="General", space_type="daily", status="active", is_default=True)
         domain = ContextSpace(id="dom", tenant_id="t1", name="D&D", space_type="domain", status="active", is_default=False)
         spaces = [system, daily, domain]
         active = [s for s in spaces if s.status == "active" and not s.is_default and s.space_type != "system"]
