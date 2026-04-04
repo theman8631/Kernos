@@ -324,8 +324,10 @@ _CATEGORY_SIGNALS: dict[str, list[str]] = {
     "calendar": ["calendar", "event", "schedule", "appointment", "meeting",
                  "remind me", "tomorrow", "today", "next week",
                  "this week", "free time", "busy", "block off"],
-    "search": ["search", "look up", "what is", "who is",
-               "how to", "research", "google"],
+    "search": ["search", "look up", "find", "what is", "who is",
+               "how to", "research", "google", "near me", "nearby",
+               "places", "in my area", "where can i", "restaurants",
+               "hot dog", "ice cream", "pizza"],
     "browser": ["website", "page", "browse", "http", "www", ".com", ".org"],
     "messaging": ["text me", "a text", "sms", "send a message", "notify",
                   "tell them", "send to channel", "discord"],
@@ -2511,6 +2513,16 @@ class MessageHandler:
 
         _tier1_count = 6 if self._retrieval else 5  # Tier 1 kernel tools always present
         _total = _tier1_count + len(_kernel_tool_map) + len(preloaded) + len(all_stubs) + len(loaded_names)
+
+        # Stable sort: Tier 1 kernel tools first (fixed prefix), then rest alphabetical.
+        # Same tool set always produces identical ordering — maximizes cache hits (IQ-3).
+        _tier1_names = {t.get("name") for t in tools[:_tier1_count]}
+        _tier1 = [t for t in tools if t.get("name") in _tier1_names]
+        _rest = [t for t in tools if t.get("name") not in _tier1_names]
+        _tier1.sort(key=lambda t: t.get("name", ""))
+        _rest.sort(key=lambda t: t.get("name", ""))
+        tools = _tier1 + _rest
+
         logger.info("TOOL_SURFACING: categories=%s surfaced=%d total_available=%d",
             categories, len(tools), _total)
         ctx.tools = tools

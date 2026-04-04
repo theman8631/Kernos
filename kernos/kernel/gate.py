@@ -6,6 +6,7 @@ manages approval tokens for confirmed actions.
 import hashlib
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,6 +64,9 @@ class DispatchGate:
         self._events = events
         self._mcp = mcp
         self._approval_tokens: dict[str, ApprovalToken] = {}
+        # Per-turn denial tracking: {tool_name: consecutive_block_count}
+        self._denial_counts: dict[str, int] = {}
+        self._denial_limit = int(os.environ.get("KERNOS_GATE_DENIAL_LIMIT", "3"))
 
     def classify_tool_effect(
         self, tool_name: str, active_space: Any, tool_input: dict[str, Any] | None = None,
@@ -161,11 +165,25 @@ class DispatchGate:
         agent_reasoning: str = "",
         is_reactive: bool = True,
     ) -> GateResult:
-        """Full gate evaluation: token → override → reactive bypass → model check."""
+        """Full gate evaluation: token → denial limit → override → reactive bypass → model check."""
+        # Step 0: Denial limit — stop runaway retry loops
+        if self._denial_counts.get(tool_name, 0) >= self._denial_limit:
+            logger.warning(
+                "GATE_DENIAL_LIMIT: tool=%s attempts=%d action=deny",
+                tool_name, self._denial_counts[tool_name],
+            )
+            return GateResult(
+                allowed=False,
+                reason="denial_limit",
+                method="denial_tracking",
+                proposed_action=self._describe_action(tool_name, tool_input),
+            )
+
         # Step 1: Approval token
         if approval_token_id and self.validate_approval_token(
             approval_token_id, tool_name, tool_input
         ):
+            self._denial_counts.pop(tool_name, None)  # Reset on approval
             logger.info("GATE: token_validated tool=%s token=%s", tool_name, approval_token_id)
             return GateResult(allowed=True, reason="token_approved", method="token")
 
@@ -175,6 +193,7 @@ class DispatchGate:
             try:
                 tenant = await self._state.get_tenant_profile(tenant_id)
                 if tenant and tenant.permission_overrides.get(cap_name) == "always-allow":
+                    self._denial_counts.pop(tool_name, None)
                     logger.info("GATE: permission_override tool=%s cap=%s", tool_name, cap_name)
                     return GateResult(allowed=True, reason="permission_override", method="always_allow")
             except Exception as exc:
@@ -196,6 +215,7 @@ class DispatchGate:
                 except Exception:
                     pass
             if not has_blocking_rule:
+                self._denial_counts.pop(tool_name, None)
                 logger.info(
                     "GATE: reactive_soft_write tool=%s — user-initiated, skipping gate model",
                     tool_name,
@@ -204,10 +224,16 @@ class DispatchGate:
             # has must_not rules — fall through to model to check relevance
 
         # Step 4: Model evaluation
-        return await self._evaluate_model(
+        result = await self._evaluate_model(
             tool_name, tool_input, effect, messages, agent_reasoning,
             tenant_id, active_space_id, user_message=user_message,
         )
+        # Track denials / reset on approve
+        if result.allowed:
+            self._denial_counts.pop(tool_name, None)
+        else:
+            self._denial_counts[tool_name] = self._denial_counts.get(tool_name, 0) + 1
+        return result
 
     async def _evaluate_model(
         self,
@@ -344,6 +370,10 @@ class DispatchGate:
             allowed=False, reason="confirm", method="model_check",
             proposed_action=action_desc, raw_response=raw,
         )
+
+    def reset_denial_counts(self) -> None:
+        """Reset per-turn denial counters. Call at the start of each turn."""
+        self._denial_counts.clear()
 
     def issue_approval_token(self, tool_name: str, tool_input: dict) -> ApprovalToken:
         """Issue a single-use approval token for a blocked tool call."""

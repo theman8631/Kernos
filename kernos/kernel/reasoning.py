@@ -262,8 +262,10 @@ class ReasoningService:
         return self._conflict_raised_this_turn
 
     def reset_conflict_raised(self) -> None:
-        """Reset the per-turn conflict flag."""
+        """Reset the per-turn conflict flag and gate denial counters."""
         self._conflict_raised_this_turn = False
+        if hasattr(self, '_gate') and self._gate:
+            self._gate.reset_denial_counts()
 
     def get_tools_changed(self) -> bool:
         """Whether manage_capabilities changed tool state this turn."""
