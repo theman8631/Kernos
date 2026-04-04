@@ -33,11 +33,18 @@ class Provider(ABC):
     async def complete(
         self,
         model: str,
-        system: str,
+        system: str | list[dict],
         messages: list[dict],
         tools: list[dict],
         max_tokens: int,
         output_schema: dict | None = None,
     ) -> ProviderResponse:
-        """Send a completion request and return a KERNOS-native response."""
+        """Send a completion request and return a KERNOS-native response.
+
+        system can be a plain string or a list of dicts with 'text' and optional
+        'cache_control' keys.  When a list, the first entry is the stable/cacheable
+        prefix, subsequent entries are dynamic per-turn content.  Providers that
+        support prompt caching should apply cache_control to the static prefix.
+        Providers that don't can concatenate all entries.
+        """
         ...

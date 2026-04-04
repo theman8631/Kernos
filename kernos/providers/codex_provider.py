@@ -216,7 +216,7 @@ class OpenAICodexProvider(Provider):
     async def complete(
         self,
         model: str,
-        system: str,
+        system: str | list[dict],
         messages: list[dict],
         tools: list[dict],
         max_tokens: int,
@@ -225,9 +225,15 @@ class OpenAICodexProvider(Provider):
         await self._ensure_valid_token()
         http = await self._ensure_http()
 
+        # Codex doesn't support prompt caching — flatten to one string
+        if isinstance(system, list):
+            system_str = "\n\n".join(b.get("text", "") for b in system if b.get("text"))
+        else:
+            system_str = system
+
         body: dict[str, Any] = {
             "model": model,
-            "instructions": system,
+            "instructions": system_str,
             "input": self._translate_input(messages),
             "store": False,
             "stream": True,

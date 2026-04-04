@@ -86,6 +86,8 @@ class ReasoningRequest:
     active_space: Any = None   # ContextSpace | None — for gate tool effect classification
     user_timezone: str = ""    # IANA timezone from soul — for scheduler extraction
     is_reactive: bool = True   # True when responding to a user message; False for scheduler/background
+    system_prompt_static: str = ""   # Cacheable prefix (RULES + ACTIONS)
+    system_prompt_dynamic: str = ""  # Fresh per turn (NOW + STATE + RESULTS + MEMORY)
 
 
 # GateResult and ApprovalToken extracted to kernos/kernel/gate.py (re-exported above)
@@ -1529,9 +1531,17 @@ class ReasoningService:
             len(messages), len(tools), request.max_tokens,
         )
         t0 = time.monotonic()
+        # Build cache-boundary system prompt if static/dynamic split is available
+        if request.system_prompt_static:
+            _system: str | list[dict] = [
+                {"type": "text", "text": request.system_prompt_static, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": request.system_prompt_dynamic},
+            ]
+        else:
+            _system = request.system_prompt
         response = await self._provider.complete(
             model=request.model,
-            system=request.system_prompt,
+            system=_system,
             messages=messages,
             tools=tools,
             max_tokens=request.max_tokens,
@@ -1775,7 +1785,7 @@ class ReasoningService:
             t0 = time.monotonic()
             response = await self._provider.complete(
                 model=request.model,
-                system=request.system_prompt,
+                system=_system,
                 messages=messages,
                 tools=tools,
                 max_tokens=request.max_tokens,

@@ -132,6 +132,8 @@ class TurnContext:
 
     # Phase 3: Assemble
     system_prompt: str = ""
+    system_prompt_static: str = ""   # Cacheable prefix (RULES + ACTIONS)
+    system_prompt_dynamic: str = ""  # Fresh each turn (NOW + STATE + RESULTS + MEMORY)
     tools: list[dict] = field(default_factory=list)
     messages: list[dict] = field(default_factory=list)
     results_prefix: str | None = None
@@ -503,7 +505,8 @@ def _build_system_prompt(
     results = _build_results_block(cross_domain_prefix)
     actions = _build_actions_block(capability_prompt, message, channel_registry)
     memory = _build_memory_block(cross_domain_prefix)  # compat: uses same prefix
-    return _compose_blocks(rules, now_block, state_block, results, actions, memory)
+    # Block order: static prefix (RULES, ACTIONS) then dynamic (NOW, STATE, RESULTS, MEMORY)
+    return _compose_blocks(rules, actions, now_block, state_block, results, memory)
 
 
 class MessageHandler:
@@ -2159,7 +2162,11 @@ class MessageHandler:
             tool_chars = sum(len(json.dumps(t)) for t in ctx.tools)
             _char_est = (_sys_chars + msg_chars + tool_chars) // 4
             _real_baseline = self.reasoning.get_last_real_input_tokens(ctx.tenant_id)
+            _static_chars = len(ctx.system_prompt_static)
+            _dynamic_chars = len(ctx.system_prompt_dynamic)
             f.write(f"System prompt: ~{_sys_chars // 4} tokens ({_sys_chars} chars)\n")
+            f.write(f"  Static (cached): ~{_static_chars // 4} tokens ({_static_chars} chars)\n")
+            f.write(f"  Dynamic (fresh):  ~{_dynamic_chars // 4} tokens ({_dynamic_chars} chars)\n")
             f.write(f"Messages: {len(ctx.messages)} entries, ~{msg_chars // 4} tokens\n")
             f.write(f"Tools: {len(ctx.tools)} schemas, ~{tool_chars // 4} tokens\n")
             f.write(f"Char-based estimate: ~{_char_est} tokens\n")
@@ -2558,7 +2565,12 @@ class MessageHandler:
         actions = _build_actions_block(capability_prompt, message, self._channel_registry)
         memory = _build_memory_block(ctx.memory_prefix)
 
-        ctx.system_prompt = _compose_blocks(rules, now_block, state_block, results, actions, memory)
+        # Cache boundary: static prefix (RULES + ACTIONS) is stable across turns,
+        # dynamic suffix (NOW + STATE + RESULTS + MEMORY) changes every turn.
+        # Reorder so static comes first for provider-level prompt caching.
+        ctx.system_prompt_static = _compose_blocks(rules, actions)
+        ctx.system_prompt_dynamic = _compose_blocks(now_block, state_block, results, memory)
+        ctx.system_prompt = _compose_blocks(ctx.system_prompt_static, ctx.system_prompt_dynamic)
 
         # Developer mode: inject pending errors
         tenant_profile = await self.state.get_tenant_profile(tenant_id)
@@ -2610,6 +2622,8 @@ class MessageHandler:
         request = ReasoningRequest(
             tenant_id=ctx.tenant_id, conversation_id=ctx.conversation_id,
             system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
+            system_prompt_static=ctx.system_prompt_static,
+            system_prompt_dynamic=ctx.system_prompt_dynamic,
             model=self.reasoning.main_model,
             trigger="user_message", active_space_id=ctx.active_space_id,
             input_text=ctx.message.content, active_space=ctx.active_space,
@@ -2624,6 +2638,8 @@ class MessageHandler:
         request = ReasoningRequest(
             tenant_id=tenant_id, conversation_id=ctx.conversation_id,
             system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
+            system_prompt_static=ctx.system_prompt_static,
+            system_prompt_dynamic=ctx.system_prompt_dynamic,
             model="", trigger="", active_space_id=ctx.active_space_id,
             input_text=ctx.message.content, active_space=ctx.active_space,
         )

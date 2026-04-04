@@ -30,20 +30,31 @@ class AnthropicProvider(Provider):
     async def complete(
         self,
         model: str,
-        system: str,
+        system: str | list[dict],
         messages: list[dict],
         tools: list[dict],
         max_tokens: int,
         output_schema: dict | None = None,
     ) -> ProviderResponse:
-        # Apply prompt caching: cache_control on system prompt and last tool
-        cached_system = [
-            {
-                "type": "text",
-                "text": system,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
+        # Apply prompt caching with cache boundary support.
+        # If system is a list of dicts (static + dynamic split), apply
+        # cache_control only to the static prefix for real cache hits.
+        # If system is a plain string, cache the whole thing (legacy path).
+        if isinstance(system, list):
+            cached_system = []
+            for i, block in enumerate(system):
+                entry: dict = {"type": "text", "text": block.get("text", "")}
+                if block.get("cache_control"):
+                    entry["cache_control"] = block["cache_control"]
+                cached_system.append(entry)
+        else:
+            cached_system = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
 
         cached_tools = list(tools) if tools else []
         if cached_tools:
