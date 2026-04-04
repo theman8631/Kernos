@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from kernos.utils import utc_now
 import logging
 import os
@@ -144,6 +145,9 @@ class TurnContext:
     # Post-turn trace (for friction observer)
     tool_calls_trace: list[dict] = field(default_factory=list)  # [{name, input, success}]
     pref_detected: bool = False  # Whether preference parser detected a preference this turn
+
+    # Phase timing (ms) — populated by process() and _run_space_loop
+    phase_timings: dict[str, int] = field(default_factory=dict)
 
 
 # Turn serialization: per-(tenant, space) mailbox/runner
@@ -594,6 +598,9 @@ class MessageHandler:
                 reasoning.set_retrieval(self._retrieval)
         except Exception as exc:
             logger.warning("Failed to initialize RetrievalService: %s", exc)
+
+        # Phase timing accumulator for /status averages
+        self._phase_timing_history: list[dict[str, int]] = []  # list of {phase: ms} dicts
 
         # Friction observer — post-turn diagnostics
         from kernos.kernel.friction import FrictionObserver
@@ -1895,8 +1902,11 @@ class MessageHandler:
                         logger.warning("Failed to log merged message: %s", exc)
 
                 # Execute the full turn (assemble → reason → persist)
+                _turn_t0 = time.monotonic()
                 try:
+                    _t0 = time.monotonic()
                     await self._phase_assemble(primary_ctx)
+                    primary_ctx.phase_timings["assemble"] = int((time.monotonic() - _t0) * 1000)
 
                     # Slash command intercepts — skip reasoning
                     _cmd = (primary_msg.content or "").strip().lower()
@@ -1908,8 +1918,10 @@ class MessageHandler:
                         response = self._handle_help()
                     else:
                         try:
+                            _t0 = time.monotonic()
                             await self._phase_reason(primary_ctx)
                         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
+                            primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "try again in a moment")
@@ -1920,6 +1932,7 @@ class MessageHandler:
                                     ef.set_result("")
                             continue
                         except ReasoningRateLimitError as exc:
+                            primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "overloaded right now. Try again in a minute")
@@ -1930,6 +1943,7 @@ class MessageHandler:
                                     ef.set_result("")
                             continue
                         except ReasoningProviderError as exc:
+                            primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "try again in a moment")
@@ -1940,6 +1954,7 @@ class MessageHandler:
                                     ef.set_result("")
                             continue
                         except Exception as exc:
+                            primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "something unexpected happened")
                             if not primary_future.done():
@@ -1948,9 +1963,16 @@ class MessageHandler:
                                 if not ef.done():
                                     ef.set_result("")
                             continue
+                        primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
 
+                        _t0 = time.monotonic()
                         await self._phase_consequence(primary_ctx)
+                        primary_ctx.phase_timings["consequence"] = int((time.monotonic() - _t0) * 1000)
+
+                        _t0 = time.monotonic()
                         await self._phase_persist(primary_ctx)
+                        primary_ctx.phase_timings["persist"] = int((time.monotonic() - _t0) * 1000)
+
                         response = primary_ctx.response_text or ""
 
                         # Friction observer — async, non-blocking
@@ -1963,6 +1985,21 @@ class MessageHandler:
                         runner.space_id, exc, exc_info=True,
                     )
                     response = "Something went wrong. Try again in a moment."
+
+                # Log phase timings
+                _total_ms = int((time.monotonic() - _turn_t0) * 1000)
+                _pt = primary_ctx.phase_timings
+                for _phase, _dur in _pt.items():
+                    logger.info("PHASE_TIMING: phase=%s duration_ms=%d", _phase, _dur)
+                logger.info(
+                    "TURN_TIMING: total_ms=%d provision=%d route=%d assemble=%d "
+                    "reason=%d consequence=%d persist=%d",
+                    _total_ms,
+                    _pt.get("provision", 0), _pt.get("route", 0),
+                    _pt.get("assemble", 0), _pt.get("reason", 0),
+                    _pt.get("consequence", 0), _pt.get("persist", 0),
+                )
+                self._record_phase_timings(_pt, _total_ms)
 
                 # Resolve all futures — primary gets the response,
                 # merged messages get empty (adapter sends nothing)
@@ -2020,8 +2057,13 @@ class MessageHandler:
             return early
 
         # Lightweight phases — safe to run concurrently
+        _t0 = time.monotonic()
         await self._phase_provision(ctx)
+        ctx.phase_timings["provision"] = int((time.monotonic() - _t0) * 1000)
+
+        _t0 = time.monotonic()
         await self._phase_route(ctx)
+        ctx.phase_timings["route"] = int((time.monotonic() - _t0) * 1000)
 
         # Submit to the space runner's mailbox
         runner = self._get_runner(ctx.tenant_id, ctx.active_space_id)
@@ -2164,6 +2206,15 @@ class MessageHandler:
             f.write(f"Tenant: {ctx.tenant_id}\n")
             f.write(f"Generated: {utc_now()}\n\n")
             f.write(operator_view)
+
+            # Phase timing averages
+            avgs = self.get_phase_timing_averages()
+            if avgs:
+                f.write("\n\n## Phase Timing (session averages)\n")
+                f.write(f"Turns sampled: {len(self._phase_timing_history)}\n")
+                for phase in ["provision", "route", "assemble", "reason", "consequence", "persist", "total"]:
+                    if phase in avgs:
+                        f.write(f"- {phase}: {avgs[phase]}ms\n")
 
         logger.info("STATUS: state view written to %s", status_path)
         return f"State view written to {status_path}"
@@ -2741,6 +2792,26 @@ class MessageHandler:
             logger.warning("Failed to emit message.sent: %s", exc)
 
         await self._update_conversation_summary(tenant_id, ctx.conversation_id, message.platform)
+
+    def _record_phase_timings(self, timings: dict[str, int], total_ms: int) -> None:
+        """Record phase timings for session averages. Keep last 50 turns."""
+        entry = dict(timings)
+        entry["total"] = total_ms
+        self._phase_timing_history.append(entry)
+        if len(self._phase_timing_history) > 50:
+            self._phase_timing_history = self._phase_timing_history[-50:]
+
+    def get_phase_timing_averages(self) -> dict[str, int]:
+        """Return average phase timings across the session."""
+        if not self._phase_timing_history:
+            return {}
+        phases = ["provision", "route", "assemble", "reason", "consequence", "persist", "total"]
+        avgs: dict[str, int] = {}
+        for phase in phases:
+            values = [t.get(phase, 0) for t in self._phase_timing_history if phase in t]
+            if values:
+                avgs[phase] = sum(values) // len(values)
+        return avgs
 
     async def _run_friction_observer(
         self, ctx: TurnContext, provider_errors: list[str] | None = None,
