@@ -40,7 +40,7 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 adapter = DiscordAdapter()
 
-OWNER_USER_ID = 000000000000000000
+OWNER_USER_ID = int(os.getenv("DISCORD_OWNER_ID", "0"))
 _PENDING_CONFIRMATION_PATH = Path("/tmp/kernos_pending_confirmation.json")
 
 
