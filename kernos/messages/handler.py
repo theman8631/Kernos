@@ -1884,7 +1884,7 @@ class MessageHandler:
             "new_name": {"type": "string"},
             "rename_evidence": {"type": "string"},
         },
-        "required": ["create_domain", "confidence", "name", "description", "reasoning"],
+        "required": ["create_domain", "confidence", "name", "description", "reasoning", "rename", "new_name", "rename_evidence"],
         "additionalProperties": False,
     }
 

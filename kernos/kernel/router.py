@@ -55,7 +55,7 @@ ROUTER_SCHEMA = {
                           "The user wants an answer, not a context change."
         },
     },
-    "required": ["tags", "focus", "continuation"],
+    "required": ["tags", "focus", "continuation", "query_mode"],
     "additionalProperties": False
 }
 
