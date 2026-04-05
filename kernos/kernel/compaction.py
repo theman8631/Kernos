@@ -68,6 +68,7 @@ class CompactionState:
     _system_overhead: int = 0
     consecutive_failures: int = 0
     last_compaction_failure_at: str = ""
+    last_seed_depth: int = 10            # Adaptive seed depth from last compaction
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +307,18 @@ When ambiguous about the Ledger — include a bullet. One extra line costs nothi
 
 #### Files
 
-If this context space has files (created via write_file), include a FILES section in the Living State listing each file's name and description. When files are created, updated, or deleted in the new messages, update the FILES section accordingly. Do not include file contents — only names and descriptions."""
+If this context space has files (created via write_file), include a FILES section in the Living State listing each file's name and description. When files are created, updated, or deleted in the new messages, update the FILES section accordingly. Do not include file contents — only names and descriptions.
+
+---
+
+#### Seed Depth
+
+After producing the Ledger entry and Living State, determine how many of the most recent messages are operationally critical for the next conversation turn to continue seamlessly. You've just read the entire conversation — you know what's active, what's resolved, and what the next turn needs to pick up without losing the thread.
+
+At the very end of your output, on its own line, write:
+SEED_DEPTH: N
+
+Where N is the number of trailing messages to carry forward (minimum 3, maximum 25). A D&D scene in progress might need 15-20. A series of quick factual questions might need 3-5. A multi-step plan might need 8-10."""
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +417,7 @@ class CompactionService:
             "_system_overhead": comp_state._system_overhead,
             "consecutive_failures": comp_state.consecutive_failures,
             "last_compaction_failure_at": comp_state.last_compaction_failure_at,
+            "last_seed_depth": comp_state.last_seed_depth,
         }
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -795,6 +808,32 @@ class CompactionService:
 
         return comp_state
 
+    @staticmethod
+    def _parse_seed_depth(doc: str) -> int:
+        """Extract SEED_DEPTH from compaction output. Default 10."""
+        import re
+        for line in reversed(doc.strip().split("\n")):
+            line = line.strip()
+            if line.upper().startswith("SEED_DEPTH:"):
+                try:
+                    n = int(re.sub(r"[^0-9]", "", line.split(":")[1]))
+                    return max(3, min(25, n))
+                except (ValueError, IndexError):
+                    pass
+        return 10
+
+    @staticmethod
+    def _strip_seed_depth(doc: str) -> str:
+        """Remove the SEED_DEPTH line from the document."""
+        lines = doc.rstrip().split("\n")
+        # Strip from the last few lines only (it should be at the very end)
+        cleaned = []
+        for line in lines:
+            if line.strip().upper().startswith("SEED_DEPTH:"):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)
+
     async def compact_from_log(
         self,
         tenant_id: str,
@@ -860,6 +899,11 @@ class CompactionService:
             max_tokens=16000,
             prefer_cheap=True,
         )
+
+        # Parse and strip adaptive seed depth
+        seed_depth = self._parse_seed_depth(updated_doc)
+        updated_doc = self._strip_seed_depth(updated_doc)
+        comp_state.last_seed_depth = seed_depth
 
         # Write updated document
         active_doc_path.write_text(updated_doc, encoding="utf-8")

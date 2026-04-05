@@ -3409,7 +3409,11 @@ class MessageHandler:
                                     comp_state = await self.compaction.compact_from_log(
                                         tenant_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)
                                     old_num, new_num = await self.conv_logger.roll_log(tenant_id, ctx.active_space_id)
-                                    await self.conv_logger.seed_from_previous(tenant_id, ctx.active_space_id, old_num, tail_entries=10)
+                                    _seed = comp_state.last_seed_depth
+                                    _seed_source = "adaptive" if _seed != 10 else "default"
+                                    await self.conv_logger.seed_from_previous(tenant_id, ctx.active_space_id, old_num, tail_entries=_seed)
+                                    logger.info("COMPACTION_SEED: space=%s depth=%d (%s)",
+                                        ctx.active_space_id, _seed, _seed_source)
                                     self.reasoning.clear_loaded_tools(ctx.active_space_id)
                                     comp_state.consecutive_failures = 0
                                     comp_state.last_compaction_failure_at = ""
