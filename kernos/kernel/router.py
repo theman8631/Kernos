@@ -47,7 +47,13 @@ ROUTER_SCHEMA = {
         "continuation": {
             "type": "boolean",
             "description": "True if this is an obvious short continuation riding conversational momentum"
-        }
+        },
+        "query_mode": {
+            "type": "boolean",
+            "description": "True if this is an informational query about another domain "
+                          "(quick question) rather than a switch into that domain. "
+                          "The user wants an answer, not a context change."
+        },
     },
     "required": ["tags", "focus", "continuation"],
     "additionalProperties": False
@@ -60,6 +66,7 @@ class RouterResult:
     tags: list[str]       # Space IDs (and optional topic hints) this message belongs to
     focus: str            # Space ID for the main agent's focus
     continuation: bool    # Obvious continuation — ride momentum
+    query_mode: bool = False  # Quick question about another domain — don't switch
 
 
 
@@ -166,6 +173,7 @@ class LLMRouter:
             tags = parsed.get("tags", [daily_id])
             focus = parsed.get("focus", daily_id)
             continuation = parsed.get("continuation", False)
+            query_mode = parsed.get("query_mode", False)
 
             # Validate focus is a known space ID (not a topic hint)
             known_ids = {s.id for s in active_spaces}
@@ -182,7 +190,7 @@ class LLMRouter:
             if focus not in tags:
                 tags = [focus] + tags
 
-            return RouterResult(tags=tags, focus=focus, continuation=continuation)
+            return RouterResult(tags=tags, focus=focus, continuation=continuation, query_mode=query_mode)
 
         except Exception as exc:
             logger.warning("LLM router failed, falling back to current focus: %s", exc)

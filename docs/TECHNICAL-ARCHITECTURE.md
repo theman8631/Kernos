@@ -583,6 +583,10 @@ Three-layer defense against storing conversation-specific facts as durable knowl
 
 **Domain rename detection (CS-4):** At compaction time, the domain assessment checks for explicit renames ("let's call it X"). Renames update `space.name`, add old name to `aliases`, set `renamed_from`/`renamed_at`. Gradual drift (new domain name similar to existing) is caught by `_is_similar_topic()` — prevents duplicate creation, logs `DOMAIN_DRIFT`.
 
+**Cross-domain signals (CS-5):** Post-turn, `_check_cross_domain_signals()` detects entities mentioned in the current space that have knowledge entries in OTHER domains. If a cheap LLM determines the mention is a meaningful update (status change, commitment, factual update), a signal is deposited as a space notice in the target domain. Notices are one-time delivery — surfaced in the target space's RESULTS block on next entry, then cleared. Casual mentions are filtered out. Log: `CROSS_DOMAIN_SIGNAL`, `CROSS_DOMAIN_SKIP`.
+
+**Downward search (CS-5):** Router schema includes `query_mode: bool`. When the router detects a quick question about another domain (not a context switch), the handler stays in the current space and searches DOWN into child domains for the answer. Knowledge from target spaces + their children is collected and resolved via a cheap LLM call. Answer is injected into the RESULTS block with attribution. Log: `DOWNWARD_SEARCH`, `DOWNWARD_SEARCH_HIT`, `DOWNWARD_SEARCH_MISS`.
+
 ### MCP Installation (SPEC-3B+)
 
 **What it does:** Allows the agent to install and uninstall MCP capability servers at runtime — discovering new tools, collecting credentials securely, and persisting server configuration across restarts.

@@ -516,6 +516,18 @@ class StateStore(ABC):
         all_spaces = await self.list_context_spaces(tenant_id)
         return [s for s in all_spaces if s.parent_id == parent_id and s.status == "active"]
 
+    # Space notices (cross-domain signals)
+    async def append_space_notice(
+        self, tenant_id: str, space_id: str, text: str,
+        source: str = "", notice_type: str = "cross_domain",
+    ) -> None:
+        """Append a notice to a space's pending notice queue."""
+        ...
+
+    async def drain_space_notices(self, tenant_id: str, space_id: str) -> list[dict]:
+        """Return and clear all pending notices for a space."""
+        ...
+
     # Topic hints (Gate 1 space creation)
     @abstractmethod
     async def increment_topic_hint(self, tenant_id: str, hint: str) -> None:

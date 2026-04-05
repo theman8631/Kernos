@@ -1415,7 +1415,20 @@ class MessageHandler:
         if awareness_block:
             results_parts.append(awareness_block)
 
-        # 2b. System events → RESULTS
+        # 2b. Cross-domain notices → RESULTS (one-time delivery)
+        try:
+            notices = await self.state.drain_space_notices(tenant_id, active_space_id)
+            if notices:
+                notice_lines = [n["text"] for n in notices if n.get("text")]
+                if notice_lines:
+                    results_parts.append(
+                        "CROSS-DOMAIN UPDATES:\n" + "\n".join(notice_lines)
+                    )
+                    logger.info("CROSS_DOMAIN_DELIVER: space=%s notices=%d", active_space_id, len(notice_lines))
+        except Exception as exc:
+            logger.warning("CROSS_DOMAIN_DELIVER: failed: %s", exc)
+
+        # 2c. System events → RESULTS
         system_events = self.drain_system_events(tenant_id)
         if system_events:
             events_block = "RECENT SYSTEM EVENTS:\n" + "\n".join(system_events)
@@ -2113,6 +2126,175 @@ class MessageHandler:
             return None
         return briefing_path.read_text(encoding="utf-8")
 
+    # --- Downward search (CS-5) ---
+
+    async def _downward_search(
+        self, tenant_id: str, query: str, target_space_ids: list[str],
+    ) -> str | None:
+        """Search DOWN into child domains for an answer to a quick question."""
+        import json as _json
+
+        # Collect knowledge from target spaces and their children
+        all_knowledge = await self.state.query_knowledge(
+            tenant_id, active_only=True, limit=500)
+
+        results_by_space: dict[str, list[str]] = {}
+        for space_id in target_space_ids:
+            space_ke = [
+                k for k in all_knowledge
+                if k.context_space == space_id
+            ]
+            # Also check children of this target
+            children = await self.state.list_child_spaces(tenant_id, space_id)
+            for child in children:
+                space_ke.extend([k for k in all_knowledge if k.context_space == child.id])
+
+            if space_ke:
+                results_by_space[space_id] = [k.content for k in space_ke[:20]]
+
+        if not results_by_space:
+            logger.info("DOWNWARD_SEARCH_MISS: query=%r searched=%d found_in=none",
+                query[:60], len(target_space_ids))
+            return None
+
+        # Use cheap model to resolve the answer
+        space_names = {}
+        for sid in results_by_space:
+            s = await self.state.get_context_space(tenant_id, sid)
+            space_names[sid] = s.name if s else sid
+
+        context_parts = []
+        for sid, facts in results_by_space.items():
+            context_parts.append(f"From {space_names[sid]}:\n" + "\n".join(f"- {f}" for f in facts))
+
+        try:
+            answer = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Answer this question using ONLY the provided context from the user's "
+                    "other domains. If you can answer, include which domain the answer came from. "
+                    "If you can't answer from the context, say so briefly."
+                ),
+                user_content=(
+                    f"Question: {query}\n\n"
+                    + "\n\n".join(context_parts)
+                ),
+                max_tokens=256,
+                prefer_cheap=True,
+            )
+
+            if answer and "can't answer" not in answer.lower() and "cannot answer" not in answer.lower():
+                matched_spaces = list(results_by_space.keys())
+                if len(matched_spaces) == 1:
+                    logger.info("DOWNWARD_SEARCH_HIT: query=%r found_in=%s", query[:60], matched_spaces[0])
+                else:
+                    logger.info("DOWNWARD_SEARCH_HIT: query=%r found_in=%s", query[:60], matched_spaces)
+                return f"[Quick answer from other context]\n{answer}"
+
+            logger.info("DOWNWARD_SEARCH_MISS: query=%r searched=%d found_in=none",
+                query[:60], len(target_space_ids))
+            return None
+        except Exception as exc:
+            logger.warning("DOWNWARD_SEARCH: failed: %s", exc)
+            return None
+
+    # --- Cross-domain signals (CS-5) ---
+
+    SIGNAL_ASSESSMENT_SCHEMA: dict = {
+        "type": "object",
+        "properties": {
+            "signal_worthy": {"type": "boolean"},
+            "signal_text": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["signal_worthy", "signal_text", "reason"],
+        "additionalProperties": False,
+    }
+
+    async def _check_cross_domain_signals(
+        self, tenant_id: str, space_id: str,
+        user_message: str, agent_response: str,
+    ) -> None:
+        """Post-turn check for cross-domain entity mentions with meaningful updates."""
+        import json as _json
+
+        if not user_message.strip():
+            return
+
+        # Get all knowledge entries
+        all_knowledge = await self.state.query_knowledge(
+            tenant_id, active_only=True, limit=500)
+
+        # Build scope chain for current space
+        from kernos.kernel.retrieval import RetrievalService
+        _rs = RetrievalService.__new__(RetrievalService)
+        _rs.state = self.state
+        current_chain = set(await _rs._build_scope_chain(tenant_id, space_id))
+
+        # Find knowledge entries in OTHER domains that mention entities from this turn
+        combined = f"{user_message} {agent_response}".lower()
+        cross_matches: list[tuple[str, Any]] = []  # (entity_text, KnowledgeEntry)
+        seen_spaces: set[str] = set()
+        for ke in all_knowledge:
+            if not ke.context_space or ke.context_space in current_chain or ke.context_space in ("", None):
+                continue
+            # Check if any entity from this knowledge appears in the turn
+            # Use subject as the entity identifier
+            if ke.subject and ke.subject != "user" and ke.subject.lower() in combined:
+                if ke.context_space not in seen_spaces:
+                    cross_matches.append((ke.subject, ke))
+                    seen_spaces.add(ke.context_space)
+
+        if not cross_matches:
+            return
+
+        logger.info("CROSS_DOMAIN_CHECK: entities=%s cross_matches=%d",
+            [m[0] for m in cross_matches], len(cross_matches))
+
+        # Assess worthiness with cheap model
+        try:
+            result_str = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Determine if this conversation turn contains a MEANINGFUL UPDATE "
+                    "about the named entity — a status change, new commitment, factual update, "
+                    "or schedule change. Casual mentions, questions, or references without "
+                    "new information are NOT signal-worthy."
+                ),
+                user_content=(
+                    f"User: {user_message[:500]}\n"
+                    f"Agent: {agent_response[:500]}\n\n"
+                    f"Entities found in other domains: {[m[0] for m in cross_matches]}"
+                ),
+                output_schema=self.SIGNAL_ASSESSMENT_SCHEMA,
+                max_tokens=128,
+                prefer_cheap=True,
+            )
+            parsed = _json.loads(result_str)
+
+            if not parsed.get("signal_worthy"):
+                logger.info("CROSS_DOMAIN_SKIP: entities=%s reason=%r",
+                    [m[0] for m in cross_matches], parsed.get("reason", ""))
+                return
+
+            signal_text = parsed.get("signal_text", "")
+            if not signal_text:
+                return
+
+            # Get current space name for attribution
+            current_space = await self.state.get_context_space(tenant_id, space_id)
+            source_name = current_space.name if current_space else space_id
+
+            for entity_name, ke in cross_matches:
+                notice_text = f"[From {source_name}] {signal_text}"
+                await self.state.append_space_notice(
+                    tenant_id, ke.context_space, notice_text,
+                    source=space_id, notice_type="cross_domain",
+                )
+                logger.info("CROSS_DOMAIN_SIGNAL: target=%s source=%s signal=%s",
+                    ke.context_space, space_id, notice_text[:80])
+
+        except Exception as exc:
+            logger.warning("CROSS_DOMAIN_CHECK: assessment failed: %s", exc)
+
     async def _update_conversation_summary(
         self, tenant_id: str, conversation_id: str, platform: str
     ) -> None:
@@ -2684,6 +2866,31 @@ class MessageHandler:
             (message.content or "")[:80], len(recent_full), current_focus_id or "none",
         )
         ctx.router_result = await self._router.route(tenant_id, message.content, recent_full, current_focus_id)
+
+        # Query mode: quick question about another domain — stay in current space
+        if ctx.router_result.query_mode and current_focus_id and ctx.router_result.focus != current_focus_id:
+            target_space_ids = [
+                t for t in ctx.router_result.tags
+                if t != current_focus_id and not t.startswith("_")
+            ]
+            if target_space_ids:
+                logger.info("DOWNWARD_SEARCH: query=%r target_domains=%s",
+                    (message.content or "")[:60], target_space_ids)
+                answer = await self._downward_search(
+                    tenant_id, message.content or "", target_space_ids)
+                if answer:
+                    if ctx.results_prefix:
+                        ctx.results_prefix += f"\n\n{answer}"
+                    else:
+                        ctx.results_prefix = answer
+            # Stay in current space regardless
+            ctx.router_result = RouterResult(
+                tags=ctx.router_result.tags,
+                focus=current_focus_id,
+                continuation=False,
+                query_mode=True,
+            )
+
         ctx.active_space_id = ctx.router_result.focus
         ctx.previous_space_id = current_focus_id
         ctx.space_switched = (
@@ -3125,6 +3332,15 @@ class MessageHandler:
 
         ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul)
         await self._post_response_soul_update(ctx.soul)
+
+        # Cross-domain signal check — async, non-blocking
+        try:
+            import asyncio as _aio
+            _aio.create_task(self._check_cross_domain_signals(
+                ctx.tenant_id, ctx.active_space_id,
+                ctx.message.content or "", ctx.response_text))
+        except Exception:
+            pass
 
     async def _phase_persist(self, ctx: TurnContext) -> None:
         """Phase 6: Store messages, write to conv log, compaction, events."""

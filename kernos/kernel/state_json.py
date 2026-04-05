@@ -577,6 +577,36 @@ class JsonStateStore(StateStore):
         self._write_json(path, hints)
 
     # -----------------------------------------------------------------------
+    # Space Notices (CS-5 cross-domain signals)
+    # -----------------------------------------------------------------------
+
+    def _notices_path(self, tenant_id: str) -> Path:
+        return self._state_dir(tenant_id) / "space_notices.json"
+
+    async def append_space_notice(
+        self, tenant_id: str, space_id: str, text: str,
+        source: str = "", notice_type: str = "cross_domain",
+    ) -> None:
+        from kernos.utils import utc_now
+        path = self._notices_path(tenant_id)
+        notices = self._read_json(path, {})
+        if space_id not in notices:
+            notices[space_id] = []
+        notices[space_id].append({
+            "text": text, "source": source, "type": notice_type,
+            "created_at": utc_now(),
+        })
+        self._write_json(path, notices)
+
+    async def drain_space_notices(self, tenant_id: str, space_id: str) -> list[dict]:
+        path = self._notices_path(tenant_id)
+        notices = self._read_json(path, {})
+        pending = notices.pop(space_id, [])
+        if pending:
+            self._write_json(path, notices)
+        return pending
+
+    # -----------------------------------------------------------------------
     # Knowledge Foresight Query (Phase 3C)
     # -----------------------------------------------------------------------
 
