@@ -572,14 +572,16 @@ Three-layer defense against storing conversation-specific facts as durable knowl
 **Storage:** `{data_dir}/{tenant_id}/spaces/{space_id}/files/` — one file per name. Manifest tracked at `{space_id}/files/.manifest.json`.
 
 **Four kernel tools** (registered alongside `remember` — kernel-managed, not MCP):
-- `write_file` — create or overwrite a named file in the active space. Text-only; binary content rejected. Directory created lazily on first write.
-- `read_file` — read a file by name from the active space.
-- `list_files` — list all files and their descriptions from the manifest.
-- `delete_file` — soft-delete: moves to `{space_id}/files/.deleted/{name}_{timestamp}`, removes from manifest. Shadow archive — never physically destroyed.
+- `write_file` — create or overwrite a file. Defaults to current space (local). Optional `target_space_id` writes to an ancestor space (universal update). Text-only; binary rejected.
+- `read_file` — read a file by name. Walks scope chain: tries current space, then parent, then grandparent, up to root.
+- `list_files` — list all files (local + inherited from ancestors) with source attribution and override markers.
+- `delete_file` — soft-delete: moves to `.deleted/`, removes from manifest. Shadow archive — never physically destroyed.
+
+**Scope chain file resolution (CS-4):** When `FileService` has a state store reference, reads walk up the parent chain. A local file shadows a parent file with the same name. The manifest shows inherited files with source and override status. Write to parent validated against scope chain (non-ancestor spaces rejected).
 
 **Manifest:** `.manifest.json` injected into the Compaction Living State section on each compaction cycle. The agent's knowledge of what files exist persists across compaction boundaries.
 
-**Space isolation:** `FileService` is constructed with a `(tenant_id, space_id)` pair. Files are never visible across spaces.
+**Domain rename detection (CS-4):** At compaction time, the domain assessment checks for explicit renames ("let's call it X"). Renames update `space.name`, add old name to `aliases`, set `renamed_from`/`renamed_at`. Gradual drift (new domain name similar to existing) is caught by `_is_similar_topic()` — prevents duplicate creation, logs `DOMAIN_DRIFT`.
 
 ### MCP Installation (SPEC-3B+)
 

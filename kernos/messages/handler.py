@@ -339,6 +339,22 @@ _CATEGORY_SIGNALS: dict[str, list[str]] = {
 }
 
 
+def _is_similar_topic(new_name: str, existing_names: list[str]) -> bool:
+    """Check if a proposed domain name is similar to existing names (drift detection).
+
+    Returns True if >50% of words overlap — likely a rename, not a new domain.
+    """
+    new_words = set(new_name.lower().split())
+    if not new_words:
+        return False
+    for name in existing_names:
+        existing_words = set(name.lower().split())
+        overlap = new_words & existing_words
+        if len(overlap) > 0 and len(overlap) >= len(new_words) * 0.5:
+            return True
+    return False
+
+
 def _select_tool_categories(message_text: str, recent_topic: str) -> set[str]:
     """Select tool categories based on turn context. Pure string matching — no LLM."""
     combined = f"{message_text.lower()} {recent_topic.lower()}"
@@ -578,7 +594,7 @@ class MessageHandler:
 
         # Wire up file service for kernel file tools
         from kernos.kernel.files import FileService
-        self._files = FileService(os.getenv("KERNOS_DATA_DIR", "./data"))
+        self._files = FileService(os.getenv("KERNOS_DATA_DIR", "./data"), state=self.state)
         reasoning.set_files(self._files)
         self.compaction.set_files(self._files)
         reasoning.set_registry(registry)
@@ -1851,6 +1867,9 @@ class MessageHandler:
             "name": {"type": "string"},
             "description": {"type": "string"},
             "reasoning": {"type": "string"},
+            "rename": {"type": "boolean"},
+            "new_name": {"type": "string"},
+            "rename_evidence": {"type": "string"},
         },
         "required": ["create_domain", "confidence", "name", "description", "reasoning"],
         "additionalProperties": False,
@@ -1898,7 +1917,10 @@ class MessageHandler:
                     "- Have a stable, clear label\n\n"
                     "A single conversation about a topic is NOT enough. "
                     "The topic must have depth and likely recurrence.\n"
-                    '"D&D Campaign" is a domain. "Random questions" is not.'
+                    '"D&D Campaign" is a domain. "Random questions" is not.\n\n'
+                    "RENAME CHECK: Has the user indicated a NAME CHANGE for this space? "
+                    'Look for explicit statements like "let\'s call it X" or "we\'re renaming to X." '
+                    "If yes, set rename=true, new_name to the new name, and rename_evidence."
                 ),
                 user_content=(
                     f"Current space: {space.name} (depth={space.depth})\n"
@@ -1910,6 +1932,22 @@ class MessageHandler:
                 prefer_cheap=True,
             )
             parsed = _json.loads(result_str)
+
+            # Handle explicit rename (independent of domain creation)
+            if parsed.get("rename") and parsed.get("new_name", "").strip():
+                new_name_rename = parsed["new_name"].strip()
+                old_name = space.name
+                aliases = list(space.aliases)
+                if old_name and old_name not in aliases:
+                    aliases.append(old_name)
+                await self.state.update_context_space(tenant_id, space_id, {
+                    "name": new_name_rename,
+                    "aliases": aliases,
+                    "renamed_from": old_name,
+                    "renamed_at": utc_now(),
+                })
+                logger.info("DOMAIN_RENAME: space=%s old=%s new=%s evidence=%r",
+                    space_id, old_name, new_name_rename, parsed.get("rename_evidence", ""))
 
             if not parsed.get("create_domain"):
                 logger.info(
@@ -1925,13 +1963,19 @@ class MessageHandler:
                 )
                 return
 
-            # Check we're not duplicating an existing space
+            # Check for duplicate or drift (similar name to existing)
             new_name = parsed.get("name", "").strip()
             if not new_name:
                 return
             for s in all_spaces:
                 if s.name.lower() == new_name.lower() or new_name.lower() in [a.lower() for a in s.aliases]:
                     logger.info("DOMAIN_ASSESS: space=%s result=duplicate name=%s existing=%s", space_id, new_name, s.id)
+                    return
+                # Drift detection: similar but not identical name
+                all_names = [s.name.lower()] + [a.lower() for a in s.aliases]
+                if _is_similar_topic(new_name, all_names):
+                    logger.info("DOMAIN_DRIFT: assessed=%s matches=%s (%s) — skipping creation",
+                        new_name, s.name, s.id)
                     return
 
             # Enforce space cap

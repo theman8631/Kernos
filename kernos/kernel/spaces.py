@@ -32,3 +32,7 @@ class ContextSpace:
     parent_id: str = ""              # Parent space ID (empty = root level)
     aliases: list[str] = field(default_factory=list)  # Previous names for routing
     depth: int = 0                   # 0 = root (General), 1 = domain, 2 = subdomain
+
+    # --- Rename tracking (CS-4) ---
+    renamed_from: str = ""           # Previous name before most recent rename
+    renamed_at: str = ""             # ISO timestamp of most recent rename

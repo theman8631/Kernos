@@ -410,6 +410,7 @@ class ReasoningService:
                         tool_input.get("name", ""),
                         tool_input.get("content", ""),
                         tool_input.get("description", ""),
+                        target_space_id=tool_input.get("target_space_id"),
                     )
                 return "File system is not available."
             elif tool_name == "read_file":
@@ -784,6 +785,7 @@ class ReasoningService:
                             tool_args.get("name", ""),
                             tool_args.get("content", ""),
                             tool_args.get("description", ""),
+                            target_space_id=tool_args.get("target_space_id"),
                         )
                     except Exception as exc:
                         logger.warning("Kernel tool 'write_file' failed: %s", exc)

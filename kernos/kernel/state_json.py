@@ -84,6 +84,7 @@ _CONTEXT_SPACE_FIELDS = {
     "posture", "model_preference", "created_at", "last_active_at", "is_default",
     "max_file_size_bytes", "max_space_bytes", "active_tools",
     "parent_id", "aliases", "depth",
+    "renamed_from", "renamed_at",
 }
 
 
