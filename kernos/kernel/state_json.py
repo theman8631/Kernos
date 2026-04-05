@@ -101,7 +101,8 @@ def _load_context_space(d: dict) -> ContextSpace:
 def _load_knowledge_entry(d: dict) -> KnowledgeEntry:
     """Load KnowledgeEntry from dict, applying migrations for missing fields.
 
-    Handles: durability → lifecycle_archetype, multi-member fields (V1 defaults).
+    Handles: durability → lifecycle_archetype, multi-member fields (V1 defaults),
+    and silently drops unknown keys (e.g. updated_at written by fact_harvest).
     """
     data = dict(d)
     if not data.get("lifecycle_archetype"):
@@ -119,6 +120,9 @@ def _load_knowledge_entry(d: dict) -> KnowledgeEntry:
         data["sensitivity"] = "open"
     if "visible_to" not in data:
         data["visible_to"] = None
+    # Strip unknown fields (forward-compat: new fields written by harvest/projectors)
+    known_fields = {f for f in KnowledgeEntry.__dataclass_fields__}
+    data = {k: v for k, v in data.items() if k in known_fields}
     return KnowledgeEntry(**data)
 
 
