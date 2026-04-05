@@ -244,17 +244,19 @@ Fail-safe: on shaping failure, falls back to Tier 1 only (NOT full dump). Docume
 
 Replaces per-turn fact/preference extraction with boundary-driven harvest. Per-turn Tier 2 extractor now only handles corrections + entities. Facts/preferences harvested at compaction boundaries and space switches via one reconciliation LLM call that sees the full unharvested span + all active facts. Outputs reconciled add/update/reinforce set. Existing embedding dedup preserved as fallback only.
 
-### Dynamic Tool Surfacing
+### Dynamic Tool Surfacing (TOOL-SURFACING-REDESIGN)
 
-Three-tier system for context-aware tool visibility:
+Three-tier LLM-driven system replacing keyword-based category matching:
 
-- **Tier 1 (always):** Core kernel tools — `request_tool`, `remember`, `remember_details`, `read_doc`, `manage_capabilities`, `dismiss_whisper`. ~1,000 tokens.
-- **Tier 2 (category-matched):** MCP + kernel tools surfaced via keyword matching against user message + recent topic. Categories: calendar, search, browser, messaging, identity, source, files, covenants. Pure string matching — no LLM call, <1ms.
-- **Tier 3 (on-demand):** Everything else, accessible via `request_tool`. Agent sees capability directory but not schemas.
+- **Tier 1 (common + local):** All kernel tools + common MCP tools (`COMMON_TOOL_NAMES`: calendar basics, search, time) + space's `local_affordance_set` (promoted tools) + preloaded MCP tools + session-loaded tools. Loaded every turn, no LLM call. Handles ~80% of turns.
+- **Tier 2 (catalog scan):** When Tier 1 is insufficient, a cheap LLM reads the universal `ToolCatalog` (one-line descriptions of ALL tools) and picks 3-8 relevant tools by intent. Works regardless of which space the user is in — "make a calendar entry" surfaces calendar in D&D space.
+- **Tier 3 (promotion):** Successfully used uncommon tools are promoted into the space's `local_affordance_set`. Next turn they're in Tier 1 — no catalog scan needed. General space has a promotion guard: only universal tools promote, domain-specific tools stay in Tier 2.
 
-Session continuity: already-loaded tools persist through the session. ACTIONS block includes "additional tools available via request_tool" notice.
+**ToolCatalog:** `kernos/kernel/tool_catalog.py` — registry of all tools with one-line descriptions. Version counter increments on add/remove. Kernel tools registered at boot, MCP tools at connection time.
 
-Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
+**Router intent modes:** `query_mode` (quick question — stay, downward search), `work_mode` (domain work — route to domain where tools live), neither (common request — handle in current space).
+
+Session continuity: already-loaded tools persist through the session.
 
 **Handler↔Reasoning protocols:** `kernos/kernel/protocols.py` — explicit boundary contracts for testability and maintainability. `HandlerProtocol` (send_outbound, read_log_text) defines what reasoning needs from the handler. `ReasoningProtocol` defines what the handler needs from reasoning (execute_tool, complete_simple, pending state, tool state, model info). No private attribute access across the boundary — all interaction through public methods. `get_pending_actions()` returns a copy to prevent mutable state leakage.
 

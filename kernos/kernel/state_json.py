@@ -85,6 +85,7 @@ _CONTEXT_SPACE_FIELDS = {
     "max_file_size_bytes", "max_space_bytes", "active_tools",
     "parent_id", "aliases", "depth",
     "renamed_from", "renamed_at",
+    "local_affordance_set", "last_catalog_version",
 }
 
 
@@ -99,6 +100,8 @@ def _load_context_space(d: dict) -> ContextSpace:
         filtered["active_tools"] = []
     if "aliases" not in filtered:
         filtered["aliases"] = []
+    if "local_affordance_set" not in filtered:
+        filtered["local_affordance_set"] = []
     # Migrate legacy "daily" space_type to "general"
     if filtered.get("space_type") == "daily":
         filtered["space_type"] = "general"

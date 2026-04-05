@@ -300,45 +300,6 @@ def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
 
 
 # Category → tool name mapping for dynamic tool surfacing (V1 policy)
-CATEGORY_TOOLS: dict[str, set[str]] = {
-    "calendar": {
-        "list-events", "search-events", "create-event",
-        "update-event", "delete-event", "get-event",
-        "get-freebusy", "get-current-time", "list-calendars",
-        "list-colors", "respond-to-event", "manage-accounts",
-        "create-events", "manage_schedule",
-    },
-    "search": {"brave_web_search", "brave_local_search"},
-    "browser": {
-        "goto", "markdown", "links", "evaluate",
-        "semantic_tree", "interactiveElements", "structuredData",
-    },
-    "messaging": {"send_to_channel", "manage_channels"},
-    "identity": {"read_soul", "update_soul"},
-    "source": {"read_source"},
-    "files": {"write_file", "read_file", "list_files", "delete_file"},
-    "covenants": {"manage_covenants"},
-}
-
-_CATEGORY_SIGNALS: dict[str, list[str]] = {
-    "calendar": ["calendar", "event", "schedule", "appointment", "meeting",
-                 "remind me", "tomorrow", "today", "next week",
-                 "this week", "free time", "busy", "block off"],
-    "search": ["search", "look up", "find", "what is", "who is",
-               "how to", "research", "google", "near me", "nearby",
-               "places", "in my area", "where can i", "restaurants",
-               "hot dog", "ice cream", "pizza"],
-    "browser": ["website", "page", "browse", "http", "www", ".com", ".org"],
-    "messaging": ["text me", "a text", "sms", "send a message", "notify",
-                  "tell them", "send to channel", "discord"],
-    "identity": ["personality", "who are you", "your name", "identity", "soul"],
-    "source": ["code", "source", "implementation", "debug", "read_source"],
-    "files": ["write file", "read file", "save file", "draft", "my notes",
-              "my files", "list files", "delete file"],
-    "covenants": ["rule", "covenant", "never", "always", "don't ever"],
-}
-
-
 def _is_similar_topic(new_name: str, existing_names: list[str]) -> bool:
     """Check if a proposed domain name is similar to existing names (drift detection).
 
@@ -355,14 +316,6 @@ def _is_similar_topic(new_name: str, existing_names: list[str]) -> bool:
     return False
 
 
-def _select_tool_categories(message_text: str, recent_topic: str) -> set[str]:
-    """Select tool categories based on turn context. Pure string matching — no LLM."""
-    combined = f"{message_text.lower()} {recent_topic.lower()}"
-    categories: set[str] = set()
-    for cat, signals in _CATEGORY_SIGNALS.items():
-        if any(sig in combined for sig in signals):
-            categories.add(cat)
-    return categories
 
 
 def _is_stale_knowledge(entry, days: int = 14) -> bool:
@@ -630,6 +583,51 @@ class MessageHandler:
             data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
             enabled=os.getenv("KERNOS_FRICTION_OBSERVER", "1") != "0",
         )
+
+        # Tool catalog — universal registry for three-tier surfacing
+        from kernos.kernel.tool_catalog import ToolCatalog
+        self._tool_catalog = ToolCatalog()
+        self._register_kernel_tools_in_catalog()
+
+    def _register_kernel_tools_in_catalog(self) -> None:
+        """Register kernel tools in the universal catalog at boot."""
+        from kernos.kernel.tool_catalog import ALWAYS_SURFACE_KERNEL
+        _kernel_descs = {
+            "request_tool": "Request access to a specific tool or capability",
+            "read_doc": "Read system documentation pages",
+            "dismiss_whisper": "Dismiss a proactive awareness whisper",
+            "manage_capabilities": "List, enable, or disable capability connections",
+            "remember_details": "Search memory for detailed information",
+            "remember": "Search memory and knowledge base",
+            "write_file": "Create or update a text file in the current space",
+            "read_file": "Read a file from the current or parent space",
+            "list_files": "List all files including inherited from parents",
+            "delete_file": "Soft-delete a file",
+            "read_source": "Read system source code for debugging",
+            "read_soul": "Read the agent's personality and identity configuration",
+            "update_soul": "Update agent personality or identity",
+            "manage_covenants": "List, add, update, or remove standing rules",
+            "manage_channels": "List or configure messaging channels",
+            "send_to_channel": "Send a message to an outbound channel (SMS, etc.)",
+            "manage_schedule": "View and manage scheduled triggers and automations",
+            "inspect_state": "View active preferences, triggers, and rules",
+        }
+        for name, desc in _kernel_descs.items():
+            self._tool_catalog.register(name, desc, "kernel")
+
+    def register_mcp_tools_in_catalog(self) -> None:
+        """Register MCP tools in the catalog. Called after MCP connect_all."""
+        if not self.mcp:
+            return
+        for tool in self.mcp.get_tools():
+            name = tool.get("name", "")
+            desc = tool.get("description", "")
+            # Truncate to one line
+            if desc:
+                desc = desc.split(".")[0].strip()[:100]
+            else:
+                desc = name.replace("-", " ").replace("_", " ")
+            self._tool_catalog.register(name, desc, f"mcp")
 
     async def _get_system_space(self, tenant_id: str):
         """Return the system context space for this tenant, or None."""
@@ -2466,6 +2464,12 @@ class MessageHandler:
                         primary_ctx.tool_calls_trace = self.reasoning.drain_tool_trace()
                         asyncio.ensure_future(self._run_friction_observer(
                             primary_ctx, provider_errors=runner.provider_errors))
+
+                        # Tier 3: Promote successfully used tools into local affordance set
+                        if primary_ctx.active_space and primary_ctx.tool_calls_trace:
+                            asyncio.ensure_future(self._promote_used_tools(
+                                primary_ctx.tenant_id, primary_ctx.active_space_id,
+                                primary_ctx.active_space, primary_ctx.tool_calls_trace))
                 except Exception as exc:
                     logger.error(
                         "TURN_ERROR: space=%s error=%s",
@@ -3081,87 +3085,144 @@ class MessageHandler:
             else:
                 ctx.results_prefix = pref_note
 
-        # --- Tool surfacing (CPU-bound, no LLM) --------------------------------
+        # --- Three-tier tool surfacing (TOOL-SURFACING-REDESIGN) ----------------
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
+        from kernos.kernel.tool_catalog import COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL, SURFACER_SCHEMA
 
-        # Tier 1: Always-surface (minimal universal kernel tools)
-        tools: list[dict] = [REQUEST_TOOL, READ_DOC_TOOL, DISMISS_WHISPER_TOOL,
-                              MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL]
-        if self._retrieval:
-            from kernos.kernel.retrieval import REMEMBER_TOOL
-            tools.append(REMEMBER_TOOL)
-
-        # Tier 2: Category-surfaced based on turn context
-        recent_topic = self._get_recent_topic_hint(ctx)
-        categories = _select_tool_categories(message.content or "", recent_topic)
-
-        # Collect category-matched tool names
-        surfaced_names: set[str] = set()
-        for cat in categories:
-            surfaced_names.update(CATEGORY_TOOLS.get(cat, set()))
-
-        # Session continuity: already-loaded tools always surface
-        loaded_names = self.reasoning.get_loaded_tools(active_space_id)
-        surfaced_names.update(loaded_names)
-
-        # Space-activated capabilities: tools from capabilities explicitly activated
-        # for this space (via request_tool) persist across turns without keyword matching
-        if active_space and active_space.active_tools:
-            for cap_name in active_space.active_tools:
-                cap = self.registry.get(cap_name)
-                if cap and cap.tools:
-                    surfaced_names.update(cap.tools)
-
-        # Map surfaced names to actual tool schemas
-        # Kernel tools matched by category
+        # Build the kernel tool schema map (needed for all tiers)
         _kernel_tool_map: dict[str, dict] = {}
         from kernos.kernel.files import FILE_TOOLS
         from kernos.kernel.reasoning import READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL
         from kernos.kernel.covenant_manager import MANAGE_COVENANTS_TOOL
         from kernos.kernel.channels import MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL
         from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
-        for t in FILE_TOOLS + [READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL,
+        from kernos.kernel.tools import INSPECT_STATE_TOOL
+        _all_kernel = FILE_TOOLS + [REQUEST_TOOL, READ_DOC_TOOL, DISMISS_WHISPER_TOOL,
+                                MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL,
+                                READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL,
                                 MANAGE_COVENANTS_TOOL, MANAGE_CHANNELS_TOOL,
-                                SEND_TO_CHANNEL_TOOL, MANAGE_SCHEDULE_TOOL]:
+                                SEND_TO_CHANNEL_TOOL, MANAGE_SCHEDULE_TOOL,
+                                INSPECT_STATE_TOOL]
+        if self._retrieval:
+            from kernos.kernel.retrieval import REMEMBER_TOOL
+            _all_kernel.append(REMEMBER_TOOL)
+        for t in _all_kernel:
             _kernel_tool_map[t["name"]] = t
 
-        for name in surfaced_names:
-            if name in _kernel_tool_map:
-                # Add kernel tool if not already in Tier 1
-                kt = _kernel_tool_map[name]
-                if kt not in tools:
-                    tools.append(kt)
+        # Tier 1: Always-surface kernel tools + common MCP tools + local affordance set
+        surfaced_names: set[str] = set(ALWAYS_SURFACE_KERNEL)
+        if self._retrieval:
+            surfaced_names.add("remember")
+        surfaced_names.update(COMMON_TOOL_NAMES)
 
-        # MCP tools: preloaded (full schema) + loaded (full) + stubs for category matches
+        # Session continuity: already-loaded tools always surface
+        loaded_names = self.reasoning.get_loaded_tools(active_space_id)
+        surfaced_names.update(loaded_names)
+
+        # Space-activated capabilities (via request_tool)
+        if active_space and active_space.active_tools:
+            for cap_name in active_space.active_tools:
+                cap = self.registry.get(cap_name)
+                if cap and cap.tools:
+                    surfaced_names.update(cap.tools)
+
+        # Local affordance set: tools promoted from successful use in this space
+        if active_space and active_space.local_affordance_set:
+            surfaced_names.update(active_space.local_affordance_set)
+
+        # Build initial tools list from surfaced names
+        tools: list[dict] = []
+        _added: set[str] = set()
+
+        def _add_tool(schema: dict) -> None:
+            name = schema.get("name", "")
+            if name and name not in _added:
+                tools.append(schema)
+                _added.add(name)
+
+        # Add ALL kernel tools (they're cheap — locally executed, not MCP)
+        for name, schema in _kernel_tool_map.items():
+            _add_tool(schema)
+
+        # Add MCP tools: preloaded always included (they're the most-used MCP tools)
         preloaded = self.registry.get_preloaded_tools(space=active_space)
         for t in preloaded:
-            if t["name"] in surfaced_names and t not in tools:
-                tools.append(t)
+            _add_tool(t)
         for tn in loaded_names:
             schema = self.registry.get_tool_schema(tn)
-            if schema and schema not in tools:
-                tools.append(schema)
-        # Stubs only for category-matched MCP tools not already loaded
+            if schema:
+                _add_tool(schema)
         all_stubs = self.registry.get_lazy_tool_stubs(space=active_space, loaded_names=loaded_names)
         for stub in all_stubs:
-            if stub["name"] in surfaced_names and stub not in tools:
-                tools.append(stub)
+            if stub["name"] in surfaced_names:
+                _add_tool(stub)
 
-        _tier1_count = 6 if self._retrieval else 5  # Tier 1 kernel tools always present
-        _total = _tier1_count + len(_kernel_tool_map) + len(preloaded) + len(all_stubs) + len(loaded_names)
+        _tier = "common"
+        _total = len(self._tool_catalog.get_names())
 
-        # Stable sort: Tier 1 kernel tools first (fixed prefix), then rest alphabetical.
-        # Same tool set always produces identical ordering — maximizes cache hits (IQ-3).
-        _tier1_names = {t.get("name") for t in tools[:_tier1_count]}
-        _tier1 = [t for t in tools if t.get("name") in _tier1_names]
-        _rest = [t for t in tools if t.get("name") not in _tier1_names]
-        _tier1.sort(key=lambda t: t.get("name", ""))
+        # Tier 2: Catalog scan — if Tier 1 seems insufficient for the user's message
+        # The LLM picks tools from the full catalog when the common set won't cover it
+        _msg_text = (message.content or "").strip()
+        # Only scan if there are tools beyond kernel + common that aren't surfaced
+        _unsurfaced = self._tool_catalog.get_names() - _added
+        if _msg_text and len(_msg_text) > 5 and _unsurfaced:
+            # Build catalog text excluding already-surfaced tools
+            catalog_text = self._tool_catalog.build_catalog_text(exclude=_added)
+            if catalog_text:
+                try:
+                    import json as _json
+                    scan_result = await self.reasoning.complete_simple(
+                        system_prompt=(
+                            "Given the user's message, select which additional tools from the catalog "
+                            "are needed to fulfill this request. Only select tools that are directly "
+                            "relevant. Return an empty array if the already-loaded tools are sufficient.\n\n"
+                            f"Already loaded: {sorted(_added)}"
+                        ),
+                        user_content=(
+                            f"User message: \"{_msg_text[:300]}\"\n\n"
+                            f"Tool catalog:\n{catalog_text}"
+                        ),
+                        output_schema=SURFACER_SCHEMA,
+                        max_tokens=128,
+                        prefer_cheap=True,
+                    )
+                    parsed_scan = _json.loads(scan_result)
+                    scan_tools = parsed_scan.get("tools", [])
+                    if scan_tools:
+                        _tier = "catalog_scan"
+                        for tool_name in scan_tools:
+                            if tool_name in _added:
+                                continue
+                            # Try kernel tool
+                            if tool_name in _kernel_tool_map:
+                                _add_tool(_kernel_tool_map[tool_name])
+                                continue
+                            # Try full MCP schema
+                            schema = self.registry.get_tool_schema(tool_name)
+                            if schema:
+                                _add_tool(schema)
+                                continue
+                            # Try stub
+                            for stub in all_stubs:
+                                if stub["name"] == tool_name:
+                                    _add_tool(stub)
+                                    break
+                        logger.info("TOOL_SURFACING: tier=catalog_scan tools=%d selected=%s",
+                            len(scan_tools), scan_tools)
+                except Exception as exc:
+                    logger.warning("TOOL_SURFACING: catalog scan failed: %s", exc)
+
+        # Stable sort: always-surface kernel tools first (fixed prefix), rest alphabetical
+        _always_names = ALWAYS_SURFACE_KERNEL | ({"remember"} if self._retrieval else set())
+        _prefix = [t for t in tools if t.get("name") in _always_names]
+        _rest = [t for t in tools if t.get("name") not in _always_names]
+        _prefix.sort(key=lambda t: t.get("name", ""))
         _rest.sort(key=lambda t: t.get("name", ""))
-        tools = _tier1 + _rest
+        tools = _prefix + _rest
 
-        logger.info("TOOL_SURFACING: categories=%s surfaced=%d total_available=%d",
-            categories, len(tools), _total)
+        logger.info("TOOL_SURFACING: tier=%s surfaced=%d total_available=%d",
+            _tier, len(tools), _total)
         ctx.tools = tools
 
         # Build system prompt blocks (Cognitive UI grammar)
@@ -3472,6 +3533,56 @@ class MessageHandler:
             if values:
                 avgs[phase] = sum(values) // len(values)
         return avgs
+
+    async def _promote_used_tools(
+        self, tenant_id: str, space_id: str, space: ContextSpace, tool_trace: list[dict],
+    ) -> None:
+        """Tier 3: Promote successfully used tools into the space's local affordance set.
+
+        General (default root) only promotes universal tools — domain-specific tools
+        should trigger routing to the appropriate domain instead.
+        """
+        from kernos.kernel.tool_catalog import COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL
+        try:
+            current_set = set(space.local_affordance_set)
+            promoted = []
+            for call in tool_trace:
+                name = call.get("name", "")
+                if not name or not call.get("success"):
+                    continue
+                # Skip tools that are already in the always-surface or common sets
+                if name in ALWAYS_SURFACE_KERNEL or name in COMMON_TOOL_NAMES:
+                    continue
+                # General space guard: only promote tools from connected capabilities
+                # marked as universal — domain-specific tools shouldn't bloat General
+                if space.is_default and self.registry:
+                    is_universal = False
+                    for cap in self.registry.get_all():
+                        if name in (cap.tools or []) and getattr(cap, "universal", False):
+                            is_universal = True
+                            break
+                    if not is_universal:
+                        # Check if it's a kernel tool (always OK to promote)
+                        if name not in self._tool_catalog.get_names():
+                            continue
+                        # Kernel tools found in catalog but not universal MCP — skip in General
+                        catalog_entry = self._tool_catalog.get(name)
+                        if catalog_entry and not catalog_entry.source.startswith("kernel"):
+                            logger.info("TOOL_PROMOTE_SKIP: tool=%s space=%s reason=general_guard",
+                                name, space_id)
+                            continue
+                if name not in current_set:
+                    current_set.add(name)
+                    promoted.append(name)
+            if promoted:
+                new_set = list(current_set)
+                await self.state.update_context_space(tenant_id, space_id, {
+                    "local_affordance_set": new_set,
+                })
+                for t in promoted:
+                    logger.info("TOOL_PROMOTED: tool=%s space=%s reason=successful_use", t, space_id)
+        except Exception as exc:
+            logger.warning("TOOL_PROMOTE: failed: %s", exc)
 
     async def _run_friction_observer(
         self, ctx: TurnContext, provider_errors: list[str] | None = None,

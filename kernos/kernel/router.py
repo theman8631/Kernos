@@ -54,8 +54,14 @@ ROUTER_SCHEMA = {
                           "(quick question) rather than a switch into that domain. "
                           "The user wants an answer, not a context change."
         },
+        "work_mode": {
+            "type": "boolean",
+            "description": "True if the user intends to DO WORK in another domain "
+                          "(not just ask about it). 'Let's invoice Henderson' is work_mode. "
+                          "'What was Henderson's last invoice?' is query_mode."
+        },
     },
-    "required": ["tags", "focus", "continuation", "query_mode"],
+    "required": ["tags", "focus", "continuation", "query_mode", "work_mode"],
     "additionalProperties": False
 }
 
@@ -67,6 +73,7 @@ class RouterResult:
     focus: str            # Space ID for the main agent's focus
     continuation: bool    # Obvious continuation — ride momentum
     query_mode: bool = False  # Quick question about another domain — don't switch
+    work_mode: bool = False   # Intent to do work in another domain — route there
 
 
 
@@ -174,6 +181,7 @@ class LLMRouter:
             focus = parsed.get("focus", daily_id)
             continuation = parsed.get("continuation", False)
             query_mode = parsed.get("query_mode", False)
+            work_mode = parsed.get("work_mode", False)
 
             # Validate focus is a known space ID (not a topic hint)
             known_ids = {s.id for s in active_spaces}
@@ -190,7 +198,7 @@ class LLMRouter:
             if focus not in tags:
                 tags = [focus] + tags
 
-            return RouterResult(tags=tags, focus=focus, continuation=continuation, query_mode=query_mode)
+            return RouterResult(tags=tags, focus=focus, continuation=continuation, query_mode=query_mode, work_mode=work_mode)
 
         except Exception as exc:
             logger.warning("LLM router failed, falling back to current focus: %s", exc)

@@ -297,10 +297,19 @@ async def test_handler_with_tool_use_brokers_call_and_returns_text():
     handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_provider_response("You have a meeting at 10am."),
-    ]
+    # Route responses: reasoning calls (with tools) get real responses;
+    # cohort agents (no tools) get stub text.
+    _tool_resp = _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"})
+    _text_resp = _mock_provider_response("You have a meeting at 10am.")
+    _stub_resp = _mock_provider_response("{}")
+    _reasoning_calls = iter([_tool_resp, _text_resp])
+
+    async def _route_complete(**kwargs):
+        if kwargs.get("tools"):
+            return next(_reasoning_calls, _stub_resp)
+        return _stub_resp
+
+    mock_provider.complete.side_effect = _route_complete
 
     result = await handler.process(_make_message("What's on my schedule?"))
     assert "10am" in result
@@ -312,9 +321,13 @@ async def test_handler_safety_valve_returns_graceful_message():
     handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="some result")
 
-    mock_provider.complete.return_value = _mock_provider_tool_response(
-        "list_events", "tu_001", {}
-    )
+    _tool_resp = _mock_provider_tool_response("list_events", "tu_001", {})
+    _stub = _mock_provider_response("{}")
+
+    async def _route(**kwargs):
+        return _tool_resp if kwargs.get("tools") else _stub
+
+    mock_provider.complete.side_effect = _route
 
     result = await handler.process(_make_message("What's on my schedule?"))
     assert isinstance(result, str)
@@ -326,10 +339,15 @@ async def test_handler_tool_failure_results_in_graceful_response():
     handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Calendar tool error: connection failed")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {}),
-        _mock_provider_response("I had trouble checking your calendar."),
-    ]
+    _tool_resp = _mock_provider_tool_response("list_events", "tu_001", {})
+    _text_resp = _mock_provider_response("I had trouble checking your calendar.")
+    _stub = _mock_provider_response("{}")
+    _iter = iter([_tool_resp, _text_resp])
+
+    async def _route(**kwargs):
+        return next(_iter, _stub) if kwargs.get("tools") else _stub
+
+    mock_provider.complete.side_effect = _route
 
     result = await handler.process(_make_message("What's on my schedule?"))
     assert isinstance(result, str)
@@ -373,10 +391,15 @@ async def test_handler_tool_calls_go_to_audit_not_conversation():
     handler, mock_provider = _make_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_provider_response("You have a meeting at 10am."),
-    ]
+    _tool_resp = _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"})
+    _text_resp = _mock_provider_response("You have a meeting at 10am.")
+    _stub = _mock_provider_response("{}")
+    _iter = iter([_tool_resp, _text_resp])
+
+    async def _route(**kwargs):
+        return next(_iter, _stub) if kwargs.get("tools") else _stub
+
+    mock_provider.complete.side_effect = _route
 
     await handler.process(_make_message("What's on my schedule?"))
 
@@ -538,42 +561,7 @@ async def test_handler_uses_task_result_text_as_response():
 # ---------------------------------------------------------------------------
 
 
-from kernos.messages.handler import _is_stale_knowledge, _select_tool_categories
-
-
-class TestToolCategorySelection:
-    """SPEC-DYNAMIC-TOOL-SURFACING: category matching for tool visibility."""
-
-    def test_calendar_signals(self):
-        cats = _select_tool_categories("Create a meeting tomorrow at 3pm", "")
-        assert "calendar" in cats
-
-    def test_search_signals(self):
-        cats = _select_tool_categories("Search for good Italian restaurants", "")
-        assert "search" in cats
-
-    def test_browser_signals(self):
-        cats = _select_tool_categories("Open the website https://example.com", "")
-        assert "browser" in cats
-
-    def test_messaging_signals(self):
-        cats = _select_tool_categories("Send me a text about the meeting", "")
-        assert "messaging" in cats
-
-    def test_no_categories_for_casual(self):
-        cats = _select_tool_categories("Hey how's it going?", "")
-        # Should have no or minimal categories
-        assert "calendar" not in cats
-        assert "browser" not in cats
-
-    def test_recent_topic_included(self):
-        cats = _select_tool_categories("yes please", "calendar event discussion")
-        assert "calendar" in cats
-
-    def test_multiple_categories(self):
-        cats = _select_tool_categories("Search for a meeting room and schedule it tomorrow", "")
-        assert "search" in cats
-        assert "calendar" in cats
+from kernos.messages.handler import _is_stale_knowledge
 
 
 class TestStaleKnowledgeCheck:
@@ -673,38 +661,6 @@ async def test_dump_case_insensitive():
 
 
 # --- SPEC-LIVE-AUDIT-POLISH-4D ---
-
-
-class TestCategorySignalTightening:
-    """Tightened signals should not over-trigger on common words."""
-
-    def test_dinner_does_not_trigger_calendar(self):
-        cats = _select_tool_categories("What should I have for dinner?", "")
-        assert "calendar" not in cats
-
-    def test_message_does_not_trigger_messaging(self):
-        cats = _select_tool_categories("What is your message?", "")
-        assert "messaging" not in cats
-
-    def test_write_does_not_trigger_files(self):
-        cats = _select_tool_categories("Write me a poem about the ocean", "")
-        assert "files" not in cats
-
-    def test_open_does_not_trigger_browser(self):
-        cats = _select_tool_categories("I am open to suggestions", "")
-        assert "browser" not in cats
-
-    def test_dont_does_not_trigger_covenants(self):
-        cats = _select_tool_categories("I don't know what to do", "")
-        assert "covenants" not in cats
-
-    def test_legitimate_signals_still_work(self):
-        cats = _select_tool_categories("Create an event for Friday", "")
-        assert "calendar" in cats
-        cats = _select_tool_categories("Send me a text about lunch", "")
-        assert "messaging" in cats
-        cats = _select_tool_categories("Write file notes.txt with the summary", "")
-        assert "files" in cats
 
 
 class TestGateRequestToolBypass:

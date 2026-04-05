@@ -36,3 +36,7 @@ class ContextSpace:
     # --- Rename tracking (CS-4) ---
     renamed_from: str = ""           # Previous name before most recent rename
     renamed_at: str = ""             # ISO timestamp of most recent rename
+
+    # --- Tool surfacing (TOOL-SURFACING-REDESIGN) ---
+    local_affordance_set: list[str] = field(default_factory=list)  # Promoted tool names
+    last_catalog_version: int = 0    # Last scanned catalog version
