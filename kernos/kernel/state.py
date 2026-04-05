@@ -511,6 +511,11 @@ class StateStore(ABC):
         self, tenant_id: str, space_id: str, updates: dict
     ) -> None: ...
 
+    async def list_child_spaces(self, tenant_id: str, parent_id: str) -> list[ContextSpace]:
+        """Return all spaces with parent_id matching the given space."""
+        all_spaces = await self.list_context_spaces(tenant_id)
+        return [s for s in all_spaces if s.parent_id == parent_id and s.status == "active"]
+
     # Topic hints (Gate 1 space creation)
     @abstractmethod
     async def increment_topic_hint(self, tenant_id: str, hint: str) -> None:

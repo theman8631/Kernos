@@ -1427,6 +1427,20 @@ class MessageHandler:
                 f"Context history for this space:\n{active_doc}"
             )
 
+        # 4. Parent briefing → MEMORY (for child domains)
+        if active_space and active_space.parent_id:
+            try:
+                briefing = await self._load_parent_briefing(
+                    tenant_id, active_space.parent_id, active_space_id)
+                if briefing:
+                    parent = await self.state.get_context_space(tenant_id, active_space.parent_id)
+                    parent_name = parent.name if parent else "parent"
+                    memory_parts.append(
+                        f"Briefing from {parent_name} (may be stale — use remember() for current data):\n{briefing}"
+                    )
+            except Exception as exc:
+                logger.warning("BRIEFING_LOAD: failed for space=%s: %s", active_space_id, exc)
+
         results_prefix = "\n\n".join(results_parts) if results_parts else None
         memory_prefix = "\n\n".join(memory_parts) if memory_parts else None
 
@@ -2000,6 +2014,60 @@ class MessageHandler:
             )
         except Exception as exc:
             logger.warning("DOMAIN_ASSESS: failed for space=%s: %s", space_id, exc)
+
+    async def _produce_child_briefings(
+        self, tenant_id: str, space_id: str, space: ContextSpace,
+    ) -> None:
+        """Produce context briefings for all child domains after parent compaction."""
+        children = await self.state.list_child_spaces(tenant_id, space_id)
+        if not children:
+            return
+
+        # Load the freshly compacted document (Living State)
+        doc = await self.compaction.load_document(tenant_id, space_id)
+        if not doc:
+            return
+
+        for child in children:
+            try:
+                briefing = await self.reasoning.complete_simple(
+                    system_prompt=(
+                        "You are producing a context briefing for a child domain. "
+                        "Extract ONLY durable truths relevant to the child domain. "
+                        "Keep it short — 3-8 bullet points of facts, decisions, "
+                        "and active status. No narrative. No history."
+                    ),
+                    user_content=(
+                        f"Parent: {space.name}\n"
+                        f"Child: {child.name} — {child.description}\n\n"
+                        f"Parent's current state:\n{doc[:4000]}"
+                    ),
+                    max_tokens=512,
+                    prefer_cheap=True,
+                )
+                if briefing and briefing.strip():
+                    briefing_path = (
+                        self.compaction._space_dir(tenant_id, space_id)
+                        / f"briefing_{child.id}.md"
+                    )
+                    briefing_path.parent.mkdir(parents=True, exist_ok=True)
+                    briefing_path.write_text(briefing.strip(), encoding="utf-8")
+                    logger.info("BRIEFING_PRODUCED: parent=%s child=%s chars=%d",
+                        space_id, child.id, len(briefing))
+            except Exception as exc:
+                logger.warning("BRIEFING_FAILED: parent=%s child=%s error=%s", space_id, child.id, exc)
+
+    async def _load_parent_briefing(
+        self, tenant_id: str, parent_id: str, child_id: str,
+    ) -> str | None:
+        """Load a parent's briefing for a specific child. Returns None if not found."""
+        briefing_path = (
+            self.compaction._space_dir(tenant_id, parent_id)
+            / f"briefing_{child_id}.md"
+        )
+        if not briefing_path.exists():
+            return None
+        return briefing_path.read_text(encoding="utf-8")
 
     async def _update_conversation_summary(
         self, tenant_id: str, conversation_id: str, platform: str
@@ -3087,13 +3155,15 @@ class MessageHandler:
                                     comp_state.last_compaction_failure_at = ""
                                     logger.info("COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
                                         ctx.active_space_id, old_num, new_num)
-                                    # Domain assessment — async, non-blocking
+                                    # Domain assessment + child briefings — async, non-blocking
                                     try:
                                         import asyncio as _aio
                                         _aio.create_task(self._assess_domain_creation(
                                             tenant_id, ctx.active_space_id, ctx.active_space, comp_state))
+                                        _aio.create_task(self._produce_child_briefings(
+                                            tenant_id, ctx.active_space_id, ctx.active_space))
                                     except Exception as _dax:
-                                        logger.warning("DOMAIN_ASSESS: launch failed: %s", _dax)
+                                        logger.warning("DOMAIN_ASSESS/BRIEFING: launch failed: %s", _dax)
                                 finally:
                                     self._compacting.discard(ctx.active_space_id)
                         else:

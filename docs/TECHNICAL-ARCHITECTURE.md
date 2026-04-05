@@ -321,6 +321,10 @@ Target: tool tokens drop from ~5,289 to ~2,000-3,000 on average turns.
 2. **Rank by quality:** `compute_quality_score()` = `(recency × 0.4) + (confidence × 0.3) + (reinforcement × 0.3)`. Space relevance boost (1.2x), foresight boost (1.5x). Replaces the FSRS-6 formula.
 3. **Format results:** Entity data first, then ranked knowledge, then archive extract, then MAYBE_SAME_AS notes. Hard cap at 1500 tokens.
 
+**Scope chain (CS-3):** `_build_scope_chain()` walks parent_id up to root. All three search methods (knowledge, entities, archives) include entries from ancestor spaces + global entries. Archive search walks the chain — searches current space first, then parent, then grandparent. SCOPE_CHAIN and SCOPE_CHAIN_HIT log lines show the walk.
+
+**Parent briefings (CS-3):** After compaction, `_produce_child_briefings()` runs for each child domain. A cheap LLM call extracts 3-8 bullet points of durable truths from the parent's Living State. Stored as `briefing_{child_id}.md` in the parent's compaction directory. Injected into child's MEMORY block during context assembly. Kit constraint: briefings can be stale — the scope chain is the freshness valve.
+
 **Tool definition:** `REMEMBER_TOOL` — registered alongside MCP tools in the handler. Kernel-managed, not MCP.
 
 ### NL Contract Parser (2D)

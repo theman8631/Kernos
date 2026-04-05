@@ -174,6 +174,25 @@ class RetrievalService:
         self.compaction = compaction
         self.reasoning = reasoning
 
+    async def _build_scope_chain(self, tenant_id: str, space_id: str) -> list[str]:
+        """Walk up the parent chain. Returns [space_id, parent_id, grandparent_id, ...].
+
+        Only includes IDs of spaces that actually exist. Stops at root or cycle.
+        """
+        chain: list[str] = []
+        current = space_id
+        seen: set[str] = set()
+        while current and current not in seen:
+            space = await self.state.get_context_space(tenant_id, current)
+            if not space:
+                break
+            chain.append(current)
+            seen.add(current)
+            if not space.parent_id:
+                break
+            current = space.parent_id
+        return chain
+
     async def search(
         self,
         tenant_id: str,
@@ -206,6 +225,12 @@ class RetrievalService:
             except Exception as exc:
                 logger.warning("REMEMBER_STATE_AUGMENT: failed: %s", exc)
 
+        # Build scope chain for hierarchical search
+        scope_chain = await self._build_scope_chain(tenant_id, active_space_id)
+        if len(scope_chain) > 1:
+            logger.info("SCOPE_CHAIN: space=%s depth=%d chain=%s",
+                active_space_id, len(scope_chain) - 1, scope_chain)
+
         # Embed the query
         try:
             query_embedding = await self.embeddings.embed(query)
@@ -219,13 +244,13 @@ class RetrievalService:
 
         if query_embedding is not None:
             knowledge_task = self._search_knowledge(
-                tenant_id, query, query_embedding, active_space_id
+                tenant_id, query, query_embedding, active_space_id, scope_chain
             )
         else:
             knowledge_task = _empty_knowledge()
 
-        entity_task = self._search_entities(tenant_id, query, active_space_id)
-        archive_task = self._search_archives(tenant_id, query, active_space_id)
+        entity_task = self._search_entities(tenant_id, query, active_space_id, scope_chain)
+        archive_task = self._search_archives(tenant_id, query, active_space_id, scope_chain)
 
         knowledge_candidates, entity_results, archive_result = await asyncio.gather(
             knowledge_task, entity_task, archive_task,
@@ -270,19 +295,21 @@ class RetrievalService:
         query: str,
         query_embedding: list[float],
         active_space_id: str,
+        scope_chain: list[str] | None = None,
     ) -> list[ScoredKnowledge]:
-        """Semantic search over KnowledgeEntries."""
+        """Semantic search over KnowledgeEntries. Walks scope chain."""
         from kernos.kernel.embeddings import cosine_similarity  # noqa: F811
 
         all_entries = await self.state.query_knowledge(
             tenant_id, active_only=True, limit=500
         )
 
-        # Space scoping
+        # Space scoping — include all ancestor spaces + global entries
+        _scope = set(scope_chain) if scope_chain else {active_space_id}
         entries = [
             e
             for e in all_entries
-            if e.context_space in (active_space_id, "", None)
+            if e.context_space in _scope or e.context_space in ("", None)
         ]
 
         candidates = []
@@ -303,17 +330,19 @@ class RetrievalService:
         tenant_id: str,
         query: str,
         active_space_id: str,
+        scope_chain: list[str] | None = None,
     ) -> list[EntityResult]:
-        """Search entities by name/alias match, then pull linked knowledge."""
+        """Search entities by name/alias match. Walks scope chain."""
         entities = await self.state.query_entity_nodes(
             tenant_id, active_only=True
         )
 
-        # Space scoping
+        # Space scoping — include all ancestor spaces + global entries
+        _scope = set(scope_chain) if scope_chain else {active_space_id}
         entities = [
             e
             for e in entities
-            if e.context_space in (active_space_id, "", None)
+            if e.context_space in _scope or e.context_space in ("", None)
         ]
 
         matched = []
@@ -381,48 +410,57 @@ class RetrievalService:
         tenant_id: str,
         query: str,
         active_space_id: str,
+        scope_chain: list[str] | None = None,
     ) -> str | None:
-        """Search compaction archives via the index."""
-        index_text = await self.compaction.load_index(tenant_id, active_space_id)
-        if not index_text:
-            return None
+        """Search compaction archives via the index. Walks scope chain."""
+        _chain = scope_chain or [active_space_id]
 
-        # Ask Haiku: which archive (if any) is relevant to this query?
-        result = await self.reasoning.complete_simple(
-            system_prompt=(
-                "Given this archive index and a query, determine if any archive "
-                "is relevant. If yes, return the archive number (just the digit). "
-                "If no, return 'none'. Return only the archive number or 'none'."
-            ),
-            user_content=f"Index:\n{index_text}\n\nQuery: {query}",
-            max_tokens=32,
-            prefer_cheap=True,
-        )
+        for ancestor_id in _chain:
+            index_text = await self.compaction.load_index(tenant_id, ancestor_id)
+            if not index_text:
+                continue
 
-        result = result.strip().lower()
-        if result == "none" or not result:
-            return None
+            # Ask Haiku: which archive (if any) is relevant to this query?
+            result = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Given this archive index and a query, determine if any archive "
+                    "is relevant. If yes, return the archive number (just the digit). "
+                    "If no, return 'none'. Return only the archive number or 'none'."
+                ),
+                user_content=f"Index:\n{index_text}\n\nQuery: {query}",
+                max_tokens=32,
+                prefer_cheap=True,
+            )
 
-        # Load the matching archive
-        archive_text = await self.compaction.load_archive(
-            tenant_id, active_space_id, result
-        )
-        if not archive_text:
-            return None
+            result = result.strip().lower()
+            if result == "none" or not result:
+                continue
 
-        # Second Haiku call: extract relevant section
-        extract = await self.reasoning.complete_simple(
-            system_prompt=(
-                "Extract the information relevant to this query from the archive. "
-                "Return a concise, readable summary. If nothing is relevant, "
-                "return 'nothing found'."
-            ),
-            user_content=f"Query: {query}\n\nArchive:\n{archive_text}",
-            max_tokens=800,
-            prefer_cheap=True,
-        )
+            # Load the matching archive
+            archive_text = await self.compaction.load_archive(
+                tenant_id, ancestor_id, result
+            )
+            if not archive_text:
+                continue
 
-        return extract if "nothing found" not in extract.lower() else None
+            # Second Haiku call: extract relevant section
+            extract = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Extract the information relevant to this query from the archive. "
+                    "Return a concise, readable summary. If nothing is relevant, "
+                    "return 'nothing found'."
+                ),
+                user_content=f"Query: {query}\n\nArchive:\n{archive_text}",
+                max_tokens=800,
+                prefer_cheap=True,
+            )
+
+            if extract and "nothing found" not in extract.lower():
+                if ancestor_id != active_space_id:
+                    logger.info("SCOPE_CHAIN_HIT: query=%r found_in=%s (ancestor)", query[:60], ancestor_id)
+                return extract
+
+        return None
 
     async def _collect_maybe_same_as(
         self,
