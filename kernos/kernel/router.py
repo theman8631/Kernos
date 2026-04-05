@@ -113,12 +113,16 @@ class LLMRouter:
         if not active_spaces:
             return RouterResult(tags=[], focus="", continuation=False)
 
-        # Build space list for the prompt
+        # Build space list for the prompt (with hierarchy info)
+        space_name_map_all = {s.id: s.name for s in active_spaces}
         space_lines = []
         for s in active_spaces:
             desc = s.description or "No description yet"
             default_marker = " [DEFAULT]" if s.is_default else ""
-            space_lines.append(f"- {s.id}: {s.name}{default_marker} — {desc}")
+            parent_marker = ""
+            if s.parent_id and s.parent_id in space_name_map_all:
+                parent_marker = f" [child of: {space_name_map_all[s.parent_id]}]"
+            space_lines.append(f"- {s.id}: {s.name}{default_marker}{parent_marker} — {desc}")
         space_descriptions = "\n".join(space_lines)
 
         # Build recent history with timestamps and existing tags
@@ -166,7 +170,13 @@ class LLMRouter:
             # Validate focus is a known space ID (not a topic hint)
             known_ids = {s.id for s in active_spaces}
             if focus not in known_ids:
-                focus = current_focus_id if current_focus_id in known_ids else daily_id
+                # Check aliases — LLM may have returned an old name
+                for s in active_spaces:
+                    if focus in s.aliases:
+                        focus = s.id
+                        break
+                else:
+                    focus = current_focus_id if current_focus_id in known_ids else daily_id
 
             # Ensure focus is in tags
             if focus not in tags:

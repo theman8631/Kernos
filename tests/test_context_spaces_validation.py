@@ -25,7 +25,7 @@ def _general_space(tenant_id: str, space_id: str = "space_general") -> ContextSp
     return ContextSpace(
         id=space_id, tenant_id=tenant_id, name="General",
         description="General conversation and daily life",
-        space_type="daily", status="active", is_default=True,
+        space_type="general", status="active", is_default=True,
         created_at=_now(), last_active_at=_now(),
     )
 
@@ -96,7 +96,7 @@ class TestDailyToGeneralMigration:
         old_space = ContextSpace(
             id="space_old", tenant_id=tid, name="Daily",
             description="General conversation and daily life",
-            space_type="daily", status="active", is_default=True,
+            space_type="general", status="active", is_default=True,
             created_at=_now(), last_active_at=_now(),
         )
         await state.save_context_space(old_space)

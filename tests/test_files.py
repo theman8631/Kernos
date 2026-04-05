@@ -465,7 +465,7 @@ class TestCompactionManifestInjection:
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
             id=SPACE_A, tenant_id=TENANT, name="General",
-            description="General space", space_type="daily",
+            description="General space", space_type="general",
         )
 
         comp_state = CompactionState(

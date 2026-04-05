@@ -821,24 +821,27 @@ async def test_tier2_extraction_populates_lifecycle_archetype(tmp_path):
 
 def test_context_space_defaults():
     space = ContextSpace(id="space_abc123", tenant_id="t1", name="General")
-    assert space.space_type == "daily"
+    assert space.space_type == "general"
     assert space.status == "active"
     assert space.is_default is False
     assert space.description == ""
     assert space.posture == ""
+    assert space.parent_id == ""
+    assert space.aliases == []
+    assert space.depth == 0
 
 
-def test_context_space_daily_default():
+def test_context_space_general_default():
     space = ContextSpace(
         id="space_abc123", tenant_id="t1", name="General",
-        space_type="daily", is_default=True,
+        space_type="general", is_default=True,
     )
     assert space.is_default is True
-    assert space.space_type == "daily"
+    assert space.space_type == "general"
 
 
 def test_context_space_all_types_accepted():
-    for space_type in ("daily", "project", "domain", "managed_resource"):
+    for space_type in ("general", "domain", "subdomain", "system"):
         s = ContextSpace(id="space_x", tenant_id="t", name="Test", space_type=space_type)
         assert s.space_type == space_type
 
@@ -954,7 +957,7 @@ async def test_handler_creates_daily_space_for_new_tenant(tmp_path):
     assert len(daily_spaces) == 1
     daily = daily_spaces[0]
     assert daily.is_default is True
-    assert daily.space_type == "daily"
+    assert daily.space_type == "general"
     assert daily.name == "General"
     assert daily.tenant_id == "t1"
     system_spaces = [s for s in spaces if s.space_type == "system"]

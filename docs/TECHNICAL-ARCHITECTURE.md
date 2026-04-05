@@ -455,9 +455,13 @@ Three-layer defense against storing conversation-specific facts as durable knowl
 - **Gate 1:** After each routing call, tags not matching known space IDs are counted as topic hints (`topic_hints.json`). At threshold (15 messages), Gate 2 fires asynchronously.
 - **Gate 2:** One LLM call (Haiku) evaluates whether the accumulated messages represent a real recurring domain or a one-off topic. If yes: creates a new ContextSpace with generated name and description, emits `context.space.created`, clears hint. Gate 2 schema includes `recommended_tools: list[str]` — capability names the LLM recommends for this domain. Recommended names that match CONNECTED capabilities are seeded into the new space's `active_tools`. If no: clears hint to avoid re-triggering soon.
 
-**LRU Sunset:** Hard cap of 40 active non-default spaces. When Gate 2 creates a space at the cap, the least recently used (by `last_active_at`) non-default space is archived — thread preserved on disk, removed from router's active list. Daily space is never archived.
+**Hierarchy (CS-2):** ContextSpace has `parent_id`, `aliases: list[str]`, and `depth: int`. Root spaces (General) have depth 0. Domains created from General have depth 1. Subdomains have depth 2. Router prompt includes `[child of: ParentName]` markers. Alias matching resolves renamed spaces (e.g., "D&D Campaign" → current "D&D Live Play" space ID).
 
-**Session exit maintenance:** When focus shifts away from a non-daily space (space switch detected), `_run_session_exit()` fires asynchronously. Requires 3+ messages tagged to that space. One Haiku call reviews the session and updates the space's name and description. Spaces get smarter about themselves over time.
+**Domain assessment at compaction:** After compaction completes on a general or domain space (depth < 2), a cheap LLM call assesses whether the compacted conversation constitutes a coherent, recurring domain. Only HIGH confidence creates a new space. The new domain gets `parent_id` pointing to the originating space and a reference-based origin document (no content duplication). space_type values: `"general"` (root), `"domain"` (Level 1), `"subdomain"` (Level 2), `"system"`.
+
+**LRU Sunset:** Hard cap of 40 active non-default spaces. When Gate 2 creates a space at the cap, the least recently used (by `last_active_at`) non-default space is archived — thread preserved on disk, removed from router's active list. General space is never archived.
+
+**Session exit maintenance:** When focus shifts away from a non-default space (space switch detected), `_run_session_exit()` fires asynchronously. Requires 3+ messages tagged to that space. One Haiku call reviews the session and updates the space's name and description. Spaces get smarter about themselves over time.
 
 **Posture injection:** Non-daily spaces with a `posture` field get it injected into the system prompt after the personality layer, with a "does not override core values" boundary label.
 
@@ -898,7 +902,7 @@ In-memory queue (`_pending_system_events`) for internal notifications. Events fr
 
 **IdentityEdge:** source_id, target_id, edge_type (SAME_AS/MAYBE_SAME_AS/ALIAS_OF), confidence, created_at, source. Stored per-tenant in `{tenant_id}/state/identity_edges.json`.
 
-**ContextSpace:** id, tenant_id, name, description, space_type (daily/domain/project/system), status (active/archived), posture, model_preference, is_default, created_at, last_active_at, max_file_size_bytes, max_space_bytes, `active_tools: list[str]` (Phase 3B — capability names explicitly enabled for this space).
+**ContextSpace:** id, tenant_id, name, description, space_type (general/domain/subdomain/system), status (active/archived), posture, model_preference, is_default, created_at, last_active_at, max_file_size_bytes, max_space_bytes, `active_tools: list[str]` (Phase 3B), `parent_id: str` (CS-2 — empty for root), `aliases: list[str]` (CS-2 — previous names), `depth: int` (CS-2 ��� 0=root, 1=domain, 2=subdomain).
 
 **ContractRule:** id, tenant_id, capability, rule_type (must/must_not/preference/escalation), description, active, source (default/user_stated/evolved), context_space (reserved, always None in Phase 1B).
 

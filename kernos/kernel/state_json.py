@@ -83,6 +83,7 @@ _CONTEXT_SPACE_FIELDS = {
     "id", "tenant_id", "name", "description", "space_type", "status",
     "posture", "model_preference", "created_at", "last_active_at", "is_default",
     "max_file_size_bytes", "max_space_bytes", "active_tools",
+    "parent_id", "aliases", "depth",
 }
 
 
@@ -95,6 +96,11 @@ def _load_context_space(d: dict) -> ContextSpace:
     filtered = {k: v for k, v in d.items() if k in _CONTEXT_SPACE_FIELDS}
     if "active_tools" not in filtered:
         filtered["active_tools"] = []
+    if "aliases" not in filtered:
+        filtered["aliases"] = []
+    # Migrate legacy "daily" space_type to "general"
+    if filtered.get("space_type") == "daily":
+        filtered["space_type"] = "general"
     return ContextSpace(**filtered)
 
 

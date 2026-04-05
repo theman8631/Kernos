@@ -1165,7 +1165,7 @@ class MessageHandler:
                 tenant_id=tenant_id,
                 name="General",
                 description="General conversation and daily life",
-                space_type="daily",
+                space_type="general",
                 status="active",
                 is_default=True,
                 created_at=now,
@@ -1826,6 +1826,180 @@ class MessageHandler:
                 )
         except Exception as exc:
             logger.warning("Gate 2 failed for hint '%s': %s", topic_hint, exc)
+
+    # --- Domain assessment (CS-2) ---
+
+    DOMAIN_ASSESSMENT_SCHEMA: dict = {
+        "type": "object",
+        "properties": {
+            "create_domain": {"type": "boolean"},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "reasoning": {"type": "string"},
+        },
+        "required": ["create_domain", "confidence", "name", "description", "reasoning"],
+        "additionalProperties": False,
+    }
+
+    async def _assess_domain_creation(
+        self, tenant_id: str, space_id: str, space: ContextSpace, comp_state: "CompactionState",
+    ) -> None:
+        """Assess whether compacted conversation constitutes a new domain.
+
+        Runs after compaction completes. Only HIGH confidence creates domains.
+        """
+        import uuid as _uuid
+        import json as _json
+
+        # Only assess from general or parent spaces (depth < 2)
+        if space.space_type not in ("general", "domain"):
+            return
+        if space.depth >= 2:
+            return
+
+        # Load the freshly compacted document
+        doc = await self.compaction.load_document(tenant_id, space_id)
+        if not doc:
+            return
+
+        # Build existing space list for context
+        all_spaces = await self.state.list_context_spaces(tenant_id)
+        existing = [
+            f"- {s.name} ({s.space_type}, depth={s.depth})"
+            for s in all_spaces if s.status == "active" and s.space_type != "system"
+        ]
+
+        child_type = "domain" if space.depth == 0 else "subdomain"
+
+        try:
+            result_str = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "You are assessing whether a conversation belongs in its own "
+                    f"dedicated context {child_type}, or should remain in the current space.\n\n"
+                    "Only create on HIGH confidence. A domain should:\n"
+                    "- Have clear internal coherence (not a grab-bag)\n"
+                    "- Likely recur in future conversations\n"
+                    "- Benefit from isolated context (for BOTH domain AND parent)\n"
+                    "- Have a stable, clear label\n\n"
+                    "A single conversation about a topic is NOT enough. "
+                    "The topic must have depth and likely recurrence.\n"
+                    '"D&D Campaign" is a domain. "Random questions" is not.'
+                ),
+                user_content=(
+                    f"Current space: {space.name} (depth={space.depth})\n"
+                    f"Existing spaces:\n" + ("\n".join(existing) or "(none)") + "\n\n"
+                    f"Compaction summary:\n{doc[:3000]}"
+                ),
+                output_schema=self.DOMAIN_ASSESSMENT_SCHEMA,
+                max_tokens=256,
+                prefer_cheap=True,
+            )
+            parsed = _json.loads(result_str)
+
+            if not parsed.get("create_domain"):
+                logger.info(
+                    "DOMAIN_ASSESS: space=%s result=keep confidence=%s reason=%r",
+                    space_id, parsed.get("confidence", "?"), parsed.get("reasoning", ""),
+                )
+                return
+
+            if parsed.get("confidence") != "high":
+                logger.info(
+                    "DOMAIN_ASSESS: space=%s result=skip_low_confidence confidence=%s",
+                    space_id, parsed.get("confidence", "?"),
+                )
+                return
+
+            # Check we're not duplicating an existing space
+            new_name = parsed.get("name", "").strip()
+            if not new_name:
+                return
+            for s in all_spaces:
+                if s.name.lower() == new_name.lower() or new_name.lower() in [a.lower() for a in s.aliases]:
+                    logger.info("DOMAIN_ASSESS: space=%s result=duplicate name=%s existing=%s", space_id, new_name, s.id)
+                    return
+
+            # Enforce space cap
+            await self._enforce_space_cap(tenant_id)
+
+            now = utc_now()
+            new_space = ContextSpace(
+                id=f"space_{_uuid.uuid4().hex[:8]}",
+                tenant_id=tenant_id,
+                name=new_name,
+                description=parsed.get("description", ""),
+                space_type=child_type,
+                status="active",
+                is_default=False,
+                parent_id=space_id,
+                depth=space.depth + 1,
+                created_at=now,
+                last_active_at=now,
+            )
+            await self.state.save_context_space(new_space)
+
+            # Initialize compaction state with reference-based origin
+            try:
+                from kernos.kernel.compaction import (
+                    CompactionState as _CS,
+                    compute_document_budget,
+                    estimate_headroom,
+                    MODEL_MAX_TOKENS,
+                    COMPACTION_MODEL_USABLE_TOKENS,
+                    COMPACTION_INSTRUCTION_TOKENS,
+                )
+                headroom = await estimate_headroom(self.reasoning, new_space)
+                context_def = (
+                    f"Space: {new_space.name}\nType: {new_space.space_type}\n"
+                    f"Description: {new_space.description}\nPosture: {new_space.posture}\n"
+                )
+                context_def_tokens = await self.compaction.adapter.count_tokens(context_def)
+                system_overhead = 4000
+                doc_budget = compute_document_budget(
+                    MODEL_MAX_TOKENS, system_overhead, 0, headroom
+                )
+                new_comp = _CS(
+                    space_id=new_space.id,
+                    conversation_headroom=headroom,
+                    document_budget=doc_budget,
+                    message_ceiling=min(
+                        doc_budget,
+                        COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS - context_def_tokens,
+                    ),
+                    _context_def_tokens=context_def_tokens,
+                    _system_overhead=system_overhead,
+                )
+                await self.compaction.save_state(tenant_id, new_space.id, new_comp)
+
+                # Write reference-based origin document
+                origin_doc = (
+                    f"## Origin\n"
+                    f"This domain originated from {space.name}, "
+                    f"compaction #{comp_state.global_compaction_number}.\n"
+                    f"Use remember() to retrieve historical context from the parent.\n"
+                )
+                origin_path = self.compaction._space_dir(tenant_id, new_space.id) / "active_document.md"
+                origin_path.parent.mkdir(parents=True, exist_ok=True)
+                origin_path.write_text(origin_doc, encoding="utf-8")
+            except Exception as exc:
+                logger.warning("Failed to init compaction for domain %s: %s", new_space.id, exc)
+
+            try:
+                from kernos.kernel.event_types import EventType as _ET
+                await emit_event(self.events, _ET.CONTEXT_SPACE_CREATED, tenant_id, "domain_assessment",
+                    payload={"space_id": new_space.id, "name": new_space.name,
+                             "description": new_space.description, "parent_id": space_id,
+                             "depth": new_space.depth})
+            except Exception:
+                pass
+
+            logger.info(
+                "DOMAIN_CREATE: space=%s name=%s parent=%s depth=%d confidence=%s",
+                new_space.id, new_space.name, space_id, new_space.depth, parsed.get("confidence"),
+            )
+        except Exception as exc:
+            logger.warning("DOMAIN_ASSESS: failed for space=%s: %s", space_id, exc)
 
     async def _update_conversation_summary(
         self, tenant_id: str, conversation_id: str, platform: str
@@ -2913,6 +3087,13 @@ class MessageHandler:
                                     comp_state.last_compaction_failure_at = ""
                                     logger.info("COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
                                         ctx.active_space_id, old_num, new_num)
+                                    # Domain assessment — async, non-blocking
+                                    try:
+                                        import asyncio as _aio
+                                        _aio.create_task(self._assess_domain_creation(
+                                            tenant_id, ctx.active_space_id, ctx.active_space, comp_state))
+                                    except Exception as _dax:
+                                        logger.warning("DOMAIN_ASSESS: launch failed: %s", _dax)
                                 finally:
                                     self._compacting.discard(ctx.active_space_id)
                         else:
