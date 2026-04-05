@@ -170,9 +170,12 @@ async def harvest_facts(
                 subject=item.get("subject", "user"),
                 content=content,
                 confidence=item.get("confidence", "inferred"),
-                lifecycle_archetype=item.get("archetype", "structural"),
+                source_event_id="",
                 source_description="boundary_fact_harvest",
                 created_at=utc_now(),
+                last_referenced=utc_now(),
+                tags=[],
+                lifecycle_archetype=item.get("archetype", "structural"),
                 valid_at=utc_now(),
             )
             await state_store.add_knowledge(entry)
