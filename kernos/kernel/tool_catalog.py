@@ -30,6 +30,7 @@ COMMON_TOOL_NAMES: set[str] = {
     "read_doc",
     "manage_capabilities",
     "request_tool",
+    "execute_code",
 }
 
 # Kernel tools that are always in context (not in the catalog — always surfaced)

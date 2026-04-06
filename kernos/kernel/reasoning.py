@@ -357,7 +357,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -436,6 +436,19 @@ class ReasoningService:
                         tool_input.get("name", ""),
                     )
                 return "File system is not available."
+            elif tool_name == "execute_code":
+                import json as _json
+                from kernos.kernel.code_exec import execute_code as _exec_code
+                data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                result = await _exec_code(
+                    tenant_id=request.tenant_id,
+                    space_id=request.active_space_id,
+                    code=tool_input.get("code", ""),
+                    timeout_seconds=tool_input.get("timeout_seconds", 30),
+                    write_file_name=tool_input.get("write_file"),
+                    data_dir=data_dir,
+                )
+                return _json.dumps(result)
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
@@ -830,6 +843,23 @@ class ReasoningService:
                         result = "File deletion failed — try again."
                 else:
                     result = "File system is not available right now."
+            elif block.name == "execute_code":
+                try:
+                    import json as _json
+                    from kernos.kernel.code_exec import execute_code as _exec_code
+                    _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                    _exec_result = await _exec_code(
+                        tenant_id=request.tenant_id,
+                        space_id=request.active_space_id,
+                        code=tool_args.get("code", ""),
+                        timeout_seconds=tool_args.get("timeout_seconds", 30),
+                        write_file_name=tool_args.get("write_file"),
+                        data_dir=_data_dir,
+                    )
+                    result = _json.dumps(_exec_result)
+                except Exception as exc:
+                    logger.warning("Kernel tool 'execute_code' failed: %s", exc)
+                    result = f"Code execution failed: {exc}"
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(

@@ -611,6 +611,7 @@ class MessageHandler:
             "send_to_channel": "Send a message to an outbound channel (SMS, etc.)",
             "manage_schedule": "View and manage scheduled triggers and automations",
             "inspect_state": "View active preferences, triggers, and rules",
+            "execute_code": "Execute Python code in a sandboxed environment for building tools and running computations",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -3098,12 +3099,13 @@ class MessageHandler:
         from kernos.kernel.channels import MANAGE_CHANNELS_TOOL, SEND_TO_CHANNEL_TOOL
         from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
         from kernos.kernel.tools import INSPECT_STATE_TOOL
+        from kernos.kernel.code_exec import EXECUTE_CODE_TOOL
         _all_kernel = FILE_TOOLS + [REQUEST_TOOL, READ_DOC_TOOL, DISMISS_WHISPER_TOOL,
                                 MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL,
                                 READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL,
                                 MANAGE_COVENANTS_TOOL, MANAGE_CHANNELS_TOOL,
                                 SEND_TO_CHANNEL_TOOL, MANAGE_SCHEDULE_TOOL,
-                                INSPECT_STATE_TOOL]
+                                INSPECT_STATE_TOOL, EXECUTE_CODE_TOOL]
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)

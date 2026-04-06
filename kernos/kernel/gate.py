@@ -83,6 +83,7 @@ class DispatchGate:
         _KERNEL_WRITES = {
             "write_file", "delete_file", "manage_covenants",
             "update_soul", "manage_capabilities", "send_to_channel",
+            "execute_code",
         }
 
         if tool_name in _KERNEL_READS:
