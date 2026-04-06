@@ -64,7 +64,9 @@ MANAGE_WORKSPACE_TOOL = {
         "Manage workspace artifacts. List what's been built in this space, "
         "add new artifacts to the manifest after building them with execute_code, "
         "update versions after modifications, or archive artifacts. "
-        "Use this to track everything you build."
+        "Tracks both TOOLS (callable capabilities registered in the catalog) "
+        "and PROJECTS (bodies of work like books, websites, business plans — "
+        "structured files that persist across sessions, not registered as tools)."
     ),
     "input_schema": {
         "type": "object",
@@ -201,14 +203,27 @@ class WorkspaceManager:
         if not active:
             return "No artifacts built in this space yet. Use execute_code to build something."
 
-        lines = [f"**Workspace Artifacts** ({len(active)})\n"]
-        for a in active:
-            registered = f" [registered as: {a.catalog_entry}]" if a.catalog_entry else " [not registered]"
-            lines.append(
-                f"- **{a.name}** ({a.type}, v{a.version}){registered}\n"
-                f"  {a.description}\n"
-                f"  Files: {', '.join(f'{k}={v}' for k, v in a.files.items())}"
-            )
+        tools = [a for a in active if a.type in ("data_tool", "script")]
+        projects = [a for a in active if a.type == "project"]
+
+        lines = [f"**Workspace** ({len(active)} artifacts)\n"]
+        if tools:
+            lines.append("**Tools:**")
+            for a in tools:
+                registered = f" [catalog: {a.catalog_entry}]" if a.catalog_entry else " [not yet registered]"
+                lines.append(
+                    f"- **{a.name}** ({a.type}, v{a.version}){registered}\n"
+                    f"  {a.description}\n"
+                    f"  Files: {', '.join(f'{k}={v}' for k, v in a.files.items() if v)}"
+                )
+        if projects:
+            lines.append("\n**Projects:**")
+            for a in projects:
+                lines.append(
+                    f"- **{a.name}** (v{a.version})\n"
+                    f"  {a.description}\n"
+                    f"  Files: {', '.join(f'{k}={v}' for k, v in a.files.items() if v)}"
+                )
         return "\n".join(lines)
 
     async def add_artifact(
