@@ -312,7 +312,11 @@ class WorkspaceManager:
         """
         space_dir = self._space_dir(tenant_id, space_id)
 
-        # 1. Load descriptor
+        # 1. Validate descriptor filename (no path traversal)
+        if "/" in descriptor_file or "\\" in descriptor_file or ".." in descriptor_file:
+            return "Descriptor filename must not contain path separators or '..'."
+
+        # 2. Load descriptor
         desc_path = space_dir / descriptor_file
         if not desc_path.exists():
             return f"Descriptor file '{descriptor_file}' not found in space directory."
@@ -322,7 +326,7 @@ class WorkspaceManager:
         except json.JSONDecodeError as exc:
             return f"Invalid JSON in descriptor: {exc}"
 
-        # 2. Validate required fields
+        # 3. Validate required fields
         required = ["name", "description", "input_schema", "implementation"]
         missing = [f for f in required if f not in descriptor]
         if missing:
@@ -331,20 +335,25 @@ class WorkspaceManager:
         name = descriptor["name"]
         impl = descriptor["implementation"]
 
-        # 3. Validate name (snake_case, no special chars)
-        if not re.match(r'^[a-z][a-z0-9_]*$', name):
-            return f"Tool name '{name}' must be snake_case (lowercase, underscores only)."
+        # 4. Validate name (snake_case, no special chars)
+        if not name or not re.match(r'^[a-z][a-z0-9_]*$', name):
+            return f"Tool name '{name}' must be snake_case (lowercase letters, digits, underscores)."
 
-        # 4. Check implementation exists
+        # 5. Validate implementation filename (no traversal, must be .py)
+        if "/" in impl or "\\" in impl or ".." in impl:
+            return "Implementation filename must not contain path separators or '..'."
+        if not impl.endswith(".py"):
+            return f"Implementation '{impl}' must be a .py file."
+
+        # 6. Check implementation exists and is a file
         impl_path = space_dir / impl
-        if not impl_path.exists():
+        if not impl_path.is_file():
             return f"Implementation file '{impl}' not found."
 
-        # 5. Check name uniqueness in catalog
-        if self._catalog and self._catalog.get(name):
-            existing = self._catalog.get(name)
-            if existing.source != "workspace":
-                return f"Name '{name}' conflicts with an existing {existing.source} tool."
+        # 7. Check name uniqueness in catalog
+        existing = self._catalog.get(name) if self._catalog else None
+        if existing and existing.source != "workspace":
+            return f"Name '{name}' conflicts with an existing {existing.source} tool."
 
         # 6. Validate input_schema
         schema = descriptor.get("input_schema", {})
@@ -407,15 +416,28 @@ class WorkspaceManager:
         if not home_space or not implementation:
             return json.dumps({"error": f"Tool '{tool_name}' missing home_space or implementation"})
 
-        # Build execution code that imports and calls the tool's execute() function
+        # Validate implementation filename
+        if "/" in implementation or "\\" in implementation or ".." in implementation:
+            return json.dumps({"error": "Implementation path contains traversal sequences"})
+        if not implementation.endswith(".py"):
+            return json.dumps({"error": "Implementation must be a .py file"})
+
+        # Write input data to a temp file to avoid shell escaping issues
+        space_dir = self._space_dir(tenant_id, home_space)
+        input_file = space_dir / "_tool_input.json"
+        space_dir.mkdir(parents=True, exist_ok=True)
+        input_file.write_text(json.dumps(tool_input), encoding="utf-8")
+
         module_name = implementation.replace(".py", "")
-        input_json = json.dumps(tool_input).replace("\\", "\\\\").replace("'", "\\'")
         exec_code = (
-            f"import json, sys\n"
-            f"sys.path.insert(0, '.')\n"
+            "import json, sys, os\n"
+            "sys.path.insert(0, '.')\n"
             f"from {module_name} import execute\n"
-            f"result = execute(json.loads('{input_json}'))\n"
-            f"print(json.dumps(result))\n"
+            "with open('_tool_input.json') as f:\n"
+            "    input_data = json.load(f)\n"
+            "os.unlink('_tool_input.json')\n"
+            "result = execute(input_data)\n"
+            "print(json.dumps(result))\n"
         )
 
         from kernos.kernel.code_exec import execute_code

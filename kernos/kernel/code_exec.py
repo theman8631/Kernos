@@ -175,5 +175,5 @@ async def execute_code(
         if is_temp and exec_path and os.path.exists(exec_path):
             try:
                 os.unlink(exec_path)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("CODE_EXEC_CLEANUP: failed to delete %s: %s", exec_path, exc)
