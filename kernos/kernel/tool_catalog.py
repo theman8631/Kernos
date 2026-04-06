@@ -14,8 +14,12 @@ class CatalogEntry:
     """A tool in the universal catalog."""
     name: str              # tool name (unique)
     description: str       # one-line description for surfacer
-    source: str            # "kernel" | "mcp:{server}" | "workspace"
+    source: str            # "kernel" | "mcp" | "workspace"
     registered_at: str = ""
+    # Workspace tool metadata (populated for source="workspace")
+    home_space: str = ""         # space where this tool's data lives
+    implementation: str = ""     # Python file implementing execute()
+    stateful: bool = True        # whether tool needs home space for execution
 
 
 # Common tools loaded every turn without LLM call (Tier 1)
@@ -100,6 +104,11 @@ class ToolCatalog:
             if entry.name not in _exclude:
                 lines.append(f"- {entry.name}: {entry.description}")
         return "\n".join(lines)
+
+    def has_workspace_tool(self, name: str) -> bool:
+        """Check if a tool is a registered workspace tool."""
+        entry = self._entries.get(name)
+        return entry is not None and entry.source == "workspace"
 
     def get_tools_since_version(self, since_version: int) -> list[CatalogEntry]:
         """Get tools added since a given version. Approximation: returns all if version gap exists."""

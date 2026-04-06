@@ -589,6 +589,14 @@ class MessageHandler:
         self._tool_catalog = ToolCatalog()
         self._register_kernel_tools_in_catalog()
 
+        # Workspace manager — artifact lifecycle, tool registration, lazy manifest loading
+        from kernos.kernel.workspace import WorkspaceManager
+        self._workspace = WorkspaceManager(
+            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+            catalog=self._tool_catalog,
+        )
+        reasoning.set_workspace(self._workspace)
+
     def _register_kernel_tools_in_catalog(self) -> None:
         """Register kernel tools in the universal catalog at boot."""
         from kernos.kernel.tool_catalog import ALWAYS_SURFACE_KERNEL
@@ -612,6 +620,8 @@ class MessageHandler:
             "manage_schedule": "View and manage scheduled triggers and automations",
             "inspect_state": "View active preferences, triggers, and rules",
             "execute_code": "Execute Python code in a sandboxed environment for building tools and running computations",
+            "manage_workspace": "Manage workspace artifacts — list, add, update, or archive built tools and scripts",
+            "register_tool": "Register a workspace-built tool in the universal catalog from a .tool.json descriptor",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -2972,6 +2982,11 @@ class MessageHandler:
         if ctx.active_space and ctx.active_space_id:
             await self.state.update_context_space(tenant_id, ctx.active_space_id,
                 {"last_active_at": utc_now(), "status": "active"})
+            # Lazy workspace registration — ensure built tools are in the catalog
+            try:
+                await self._workspace.ensure_registered(tenant_id, ctx.active_space_id)
+            except Exception as exc:
+                logger.warning("WORKSPACE: lazy registration failed for %s: %s", ctx.active_space_id, exc)
 
         if message.context and ctx.active_space_id:
             for att in message.context.get("attachments", []):
@@ -3100,12 +3115,14 @@ class MessageHandler:
         from kernos.kernel.scheduler import MANAGE_SCHEDULE_TOOL
         from kernos.kernel.tools import INSPECT_STATE_TOOL
         from kernos.kernel.code_exec import EXECUTE_CODE_TOOL
+        from kernos.kernel.workspace import MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL
         _all_kernel = FILE_TOOLS + [REQUEST_TOOL, READ_DOC_TOOL, DISMISS_WHISPER_TOOL,
                                 MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL,
                                 READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL,
                                 MANAGE_COVENANTS_TOOL, MANAGE_CHANNELS_TOOL,
                                 SEND_TO_CHANNEL_TOOL, MANAGE_SCHEDULE_TOOL,
-                                INSPECT_STATE_TOOL, EXECUTE_CODE_TOOL]
+                                INSPECT_STATE_TOOL, EXECUTE_CODE_TOOL,
+                                MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL]
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)

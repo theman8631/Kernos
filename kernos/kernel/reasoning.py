@@ -228,6 +228,10 @@ class ReasoningService:
         """Wire up the capability registry for request_tool routing."""
         self._registry = registry
 
+    def set_workspace(self, workspace: Any) -> None:
+        """Wire up the workspace manager for manage_workspace/register_tool."""
+        self._workspace = workspace
+
     def set_state(self, state: Any) -> None:
         """Wire up the state store for request_tool activation."""
         self._state = state
@@ -357,7 +361,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -449,6 +453,24 @@ class ReasoningService:
                     data_dir=data_dir,
                 )
                 return _json.dumps(result)
+            elif tool_name == "manage_workspace":
+                if self._workspace:
+                    action = tool_input.get("action", "list")
+                    if action == "list":
+                        return await self._workspace.list_artifacts(request.tenant_id, request.active_space_id)
+                    elif action == "add":
+                        msg, _ = await self._workspace.add_artifact(request.tenant_id, request.active_space_id, tool_input.get("artifact", {}))
+                        return msg
+                    elif action == "update":
+                        return await self._workspace.update_artifact(request.tenant_id, request.active_space_id, tool_input.get("artifact_id", ""), tool_input.get("artifact", {}))
+                    elif action == "archive":
+                        return await self._workspace.archive_artifact(request.tenant_id, request.active_space_id, tool_input.get("artifact_id", ""))
+                    return f"Unknown action: {action}"
+                return "Workspace manager is not available."
+            elif tool_name == "register_tool":
+                if self._workspace:
+                    return await self._workspace.register_tool(request.tenant_id, request.active_space_id, tool_input.get("descriptor_file", ""))
+                return "Workspace manager is not available."
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
@@ -860,6 +882,35 @@ class ReasoningService:
                 except Exception as exc:
                     logger.warning("Kernel tool 'execute_code' failed: %s", exc)
                     result = f"Code execution failed: {exc}"
+            elif block.name == "manage_workspace":
+                if hasattr(self, '_workspace') and self._workspace:
+                    try:
+                        action = tool_args.get("action", "list")
+                        if action == "list":
+                            result = await self._workspace.list_artifacts(request.tenant_id, request.active_space_id)
+                        elif action == "add":
+                            msg, _ = await self._workspace.add_artifact(request.tenant_id, request.active_space_id, tool_args.get("artifact", {}))
+                            result = msg
+                        elif action == "update":
+                            result = await self._workspace.update_artifact(request.tenant_id, request.active_space_id, tool_args.get("artifact_id", ""), tool_args.get("artifact", {}))
+                        elif action == "archive":
+                            result = await self._workspace.archive_artifact(request.tenant_id, request.active_space_id, tool_args.get("artifact_id", ""))
+                        else:
+                            result = f"Unknown action: {action}"
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'manage_workspace' failed: %s", exc)
+                        result = f"Workspace operation failed: {exc}"
+                else:
+                    result = "Workspace manager is not available."
+            elif block.name == "register_tool":
+                if hasattr(self, '_workspace') and self._workspace:
+                    try:
+                        result = await self._workspace.register_tool(request.tenant_id, request.active_space_id, tool_args.get("descriptor_file", ""))
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'register_tool' failed: %s", exc)
+                        result = f"Registration failed: {exc}"
+                else:
+                    result = "Workspace manager is not available."
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(
@@ -1073,6 +1124,20 @@ class ReasoningService:
                         "TOOL_LOAD: tool=%s space=%s (not in list, schema loaded)",
                         block.name, request.active_space_id,
                     )
+                elif hasattr(self, '_workspace') and self._workspace and self._workspace._catalog and self._workspace._catalog.has_workspace_tool(block.name):
+                    # Workspace tool — dispatch via workspace manager
+                    _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                    result = await self._workspace.execute_workspace_tool(
+                        request.tenant_id, block.name, tool_input, _data_dir)
+                    logger.info("TOOL_DISPATCH: name=%s type=workspace", block.name)
+                    tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
+                    logger.info("AGENT_RESULT: tool=%s success=%s preview=%s",
+                        block.name, "error" not in result.lower()[:50], result[:100])
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    }
                 else:
                     result = f"Tool '{block.name}' is not available."
                     tool_duration_ms = int((time.monotonic() - t_tool) * 1000)

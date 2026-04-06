@@ -99,6 +99,11 @@ class DispatchGate:
             return "read" if action == "list" else "soft_write"
         if tool_name == "manage_schedule":
             return "read"
+        if tool_name == "manage_workspace":
+            action = (tool_input or {}).get("action", "list")
+            return "read" if action == "list" else "soft_write"
+        if tool_name == "register_tool":
+            return "soft_write"
         if tool_name in _KERNEL_WRITES:
             return "soft_write"
 

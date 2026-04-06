@@ -268,6 +268,14 @@ Session continuity: already-loaded tools persist through the session.
 
 **Code Execution Engine (AW-1):** `kernos/kernel/code_exec.py` — `execute_code` kernel tool runs Python code in a sandboxed subprocess. Hard security walls: clean environment (no API keys, no parent env inheritance), cwd scoped to space's files directory, PYTHONPATH restricted, no Kernos internals access. Soft limits: timeout (default 30s, max 300s), output budget (stdout 4000 chars, stderr 2000). Optional `write_file` parameter persists code as a named file before execution. Gate classifies as `soft_write` — reactive to user intent. Tier 1 common tool — always available in every space.
 
+**Agentic Workspace (AW-2/3/4):** `kernos/kernel/workspace.py` — `WorkspaceManager` owns the manifest, artifact lifecycle, and tool registration.
+
+- **Manifest:** `workspace_manifest.json` per space tracks all built artifacts following Kit's four-layer model (Artifact → Descriptor → Surface → Store). Artifacts are versioned (integer counter), support active/archived status (no destructive deletion).
+- **Tool Registration:** `register_tool` kernel tool validates a `.tool.json` descriptor (name, description, input_schema, implementation) and registers the tool in the universal ToolCatalog with `source="workspace"`. Auto-adds to manifest. Descriptor is the single source of truth.
+- **Workspace Tool Dispatch:** When the agent calls a registered workspace tool by name, the reasoning loop detects it's not a kernel or MCP tool, looks up the CatalogEntry, and executes the implementation's `execute(input_data) → dict` function via `execute_code` in the tool's home space.
+- **Lazy Registration:** Manifests load on space entry (not at boot). `ensure_registered()` in `_phase_route` checks for unregistered artifacts and registers them in the catalog. No cost for unvisited spaces.
+- **Builder Flow (AW-4):** The agent builds tools in-conversation using `execute_code` (write + test), `register_tool` (register), and `manage_workspace` (track). Build fast, iterate from feedback. Operating principles guide the agent to propose building when no tool matches a request.
+
 **Hallucination detection and corrective retry:** After `reason()` completes, if `iterations==0` and `stop_reason=="end_turn"` and the response text contains tool-claiming phrases, `HALLUCINATION_CHECK` fires. Instead of tagging the response, the system injects a corrective system message ("Do NOT claim actions were completed without calling the tool") and retries the LLM call. If the retry succeeds (honest response or actual tool call), the corrected response is used. If both attempts fabricate, the user sees an honest failure: "I tried to do that but wasn't able to execute the action."
 
 **Structured trace logging:** INFO-level grep-able prefixes. Timestamps on every line (`HH:MM:SS`). Prefixes:
