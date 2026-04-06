@@ -391,8 +391,22 @@ def _build_state_block(
     if soul.user_name:
         user_parts.append(f"User's name: {soul.user_name}")
     if user_knowledge_entries:
+        _SOURCE_TAGS = {
+            "identity": "stated", "habitual": "observed",
+            "structural": "established", "episodic": "remembered",
+            "contextual": "recent",
+        }
+        seen_content: set[str] = set()
         for entry in user_knowledge_entries:
-            user_parts.append(entry.content)
+            normalized = entry.content.strip().lower()
+            if normalized in seen_content:
+                continue
+            # Filter out entries that confuse agent identity with user identity
+            if agent_name.lower() in normalized and "user" in normalized and "name" in normalized:
+                continue
+            seen_content.add(normalized)
+            tag = _SOURCE_TAGS.get(getattr(entry, "lifecycle_archetype", ""), "known")
+            user_parts.append(f"{entry.content} [{tag}]")
     if soul.communication_style:
         user_parts.append(f"Communication style: {soul.communication_style}")
     if user_parts:
@@ -1888,12 +1902,17 @@ class MessageHandler:
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
             "name": {"type": "string"},
             "description": {"type": "string"},
+            "posture": {"type": "string",
+                        "description": "Brief working style for this domain. "
+                        "How should the agent approach work here? One sentence. "
+                        "Examples: 'Creative and improvisational', "
+                        "'Precise and action-oriented', 'Warm and supportive'."},
             "reasoning": {"type": "string"},
             "rename": {"type": "boolean"},
             "new_name": {"type": "string"},
             "rename_evidence": {"type": "string"},
         },
-        "required": ["create_domain", "confidence", "name", "description", "reasoning", "rename", "new_name", "rename_evidence"],
+        "required": ["create_domain", "confidence", "name", "description", "posture", "reasoning", "rename", "new_name", "rename_evidence"],
         "additionalProperties": False,
     }
 
@@ -2009,6 +2028,7 @@ class MessageHandler:
                 tenant_id=tenant_id,
                 name=new_name,
                 description=parsed.get("description", ""),
+                posture=parsed.get("posture", ""),
                 space_type=child_type,
                 status="active",
                 is_default=False,
