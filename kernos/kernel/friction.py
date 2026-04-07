@@ -16,8 +16,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Preference-shaped language patterns (signal 7)
+# These must be specific enough to avoid matching roleplay/narrative text.
+# "Never" alone is too broad — requires a behavioral verb after it.
 _PREF_PATTERNS = [
-    re.compile(r"\b(from now on|always|never|every time|whenever|each time)\b", re.I),
+    re.compile(r"\b(from now on|every time|whenever|each time)\b", re.I),
+    re.compile(r"\balways\b.{0,20}\b(do|use|send|notify|remind|check|include|keep)\b", re.I),
+    re.compile(r"\bnever\b.{0,20}\b(do|use|send|notify|ask|confirm|check|include)\b", re.I),
     re.compile(r"\b(remind me|notify me|let me know|alert me)\b.{0,40}\b(before|when|if|every)\b", re.I),
     re.compile(r"\b(don'?t|do not|stop)\b.{0,30}\b(ask|confirm|check|send|notify)\b", re.I),
 ]
@@ -82,6 +86,19 @@ class FrictionObserver:
             "merged_count": merged_count,
             "is_reactive": is_reactive,
         }
+
+        # Signal 9: EMPTY_RESPONSE — agent returned nothing to a non-empty user message
+        if user_message.strip() and (not response_text or not response_text.strip()):
+            signals.append(FrictionSignal(
+                signal_type="EMPTY_RESPONSE",
+                description="Agent returned an empty response to a non-empty user message",
+                evidence=[
+                    f"User message: {user_message[:200]}",
+                    f"Response length: {len(response_text or '')} chars",
+                    f"Tool calls: {[t['name'] for t in tool_trace] or 'none'}",
+                ],
+                context=ctx_snapshot,
+            ))
 
         # Signal 1: TOOL_REQUEST_FOR_SURFACED_TOOL
         sig = self._check_request_for_surfaced(tool_trace, surfaced_tool_names, ctx_snapshot)
@@ -211,25 +228,29 @@ class FrictionObserver:
         if merged_count <= 1:
             return None
 
-        # Simple heuristic: count sentences in response vs merged count
-        # A response with fewer than merged_count substantial paragraphs
-        # is a potential drop signal
+        # Empty response is a separate signal (EMPTY_RESPONSE handles it)
+        if not response or not response.strip():
+            return None
+
+        # Count substantial content units (paragraphs or list items)
         response_paragraphs = [p.strip() for p in response.split("\n\n") if len(p.strip()) > 20]
-        if len(response_paragraphs) >= merged_count:
+        response_lines = [l.strip() for l in response.split("\n") if len(l.strip()) > 10]
+        content_units = max(len(response_paragraphs), len(response_lines))
+        if content_units >= merged_count:
             return None  # Addressed enough topics
 
-        # Check if the response is very short relative to message count
+        # Very short response relative to merge count
         words = len(response.split())
-        if words < merged_count * 10:  # Less than ~10 words per message
+        if words < merged_count * 8:
             return FrictionSignal(
                 signal_type="MERGED_MESSAGES_DROPPED",
                 description=(
                     f"Turn had {merged_count} merged messages but response "
-                    f"only has {len(response_paragraphs)} paragraphs / {words} words"
+                    f"only has {content_units} content units / {words} words"
                 ),
                 evidence=[
                     f"Merged count: {merged_count}",
-                    f"Response paragraphs: {len(response_paragraphs)}",
+                    f"Content units: {content_units}",
                     f"Response words: {words}",
                 ],
                 context=ctx,
@@ -315,21 +336,22 @@ class FrictionObserver:
                     heuristic=True,
                 )
 
-        # Schedule queries without manage_schedule
-        # "my schedule" / "what's on my schedule" → calendar query, list-events is correct
-        # "my reminders" / "what triggers" → trigger query, manage_schedule expected
-        sched_keywords = ["what reminders", "my reminders", "what triggers"]
-        if any(kw in msg_lower for kw in sched_keywords):
-            # If agent used any calendar read tool, it answered the query with the right tool
+        # Schedule/trigger queries — manage_schedule is for triggers, NOT calendar.
+        # Calendar tools (list-events, search-events) are the correct tools for
+        # "What's on my schedule?" / "What's on my calendar?".
+        # Only flag manage_schedule for explicit trigger/reminder queries.
+        trigger_keywords = ["what triggers", "my triggers", "what automations", "my automations",
+                           "what reminders", "my reminders"]
+        if any(kw in msg_lower for kw in trigger_keywords):
             _calendar_reads = {"list-events", "search-events", "get-event", "get-freebusy"}
-            if tool_names & _calendar_reads:
+            if tool_names & _calendar_reads or "manage_schedule" in tool_names:
                 return None
-            if "manage_schedule" in surfaced and "manage_schedule" not in tool_names:
+            if "manage_schedule" in surfaced:
                 return FrictionSignal(
                     signal_type="TOOL_AVAILABLE_BUT_NOT_USED",
-                    description="Agent answered a schedule query without calling manage_schedule",
+                    description="Agent answered a trigger query without calling manage_schedule",
                     evidence=[
-                        f"User asked about schedule: {user_message[:100]}",
+                        f"User asked about triggers: {user_message[:100]}",
                         f"manage_schedule: surfaced but NOT called",
                         f"Tools called: {sorted(tool_names) or 'none'}",
                     ],
@@ -477,5 +499,6 @@ class FrictionObserver:
             "MERGED_MESSAGES_DROPPED": "SIMPLIFY",
             "PREFERENCE_STATED_BUT_NOT_CAPTURED": "SIMPLIFY",
             "PROVIDER_ERROR_REPEATED": "STRUCTURAL_ENFORCE",
+            "EMPTY_RESPONSE": "STRUCTURAL_ENFORCE",
         }
         return defaults.get(signal_type, "SIMPLIFY")
