@@ -150,9 +150,6 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     state.query_covenant_rules.return_value = []
     state.list_context_spaces.return_value = []
     state.get_context_space.return_value = None
-    state.increment_topic_hint.return_value = None
-    state.get_topic_hint_count.return_value = 0
-    state.clear_topic_hint.return_value = None
     state.get_knowledge_hashes.return_value = set()
     state.query_knowledge.return_value = []
 
@@ -467,9 +464,6 @@ async def test_handler_creates_task_via_engine():
     state.query_covenant_rules.return_value = []
     state.list_context_spaces.return_value = []
     state.get_context_space.return_value = None
-    state.increment_topic_hint.return_value = None
-    state.get_topic_hint_count.return_value = 0
-    state.clear_topic_hint.return_value = None
 
     mock_provider = AsyncMock(spec=Provider)
     registry = _make_mock_registry()
@@ -529,9 +523,6 @@ async def test_handler_uses_task_result_text_as_response():
     state.query_covenant_rules.return_value = []
     state.list_context_spaces.return_value = []
     state.get_context_space.return_value = None
-    state.increment_topic_hint.return_value = None
-    state.get_topic_hint_count.return_value = 0
-    state.clear_topic_hint.return_value = None
     state.get_knowledge_hashes.return_value = set()
     state.query_knowledge.return_value = []
 

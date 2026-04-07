@@ -556,30 +556,6 @@ class JsonStateStore(StateStore):
         logger.warning("update_context_space: id %s not found for tenant %s", space_id, tenant_id)
 
     # -----------------------------------------------------------------------
-    # Topic Hints (Gate 1 space creation)
-    # -----------------------------------------------------------------------
-
-    def _topic_hints_path(self, tenant_id: str) -> Path:
-        return self._state_dir(tenant_id) / "topic_hints.json"
-
-    async def increment_topic_hint(self, tenant_id: str, hint: str) -> None:
-        path = self._topic_hints_path(tenant_id)
-        hints = self._read_json(path, {})
-        hints[hint] = hints.get(hint, 0) + 1
-        self._write_json(path, hints)
-
-    async def get_topic_hint_count(self, tenant_id: str, hint: str) -> int:
-        path = self._topic_hints_path(tenant_id)
-        hints = self._read_json(path, {})
-        return hints.get(hint, 0)
-
-    async def clear_topic_hint(self, tenant_id: str, hint: str) -> None:
-        path = self._topic_hints_path(tenant_id)
-        hints = self._read_json(path, {})
-        hints.pop(hint, None)
-        self._write_json(path, hints)
-
-    # -----------------------------------------------------------------------
     # Space Notices (CS-5 cross-domain signals)
     # -----------------------------------------------------------------------
 

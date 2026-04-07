@@ -172,7 +172,6 @@ _PROVIDER = "anthropic"
 
 SPACE_THREAD_TOKEN_BUDGET = 4000
 CROSS_DOMAIN_INJECTION_TURNS = 5
-SPACE_CREATION_THRESHOLD = 15
 ACTIVE_SPACE_CAP = 40
 
 # Minimum interaction count before bootstrap graduation is even evaluated.
@@ -1736,164 +1735,6 @@ class MessageHandler:
             logger.warning("Failed to emit context.space.suspended: %s", exc)
         logger.info("Archived LRU space %s (%s) for tenant %s", lru.id, lru.name, tenant_id)
 
-    async def _trigger_gate2(
-        self, tenant_id: str, topic_hint: str, conversation_id: str
-    ) -> None:
-        """Gate 2: LLM decides whether to create a space for this topic cluster."""
-        import uuid
-        import json as _json
-
-        # Gather sample messages tagged with this hint
-        recent = await self.conversations.get_recent_full(tenant_id, conversation_id, limit=100)
-        hint_messages = [
-            m for m in recent
-            if topic_hint in m.get("space_tags", [])
-        ]
-        hint_count = len(hint_messages)
-        logger.info(
-            "SPACE_GATE2: hint=%s count=%d threshold=%d action=evaluating",
-            topic_hint, hint_count, SPACE_CREATION_THRESHOLD,
-        )
-        if not hint_messages:
-            return
-
-        formatted = "\n".join(
-            f"{'User' if m['role'] == 'user' else 'Agent'}: {str(m.get('content', ''))[:200]}"
-            for m in hint_messages[-20:]
-        )
-
-        GATE2_SCHEMA = {
-            "type": "object",
-            "properties": {
-                "create_space": {"type": "boolean"},
-                "name": {"type": "string"},
-                "description": {"type": "string"},
-                "reasoning": {"type": "string"},
-                "recommended_tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Capability names from the installed list that are relevant to this space",
-                },
-            },
-            "required": ["create_space", "name", "description", "reasoning", "recommended_tools"],
-            "additionalProperties": False
-        }
-
-        try:
-            result_str = await self.reasoning.complete_simple(
-                system_prompt=(
-                    "You are evaluating whether a recurring topic in someone's life deserves "
-                    "its own dedicated context space. The full breadth of someone's life is "
-                    "in scope — business, legal, health, family, finance, creative projects, "
-                    "property, education, hobbies, relationships, or anything else. A space is "
-                    "for recurring domains with depth, not one-off topics that happened to run "
-                    "long. If this is a real domain, name it concisely and write a 1-2 sentence "
-                    "description of what it covers."
-                ),
-                user_content=(
-                    f"Topic hint: {topic_hint}\n\n"
-                    f"Messages about this topic:\n{formatted}\n\n"
-                    f"Installed tools available for activation:\n"
-                    f"{self.registry.get_capability_descriptions()}\n\n"
-                    f"Populate recommended_tools with capability names likely to be useful for this space. "
-                    f"Use exact capability names from the installed list above."
-                ),
-                output_schema=GATE2_SCHEMA,
-                max_tokens=256,
-                prefer_cheap=True,
-            )
-            parsed = _json.loads(result_str)
-            if parsed.get("create_space"):
-                await self._enforce_space_cap(tenant_id)
-                now = utc_now()
-                new_space = ContextSpace(
-                    id=f"space_{uuid.uuid4().hex[:8]}",
-                    tenant_id=tenant_id,
-                    name=parsed.get("name", topic_hint.replace("_", " ").title()),
-                    description=parsed.get("description", ""),
-                    space_type="domain",
-                    status="active",
-                    created_at=now,
-                    last_active_at=now,
-                    is_default=False,
-                )
-                await self.state.save_context_space(new_space)
-
-                # Seed active_tools from Gate 2 recommendations
-                installed_names = set(self.registry.get_connected_capability_names())
-                recommended = parsed.get("recommended_tools", [])
-                seeded_tools = [t for t in recommended if t in installed_names]
-                if seeded_tools:
-                    new_space.active_tools = seeded_tools
-                    await self.state.update_context_space(
-                        tenant_id, new_space.id, {"active_tools": seeded_tools}
-                    )
-
-                await self.state.clear_topic_hint(tenant_id, topic_hint)
-
-                # Initialize compaction state for the new space
-                try:
-                    from kernos.kernel.compaction import (
-                        CompactionState,
-                        compute_document_budget,
-                        estimate_headroom,
-                        MODEL_MAX_TOKENS,
-                        COMPACTION_MODEL_USABLE_TOKENS,
-                        COMPACTION_INSTRUCTION_TOKENS,
-                    )
-                    headroom = await estimate_headroom(self.reasoning, new_space)
-                    context_def = (
-                        f"Space: {new_space.name}\nType: {new_space.space_type}\n"
-                        f"Description: {new_space.description}\nPosture: {new_space.posture}\n"
-                    )
-                    context_def_tokens = await self.compaction.adapter.count_tokens(context_def)
-                    system_overhead = 4000  # Approximate
-                    doc_budget = compute_document_budget(
-                        MODEL_MAX_TOKENS, system_overhead, 0, headroom
-                    )
-                    gate2_comp = CompactionState(
-                        space_id=new_space.id,
-                        conversation_headroom=headroom,
-                        document_budget=doc_budget,
-                        message_ceiling=min(
-                            doc_budget,
-                            COMPACTION_MODEL_USABLE_TOKENS - COMPACTION_INSTRUCTION_TOKENS - context_def_tokens,
-                        ),
-                        _context_def_tokens=context_def_tokens,
-                        _system_overhead=system_overhead,
-                    )
-                    await self.compaction.save_state(tenant_id, new_space.id, gate2_comp)
-                except Exception as exc:
-                    logger.warning("Failed to init compaction state for gate2 space: %s", exc)
-
-                try:
-                    await emit_event(
-                        self.events,
-                        EventType.CONTEXT_SPACE_CREATED,
-                        tenant_id,
-                        "gate2",
-                        payload={
-                            "space_id": new_space.id,
-                            "name": new_space.name,
-                            "description": new_space.description,
-                            "topic_hint": topic_hint,
-                        },
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to emit context.space.created: %s", exc)
-                logger.info(
-                    "SPACE_CREATE: id=%s name=%s parent=General reason=%r",
-                    new_space.id, new_space.name, parsed.get("reasoning", ""),
-                )
-            else:
-                # Not a real domain — clear hint count to avoid re-triggering soon
-                await self.state.clear_topic_hint(tenant_id, topic_hint)
-                logger.info(
-                    "SPACE_GATE2: hint=%s action=rejected reason=%r",
-                    topic_hint, parsed.get("reasoning", ""),
-                )
-        except Exception as exc:
-            logger.warning("Gate 2 failed for hint '%s': %s", topic_hint, exc)
 
     # --- Domain assessment (CS-2) ---
 
@@ -2988,18 +2829,6 @@ class MessageHandler:
             except Exception as exc:
                 logger.warning("Failed to emit context.space.switched: %s", exc)
 
-        # Gate 1: topic hint tracking
-        known_space_ids = {s.id for s in await self.state.list_context_spaces(tenant_id)}
-        for tag in ctx.router_result.tags:
-            if tag and tag not in known_space_ids:
-                try:
-                    await self.state.increment_topic_hint(tenant_id, tag)
-                    count = await self.state.get_topic_hint_count(tenant_id, tag)
-                    if count >= SPACE_CREATION_THRESHOLD:
-                        import asyncio
-                        asyncio.create_task(self._trigger_gate2(tenant_id, tag, conversation_id))
-                except Exception as exc:
-                    logger.warning("Gate 1 tracking failed for hint '%s': %s", tag, exc)
 
         ctx.active_space = (
             await self.state.get_context_space(tenant_id, ctx.active_space_id)

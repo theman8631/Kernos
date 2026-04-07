@@ -528,21 +528,6 @@ class StateStore(ABC):
         """Return and clear all pending notices for a space."""
         ...
 
-    # Topic hints (Gate 1 space creation)
-    @abstractmethod
-    async def increment_topic_hint(self, tenant_id: str, hint: str) -> None:
-        """Increment the message count for an unnamed topic cluster."""
-        ...
-
-    @abstractmethod
-    async def get_topic_hint_count(self, tenant_id: str, hint: str) -> int:
-        """Get current message count for a topic hint."""
-        ...
-
-    @abstractmethod
-    async def clear_topic_hint(self, tenant_id: str, hint: str) -> None:
-        """Clear a topic hint after space creation or expiration."""
-        ...
 
     # Knowledge Foresight Query (Phase 3C: Proactive Awareness)
     @abstractmethod
