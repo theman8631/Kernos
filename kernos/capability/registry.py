@@ -236,11 +236,11 @@ class CapabilityRegistry:
         return []
 
     def get_connected_capability_names(self) -> list[str]:
-        """Names of all connected capabilities. Used by Gate 2 seeding."""
+        """Names of all connected capabilities."""
         return [c.name for c in self.get_connected()]
 
     def get_capability_descriptions(self) -> str:
-        """Formatted descriptions of connected capabilities. Used by Gate 2 prompt."""
+        """Formatted descriptions of connected capabilities."""
         connected = self.get_connected()
         if not connected:
             return "No tools currently installed."

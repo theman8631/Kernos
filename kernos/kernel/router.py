@@ -114,8 +114,8 @@ def _compute_gap_description(last_ts: str, now_ts: str) -> str:
 class LLMRouter:
     """Route messages to context spaces using a lightweight LLM.
 
-    One Haiku-class call per message. Reads language, not keyword lists.
-    Falls back to daily (zero cost) for single-space tenants.
+    One call per message. Reads language, not keyword lists.
+    Always fires — no single-space bypass.
     """
 
     def __init__(self, state: StateStore, reasoning: ReasoningService) -> None:

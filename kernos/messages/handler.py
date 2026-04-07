@@ -3490,7 +3490,7 @@ class MessageHandler:
                 f"- [{e.id}] \"{e.content}\" ({e.lifecycle_archetype})"
                 for e in candidates
             )
-            recent_topic = self._get_recent_topic_hint(ctx)
+            recent_topic = self._get_recent_context_summary(ctx)
 
             logger.info(
                 "SHAPE_INPUT: candidates=%d message=%s",
@@ -3527,8 +3527,8 @@ class MessageHandler:
             logger.warning("KNOWLEDGE_SHAPING_FAILED: %s — falling back to Tier 1 only", exc)
             return set()  # fail-safe: Tier 1 only, NOT full dump
 
-    def _get_recent_topic_hint(self, ctx: TurnContext) -> str:
-        """Extract a brief topic hint from recent conversation."""
+    def _get_recent_context_summary(self, ctx: TurnContext) -> str:
+        """Extract a brief summary of recent conversation for knowledge shaping."""
         if not ctx.messages:
             return "new conversation"
         recent = ctx.messages[-3:]

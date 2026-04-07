@@ -1,7 +1,7 @@
 """Universal Tool Catalog — registry of all available tools with one-line descriptions.
 
-Replaces keyword-based CATEGORY_TOOLS. The surfacer LLM reads this catalog
-to determine which tools are relevant for a given turn.
+The surfacer LLM reads this catalog to determine which tools are
+relevant for a given turn. Intent-based, not keyword-based.
 """
 import logging
 from dataclasses import dataclass, field

@@ -581,19 +581,19 @@ class TestTopicHint:
     def test_empty_messages(self):
         from kernos.messages.handler import MessageHandler, TurnContext
         handler = MagicMock(spec=MessageHandler)
-        handler._get_recent_topic_hint = MessageHandler._get_recent_topic_hint.__get__(handler)
+        handler._get_recent_context_summary = MessageHandler._get_recent_context_summary.__get__(handler)
         ctx = TurnContext(messages=[])
-        assert handler._get_recent_topic_hint(ctx) == "new conversation"
+        assert handler._get_recent_context_summary(ctx) == "new conversation"
 
     def test_extracts_from_recent(self):
         from kernos.messages.handler import MessageHandler, TurnContext
         handler = MagicMock(spec=MessageHandler)
-        handler._get_recent_topic_hint = MessageHandler._get_recent_topic_hint.__get__(handler)
+        handler._get_recent_context_summary = MessageHandler._get_recent_context_summary.__get__(handler)
         ctx = TurnContext(messages=[
             {"role": "user", "content": "Tell me about guitar"},
             {"role": "assistant", "content": "Guitar is great"},
         ])
-        hint = handler._get_recent_topic_hint(ctx)
+        hint = handler._get_recent_context_summary(ctx)
         assert "guitar" in hint.lower()
 
 
