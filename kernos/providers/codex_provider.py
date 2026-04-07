@@ -172,6 +172,17 @@ class OpenAICodexProvider(Provider):
 
         content_blocks: list[ContentBlock] = []
 
+        # Diagnostic: log output structure for empty text debugging
+        if output_items:
+            for _i, _item in enumerate(output_items):
+                _t = _item.get("type", "?")
+                _keys = sorted(_item.keys())
+                logger.info("CODEX_PARSE: item[%d] type=%s keys=%s", _i, _t, _keys)
+                if _t == "message":
+                    for _p in _item.get("content", []):
+                        logger.info("CODEX_PARSE:   content type=%s keys=%s text_len=%d",
+                            _p.get("type"), sorted(_p.keys()), len(_p.get("text", "")))
+
         for item in output_items:
             item_type = item.get("type", "")
 
