@@ -172,16 +172,6 @@ class OpenAICodexProvider(Provider):
 
         content_blocks: list[ContentBlock] = []
 
-        # Diagnostic: log output structure for empty text debugging
-        if output_items:
-            for _i, _item in enumerate(output_items):
-                _t = _item.get("type", "?")
-                _keys = sorted(_item.keys())
-                logger.info("CODEX_PARSE: item[%d] type=%s keys=%s", _i, _t, _keys)
-                if _t == "message":
-                    for _p in _item.get("content", []):
-                        logger.info("CODEX_PARSE:   content type=%s keys=%s text_len=%d",
-                            _p.get("type"), sorted(_p.keys()), len(_p.get("text", "")))
 
         for item in output_items:
             item_type = item.get("type", "")
@@ -315,9 +305,18 @@ class OpenAICodexProvider(Provider):
 
     @staticmethod
     async def _collect_sse_response(resp: Any) -> dict:
-        """Read an SSE stream and return the final response object."""
+        """Read an SSE stream and return the final response object.
+
+        Accumulates text from delta events during streaming, then merges
+        into the final response if the completed event has empty output.
+        """
         final_response: dict = {}
         buffer = ""
+
+        # Accumulate streamed content: {output_index: {type, text, ...}}
+        _streamed_items: dict[int, dict] = {}
+        _streamed_text: dict[int, list[str]] = {}  # output_index → text chunks
+        _streamed_fn_args: dict[str, list[str]] = {}  # call_id → argument chunks
 
         async for chunk in resp.aiter_text():
             buffer += chunk
@@ -345,6 +344,25 @@ class OpenAICodexProvider(Provider):
 
                 if event_type in ("response.completed", "response.done"):
                     final_response = event.get("response", event)
+
+                # Accumulate output items and text deltas
+                elif event_type == "response.output_item.added":
+                    oi = event.get("output_index", 0)
+                    item = event.get("item", {})
+                    _streamed_items[oi] = item
+                elif event_type == "response.output_text.delta":
+                    oi = event.get("output_index", 0)
+                    delta = event.get("delta", "")
+                    if oi not in _streamed_text:
+                        _streamed_text[oi] = []
+                    _streamed_text[oi].append(delta)
+                elif event_type == "response.function_call_arguments.delta":
+                    call_id = event.get("call_id", event.get("item_id", ""))
+                    delta = event.get("delta", "")
+                    if call_id not in _streamed_fn_args:
+                        _streamed_fn_args[call_id] = []
+                    _streamed_fn_args[call_id].append(delta)
+
                 elif event_type == "response.failed":
                     msg = ""
                     if "response" in event:
@@ -361,6 +379,28 @@ class OpenAICodexProvider(Provider):
                     if error_type == "server_error":
                         raise ReasoningTransientError(f"Codex server error: {msg}")
                     raise ReasoningProviderError(f"Codex stream error: {msg}")
+
+        # If final_response.output is empty but we accumulated streamed content,
+        # reconstruct the output from deltas
+        if final_response:
+            output = final_response.get("output", [])
+            if not output and (_streamed_text or _streamed_items):
+                reconstructed = []
+                for oi in sorted(set(list(_streamed_items.keys()) + list(_streamed_text.keys()))):
+                    item = dict(_streamed_items.get(oi, {}))
+                    if oi in _streamed_text:
+                        full_text = "".join(_streamed_text[oi])
+                        if item.get("type") == "message":
+                            item["content"] = [{"type": "output_text", "text": full_text}]
+                        else:
+                            item.setdefault("type", "output_text")
+                            item["text"] = full_text
+                    # Reconstruct function call arguments
+                    call_id = item.get("call_id", item.get("id", ""))
+                    if call_id in _streamed_fn_args:
+                        item["arguments"] = "".join(_streamed_fn_args[call_id])
+                    reconstructed.append(item)
+                final_response["output"] = reconstructed
 
         if not final_response:
             raise ReasoningProviderError("Codex stream ended without response.completed")
