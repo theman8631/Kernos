@@ -25,8 +25,10 @@ ROUTER_SYSTEM_PROMPT = """You are a message router for a personal AI assistant. 
 3. CONTINUATION: Is this an obvious continuation (short affirmation, reaction, "lol", "ok", "sounds good") that should ride conversational momentum? If yes, keep the current focus unchanged.
 
 Rules:
+- UNIVERSAL ACTIONS stay in the current space. Calendar operations (create/list/search events), time queries, web searches, memory lookups, and file operations are available everywhere — they do NOT require switching spaces. "Make a calendar entry" from D&D stays in D&D. "Search for pizza" from a project stays in that project.
+- DOMAIN-SPECIFIC WORK routes to the domain. "Invoice Henderson" routes to the invoicing space. "Roll for initiative" routes to D&D. The key distinction: does this require the domain's data and context, or is it a universal action?
 - When a message signals something NEW within an existing domain ("new campaign", "starting fresh", "not the old one"), tag General. Let the new topic accumulate before it earns a space.
-- Ambiguity is not a domain signal. When uncertain, tag General.
+- Ambiguity is not a domain signal. When uncertain, keep the current focus.
 - A message mentioning a person or entity from one domain doesn't mean the message IS about that domain. "Henderson plays D&D" while chatting casually is General, not Business.
 - Read the message in the context of recent history. A message after a long gap is a fresh start. A message seconds after the last one is a continuation.
 - Never invent space IDs. Only use IDs from the provided space list, or snake_case topic hints for emerging topics.

@@ -1764,12 +1764,22 @@ class ReasoningService:
                                 "TOOL_LOAD: tool=%s space=%s (stub -> full schema, re-running)",
                                 block.name, request.active_space_id,
                             )
+                            # Build a hint about required parameters from the full schema
+                            _required = full_schema.get("input_schema", {}).get("required", [])
+                            _props = full_schema.get("input_schema", {}).get("properties", {})
+                            _param_hint = ""
+                            if _required:
+                                _param_hint = f" Required parameters: {', '.join(_required)}."
+                            elif _props:
+                                _param_hint = f" Available parameters: {', '.join(list(_props.keys())[:8])}."
                             stub_results[idx] = {
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
                                 "content": (
-                                    f"[SYSTEM] The tool {block.name} is now fully loaded. "
-                                    "Please retry your call with the correct parameters."
+                                    f"[SYSTEM] The tool {block.name} is now fully loaded with its complete schema. "
+                                    f"Your previous call had empty parameters because the schema wasn't loaded yet."
+                                    f"{_param_hint} "
+                                    f"Please call {block.name} again with the correct parameters for the user's request."
                                 ),
                             }
                             continue
