@@ -1783,10 +1783,12 @@ class MessageHandler:
             result_str = await self.reasoning.complete_simple(
                 system_prompt=(
                     "You are evaluating whether a recurring topic in someone's life deserves "
-                    "its own dedicated context space. A space is for recurring domains — "
-                    "ongoing projects, hobbies, professional areas — not one-off topics that "
-                    "happened to run long. If this is a real domain, name it concisely and "
-                    "write a 1-2 sentence description of what it covers."
+                    "its own dedicated context space. The full breadth of someone's life is "
+                    "in scope — business, legal, health, family, finance, creative projects, "
+                    "property, education, hobbies, relationships, or anything else. A space is "
+                    "for recurring domains with depth, not one-off topics that happened to run "
+                    "long. If this is a real domain, name it concisely and write a 1-2 sentence "
+                    "description of what it covers."
                 ),
                 user_content=(
                     f"Topic hint: {topic_hint}\n\n"
@@ -1951,6 +1953,9 @@ class MessageHandler:
                 system_prompt=(
                     "You are assessing whether a conversation belongs in its own "
                     f"dedicated context {child_type}, or should remain in the current space.\n\n"
+                    "Domains can come from ANY area of someone's life — business, legal, "
+                    "health, family, finance, creative work, property, education, hobbies, "
+                    "relationships, or anything else with recurring depth.\n\n"
                     "Only create on HIGH confidence. A domain should:\n"
                     "- Have clear internal coherence (not a grab-bag)\n"
                     "- Likely recur in future conversations\n"
@@ -1958,7 +1963,8 @@ class MessageHandler:
                     "- Have a stable, clear label\n\n"
                     "A single conversation about a topic is NOT enough. "
                     "The topic must have depth and likely recurrence.\n"
-                    '"Kitchen Renovation" is a domain. "Tax Prep 2026" is a domain. "Random questions" is not.\n\n'
+                    '"Kitchen Renovation" is a domain. "Tax Prep 2026" is a domain. '
+                    '"Dog Training" is a domain. "Random questions" is not.\n\n'
                     "RENAME CHECK: Has the user indicated a NAME CHANGE for this space? "
                     'Look for explicit statements like "let\'s call it X" or "we\'re renaming to X." '
                     "If yes, set rename=true, new_name to the new name, and rename_evidence."
