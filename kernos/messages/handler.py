@@ -3077,7 +3077,9 @@ class MessageHandler:
         for name, meta in _affordance.items():
             if name in _added:
                 continue
-            schema = _kernel_tool_map.get(name) or self.registry.get_tool_schema(name)
+            schema = (_kernel_tool_map.get(name)
+                      or self.registry.get_tool_schema(name)
+                      or self._load_workspace_tool_schema(tenant_id, name))
             if schema and _add_tool(schema):
                 tokens = _schema_tokens(schema)
                 turns_unused = max(1, _turn - meta.get("last_turn", 0))
@@ -3131,7 +3133,10 @@ class MessageHandler:
                         for tool_name in scan_tools:
                             if tool_name in _added:
                                 continue
+                            # Try kernel → MCP → workspace descriptor
                             schema = _kernel_tool_map.get(tool_name) or self.registry.get_tool_schema(tool_name)
+                            if not schema:
+                                schema = self._load_workspace_tool_schema(tenant_id, tool_name)
                             if schema and _add_tool(schema):
                                 tokens = _schema_tokens(schema)
                                 candidates.append((schema, 0))  # scan-selected = highest priority
@@ -3479,6 +3484,33 @@ class MessageHandler:
             if values:
                 avgs[phase] = sum(values) // len(values)
         return avgs
+
+    def _load_workspace_tool_schema(self, tenant_id: str, tool_name: str) -> dict | None:
+        """Load a workspace tool's schema from its .tool.json descriptor."""
+        catalog_entry = self._tool_catalog.get(tool_name)
+        if not catalog_entry or catalog_entry.source != "workspace":
+            return None
+        home_space = getattr(catalog_entry, "home_space", "")
+        if not home_space:
+            return None
+        # Find the descriptor file from the workspace manifest
+        try:
+            desc_file = f"{tool_name}.tool.json"
+            from kernos.utils import _safe_name
+            desc_path = (
+                Path(os.getenv("KERNOS_DATA_DIR", "./data"))
+                / _safe_name(tenant_id) / "spaces" / home_space / "files" / desc_file
+            )
+            if desc_path.exists():
+                descriptor = json.loads(desc_path.read_text(encoding="utf-8"))
+                return {
+                    "name": descriptor.get("name", tool_name),
+                    "description": descriptor.get("description", ""),
+                    "input_schema": descriptor.get("input_schema", {"type": "object", "properties": {}}),
+                }
+        except Exception as exc:
+            logger.warning("WORKSPACE_SCHEMA_LOAD: failed for %s: %s", tool_name, exc)
+        return None
 
     async def _check_catalog_version(
         self, tenant_id: str, space_id: str, space: ContextSpace,
