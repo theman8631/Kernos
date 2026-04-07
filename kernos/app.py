@@ -143,10 +143,26 @@ async def sms_inbound(request: Request) -> Response:
     Twilio SMS webhook endpoint.
 
     Wiring: Twilio adapter (inbound) → handler → Twilio adapter (outbound)
+    Validates Twilio signature before processing.
     """
-    # TODO: Validate Twilio request signature before processing in production.
     form_data = await request.form()
     raw = dict(form_data)
+
+    # Validate Twilio request signature
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN", "")
+    if auth_token:
+        try:
+            from twilio.request_validator import RequestValidator
+            validator = RequestValidator(auth_token)
+            signature = request.headers.get("X-Twilio-Signature", "")
+            url = str(request.url)
+            if not validator.validate(url, raw, signature):
+                logger.warning("SMS_WEBHOOK: rejected invalid Twilio signature from %s", raw.get("From", "unknown"))
+                return Response("Forbidden", status_code=403)
+        except ImportError:
+            logger.warning("SMS_WEBHOOK: twilio library not installed, skipping signature validation")
+    else:
+        logger.warning("SMS_WEBHOOK: TWILIO_AUTH_TOKEN not set, skipping signature validation")
 
     logger.info("Inbound SMS from=%s body=%r", raw.get("From"), raw.get("Body"))
 

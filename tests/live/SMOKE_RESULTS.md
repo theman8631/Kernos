@@ -1,32 +1,32 @@
 # Live Smoke Test Results
 
-**Date:** 2026-04-07 05:46 UTC
+**Date:** 2026-04-07 06:24 UTC
 **Result:** 10/11 passed
 **Provider:** openai-codex
 
 ## Core LLM Pipeline (3/3)
 
 ### ✅ Basic response (core)
-**Duration:** 4177ms
-**Response:** 10:30 PM.
+**Duration:** 6192ms
+**Response:** It’s 11:23 PM local time.
 - OK: non-empty
 - OK: router fired
 
 ### ✅ Multi-turn coherence (core)
-**Duration:** 4343ms
+**Duration:** 3938ms
 **Response:** Monday, April 6, 2026.
 - OK: non-empty
 
 ### ✅ Router structured output (core)
-**Duration:** 17918ms
-**Response:** I’m good. ↵  ↵ How’s your night going?
+**Duration:** 4491ms
+**Response:** Doing well. ↵  ↵ How are you doing?
 - OK: router returned valid JSON
 
 ## Context UI Quality (Hotfix) (1/2)
 
 ### ✅ DEPTH paragraph in RULES (hotfix)
-**Duration:** 2157ms
-**Response:** Context dumped to data/diagnostics/context_2026-04-07T05-45-49.txt
+**Duration:** 2092ms
+**Response:** Context dumped to data/diagnostics/context_2026-04-07T06-24-01.txt
 - OK: DEPTH paragraph found in RULES block
 
 ### ❌ USER CONTEXT source tags + dedup (hotfix)
@@ -35,8 +35,8 @@
 ## Tool Surfacing Redesign (2/2)
 
 ### ✅ Tool surfacing logs (surfacing)
-**Duration:** 3723ms
-**Response:** What city or neighborhood should I search in?
+**Duration:** 5047ms
+**Response:** What city or neighborhood should I search?
 - OK: TOOL_SURFACING: tier=common surfaced=21 total_available=21
 
 ### ✅ Kernel tools all surfaced (surfacing)
@@ -45,15 +45,15 @@
 ## Agentic Workspace (1/1)
 
 ### ✅ Code execution (workspace)
-**Duration:** 7153ms
-**Response:** 2^100 = 1267650600228229401496703205376 ↵  ↵ `execute_code` failed here because the workspace file path is misconfigured, so Python couldn’t open the script file.
+**Duration:** 7822ms
+**Response:** I hit a file-path issue with `execute_code`, but the computed result is: ↵  ↵ **1267650600228229401496703205376**
 - OK: correct computation result
 
 ## Regression Checks (3/3)
 
 ### ✅ Context size + timing (regression)
-- ctx_tokens_est=5134
-- assemble=1075ms route=1535ms
+- ctx_tokens_est=5156
+- assemble=1754ms route=1082ms
 
 ### ✅ Preference parser stability (regression)
 - OK: preference parser ran without errors

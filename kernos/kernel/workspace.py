@@ -422,20 +422,27 @@ class WorkspaceManager:
         if not implementation.endswith(".py"):
             return json.dumps({"error": "Implementation must be a .py file"})
 
-        # Write input data to a temp file to avoid shell escaping issues
+        # Write input data to a unique temp file (avoids collision on concurrent calls)
+        import tempfile as _tf
         space_dir = self._space_dir(tenant_id, home_space)
-        input_file = space_dir / "_tool_input.json"
         space_dir.mkdir(parents=True, exist_ok=True)
-        input_file.write_text(json.dumps(tool_input), encoding="utf-8")
+        fd, input_path = _tf.mkstemp(suffix=".json", prefix="_tool_input_", dir=str(space_dir))
+        input_filename = os.path.basename(input_path)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(tool_input, f)
+        except Exception:
+            os.close(fd)
+            raise
 
         module_name = implementation.replace(".py", "")
         exec_code = (
             "import json, sys, os\n"
             "sys.path.insert(0, '.')\n"
             f"from {module_name} import execute\n"
-            "with open('_tool_input.json') as f:\n"
+            f"with open('{input_filename}') as f:\n"
             "    input_data = json.load(f)\n"
-            "os.unlink('_tool_input.json')\n"
+            f"os.unlink('{input_filename}')\n"
             "result = execute(input_data)\n"
             "print(json.dumps(result))\n"
         )

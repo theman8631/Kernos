@@ -65,7 +65,7 @@ def tc():
             mock_anthropic = MagicMock()
             mock_anthropic.messages.stream = _mock_stream_responses(_mock_text_response(""))
             mock_cls.return_value = mock_anthropic
-            with patch.dict(os.environ, {"KERNOS_DATA_DIR": tmpdir}):
+            with patch.dict(os.environ, {"KERNOS_DATA_DIR": tmpdir, "TWILIO_AUTH_TOKEN": ""}):
                 with TestClient(app) as client:
                     yield client, mock_anthropic
     finally:

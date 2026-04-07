@@ -7,44 +7,10 @@ reconciled add/update/reinforce set.
 """
 import json
 import logging
-from dataclasses import dataclass, asdict
-from pathlib import Path
 
 from kernos.utils import utc_now
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FactHarvestState:
-    """Tracks which conversation has been harvested for durable facts."""
-
-    space_id: str
-    last_harvested_log: str = ""      # e.g., "log_067"
-    last_harvested_offset: int = 0    # message index within log
-    last_harvested_at: str = ""       # ISO timestamp
-
-
-def _harvest_state_path(data_dir: str, tenant_id: str, space_id: str) -> Path:
-    from kernos.utils import _safe_name
-    return Path(data_dir) / _safe_name(tenant_id) / "state" / "harvest" / f"{space_id}.json"
-
-
-def load_harvest_state(data_dir: str, tenant_id: str, space_id: str) -> FactHarvestState:
-    path = _harvest_state_path(data_dir, tenant_id, space_id)
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return FactHarvestState(**data)
-        except Exception:
-            pass
-    return FactHarvestState(space_id=space_id)
-
-
-def save_harvest_state(data_dir: str, tenant_id: str, state: FactHarvestState) -> None:
-    path = _harvest_state_path(data_dir, tenant_id, state.space_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(state), indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 _RECONCILIATION_SYSTEM_PROMPT = """\
