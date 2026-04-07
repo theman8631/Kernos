@@ -182,6 +182,12 @@ class OpenAICodexProvider(Provider):
                             ContentBlock(type="text", text=part.get("text", ""))
                         )
 
+            elif item_type == "output_text":
+                # Direct output_text item (structured output / text format)
+                content_blocks.append(
+                    ContentBlock(type="text", text=item.get("text", ""))
+                )
+
             elif item_type == "function_call":
                 try:
                     args = json.loads(item.get("arguments", "{}"))
