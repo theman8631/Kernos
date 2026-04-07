@@ -260,6 +260,13 @@ class OpenAICodexProvider(Provider):
                 }
             }
 
+        # Log actual request payload size for debugging API limits
+        _payload_bytes = len(json.dumps(body))
+        _tool_count = len(body.get("tools", []))
+        _tool_bytes = len(json.dumps(body.get("tools", []))) if body.get("tools") else 0
+        logger.info("CODEX_REQUEST: payload=%dKB tools=%d tool_schemas=%dKB input_items=%d",
+            _payload_bytes // 1024, _tool_count, _tool_bytes // 1024, len(body.get("input", [])))
+
         url = self._resolve_url()
         headers = self._headers()
         headers["accept"] = "text/event-stream"
