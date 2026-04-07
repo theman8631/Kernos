@@ -2630,14 +2630,17 @@ class MessageHandler:
             return "No context spaces found."
         lines = ["**Context Spaces**\n"]
         for s in sorted(spaces, key=lambda x: x.last_active_at or "", reverse=True):
+            current = " **(Current)**" if s.id == ctx.active_space_id else ""
             default = " [DEFAULT]" if s.is_default else ""
             lines.append(
-                f"- **{s.name}**{default} ({s.id}) — "
+                f"- **{s.name}**{current}{default} ({s.id}) — "
                 f"type={s.space_type} status={s.status} "
                 f"last_active={s.last_active_at or 'never'}"
             )
             if s.description:
                 lines.append(f"  {s.description}")
+            if s.posture:
+                lines.append(f"  Style: {s.posture}")
         return "\n".join(lines)
 
     async def _handle_status(self, ctx: TurnContext) -> str:
