@@ -1152,8 +1152,17 @@ class ReasoningService:
                         "tool_use_id": block.id,
                         "content": result,
                     }
-            result = await self._mcp.call_tool(block.name, tool_input)
-            _is_mcp_tool = True
+            # Check workspace tools BEFORE MCP — workspace tools aren't in MCP
+            if (hasattr(self, '_workspace') and self._workspace
+                    and self._workspace._catalog
+                    and self._workspace._catalog.has_workspace_tool(block.name)):
+                _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                result = await self._workspace.execute_workspace_tool(
+                    request.tenant_id, block.name, tool_input, _data_dir)
+                logger.info("TOOL_DISPATCH: name=%s type=workspace", block.name)
+            else:
+                result = await self._mcp.call_tool(block.name, tool_input)
+                _is_mcp_tool = True
 
         tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
         is_error = result.startswith("Tool error:") or result.startswith(
