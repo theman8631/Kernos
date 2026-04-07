@@ -25,9 +25,19 @@ ROUTER_SYSTEM_PROMPT = """You are a message router for a personal AI assistant. 
 3. CONTINUATION: Is this an obvious continuation (short affirmation, reaction, "lol", "ok", "sounds good") that should ride conversational momentum? If yes, keep the current focus unchanged.
 
 Rules:
-- UNIVERSAL ACTIONS stay in the current space. Calendar operations (create/list/search events), time queries, web searches, memory lookups, and file operations are available everywhere — they do NOT require switching spaces. "Make a calendar entry" from D&D stays in D&D. "Search for pizza" from a project stays in that project.
-- DOMAIN-SPECIFIC WORK routes to the domain. "Invoice Henderson" routes to the invoicing space. "Roll for initiative" routes to D&D. The key distinction: does this require the domain's data and context, or is it a universal action?
-- When a message signals something NEW within an existing domain ("new campaign", "starting fresh", "not the old one"), tag General. Let the new topic accumulate before it earns a space.
+
+HIERARCHY: Spaces form a tree. Some spaces are children of others (marked [child of: X]). Route to the RIGHT LEVEL of specificity:
+- Broad domain content goes to the parent. "Look that up in the Player's Handbook" from a specific campaign → step up to the D&D parent (it's about D&D in general, not this campaign). "Let's make a list of cities for all campaigns" → D&D parent.
+- Specific ongoing work goes to the child. "I attack the orc!" → step back into the active campaign. "Where did we leave off with Henderson's contract?" → the Henderson-specific space.
+- The cost of staying is low. The cost of switching wrong is high (breaks conversational context). When unsure, stay.
+- This applies to ANY domain hierarchy — legal, medical, business, creative projects. Route to where the scope fits.
+
+UNIVERSAL ACTIONS stay in the current space. Calendar, time, search, memory, file operations are available everywhere. "Make a calendar entry" from any space stays in that space.
+
+DOMAIN-SPECIFIC WORK routes to the domain. "Invoice Henderson" routes to the invoicing space. The key distinction: does this message need a specific domain's data and context, or is it universal?
+
+OTHER RULES:
+- When a message signals something NEW within an existing domain ("new campaign", "starting fresh"), tag the parent. Let the new topic accumulate before it earns its own space.
 - Ambiguity is not a domain signal. When uncertain, keep the current focus.
 - A message mentioning a person or entity from one domain doesn't mean the message IS about that domain. "Henderson plays D&D" while chatting casually is General, not Business.
 - Read the message in the context of recent history. A message after a long gap is a fresh start. A message seconds after the last one is a continuation.
@@ -135,10 +145,12 @@ class LLMRouter:
         for s in active_spaces:
             desc = s.description or "No description yet"
             default_marker = " [DEFAULT]" if s.is_default else ""
-            parent_marker = ""
+            hierarchy = ""
             if s.parent_id and s.parent_id in space_name_map_all:
-                parent_marker = f" [child of: {space_name_map_all[s.parent_id]}]"
-            space_lines.append(f"- {s.id}: {s.name}{default_marker}{parent_marker} — {desc}")
+                hierarchy = f" [child of: {space_name_map_all[s.parent_id]}]"
+            elif s.depth == 0 and not s.is_default and s.space_type != "system":
+                hierarchy = " [root domain]"
+            space_lines.append(f"- {s.id}: {s.name}{default_marker}{hierarchy} — {desc}")
         space_descriptions = "\n".join(space_lines)
 
         # Build recent history with timestamps and existing tags
