@@ -1,42 +1,42 @@
 # Live Smoke Test Results
 
-**Date:** 2026-04-07 07:08 UTC
+**Date:** 2026-04-07 07:23 UTC
 **Result:** 10/11 passed
 **Provider:** openai-codex
 
 ## Core LLM Pipeline (3/3)
 
 ### ✅ Basic response (core)
-**Duration:** 6619ms
-**Response:** It’s **Tuesday, April 7, 2026, 12:07 AM** system local time.
+**Duration:** 4565ms
+**Response:** It’s 12:22 AM local time.
 - OK: non-empty
 - OK: router fired
 
 ### ✅ Multi-turn coherence (core)
-**Duration:** 4303ms
+**Duration:** 13335ms
 **Response:** Tuesday, April 7, 2026.
 - OK: non-empty
 
 ### ✅ Router structured output (core)
-**Duration:** 11209ms
-**Response:** Doing well. ↵  ↵ How’s your day going?
+**Duration:** 5470ms
+**Response:** Doing well. ↵  ↵ How’s your night going?
 - OK: router returned valid JSON
 
 ## Context UI Quality (Hotfix) (1/2)
 
 ### ✅ DEPTH paragraph in RULES (hotfix)
-**Duration:** 2518ms
-**Response:** Context dumped to data/diagnostics/context_2026-04-07T07-07-43.txt
+**Duration:** 2510ms
+**Response:** Context dumped to data/diagnostics/context_2026-04-07T07-22-46.txt
 - OK: DEPTH paragraph found in RULES block
 
 ### ❌ USER CONTEXT source tags + dedup (hotfix)
-- FAIL: 384 duplicate(s): [user]
+- FAIL: 383 duplicate(s): [user]
 
 ## Tool Surfacing Redesign (2/2)
 
 ### ✅ Tool surfacing logs (surfacing)
-**Duration:** 18161ms
-**Response:** I can do that, but I need the location first. ↵  ↵ What city or neighborhood should I search in?
+**Duration:** 5416ms
+**Response:** I can do that — what city or neighborhood should I search in?
 - OK: TOOL_SURFACING: tier=common surfaced=21 total_available=21
 
 ### ✅ Kernel tools all surfaced (surfacing)
@@ -45,15 +45,15 @@
 ## Agentic Workspace (1/1)
 
 ### ✅ Code execution (workspace)
-**Duration:** 10111ms
-**Response:** 2^100 = 1267650600228229401496703205376 ↵  ↵ I used `execute_code`, but it failed in this workspace because the script path is misconfigured: ↵ `python3: can't open file ... pow100.py`
+**Duration:** 11561ms
+**Response:** `execute_code` hit a file-path error, but the result is: ↵  ↵ **1267650600228229401496703205376**
 - OK: correct computation result
 
 ## Regression Checks (3/3)
 
 ### ✅ Context size + timing (regression)
-- ctx_tokens_est=5164
-- assemble=909ms route=913ms
+- ctx_tokens_est=5134
+- assemble=1071ms route=1671ms
 
 ### ✅ Preference parser stability (regression)
 - OK: preference parser ran without errors

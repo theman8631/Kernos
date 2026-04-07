@@ -18,6 +18,19 @@ from kernos.kernel.events import EventStream, emit_event
 logger = logging.getLogger(__name__)
 
 
+def _action_keywords(tool_name: str, tool_input: dict) -> list[str]:
+    """Extract keywords from a tool call for must_not rule relevance matching."""
+    keywords = [tool_name.replace("-", " "), tool_name.replace("_", " ")]
+    # Add action-specific keywords
+    action = (tool_input or {}).get("action", "")
+    if action:
+        keywords.append(action)
+    summary = (tool_input or {}).get("summary", "")
+    if summary:
+        keywords.extend(summary.lower().split()[:3])
+    return keywords
+
+
 @dataclass
 class GateResult:
     """The outcome of a dispatch gate check."""
@@ -211,23 +224,35 @@ class DispatchGate:
         # intent through conversation — don't second-guess it.
         # must_not covenants still block; hard_write/unknown still go to model.
         if is_reactive and effect == "soft_write":
-            has_blocking_rule = False
+            # Reactive soft_write: user requested this action. Only fall through
+            # to the gate model if a must_not rule MENTIONS this tool or capability.
+            has_relevant_blocking_rule = False
             if self._state:
                 try:
                     rules = await self._state.query_covenant_rules(
                         tenant_id, context_space_scope=[active_space_id, None], active_only=True,
                     )
-                    has_blocking_rule = any(r.rule_type == "must_not" for r in rules)
+                    cap_name = self._get_capability_for_tool(tool_name) or ""
+                    for r in rules:
+                        if r.rule_type != "must_not":
+                            continue
+                        desc_lower = r.description.lower()
+                        # Only relevant if the rule mentions this tool, capability, or action
+                        if (tool_name in desc_lower
+                                or (cap_name and cap_name in desc_lower)
+                                or any(kw in desc_lower for kw in _action_keywords(tool_name, tool_input))):
+                            has_relevant_blocking_rule = True
+                            break
                 except Exception:
                     pass
-            if not has_blocking_rule:
+            if not has_relevant_blocking_rule:
                 self._denial_counts.pop(tool_name, None)
                 logger.info(
                     "GATE: reactive_soft_write tool=%s — user-initiated, skipping gate model",
                     tool_name,
                 )
                 return GateResult(allowed=True, reason="approved", method="reactive_soft_write")
-            # has must_not rules — fall through to model to check relevance
+            # has relevant must_not rules — fall through to model to check
 
         # Step 4: Model evaluation
         result = await self._evaluate_model(
