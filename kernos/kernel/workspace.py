@@ -342,6 +342,16 @@ class WorkspaceManager:
         name = descriptor["name"]
         impl = descriptor["implementation"]
 
+        # 3b. Implementation must be a string filename, not an object
+        if isinstance(impl, dict):
+            # Common mistake: agent sends {"type": "python", "entrypoint": "file.py"}
+            impl = impl.get("entrypoint", impl.get("file", impl.get("name", "")))
+            if not impl or not isinstance(impl, str):
+                return (
+                    "The 'implementation' field must be a string filename (e.g. \"my_tool.py\"), "
+                    "not an object. The Python file must export execute(input_data) → dict."
+                )
+
         # 4. Validate name (snake_case, no special chars)
         if not name or not re.match(r'^[a-z][a-z0-9_]*$', name):
             return f"Tool name '{name}' must be snake_case (lowercase letters, digits, underscores)."
