@@ -118,8 +118,8 @@ async def estimate_headroom(
             "recent conversation history to maintain coherent, useful interaction. "
             "Consider: how verbose are typical exchanges in this domain? "
             "How many recent turns does meaningful conversation require? "
-            "A D&D campaign with long narrative exchanges needs more headroom "
-            "than a scheduling space with short structured messages. "
+            "A creative writing project or legal review with long exchanges needs more "
+            "headroom than a scheduling space with short structured messages. "
             "Return estimated_tokens_per_exchange (average tokens per user+assistant pair), "
             "minimum_recent_exchanges (how many recent exchanges the agent needs to see), "
             "and conversation_headroom (their product, rounded up to nearest 1000)."
@@ -318,7 +318,7 @@ After producing the Ledger entry and Living State, determine how many of the mos
 At the very end of your output, on its own line, write:
 SEED_DEPTH: N
 
-Where N is the number of trailing messages to carry forward (minimum 3, maximum 25). A D&D scene in progress might need 15-20. A series of quick factual questions might need 3-5. A multi-step plan might need 8-10."""
+Where N is the number of trailing messages to carry forward (minimum 3, maximum 25). A creative scene or active negotiation might need 15-20. Quick factual questions might need 3-5. A multi-step plan or project review might need 8-10."""
 
 
 # ---------------------------------------------------------------------------

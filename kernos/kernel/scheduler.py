@@ -268,7 +268,7 @@ MANAGE_SCHEDULE_TOOL = {
     "description": (
         "Manage scheduled actions — both time-based reminders AND event-based monitoring. "
         "Use 'create' with a natural language description. "
-        "Time-based: 'Remind me to invoice Henderson on Friday at 9am', "
+        "Time-based: 'Remind me to send the estimate on Friday at 9am', "
         "'Every morning at 8am tell me what is on my calendar today', "
         "'In 2 hours send me a message saying time to stretch'. "
         "Event-based monitoring: 'Let me know 30 minutes before any calendar event', "
@@ -293,8 +293,8 @@ MANAGE_SCHEDULE_TOOL = {
                 "type": "string",
                 "description": (
                     "What to schedule, in natural language. Include the time and what "
-                    "should happen. Examples: 'Remind me to invoice Henderson on Friday "
-                    "at 9am', 'Every morning at 8am tell me what is on my calendar today', "
+                    "should happen. Examples: 'Remind me to follow up with the contractor on "
+                    "Friday at 9am', 'Every morning at 8am tell me what is on my calendar today', "
                     "'In 2 hours send me a message saying time to stretch'"
                 ),
             },
@@ -419,7 +419,7 @@ async def _extract_schedule_params(
                 "'remind me about the dentist', or 'alert me 15 minutes before events':\n"
                 "  - condition_type: 'event'\n"
                 "  - event_source: 'calendar'\n"
-                "  - event_filter: keyword if specific ('dentist', 'Henderson'), "
+                "  - event_filter: keyword if specific ('dentist', 'inspection'), "
                 "empty string if all events\n"
                 "  - event_lead_minutes: requested lead time (default 30)\n"
                 "  - recurrence: 'standing' if ongoing ('before any meeting'), "

@@ -1958,7 +1958,7 @@ class MessageHandler:
                     "- Have a stable, clear label\n\n"
                     "A single conversation about a topic is NOT enough. "
                     "The topic must have depth and likely recurrence.\n"
-                    '"D&D Campaign" is a domain. "Random questions" is not.\n\n'
+                    '"Kitchen Renovation" is a domain. "Tax Prep 2026" is a domain. "Random questions" is not.\n\n'
                     "RENAME CHECK: Has the user indicated a NAME CHANGE for this space? "
                     'Look for explicit statements like "let\'s call it X" or "we\'re renaming to X." '
                     "If yes, set rename=true, new_name to the new name, and rename_evidence."

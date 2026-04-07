@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 ROUTER_SYSTEM_PROMPT = """You are a message router for a personal AI assistant. Given the user's message, recent conversation history, and a list of context spaces, do three things:
 
-1. TAG: Which space(s) does this message belong to? A message can belong to multiple spaces. Use space IDs from the list. If the message is about a recurring topic that doesn't yet have its own space, also include a concise snake_case topic hint (e.g., "legal_work", "dnd_campaign"). Don't add a hint if the topic fits in General or an existing space.
+1. TAG: Which space(s) does this message belong to? A message can belong to multiple spaces. Use space IDs from the list. If the message is about a recurring topic that doesn't yet have its own space, also include a concise snake_case topic hint (e.g., "legal_work", "kitchen_reno", "tax_prep"). Don't add a hint if the topic fits in General or an existing space.
 
 2. FOCUS: Which single space should receive the agent's full attention right now? DEFAULT: keep the current focus unless there's a clear contextual signal pulling to a different space. Only switch when the message is clearly ABOUT a different domain's subject matter. Universal actions (calendar, time, search, memory) are not domain signals — they stay in the current space.
 
@@ -27,19 +27,19 @@ ROUTER_SYSTEM_PROMPT = """You are a message router for a personal AI assistant. 
 Rules:
 
 HIERARCHY: Spaces form a tree. Some spaces are children of others (marked [child of: X]). Route to the RIGHT LEVEL of specificity:
-- Broad domain content goes to the parent. "Look that up in the Player's Handbook" from a specific campaign → step up to the D&D parent (it's about D&D in general, not this campaign). "Let's make a list of cities for all campaigns" → D&D parent.
-- Specific ongoing work goes to the child. "I attack the orc!" → step back into the active campaign. "Where did we leave off with Henderson's contract?" → the Henderson-specific space.
+- Broad domain content → parent space. From a specific client project, "What's our standard contract template?" steps up to the Legal parent. From a specific renovation, "What's the overall property budget?" steps up to the Real Estate parent.
+- Specific ongoing work → child space. "Send the invoice to Martinez" steps into the Martinez-specific space. "Where did we leave off on chapter 3?" steps into the specific writing project.
 - The cost of staying is low. The cost of switching wrong is high (breaks conversational context). When unsure, stay.
-- This applies to ANY domain hierarchy — legal, medical, business, creative projects. Route to where the scope fits.
+- Domains span all areas of life: business operations, legal work, personal finance, health, home & family, creative projects, travel, education, property management, relationships. Route to where the scope fits.
 
-UNIVERSAL ACTIONS stay in the current space. Calendar, time, search, memory, file operations are available everywhere. "Make a calendar entry" from any space stays in that space.
+UNIVERSAL ACTIONS stay in the current space. Calendar, time, search, memory, file operations are available everywhere. "Make a calendar entry" or "search for X" from any space stays in that space.
 
-DOMAIN-SPECIFIC WORK routes to the domain. "Invoice Henderson" routes to the invoicing space. The key distinction: does this message need a specific domain's data and context, or is it universal?
+DOMAIN-SPECIFIC WORK routes to the domain. "Send Martinez the estimate" routes to the business space. "Check my Roth IRA balance" routes to finance. The key distinction: does this message need a specific domain's data and context, or is it universal?
 
 OTHER RULES:
-- When a message signals something NEW within an existing domain ("new campaign", "starting fresh"), tag the parent. Let the new topic accumulate before it earns its own space.
+- When a message signals something NEW within an existing domain ("new project", "starting fresh"), tag the parent. Let the new topic accumulate before it earns its own space.
 - Ambiguity is not a domain signal. When uncertain, keep the current focus.
-- A message mentioning a person or entity from one domain doesn't mean the message IS about that domain. "Henderson plays D&D" while chatting casually is General, not Business.
+- A message mentioning a person or entity from one domain doesn't mean the message IS about that domain. Discussing someone casually doesn't route to their business context.
 - Read the message in the context of recent history. A message after a long gap is a fresh start. A message seconds after the last one is a continuation.
 - Never invent space IDs. Only use IDs from the provided space list, or snake_case topic hints for emerging topics.
 """
@@ -69,8 +69,8 @@ ROUTER_SCHEMA = {
         "work_mode": {
             "type": "boolean",
             "description": "True if the user intends to DO WORK in another domain "
-                          "(not just ask about it). 'Let's invoice Henderson' is work_mode. "
-                          "'What was Henderson's last invoice?' is query_mode."
+                          "(not just ask about it). 'Let's send Martinez the estimate' is work_mode. "
+                          "'What was our last quote for Martinez?' is query_mode."
         },
     },
     "required": ["tags", "focus", "continuation", "query_mode", "work_mode"],

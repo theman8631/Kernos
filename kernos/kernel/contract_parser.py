@@ -44,7 +44,7 @@ CONTRACT_PARSER_SCHEMA = {
                 "(e.g., 'never do X', 'always confirm Y', 'keep responses short'). "
                 "automation_rule = when something happens, do something — an event-triggered "
                 "or scheduled action (e.g., 'whenever I get an email, text me', "
-                "'if Henderson doesn't reply by Friday, remind me', "
+                "'if the contractor doesn't reply by Friday, remind me', "
                 "'every Monday, summarize my calendar'). "
                 "Only behavioral_constraints become covenant rules."
             ),
@@ -123,7 +123,7 @@ async def classify_and_parse(
                 "'keep responses short', 'use formal language with clients'.\n"
                 "- automation_rule: defines WHEN the agent should act in response to "
                 "an external event or schedule. Examples: 'whenever I get an email, "
-                "text me', 'if Henderson doesn't reply by Friday, remind me', "
+                "text me', 'if the contractor doesn't reply by Friday, remind me', "
                 "'every Monday, summarize my calendar'.\n\n"
                 "For behavioral_constraints, also determine:\n"
                 "- rule_type: must (always do), must_not (never do), or preference\n"
