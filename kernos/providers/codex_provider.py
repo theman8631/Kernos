@@ -78,11 +78,12 @@ class OpenAICodexProvider(Provider):
         """Convert Anthropic-format tool defs to OpenAI Responses API function format."""
         result = []
         for t in tools:
+            schema = t.get("input_schema", {"type": "object", "properties": {}})
             result.append({
                 "type": "function",
                 "name": t["name"],
                 "description": t.get("description", ""),
-                "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                "parameters": schema,
             })
         return result
 
@@ -356,12 +357,27 @@ class OpenAICodexProvider(Provider):
                     if oi not in _streamed_text:
                         _streamed_text[oi] = []
                     _streamed_text[oi].append(delta)
+                elif event_type == "response.output_item.done":
+                    # Completed output item — may have full arguments
+                    oi = event.get("output_index", 0)
+                    item = event.get("item", {})
+                    if item:
+                        _streamed_items[oi] = item  # Overwrite with completed version
                 elif event_type == "response.function_call_arguments.delta":
+                    # Key by output_index (reliable) AND call_id/item_id (fallback)
+                    oi = event.get("output_index", -1)
                     call_id = event.get("call_id", event.get("item_id", ""))
                     delta = event.get("delta", "")
-                    if call_id not in _streamed_fn_args:
-                        _streamed_fn_args[call_id] = []
-                    _streamed_fn_args[call_id].append(delta)
+                    # Use output_index as primary key for reconstruction
+                    key = f"oi:{oi}" if oi >= 0 else call_id
+                    if key not in _streamed_fn_args:
+                        _streamed_fn_args[key] = []
+                    _streamed_fn_args[key].append(delta)
+                    # Also store by call_id for backwards compat
+                    if call_id and call_id != key:
+                        if call_id not in _streamed_fn_args:
+                            _streamed_fn_args[call_id] = []
+                        _streamed_fn_args[call_id].append(delta)
 
                 elif event_type == "response.failed":
                     msg = ""
@@ -384,9 +400,21 @@ class OpenAICodexProvider(Provider):
         # reconstruct the output from deltas
         if final_response:
             output = final_response.get("output", [])
-            if not output and (_streamed_text or _streamed_items):
+            if not output and (_streamed_text or _streamed_items or _streamed_fn_args):
+                # Collect all output indices we know about
+                all_indices = set()
+                all_indices.update(_streamed_items.keys())
+                all_indices.update(_streamed_text.keys())
+                # Also extract indices from fn_args keys like "oi:0"
+                for key in _streamed_fn_args:
+                    if key.startswith("oi:"):
+                        try:
+                            all_indices.add(int(key[3:]))
+                        except ValueError:
+                            pass
+
                 reconstructed = []
-                for oi in sorted(set(list(_streamed_items.keys()) + list(_streamed_text.keys()))):
+                for oi in sorted(all_indices):
                     item = dict(_streamed_items.get(oi, {}))
                     if oi in _streamed_text:
                         full_text = "".join(_streamed_text[oi])
@@ -395,10 +423,12 @@ class OpenAICodexProvider(Provider):
                         else:
                             item.setdefault("type", "output_text")
                             item["text"] = full_text
-                    # Reconstruct function call arguments
+                    # Reconstruct function call arguments — try output_index first, then call_id
+                    oi_key = f"oi:{oi}"
                     call_id = item.get("call_id", item.get("id", ""))
-                    if call_id in _streamed_fn_args:
-                        item["arguments"] = "".join(_streamed_fn_args[call_id])
+                    fn_args = _streamed_fn_args.get(oi_key) or _streamed_fn_args.get(call_id)
+                    if fn_args:
+                        item["arguments"] = "".join(fn_args)
                     reconstructed.append(item)
                 final_response["output"] = reconstructed
 

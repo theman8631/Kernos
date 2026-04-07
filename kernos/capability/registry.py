@@ -88,7 +88,9 @@ def _compress_hint(description: str) -> str:
     return " ".join(words[:4]).rstrip(".")
 
 
-# Calendar read tools — most-called MCP tools, always have full schemas in context.
+# Calendar tools — most-called MCP tools, always have full schemas in context.
+# All calendar tools preloaded (not just reads) so the LLM always has the
+# complete input schema for create/update/delete — stubs produce empty args.
 PRELOADED_TOOLS: set[str] = {
     "list-events",
     "search-events",
@@ -96,6 +98,11 @@ PRELOADED_TOOLS: set[str] = {
     "get-freebusy",
     "list-calendars",
     "get-current-time",
+    "create-event",
+    "create-events",
+    "update-event",
+    "delete-event",
+    "respond-to-event",
 }
 
 # ---------------------------------------------------------------------------

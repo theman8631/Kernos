@@ -493,8 +493,8 @@ class TestPreloadedTools:
         preloaded = registry.get_preloaded_tools()
         names = {t["name"] for t in preloaded}
         assert "list-events" in names
-        assert "create-event" not in names  # Not in PRELOADED_TOOLS
-        assert "delete-event" not in names
+        assert "create-event" in names  # Now preloaded (stubs produce empty args)
+        assert "delete-event" in names  # Also preloaded now
 
     def test_no_mcp_returns_empty(self):
         registry = make_registry()
@@ -585,15 +585,15 @@ class TestLazyToolStubs:
 
         stubs = registry.get_lazy_tool_stubs()
         stub_names = {s["name"] for s in stubs}
-        # list-events is PRELOADED — should NOT be a stub
+        # All calendar tools are now PRELOADED — none should be stubs
         assert "list-events" not in stub_names
-        # create-event and delete-event are lazy — should be stubs
-        assert "create-event" in stub_names
-        assert "delete-event" in stub_names
+        assert "create-event" not in stub_names
+        assert "delete-event" not in stub_names
 
     def test_stubs_have_open_schema(self):
         mcp = MagicMock()
-        tool_list = [{"name": "create-event", "description": "Create event"}]
+        # Use a non-preloaded tool name for stub testing
+        tool_list = [{"name": "manage-accounts", "description": "Manage calendar accounts"}]
         mcp.get_tools.return_value = tool_list
         mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
         registry = make_registry(mcp=mcp)
@@ -604,25 +604,25 @@ class TestLazyToolStubs:
         schema = stubs[0]["input_schema"]
         assert schema["additionalProperties"] is True
         assert schema["properties"] == {}
-        # Description should use MCP description, not loading language
         assert "loads on first use" not in stubs[0]["description"]
-        assert "Create event" in stubs[0]["description"]  # From MCP description
+        assert "Manage calendar accounts" in stubs[0]["description"]
 
     def test_excludes_already_loaded(self):
         mcp = MagicMock()
+        # Use non-preloaded tools for stub exclusion testing
         tool_list = [
-            {"name": "create-event", "description": "Create event"},
-            {"name": "delete-event", "description": "Delete event"},
+            {"name": "manage-accounts", "description": "Manage accounts"},
+            {"name": "list-colors", "description": "List colors"},
         ]
         mcp.get_tools.return_value = tool_list
         mcp.get_tool_definitions.return_value = {"google-calendar": tool_list}
         registry = make_registry(mcp=mcp)
         registry.register(make_cap("google-calendar", universal=True))
 
-        stubs = registry.get_lazy_tool_stubs(loaded_names={"create-event"})
+        stubs = registry.get_lazy_tool_stubs(loaded_names={"manage-accounts"})
         stub_names = {s["name"] for s in stubs}
-        assert "create-event" not in stub_names
-        assert "delete-event" in stub_names
+        assert "manage-accounts" not in stub_names
+        assert "list-colors" in stub_names
 
     def test_stubs_use_tool_hints(self):
         mcp = MagicMock()

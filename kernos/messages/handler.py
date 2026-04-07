@@ -3237,16 +3237,11 @@ class MessageHandler:
                             if tool_name in _kernel_tool_map:
                                 _add_tool(_kernel_tool_map[tool_name])
                                 continue
-                            # Try full MCP schema
+                            # Always try full MCP schema (never use stubs for catalog-scan tools)
                             schema = self.registry.get_tool_schema(tool_name)
                             if schema:
                                 _add_tool(schema)
-                                continue
-                            # Try stub
-                            for stub in all_stubs:
-                                if stub["name"] == tool_name:
-                                    _add_tool(stub)
-                                    break
+                                self.reasoning.load_tool(active_space_id, tool_name)
                         logger.info("TOOL_SURFACING: tier=catalog_scan tools=%d selected=%s",
                             len(scan_tools), scan_tools)
                 except Exception as exc:
