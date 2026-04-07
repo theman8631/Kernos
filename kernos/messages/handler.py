@@ -257,14 +257,20 @@ def resolve_mcp_credentials(
     return resolved
 
 
-def _format_contracts(rules: list[CovenantRule]) -> str:
-    """Format behavioral contract rules into natural language for the system prompt."""
+def _format_contracts(rules: list[CovenantRule], space_names: dict[str, str] | None = None) -> str:
+    """Format behavioral contract rules with source attribution for the system prompt."""
     if not rules:
         return ""
+    _names = space_names or {}
     lines = ["BEHAVIORAL CONTRACTS — follow these strictly:"]
     for rule in rules:
         label = rule.rule_type.replace("_", " ").upper()
-        lines.append(f"{label}: {rule.description}")
+        scope_tag = ""
+        if rule.context_space:
+            scope_tag = f" [{_names.get(rule.context_space, rule.context_space)}]"
+        else:
+            scope_tag = " [global]"
+        lines.append(f"{label}: {rule.description}{scope_tag}")
     return "\n".join(lines)
 
 
@@ -334,10 +340,11 @@ def _is_stale_knowledge(entry, days: int = 14) -> bool:
 
 def _build_rules_block(
     template: AgentTemplate, contract_rules: list[CovenantRule], soul: Soul,
+    space_names: dict[str, str] | None = None,
 ) -> str:
     """## RULES — operating principles + behavioral contracts + bootstrap."""
     parts = [template.operating_principles]
-    contracts_text = _format_contracts(contract_rules)
+    contracts_text = _format_contracts(contract_rules, space_names)
     if contracts_text:
         parts.append(contracts_text)
     if not soul.bootstrap_graduated:
@@ -460,6 +467,13 @@ def _build_memory_block(memory_prefix: str | None) -> str:
     if not parts:
         return ""
     return "## MEMORY\n" + "\n\n".join(parts)
+
+
+def _build_procedures_block(procedures_prefix: str | None) -> str:
+    """## PROCEDURES — domain-specific workflows from _procedures.md."""
+    if not procedures_prefix:
+        return ""
+    return "## PROCEDURES\n" + procedures_prefix
 
 
 def _compose_blocks(*blocks: str) -> str:
@@ -1411,10 +1425,10 @@ class MessageHandler:
         conversation_id: str,
         active_space_id: str,
         active_space: ContextSpace | None,
-    ) -> tuple[list[dict], str | None, str | None]:
+    ) -> tuple[list[dict], str | None, str | None, str | None]:
         """Assemble the agent's conversation context for the active space.
 
-        Returns (recent_messages, results_prefix, memory_prefix) where:
+        Returns (recent_messages, results_prefix, memory_prefix, procedures_prefix) where:
         - recent_messages: messages since last compaction (the live thread)
         - results_prefix: receipts, system events, awareness (for ## RESULTS)
         - memory_prefix: compaction index + document (for ## MEMORY)
@@ -1495,7 +1509,32 @@ class MessageHandler:
         results_prefix = "\n\n".join(results_parts) if results_parts else None
         memory_prefix = "\n\n".join(memory_parts) if memory_parts else None
 
-        # 4. Recent messages — read from space log (P2), fallback to legacy store
+        # 5. Procedure files from scope chain → PROCEDURES section
+        procedures_prefix = None
+        if active_space and active_space_id:
+            try:
+                proc_parts: list[str] = []
+                # Build scope chain for procedure inheritance
+                _proc_chain = [active_space_id]
+                _cur_space = active_space
+                while _cur_space and _cur_space.parent_id:
+                    _proc_chain.append(_cur_space.parent_id)
+                    _cur_space = await self.state.get_context_space(tenant_id, _cur_space.parent_id)
+                for sid in _proc_chain:
+                    content = await self._files.read_file(tenant_id, sid, "_procedures.md")
+                    if content and not content.startswith("Error:"):
+                        if sid == active_space_id:
+                            proc_parts.append(content)
+                        else:
+                            _pspace = await self.state.get_context_space(tenant_id, sid)
+                            _pname = _pspace.name if _pspace else sid
+                            proc_parts.append(f"[From {_pname}]\n{content}")
+                if proc_parts:
+                    procedures_prefix = "\n\n".join(proc_parts)
+            except Exception as exc:
+                logger.warning("PROCEDURES_LOAD: failed for space=%s: %s", active_space_id, exc)
+
+        # 6. Recent messages — read from space log (P2), fallback to legacy store
         recent_messages: list[dict] = []
         _context_source = "none"
         try:
@@ -1569,7 +1608,7 @@ class MessageHandler:
         if merged_orphans:
             self._orphaned_user_content = merged_orphans
 
-        return recent_messages, results_prefix, memory_prefix
+        return recent_messages, results_prefix, memory_prefix, procedures_prefix
 
     async def _get_pending_awareness(self, tenant_id: str, active_space_id: str) -> str:
         """Get pending whispers formatted for the agent's context."""
@@ -2893,7 +2932,7 @@ class MessageHandler:
         active_space_id = ctx.active_space_id
 
         # Space context (compaction, cross-domain, system events, receipts)
-        space_messages, ctx.results_prefix, ctx.memory_prefix = await self._assemble_space_context(
+        space_messages, ctx.results_prefix, ctx.memory_prefix, _procedures_prefix = await self._assemble_space_context(
             tenant_id, ctx.conversation_id, active_space_id, active_space
         )
 
@@ -2976,7 +3015,17 @@ class MessageHandler:
             return always_inject + shaped
 
         # Fire both LLM pipelines + covenant query concurrently
-        space_scope = [active_space_id, None] if active_space_id else None
+        # Build scope chain for covenant inheritance (current + ancestors + global)
+        _scope_chain = [active_space_id] if active_space_id else []
+        if active_space and active_space.parent_id:
+            _cur = active_space.parent_id
+            _seen = {active_space_id}
+            while _cur and _cur not in _seen:
+                _scope_chain.append(_cur)
+                _seen.add(_cur)
+                _p = await self.state.get_context_space(tenant_id, _cur)
+                _cur = _p.parent_id if _p and _p.parent_id else None
+        space_scope = _scope_chain + [None] if _scope_chain else None  # add None for global
         pref_note, user_knowledge_entries, contract_rules = await asyncio.gather(
             _run_pref_parsing(),
             _run_knowledge_pipeline(),
@@ -3192,18 +3241,28 @@ class MessageHandler:
             else:
                 ctx.results_prefix = merge_note
 
-        rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul)
+        # Build space name map for covenant attribution
+        _space_names: dict[str, str] = {}
+        if active_space:
+            _space_names[active_space_id] = active_space.name
+        for sid in _scope_chain:
+            if sid not in _space_names:
+                _s = await self.state.get_context_space(tenant_id, sid)
+                if _s:
+                    _space_names[sid] = _s.name
+
+        rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul, space_names=_space_names)
         now_block = _build_now_block(message, soul, active_space)
         state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries)
         results = _build_results_block(ctx.results_prefix)
         actions = _build_actions_block(capability_prompt, message, self._channel_registry)
         memory = _build_memory_block(ctx.memory_prefix)
+        procedures = _build_procedures_block(_procedures_prefix)
 
         # Cache boundary: static prefix (RULES + ACTIONS) is stable across turns,
-        # dynamic suffix (NOW + STATE + RESULTS + MEMORY) changes every turn.
-        # Reorder so static comes first for provider-level prompt caching.
+        # dynamic suffix (NOW + STATE + RESULTS + PROCEDURES + MEMORY) changes every turn.
         ctx.system_prompt_static = _compose_blocks(rules, actions)
-        ctx.system_prompt_dynamic = _compose_blocks(now_block, state_block, results, memory)
+        ctx.system_prompt_dynamic = _compose_blocks(now_block, state_block, results, procedures, memory)
         ctx.system_prompt = _compose_blocks(ctx.system_prompt_static, ctx.system_prompt_dynamic)
 
         # Developer mode: inject pending errors

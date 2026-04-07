@@ -200,6 +200,7 @@ Dynamic suffix (changes every turn):
 - **NOW** — Current time, platform, auth level, space posture.
 - **STATE** — Soul identity + USER CONTEXT (knowledge entries with source tags, deduplicated).
 - **RESULTS** — Receipts, system events, awareness whispers, cross-domain signals, downward search answers.
+- **PROCEDURES** — Domain-specific workflows from `_procedures.md` files in the scope chain.
 - **MEMORY** — Compaction Living State + Ledger index + parent briefings.
 
 ### USER CONTEXT
@@ -293,7 +294,32 @@ Operating principles guide build-fast-iterate: propose concrete, write code, tes
 
 ---
 
-## 9. Awareness & Scheduling
+## 9. Procedural Knowledge
+
+Two systems for domain-specific knowledge in the hierarchy tree. They solve different problems and remain separate:
+
+### Covenants = How to Behave
+
+Short behavioral rules. Auto-captured by the kernel. Space-scoped via `context_space` field on `CovenantRule`. Loaded via scope chain (current space + ancestors + global). Injected into RULES block with source attribution: `[global]`, `[Health]`, `[D&D]`.
+
+Child-level covenants take precedence over parent-level when they conflict on the same topic.
+
+### Procedures = What to Do
+
+Multi-step workflows with tool references. Written to `_procedures.md` in each space's files directory. Loaded via file scope chain on space entry. Injected as a PROCEDURES section in the system prompt between RESULTS and MEMORY.
+
+Parent procedures appear with `[From ParentName]` attribution. Local `_procedures.md` shadows same-named sections in parent.
+
+### Capture Path
+
+- **Behavioral rule** → covenant (auto-captured by preference parser)
+- **Multi-step workflow** → agent writes to `_procedures.md` via `write_file`
+
+The agent's operating principles include guidance on distinguishing these.
+
+---
+
+## 10. Awareness & Scheduling
 
 ### Awareness Evaluator
 
@@ -309,7 +335,7 @@ Background task. Evaluates proactive insights ("whispers") on a timer (default 1
 
 ---
 
-## 10. Capabilities & MCP
+## 11. Capabilities & MCP
 
 ### Connected Servers
 
@@ -325,7 +351,7 @@ Background task. Evaluates proactive insights ("whispers") on a timer (default 1
 
 ---
 
-## 11. Identity & Covenants
+## 12. Identity & Covenants
 
 ### Soul
 
@@ -341,7 +367,7 @@ Automatically captured from user behavioral instructions. Types: MUST, MUST NOT,
 
 ---
 
-## 12. Friction Observer
+## 13. Friction Observer
 
 **File:** `kernos/kernel/friction.py`
 
@@ -360,7 +386,7 @@ Post-turn cohort agent. Detects friction signals and writes diagnostic reports t
 
 ---
 
-## 13. Platform Adapters
+## 14. Platform Adapters
 
 Handler never knows about adapters. Adapters never know about the handler. All communication through NormalizedMessage.
 
@@ -369,7 +395,7 @@ Handler never knows about adapters. Adapters never know about the handler. All c
 
 ---
 
-## 14. Persistence
+## 15. Persistence
 
 ### State Store
 
@@ -389,7 +415,7 @@ Shadow archive architecture. `delete_file` preserves files in `.deleted/`. Knowl
 
 ---
 
-## 15. Standing Principles
+## 16. Standing Principles
 
 - Conservative by default, expansive by permission
 - Memory as the moat — trust earned through thousands of correct small actions
