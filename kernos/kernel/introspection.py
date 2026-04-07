@@ -100,6 +100,44 @@ async def build_user_truth_view(
     except Exception as exc:
         logger.warning("Introspection: knowledge query failed: %s", exc)
 
+    # --- Context Spaces ---
+    try:
+        spaces = await state.list_context_spaces(tenant_id)
+        active_spaces = [s for s in spaces if s.status == "active"]
+        if active_spaces:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            lines = ["## Context Spaces"]
+            for s in sorted(active_spaces, key=lambda x: (x.depth, x.name)):
+                if s.space_type == "system":
+                    continue  # Don't clutter the user view with system internals
+                parent_note = ""
+                if s.parent_id:
+                    parent = next((p for p in active_spaces if p.id == s.parent_id), None)
+                    if parent:
+                        parent_note = f" (within {parent.name})"
+                type_tag = " [default]" if s.is_default else ""
+                desc = s.description[:100] if s.description else "No description"
+                posture_note = f"\n  Style: {s.posture}" if s.posture else ""
+                # Relative time
+                age_note = ""
+                if s.last_active_at:
+                    try:
+                        last = datetime.fromisoformat(s.last_active_at)
+                        days = (now - last).days
+                        if days == 0:
+                            age_note = " — active today"
+                        elif days == 1:
+                            age_note = " — active yesterday"
+                        elif days < 7:
+                            age_note = f" — active {days} days ago"
+                    except (ValueError, TypeError):
+                        pass
+                lines.append(f"- {s.name}{type_tag}{parent_note}{age_note}\n  {desc}{posture_note}")
+            sections.append("\n".join(lines))
+    except Exception as exc:
+        logger.warning("Introspection: spaces query failed: %s", exc)
+
     # --- Connected Capabilities ---
     try:
         if registry:
