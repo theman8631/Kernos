@@ -20,7 +20,7 @@ ROUTER_SYSTEM_PROMPT = """You are a message router for a personal AI assistant. 
 
 1. TAG: Which space(s) does this message belong to? A message can belong to multiple spaces. Use space IDs from the list. If the message is about a recurring topic that doesn't yet have its own space, also include a concise snake_case topic hint (e.g., "legal_work", "dnd_campaign"). Don't add a hint if the topic fits in General or an existing space.
 
-2. FOCUS: Which single space should receive the agent's full attention right now? When in doubt, choose General. The cost of defaulting to General is low — if the domain continues, it reasserts next message.
+2. FOCUS: Which single space should receive the agent's full attention right now? DEFAULT: keep the current focus unless there's a clear contextual signal pulling to a different space. Only switch when the message is clearly ABOUT a different domain's subject matter. Universal actions (calendar, time, search, memory) are not domain signals — they stay in the current space.
 
 3. CONTINUATION: Is this an obvious continuation (short affirmation, reaction, "lol", "ok", "sounds good") that should ride conversational momentum? If yes, keep the current focus unchanged.
 
