@@ -303,13 +303,20 @@ class WorkspaceManager:
     # --- Tool Registration ---
 
     async def register_tool(
-        self, tenant_id: str, space_id: str, descriptor_file: str,
+        self, tenant_id: str, space_id: str, descriptor_file: str | dict,
     ) -> str:
         """Validate a descriptor and register the tool in the catalog.
 
         The descriptor (.tool.json) is the source of truth. The catalog
         reads from it. The manifest tracks it.
         """
+        # Guard: LLM may send a dict instead of a string
+        if isinstance(descriptor_file, dict):
+            descriptor_file = descriptor_file.get("descriptor_file", descriptor_file.get("name", str(descriptor_file)))
+        descriptor_file = str(descriptor_file).strip()
+        if not descriptor_file:
+            return "Error: descriptor_file must be a filename string."
+
         space_dir = self._space_dir(tenant_id, space_id)
 
         # 1. Validate descriptor filename (no path traversal)

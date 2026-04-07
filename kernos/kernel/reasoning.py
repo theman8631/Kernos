@@ -469,7 +469,8 @@ class ReasoningService:
                 return "Workspace manager is not available."
             elif tool_name == "register_tool":
                 if self._workspace:
-                    return await self._workspace.register_tool(request.tenant_id, request.active_space_id, tool_input.get("descriptor_file", ""))
+                    _desc_file = tool_input.get("descriptor_file", "") or tool_input
+                    return await self._workspace.register_tool(request.tenant_id, request.active_space_id, _desc_file)
                 return "Workspace manager is not available."
             elif tool_name == "remember":
                 if self._retrieval:
@@ -905,7 +906,8 @@ class ReasoningService:
             elif block.name == "register_tool":
                 if hasattr(self, '_workspace') and self._workspace:
                     try:
-                        result = await self._workspace.register_tool(request.tenant_id, request.active_space_id, tool_args.get("descriptor_file", ""))
+                        _desc_file = tool_args.get("descriptor_file", "") or tool_args
+                        result = await self._workspace.register_tool(request.tenant_id, request.active_space_id, _desc_file)
                     except Exception as exc:
                         logger.warning("Kernel tool 'register_tool' failed: %s", exc)
                         result = f"Registration failed: {exc}"
