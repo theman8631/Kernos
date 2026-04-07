@@ -2624,23 +2624,44 @@ class MessageHandler:
             logger.info("SPACE_CREATE: id=%s name=%s source=manual", new_space.id, new_space.name)
             return f"Created space **{name}** ({new_space.id}). Description: {description or '(none)'}"
 
-        # Default: list all spaces
+        # Default: list all spaces (user-facing — no internal fields)
+        from datetime import datetime, timezone
         spaces = await self.state.list_context_spaces(tenant_id)
-        if not spaces:
+        active = [s for s in spaces if s.status == "active"]
+        if not active:
             return "No context spaces found."
-        lines = ["**Context Spaces**\n"]
-        for s in sorted(spaces, key=lambda x: x.last_active_at or "", reverse=True):
-            current = " **(Current)**" if s.id == ctx.active_space_id else ""
-            default = " [DEFAULT]" if s.is_default else ""
-            lines.append(
-                f"- **{s.name}**{current}{default} ({s.id}) — "
-                f"type={s.space_type} status={s.status} "
-                f"last_active={s.last_active_at or 'never'}"
-            )
+
+        now = datetime.now(timezone.utc)
+        lines = ["**Your Spaces**\n"]
+        for s in sorted(active, key=lambda x: x.last_active_at or "", reverse=True):
+            if s.space_type == "system":
+                continue  # Don't show system internals
+            current = " **(you are here)**" if s.id == ctx.active_space_id else ""
+            default = " — default" if s.is_default else ""
+            # Relative time
+            age = ""
+            if s.last_active_at:
+                try:
+                    last = datetime.fromisoformat(s.last_active_at)
+                    days = (now - last).days
+                    if days == 0:
+                        age = " — active today"
+                    elif days == 1:
+                        age = " — yesterday"
+                    elif days < 7:
+                        age = f" — {days} days ago"
+                    else:
+                        age = f" — {days}d ago"
+                except (ValueError, TypeError):
+                    pass
+            parent_note = ""
+            if s.parent_id:
+                parent = next((p for p in active if p.id == s.parent_id), None)
+                if parent:
+                    parent_note = f" (within {parent.name})"
+            lines.append(f"- **{s.name}**{current}{default}{parent_note}{age}")
             if s.description:
                 lines.append(f"  {s.description}")
-            if s.posture:
-                lines.append(f"  Style: {s.posture}")
         return "\n".join(lines)
 
     async def _handle_status(self, ctx: TurnContext) -> str:

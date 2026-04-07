@@ -256,8 +256,7 @@ class TestSpacesCommand:
 
         result = await handler._handle_spaces(ctx, "/spaces")
         assert "General" in result
-        assert general.id in result
-        assert "DEFAULT" in result
+        assert "default" in result
 
     async def test_spaces_create(self, tmp_path):
         from kernos.messages.handler import MessageHandler, TurnContext
