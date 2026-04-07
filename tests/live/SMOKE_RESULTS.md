@@ -1,55 +1,63 @@
 # Live Smoke Test Results
 
-**Date:** 2026-04-07 01:08 UTC
-**Result:** 6/6 passed
+**Date:** 2026-04-07 01:15 UTC
+**Result:** 11/11 passed
 **Provider:** openai-codex
 
-### PASS: Basic response
-Duration: 5113ms
-Response: It’s 6:07 PM local time for you.
+## Core LLM Pipeline (3/3)
 
-By the way — what should I call you?
-- OK: Response not empty
-- OK: No error message
+### ✅ Basic response (core)
+**Duration:** 4112ms
+**Response:** It’s 6:15 PM local time.
+- OK: non-empty
+- OK: router fired
 
-### PASS: /dump check
-Duration: 1284ms
-Response: Context dumped to data/diagnostics/context_2026-04-07T01-07-32.txt
-- OK: Response mentions dump
+### ✅ Multi-turn coherence (core)
+**Duration:** 5704ms
+**Response:** Monday, April 6, 2026.
+- OK: non-empty
 
-### PASS: Router works
-Duration: 4677ms
-Response: Hey — I’m good. Here and paying attention.
+### ✅ Router structured output (core)
+**Duration:** 5410ms
+**Response:** Doing well. ↵  ↵ How are you?
+- OK: router returned valid JSON
 
-How are you doing?
-- OK: Response not empty
-- OK: No error message
-- OK: Router fired
+## Context UI Quality (Hotfix) (2/2)
 
-### PASS: Knowledge shaping
-Duration: 8454ms
-Response: Not much yet.
+### ✅ DEPTH paragraph in RULES (hotfix)
+**Duration:** 1296ms
+**Response:** Context dumped to data/diagnostics/context_2026-04-07T01-15-15.txt
+- OK: DEPTH paragraph found in RULES block
 
-I know:
-- you’re the verified owner of this Kernos instance
-- we’re talking on Discord
-- your standing preferences/rules include:
-  - keep responses concise unless you ask for detail
-  
-- OK: Response not empty
-- OK: No error message
+### ✅ USER CONTEXT source tags + dedup (hotfix)
+- OK: source tags present, no duplicates, no identity confusion
 
-### PASS: Tool surfacing
-Duration: 8815ms
-Response: I can do that, but I don’t currently have web search loaded here.
+## Tool Surfacing Redesign (2/2)
 
-If you want, I can help you set up web search/browser access so I can look up pizza places near you. If you already have a city or ne
-- OK: Response not empty
-- OK: Tool surfacing logged
+### ✅ Tool surfacing logs (surfacing)
+**Duration:** 8497ms
+**Response:** I can search now. What city or neighborhood should I use?
+- OK: TOOL_SURFACING: tier=common surfaced=21 total_available=21
 
-### PASS: Code execution
-Duration: 8987ms
-Response: 2^100 = 1267650600228229401496703205376
-- OK: Response not empty
-- OK: No error message
+### ✅ Kernel tools all surfaced (surfacing)
+- tool_count=21 (expect ≥15)
+
+## Agentic Workspace (1/1)
+
+### ✅ Code execution (workspace)
+**Duration:** 9970ms
+**Response:** 2^100 = 1267650600228229401496703205376
+- OK: correct computation result
+
+## Regression Checks (3/3)
+
+### ✅ Context size + timing (regression)
+- ctx_tokens_est=4880
+- assemble=3252ms route=1103ms
+
+### ✅ Preference parser stability (regression)
+- OK: preference parser ran without errors
+
+### ✅ Knowledge shaping stability (regression)
+- INFO: no shaping logs (may have no candidates)
 
