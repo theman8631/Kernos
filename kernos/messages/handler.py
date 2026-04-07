@@ -2773,6 +2773,11 @@ class MessageHandler:
                 query_mode=True,
             )
 
+        # Work mode: intentional domain-specific work — route there confidently
+        if ctx.router_result.work_mode and current_focus_id and ctx.router_result.focus != current_focus_id:
+            logger.info("WORK_MODE: routing to %s for domain-specific work",
+                ctx.router_result.focus)
+
         ctx.active_space_id = ctx.router_result.focus
         ctx.previous_space_id = current_focus_id
         ctx.space_switched = (
@@ -2842,6 +2847,12 @@ class MessageHandler:
                 await self._workspace.ensure_registered(tenant_id, ctx.active_space_id)
             except Exception as exc:
                 logger.warning("WORKSPACE: lazy registration failed for %s: %s", ctx.active_space_id, exc)
+
+            # Lazy catalog version promotion — scan for new tools relevant to this space
+            try:
+                await self._check_catalog_version(tenant_id, ctx.active_space_id, ctx.active_space)
+            except Exception as exc:
+                logger.warning("CATALOG_VERSION: check failed for %s: %s", ctx.active_space_id, exc)
 
         if message.context and ctx.active_space_id:
             for att in message.context.get("attachments", []):
@@ -3402,6 +3413,87 @@ class MessageHandler:
             if values:
                 avgs[phase] = sum(values) // len(values)
         return avgs
+
+    async def _check_catalog_version(
+        self, tenant_id: str, space_id: str, space: ContextSpace,
+    ) -> None:
+        """Lazy version promotion: scan new tools for relevance to this space.
+
+        On space entry, if catalog.version > space.last_catalog_version,
+        new tools have been registered since last visit. Run a cheap LLM
+        check to see if any are relevant, and promote them into the
+        space's local affordance set.
+        """
+        import json as _json
+        catalog = self._tool_catalog
+        if not catalog or space.last_catalog_version >= catalog.version:
+            return  # Up to date
+
+        # Get tools not already in this space's affordance set
+        current_set = set(space.local_affordance_set)
+        from kernos.kernel.tool_catalog import COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL
+        already_known = current_set | COMMON_TOOL_NAMES | ALWAYS_SURFACE_KERNEL
+        new_tools = [
+            e for e in catalog.get_all()
+            if e.name not in already_known and e.source == "workspace"
+        ]
+
+        if not new_tools:
+            # No new workspace tools — just update the version marker
+            await self.state.update_context_space(tenant_id, space_id, {
+                "last_catalog_version": catalog.version,
+            })
+            return
+
+        # Ask cheap LLM: which of these new tools are relevant to this space?
+        tool_lines = "\n".join(f"- {t.name}: {t.description}" for t in new_tools)
+        try:
+            result_str = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "Given this context space and the new tools below, which tools "
+                    "would be regularly useful in this domain? Only include tools that "
+                    "are genuinely relevant to this space's typical work. Return a JSON "
+                    "array of tool names, or an empty array if none are relevant."
+                ),
+                user_content=(
+                    f"Space: {space.name}\n"
+                    f"Description: {space.description}\n\n"
+                    f"New tools:\n{tool_lines}"
+                ),
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "promote": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["promote"],
+                    "additionalProperties": False,
+                },
+                max_tokens=128,
+                prefer_cheap=True,
+            )
+            parsed = _json.loads(result_str)
+            to_promote = [n for n in parsed.get("promote", []) if n in {t.name for t in new_tools}]
+
+            if to_promote:
+                new_set = list(current_set | set(to_promote))
+                await self.state.update_context_space(tenant_id, space_id, {
+                    "local_affordance_set": new_set,
+                    "last_catalog_version": catalog.version,
+                })
+                logger.info("TOOL_CATALOG_SCAN: space=%s new_tools=%d promoted=%d tools=%s",
+                    space_id, len(new_tools), len(to_promote), to_promote)
+            else:
+                await self.state.update_context_space(tenant_id, space_id, {
+                    "last_catalog_version": catalog.version,
+                })
+                logger.info("TOOL_CATALOG_SCAN: space=%s new_tools=%d promoted=0",
+                    space_id, len(new_tools))
+        except Exception as exc:
+            # On failure, still update version to avoid re-scanning every turn
+            logger.warning("TOOL_CATALOG_SCAN: failed for %s: %s", space_id, exc)
+            await self.state.update_context_space(tenant_id, space_id, {
+                "last_catalog_version": catalog.version,
+            })
 
     async def _promote_used_tools(
         self, tenant_id: str, space_id: str, space: ContextSpace, tool_trace: list[dict],

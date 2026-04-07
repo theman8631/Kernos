@@ -1,41 +1,41 @@
 # Live Smoke Test Results
 
-**Date:** 2026-04-07 05:30 UTC
+**Date:** 2026-04-07 05:46 UTC
 **Result:** 10/11 passed
 **Provider:** openai-codex
 
 ## Core LLM Pipeline (3/3)
 
 ### ✅ Basic response (core)
-**Duration:** 4500ms
+**Duration:** 4177ms
 **Response:** 10:30 PM.
 - OK: non-empty
 - OK: router fired
 
 ### ✅ Multi-turn coherence (core)
-**Duration:** 5976ms
+**Duration:** 4343ms
 **Response:** Monday, April 6, 2026.
 - OK: non-empty
 
 ### ✅ Router structured output (core)
-**Duration:** 3934ms
-**Response:** Doing well. You?
+**Duration:** 17918ms
+**Response:** I’m good. ↵  ↵ How’s your night going?
 - OK: router returned valid JSON
 
 ## Context UI Quality (Hotfix) (1/2)
 
 ### ✅ DEPTH paragraph in RULES (hotfix)
-**Duration:** 2587ms
-**Response:** Context dumped to data/diagnostics/context_2026-04-07T05-30-36.txt
+**Duration:** 2157ms
+**Response:** Context dumped to data/diagnostics/context_2026-04-07T05-45-49.txt
 - OK: DEPTH paragraph found in RULES block
 
 ### ❌ USER CONTEXT source tags + dedup (hotfix)
-- FAIL: 337 duplicate(s): [user]
+- FAIL: 385 duplicate(s): [user]
 
 ## Tool Surfacing Redesign (2/2)
 
 ### ✅ Tool surfacing logs (surfacing)
-**Duration:** 5878ms
+**Duration:** 3723ms
 **Response:** What city or neighborhood should I search in?
 - OK: TOOL_SURFACING: tier=common surfaced=21 total_available=21
 
@@ -45,15 +45,15 @@
 ## Agentic Workspace (1/1)
 
 ### ✅ Code execution (workspace)
-**Duration:** 10677ms
-**Response:** I hit a tool path error trying to run it, but the result is: ↵  ↵ **1267650600228229401496703205376**
+**Duration:** 7153ms
+**Response:** 2^100 = 1267650600228229401496703205376 ↵  ↵ `execute_code` failed here because the workspace file path is misconfigured, so Python couldn’t open the script file.
 - OK: correct computation result
 
 ## Regression Checks (3/3)
 
 ### ✅ Context size + timing (regression)
-- ctx_tokens_est=5084
-- assemble=1242ms route=1744ms
+- ctx_tokens_est=5134
+- assemble=1075ms route=1535ms
 
 ### ✅ Preference parser stability (regression)
 - OK: preference parser ran without errors
