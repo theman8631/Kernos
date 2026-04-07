@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from kernos.kernel.tool_catalog import (
-    ToolCatalog, CatalogEntry, COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL, SURFACER_SCHEMA,
+    ToolCatalog, CatalogEntry, ALWAYS_PINNED, COMMON_MCP_NAMES, TOOL_TOKEN_BUDGET, SURFACER_SCHEMA,
 )
 from kernos.kernel.spaces import ContextSpace
 
@@ -77,17 +77,21 @@ class TestToolCatalog:
 
 
 class TestConstants:
-    def test_common_tools_include_calendar(self):
-        assert "create-event" in COMMON_TOOL_NAMES
-        assert "list-events" in COMMON_TOOL_NAMES
+    def test_common_mcp_includes_calendar(self):
+        assert "create-event" in COMMON_MCP_NAMES
+        assert "list-events" in COMMON_MCP_NAMES
 
-    def test_common_tools_include_search(self):
-        assert "brave_web_search" in COMMON_TOOL_NAMES
+    def test_common_mcp_includes_search(self):
+        assert "brave_web_search" in COMMON_MCP_NAMES
 
-    def test_always_surface_kernel(self):
-        assert "request_tool" in ALWAYS_SURFACE_KERNEL
-        assert "read_doc" in ALWAYS_SURFACE_KERNEL
-        assert "manage_capabilities" in ALWAYS_SURFACE_KERNEL
+    def test_pinned_kernel(self):
+        assert "remember" in ALWAYS_PINNED
+        assert "write_file" in ALWAYS_PINNED
+        assert "execute_code" in ALWAYS_PINNED
+        assert "inspect_state" in ALWAYS_PINNED
+
+    def test_token_budget_default(self):
+        assert TOOL_TOKEN_BUDGET == 8000
 
     def test_surfacer_schema_valid(self):
         assert "tools" in SURFACER_SCHEMA["properties"]
@@ -102,16 +106,16 @@ class TestConstants:
 class TestContextSpaceToolFields:
     def test_defaults(self):
         space = ContextSpace(id="s1", tenant_id="t1", name="Test")
-        assert space.local_affordance_set == []
+        assert space.local_affordance_set == {}
         assert space.last_catalog_version == 0
 
     def test_with_promoted_tools(self):
         space = ContextSpace(
             id="s1", tenant_id="t1", name="D&D",
-            local_affordance_set=["dice_roller", "character_tracker"],
+            local_affordance_set={"dice_roller": {"last_turn": 0, "tokens": 100}},
             last_catalog_version=5,
         )
-        assert len(space.local_affordance_set) == 2
+        assert len(space.local_affordance_set) == 1
         assert space.last_catalog_version == 5
 
 
@@ -137,72 +141,55 @@ class TestStableSortOrder:
 
 
 class TestToolPromotion:
-    async def test_successful_use_promotes(self, tmp_path):
+    def _handler(self, tmp_path):
         from kernos.messages.handler import MessageHandler
         from kernos.kernel.state_json import JsonStateStore
+        from kernos.kernel.tool_catalog import ToolCatalog
+        from unittest.mock import MagicMock
 
         store = JsonStateStore(tmp_path)
         handler = MessageHandler.__new__(MessageHandler)
         handler.state = store
+        handler._tool_catalog = ToolCatalog()
+        handler._turn_counter = 1
+        handler.registry = MagicMock()
+        handler.registry.get_all.return_value = []
+        handler.registry.get_tool_schema.return_value = None
+        return handler, store
 
-        space = ContextSpace(
-            id="sp_dnd", tenant_id="t1", name="D&D",
-            space_type="domain", created_at="2026-01-01",
-        )
+    async def test_successful_use_promotes(self, tmp_path):
+        handler, store = self._handler(tmp_path)
+        space = ContextSpace(id="sp_dnd", tenant_id="t1", name="D&D",
+            space_type="domain", created_at="2026-01-01")
         await store.save_context_space(space)
 
         trace = [
-            {"name": "create-event", "input": {}, "success": True},
-            {"name": "manage_capabilities", "input": {}, "success": True},  # already common
+            {"name": "create-event", "input": {}, "success": True},  # in COMMON_MCP
         ]
-
         await handler._promote_used_tools("t1", "sp_dnd", space, trace)
 
         updated = await store.get_context_space("t1", "sp_dnd")
-        assert "create-event" not in updated.local_affordance_set  # already in COMMON
-        # manage_capabilities is in ALWAYS_SURFACE, so also not promoted
+        assert "create-event" not in updated.local_affordance_set  # already in COMMON_MCP
 
     async def test_uncommon_tool_promoted(self, tmp_path):
-        from kernos.messages.handler import MessageHandler
-        from kernos.kernel.state_json import JsonStateStore
-
-        store = JsonStateStore(tmp_path)
-        handler = MessageHandler.__new__(MessageHandler)
-        handler.state = store
-
-        space = ContextSpace(
-            id="sp_dnd", tenant_id="t1", name="D&D",
-            space_type="domain", created_at="2026-01-01",
-        )
+        handler, store = self._handler(tmp_path)
+        space = ContextSpace(id="sp_dnd", tenant_id="t1", name="D&D",
+            space_type="domain", created_at="2026-01-01")
         await store.save_context_space(space)
 
-        trace = [
-            {"name": "update-event", "input": {}, "success": True},
-        ]
-
+        trace = [{"name": "update-event", "input": {}, "success": True}]
         await handler._promote_used_tools("t1", "sp_dnd", space, trace)
 
         updated = await store.get_context_space("t1", "sp_dnd")
         assert "update-event" in updated.local_affordance_set
 
     async def test_failed_use_not_promoted(self, tmp_path):
-        from kernos.messages.handler import MessageHandler
-        from kernos.kernel.state_json import JsonStateStore
-
-        store = JsonStateStore(tmp_path)
-        handler = MessageHandler.__new__(MessageHandler)
-        handler.state = store
-
-        space = ContextSpace(
-            id="sp_dnd", tenant_id="t1", name="D&D",
-            space_type="domain", created_at="2026-01-01",
-        )
+        handler, store = self._handler(tmp_path)
+        space = ContextSpace(id="sp_dnd", tenant_id="t1", name="D&D",
+            space_type="domain", created_at="2026-01-01")
         await store.save_context_space(space)
 
-        trace = [
-            {"name": "update-event", "input": {}, "success": False},
-        ]
-
+        trace = [{"name": "update-event", "input": {}, "success": False}]
         await handler._promote_used_tools("t1", "sp_dnd", space, trace)
 
         updated = await store.get_context_space("t1", "sp_dnd")

@@ -129,6 +129,9 @@ def _make_mock_handler(tools: list[dict] | None = None):
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp, conversations, tenants, audit, events, state, reasoning, registry, engine)
     handler.preference_parsing_enabled = False
+    # Register test tools in catalog so the surfacer can find them
+    for t in tools_list:
+        handler._tool_catalog.register(t["name"], t.get("description", "test"), "mcp")
     return handler, mock_provider
 
 
@@ -270,10 +273,15 @@ async def test_handler_emits_tool_called_and_result():
     handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_provider_response("You have a meeting at 10am."),
-    ]
+    _tool_resp = _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"})
+    _text_resp = _mock_provider_response("You have a meeting at 10am.")
+    _stub = _mock_provider_response("{}")
+    _iter = iter([_tool_resp, _text_resp])
+
+    async def _route(**kwargs):
+        return next(_iter, _stub) if kwargs.get("tools") else _stub
+
+    mock_provider.complete.side_effect = _route
 
     await handler.process(_make_message("What's on my schedule?"))
 
@@ -287,10 +295,13 @@ async def test_tool_called_event_has_tool_name_and_input():
     handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Event data")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"}),
-        _mock_provider_response("Done"),
-    ]
+    _tool_resp = _mock_provider_tool_response("list_events", "tu_001", {"date": "2026-03-01"})
+    _text_resp = _mock_provider_response("Done")
+    _stub = _mock_provider_response("{}")
+    _iter = iter([_tool_resp, _text_resp])
+    async def _route(**kwargs):
+        return next(_iter, _stub) if kwargs.get("tools") else _stub
+    mock_provider.complete.side_effect = _route
 
     await handler.process(_make_message())
 
@@ -305,10 +316,12 @@ async def test_tool_result_success_flag_on_success():
     handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Meeting at 10am")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {}),
-        _mock_provider_response("Done"),
-    ]
+    _tr = _mock_provider_tool_response("list_events", "tu_001", {})
+    _tx = _mock_provider_response("Done")
+    _st = _mock_provider_response("{}")
+    _it = iter([_tr, _tx])
+    async def _r(**kw): return next(_it, _st) if kw.get("tools") else _st
+    mock_provider.complete.side_effect = _r
 
     await handler.process(_make_message())
 
@@ -323,10 +336,12 @@ async def test_tool_result_error_flag_on_tool_error():
     handler, mock_provider = _make_mock_handler(tools=tools)
     handler.mcp.call_tool = AsyncMock(return_value="Tool error: connection failed")
 
-    mock_provider.complete.side_effect = [
-        _mock_provider_tool_response("list_events", "tu_001", {}),
-        _mock_provider_response("I had trouble with that."),
-    ]
+    _tr = _mock_provider_tool_response("list_events", "tu_001", {})
+    _tx = _mock_provider_response("I had trouble with that.")
+    _st = _mock_provider_response("{}")
+    _it = iter([_tr, _tx])
+    async def _r(**kw): return next(_it, _st) if kw.get("tools") else _st
+    mock_provider.complete.side_effect = _r
 
     await handler.process(_make_message())
 

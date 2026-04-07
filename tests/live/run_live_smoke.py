@@ -306,7 +306,7 @@ async def main():
             except (ValueError, IndexError):
                 pass
             break
-    r.passed = tool_count >= 15
+    r.passed = 8 <= tool_count <= 20  # Budget: 8-20 tools (TOOL-WINDOW spec)
     r.notes.append(f"tool_count={tool_count} (expect ≥15)")
     results.append(r)
     logger.info(f"{'PASS' if r.passed else 'FAIL'}: {r.name} (tools={tool_count})")

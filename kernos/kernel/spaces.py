@@ -37,6 +37,6 @@ class ContextSpace:
     renamed_from: str = ""           # Previous name before most recent rename
     renamed_at: str = ""             # ISO timestamp of most recent rename
 
-    # --- Tool surfacing (TOOL-SURFACING-REDESIGN) ---
-    local_affordance_set: list[str] = field(default_factory=list)  # Promoted tool names
+    # --- Tool surfacing (TOOL-WINDOW) ---
+    local_affordance_set: dict = field(default_factory=dict)  # {tool_name: {"last_turn": N, "tokens": N}}
     last_catalog_version: int = 0    # Last scanned catalog version

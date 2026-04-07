@@ -532,6 +532,7 @@ class MessageHandler:
         self._error_buffer = ErrorBuffer()
         self._pending_system_events: dict[str, list[str]] = {}
         self._compacting: set[str] = set()  # space_ids currently compacting
+        self._turn_counter: int = 0  # monotonic turn counter for tool LRU tracking
         self.preference_parsing_enabled: bool = True  # Bypassable (Agent Card principle)
         self._runners: dict[str, SpaceRunner] = {}  # "tenant:space" → SpaceRunner
         self._adapters: dict[str, "BaseAdapter"] = {}  # platform → adapter
@@ -612,7 +613,6 @@ class MessageHandler:
 
     def _register_kernel_tools_in_catalog(self) -> None:
         """Register kernel tools in the universal catalog at boot."""
-        from kernos.kernel.tool_catalog import ALWAYS_SURFACE_KERNEL
         _kernel_descs = {
             "request_tool": "Request access to a specific tool or capability",
             "read_doc": "Read system documentation pages",
@@ -2994,7 +2994,7 @@ class MessageHandler:
         # --- Three-tier tool surfacing (TOOL-SURFACING-REDESIGN) ----------------
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
         from kernos.kernel.awareness import DISMISS_WHISPER_TOOL
-        from kernos.kernel.tool_catalog import COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL, SURFACER_SCHEMA
+        from kernos.kernel.tool_catalog import ALWAYS_PINNED, COMMON_MCP_NAMES, TOOL_TOKEN_BUDGET, SURFACER_SCHEMA
 
         # Build the kernel tool schema map (needed for all tiers)
         _kernel_tool_map: dict[str, dict] = {}
@@ -3019,64 +3019,95 @@ class MessageHandler:
         for t in _all_kernel:
             _kernel_tool_map[t["name"]] = t
 
-        # Tier 1: Always-surface kernel tools + common MCP tools + local affordance set
-        surfaced_names: set[str] = set(ALWAYS_SURFACE_KERNEL)
-        if self._retrieval:
-            surfaced_names.add("remember")
-        surfaced_names.update(COMMON_TOOL_NAMES)
+        # === BUDGETED TOOL WINDOW (SPEC-TOOL-WINDOW) ===
+        # Two zones: PINNED (always loaded) + ACTIVE (token-budgeted, LRU eviction)
 
-        # Session continuity: already-loaded tools always surface
+        def _schema_tokens(schema: dict) -> int:
+            return len(json.dumps(schema)) // 4
+
+        # --- Zone 1: PINNED (always loaded, never evicted) ---
+        pinned_tools: list[dict] = []
+        _added: set[str] = set()
+
+        def _add_tool(schema: dict) -> bool:
+            name = schema.get("name", "")
+            if name and name not in _added:
+                _added.add(name)
+                return True
+            return False
+
+        for name in ALWAYS_PINNED:
+            if name in _kernel_tool_map:
+                if _add_tool(_kernel_tool_map[name]):
+                    pinned_tools.append(_kernel_tool_map[name])
+        # remember is pinned if available
+        if self._retrieval and "remember" in _kernel_tool_map:
+            if _add_tool(_kernel_tool_map["remember"]):
+                pinned_tools.append(_kernel_tool_map["remember"])
+
+        _pinned_tokens = sum(_schema_tokens(t) for t in pinned_tools)
+
+        # --- Zone 2: ACTIVE (token-budgeted, schema-weighted LRU) ---
+        active_budget = TOOL_TOKEN_BUDGET - _pinned_tokens
+        _tier = "common"
+
+        # Collect candidate tools with priority scores
+        # Priority: lower = keep longer. Schema-weighted LRU.
+        _affordance = {}
+        if active_space and isinstance(active_space.local_affordance_set, dict):
+            _affordance = active_space.local_affordance_set
+        _turn = getattr(self, '_turn_counter', 0)
+        self._turn_counter = _turn + 1
+
+        candidates: list[tuple[dict, int]] = []  # (schema, eviction_priority)
+
+        # Session-loaded tools get priority (recently used this session)
         loaded_names = self.reasoning.get_loaded_tools(active_space_id)
-        surfaced_names.update(loaded_names)
+
+        # Common MCP tools get low priority score (preferred to keep)
+        for name in COMMON_MCP_NAMES:
+            if name in _added:
+                continue
+            schema = self.registry.get_tool_schema(name)
+            if schema and _add_tool(schema):
+                tokens = _schema_tokens(schema)
+                candidates.append((schema, tokens))  # low priority = keep
+
+        # Local affordance set tools
+        for name, meta in _affordance.items():
+            if name in _added:
+                continue
+            schema = _kernel_tool_map.get(name) or self.registry.get_tool_schema(name)
+            if schema and _add_tool(schema):
+                tokens = _schema_tokens(schema)
+                turns_unused = max(1, _turn - meta.get("last_turn", 0))
+                candidates.append((schema, turns_unused * tokens))
+
+        # Session-loaded tools
+        for name in loaded_names:
+            if name in _added:
+                continue
+            schema = self.registry.get_tool_schema(name)
+            if schema and _add_tool(schema):
+                tokens = _schema_tokens(schema)
+                candidates.append((schema, tokens))  # recently loaded = low priority
 
         # Space-activated capabilities (via request_tool)
         if active_space and active_space.active_tools:
             for cap_name in active_space.active_tools:
                 cap = self.registry.get(cap_name)
                 if cap and cap.tools:
-                    surfaced_names.update(cap.tools)
+                    for tname in cap.tools:
+                        if tname in _added:
+                            continue
+                        schema = self.registry.get_tool_schema(tname)
+                        if schema and _add_tool(schema):
+                            candidates.append((schema, _schema_tokens(schema)))
 
-        # Local affordance set: tools promoted from successful use in this space
-        if active_space and active_space.local_affordance_set:
-            surfaced_names.update(active_space.local_affordance_set)
-
-        # Build initial tools list from surfaced names
-        tools: list[dict] = []
-        _added: set[str] = set()
-
-        def _add_tool(schema: dict) -> None:
-            name = schema.get("name", "")
-            if name and name not in _added:
-                tools.append(schema)
-                _added.add(name)
-
-        # Add ALL kernel tools (they're cheap — locally executed, not MCP)
-        for name, schema in _kernel_tool_map.items():
-            _add_tool(schema)
-
-        # Add MCP tools: preloaded always included (they're the most-used MCP tools)
-        preloaded = self.registry.get_preloaded_tools(space=active_space)
-        for t in preloaded:
-            _add_tool(t)
-        for tn in loaded_names:
-            schema = self.registry.get_tool_schema(tn)
-            if schema:
-                _add_tool(schema)
-        all_stubs = self.registry.get_lazy_tool_stubs(space=active_space, loaded_names=loaded_names)
-        for stub in all_stubs:
-            if stub["name"] in surfaced_names:
-                _add_tool(stub)
-
-        _tier = "common"
-        _total = len(self._tool_catalog.get_names())
-
-        # Tier 2: Catalog scan — if Tier 1 seems insufficient for the user's message
-        # The LLM picks tools from the full catalog when the common set won't cover it
+        # Tier 2: Catalog scan for this turn's intent
         _msg_text = (message.content or "").strip()
-        # Only scan if there are tools beyond kernel + common that aren't surfaced
         _unsurfaced = self._tool_catalog.get_names() - _added
         if _msg_text and len(_msg_text) > 5 and _unsurfaced:
-            # Build catalog text excluding already-surfaced tools
             catalog_text = self._tool_catalog.build_catalog_text(exclude=_added)
             if catalog_text:
                 try:
@@ -3084,14 +3115,11 @@ class MessageHandler:
                     scan_result = await self.reasoning.complete_simple(
                         system_prompt=(
                             "Given the user's message, select which additional tools from the catalog "
-                            "are needed to fulfill this request. Only select tools that are directly "
-                            "relevant. Return an empty array if the already-loaded tools are sufficient.\n\n"
+                            "are needed. Only select tools directly relevant. Return empty array if "
+                            "the loaded tools are sufficient.\n\n"
                             f"Already loaded: {sorted(_added)}"
                         ),
-                        user_content=(
-                            f"User message: \"{_msg_text[:300]}\"\n\n"
-                            f"Tool catalog:\n{catalog_text}"
-                        ),
+                        user_content=f"User message: \"{_msg_text[:300]}\"\n\nTool catalog:\n{catalog_text}",
                         output_schema=SURFACER_SCHEMA,
                         max_tokens=128,
                         prefer_cheap=True,
@@ -3103,28 +3131,42 @@ class MessageHandler:
                         for tool_name in scan_tools:
                             if tool_name in _added:
                                 continue
-                            # Try kernel tool
-                            if tool_name in _kernel_tool_map:
-                                _add_tool(_kernel_tool_map[tool_name])
-                                continue
-                            # Always try full MCP schema (never use stubs for catalog-scan tools)
-                            schema = self.registry.get_tool_schema(tool_name)
-                            if schema:
-                                _add_tool(schema)
+                            schema = _kernel_tool_map.get(tool_name) or self.registry.get_tool_schema(tool_name)
+                            if schema and _add_tool(schema):
+                                tokens = _schema_tokens(schema)
+                                candidates.append((schema, 0))  # scan-selected = highest priority
                                 self.reasoning.load_tool(active_space_id, tool_name)
-                        logger.info("TOOL_SURFACING: tier=catalog_scan tools=%d selected=%s",
-                            len(scan_tools), scan_tools)
+                        logger.info("TOOL_SURFACING: tier=catalog_scan selected=%s", scan_tools)
                 except Exception as exc:
                     logger.warning("TOOL_SURFACING: catalog scan failed: %s", exc)
 
-        # Stable sort: always-surface kernel tools first (fixed prefix), rest alphabetical
-        _always_names = ALWAYS_SURFACE_KERNEL | ({"remember"} if self._retrieval else set())
-        _prefix = [t for t in tools if t.get("name") in _always_names]
-        _rest = [t for t in tools if t.get("name") not in _always_names]
-        _prefix.sort(key=lambda t: t.get("name", ""))
-        _rest.sort(key=lambda t: t.get("name", ""))
-        tools = _prefix + _rest
+        # Sort candidates by eviction priority (ascending = keep first)
+        candidates.sort(key=lambda x: x[1])
 
+        # Fill active zone within budget
+        active_tools: list[dict] = []
+        _active_tokens = 0
+        _evicted: list[str] = []
+        for schema, priority in candidates:
+            tokens = _schema_tokens(schema)
+            if _active_tokens + tokens <= active_budget:
+                active_tools.append(schema)
+                _active_tokens += tokens
+            else:
+                _evicted.append(schema.get("name", "?"))
+
+        # Assemble final tool list: pinned first (sorted), then active (sorted)
+        pinned_tools.sort(key=lambda t: t.get("name", ""))
+        active_tools.sort(key=lambda t: t.get("name", ""))
+        tools = pinned_tools + active_tools
+
+        _total_tokens = _pinned_tokens + _active_tokens
+        _total = len(self._tool_catalog.get_names())
+        if _evicted:
+            logger.info("TOOL_EVICT: evicted=%s", _evicted)
+        logger.info("TOOL_BUDGET: total=%d pinned=%d active=%d tokens=%d/%d evicted=%d",
+            len(tools), len(pinned_tools), len(active_tools),
+            _total_tokens, TOOL_TOKEN_BUDGET, len(_evicted))
         logger.info("TOOL_SURFACING: tier=%s surfaced=%d total_available=%d",
             _tier, len(tools), _total)
         ctx.tools = tools
@@ -3454,9 +3496,10 @@ class MessageHandler:
             return  # Up to date
 
         # Get tools not already in this space's affordance set
-        current_set = set(space.local_affordance_set)
-        from kernos.kernel.tool_catalog import COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL
-        already_known = current_set | COMMON_TOOL_NAMES | ALWAYS_SURFACE_KERNEL
+        aff = space.local_affordance_set if isinstance(space.local_affordance_set, dict) else {}
+        current_set = set(aff.keys())
+        from kernos.kernel.tool_catalog import ALWAYS_PINNED, COMMON_MCP_NAMES
+        already_known = current_set | ALWAYS_PINNED | COMMON_MCP_NAMES
         new_tools = [
             e for e in catalog.get_all()
             if e.name not in already_known and e.source == "workspace"
@@ -3499,9 +3542,11 @@ class MessageHandler:
             to_promote = [n for n in parsed.get("promote", []) if n in {t.name for t in new_tools}]
 
             if to_promote:
-                new_set = list(current_set | set(to_promote))
+                new_aff = dict(aff)
+                for name in to_promote:
+                    new_aff[name] = {"last_turn": 0, "tokens": 0}
                 await self.state.update_context_space(tenant_id, space_id, {
-                    "local_affordance_set": new_set,
+                    "local_affordance_set": new_aff,
                     "last_catalog_version": catalog.version,
                 })
                 logger.info("TOOL_CATALOG_SCAN: space=%s new_tools=%d promoted=%d tools=%s",
@@ -3524,22 +3569,22 @@ class MessageHandler:
     ) -> None:
         """Tier 3: Promote successfully used tools into the space's local affordance set.
 
-        General (default root) only promotes universal tools — domain-specific tools
-        should trigger routing to the appropriate domain instead.
+        Updates last_turn for already-promoted tools. General (default root) only
+        promotes universal tools — domain-specific tools should trigger routing.
         """
-        from kernos.kernel.tool_catalog import COMMON_TOOL_NAMES, ALWAYS_SURFACE_KERNEL
+        from kernos.kernel.tool_catalog import ALWAYS_PINNED, COMMON_MCP_NAMES
         try:
-            current_set = set(space.local_affordance_set)
-            promoted = []
+            aff = dict(space.local_affordance_set) if isinstance(space.local_affordance_set, dict) else {}
+            _turn = getattr(self, '_turn_counter', 0)
+            changed = False
             for call in tool_trace:
                 name = call.get("name", "")
                 if not name or not call.get("success"):
                     continue
-                # Skip tools that are already in the always-surface or common sets
-                if name in ALWAYS_SURFACE_KERNEL or name in COMMON_TOOL_NAMES:
+                # Skip pinned tools (they're always loaded)
+                if name in ALWAYS_PINNED or name in COMMON_MCP_NAMES:
                     continue
-                # General space guard: only promote tools from connected capabilities
-                # marked as universal — domain-specific tools shouldn't bloat General
+                # General space guard
                 if space.is_default and self.registry:
                     is_universal = False
                     for cap in self.registry.get_all():
@@ -3547,22 +3592,24 @@ class MessageHandler:
                             is_universal = True
                             break
                     if not is_universal:
-                        # Check if it's a kernel tool (always OK to promote)
-                        if name not in self._tool_catalog.get_names():
-                            continue
-                        # Kernel tools found in catalog but not universal MCP — skip in General
                         catalog_entry = self._tool_catalog.get(name)
                         if catalog_entry and not catalog_entry.source.startswith("kernel"):
                             logger.info("TOOL_PROMOTE_SKIP: tool=%s space=%s reason=general_guard",
                                 name, space_id)
                             continue
-                if name not in current_set:
-                    current_set.add(name)
-                    promoted.append(name)
-            if promoted:
-                new_set = list(current_set)
+                # Compute schema tokens for this tool
+                schema = self.registry.get_tool_schema(name)
+                tokens = len(json.dumps(schema)) // 4 if schema else 0
+                if name in aff:
+                    aff[name]["last_turn"] = _turn
+                    changed = True
+                else:
+                    aff[name] = {"last_turn": _turn, "tokens": tokens}
+                    changed = True
+                    logger.info("TOOL_PROMOTED: tool=%s space=%s reason=successful_use", name, space_id)
+            if changed:
                 await self.state.update_context_space(tenant_id, space_id, {
-                    "local_affordance_set": new_set,
+                    "local_affordance_set": aff,
                 })
                 for t in promoted:
                     logger.info("TOOL_PROMOTED: tool=%s space=%s reason=successful_use", t, space_id)

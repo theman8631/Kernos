@@ -1610,11 +1610,12 @@ class ReasoningService:
 
         _tool_sizes = [(t.get("name", "?"), len(json.dumps(t))) for t in tools]
         _tool_sizes.sort(key=lambda x: x[1], reverse=True)
+        _tool_tokens = sum(chars // 4 for _, chars in _tool_sizes)
         _top3 = ", ".join(f"{name}={chars//4}tok" for name, chars in _tool_sizes[:3])
         logger.info(
-            "REASON_START: tool_count=%d max_tokens=%d msg_count=%d "
+            "REASON_START: tool_count=%d tool_tokens=%d max_tokens=%d msg_count=%d "
             "ctx_tokens_est=%d (hybrid=%d char=%d real_baseline=%d) top_tools=[%s]",
-            len(tools), request.max_tokens, len(messages), _ctx_tokens_est,
+            len(tools), _tool_tokens, request.max_tokens, len(messages), _ctx_tokens_est,
             _ctx_tokens_est, _char_est, _last_real, _top3,
         )
         if logger.isEnabledFor(logging.DEBUG):

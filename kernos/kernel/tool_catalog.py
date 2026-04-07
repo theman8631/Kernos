@@ -4,6 +4,7 @@ The surfacer LLM reads this catalog to determine which tools are
 relevant for a given turn. Intent-based, not keyword-based.
 """
 import logging
+import os
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -22,29 +23,30 @@ class CatalogEntry:
     stateful: bool = True        # whether tool needs home space for execution
 
 
-# Common tools loaded every turn without LLM call (Tier 1)
-COMMON_TOOL_NAMES: set[str] = {
+# Token budget for tool schemas per reasoning call
+TOOL_TOKEN_BUDGET = int(os.environ.get("KERNOS_TOOL_TOKEN_BUDGET", "8000"))
+
+# Pinned tools: always loaded, never evicted (~25% of budget)
+# These are the tools the agent needs on almost every turn.
+ALWAYS_PINNED: set[str] = {
+    "remember",           # memory retrieval
+    "remember_details",   # deep memory retrieval
+    "write_file",         # file creation
+    "read_file",          # file reading
+    "list_files",         # file listing
+    "execute_code",       # workspace engine
+    "register_tool",      # tool registration
+    "inspect_state",      # self-awareness + space listing
+    "manage_workspace",   # artifact tracking
+    "send_to_channel",    # communication
+}
+
+# Common MCP tools that get priority in the active window (not pinned, but preferred)
+COMMON_MCP_NAMES: set[str] = {
     "get-current-time",
     "create-event",
     "list-events",
     "brave_web_search",
-    "brave_local_search",
-    "remember_details",
-    "inspect_state",
-    "read_doc",
-    "manage_capabilities",
-    "request_tool",
-    "execute_code",
-}
-
-# Kernel tools that are always in context (not in the catalog — always surfaced)
-ALWAYS_SURFACE_KERNEL: set[str] = {
-    "request_tool",
-    "read_doc",
-    "dismiss_whisper",
-    "manage_capabilities",
-    "remember_details",
-    "remember",
 }
 
 
