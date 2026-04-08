@@ -300,6 +300,13 @@ class AwarenessEvaluator:
         """Run all evaluation passes for a tenant."""
         whispers = await self.run_time_pass(tenant_id)
 
+        # Capability gap detection
+        try:
+            gap_whispers = await self.run_capability_gap_pass(tenant_id)
+            whispers.extend(gap_whispers)
+        except Exception as exc:
+            logger.warning("AWARENESS: capability_gap pass failed: %s", exc)
+
         for whisper in whispers:
             # Check suppression — don't re-surface
             if await self._is_suppressed(tenant_id, whisper):
@@ -403,6 +410,76 @@ class AwarenessEvaluator:
                      len(entries), len(whispers))
 
         return whispers
+
+    async def run_capability_gap_pass(self, tenant_id: str) -> list[Whisper]:
+        """Detect workaround patterns that suggest a missing tool.
+
+        Reads recent conversation logs looking for patterns where the agent
+        used plain files, manual formatting, or repeated multi-step processes
+        that could be a registered workspace tool. One cheap LLM call.
+        """
+        # Read recent conversation from the active space
+        try:
+            from kernos.kernel.state import TenantProfile
+            profile = await self._state.get_tenant_profile(tenant_id)
+            if not profile or not profile.last_active_space_id:
+                return []
+            space_id = profile.last_active_space_id
+        except Exception:
+            return []
+
+        # Get recent conversation log
+        try:
+            if not self._handler:
+                return []
+            log_text = await self._handler.conv_logger.read_current_log_text(tenant_id, space_id)
+            if isinstance(log_text, tuple):
+                log_text = log_text[0]
+            if not log_text or len(log_text) < 200:
+                return []
+        except Exception:
+            return []
+
+        # One cheap LLM call — check for capability gaps
+        try:
+            reasoning = self._handler.reasoning if self._handler else None
+            if not reasoning:
+                return []
+            result = await reasoning.complete_simple(
+                system_prompt=(
+                    "You detect capability gaps — places where the user could benefit from "
+                    "a built tool instead of manual workarounds. Look for:\n"
+                    "- Data tracked in plain text files instead of a structured tool\n"
+                    "- Repeated multi-step processes that could be automated\n"
+                    "- Manual formatting that a tool could handle\n"
+                    "- The agent saying 'I can't do that' when it could build something\n\n"
+                    "If you find a gap, describe what tool could be built and why.\n"
+                    "If no gaps found, reply with just: NONE"
+                ),
+                user_content=f"Recent conversation:\n{log_text[-3000:]}",
+                max_tokens=200,
+                prefer_cheap=True,
+            )
+
+            if not result or "NONE" in result.upper()[:20]:
+                return []
+
+            now = datetime.now(timezone.utc)
+            whisper = Whisper(
+                whisper_id=generate_whisper_id(),
+                insight_text=result.strip(),
+                delivery_class="ambient",
+                source_space_id=space_id,
+                target_space_id=space_id,
+                supporting_evidence=["capability_gap_detection"],
+                reasoning_trace="Awareness evaluator detected a potential capability gap from recent conversation patterns.",
+                created_at=now.isoformat(),
+            )
+            logger.info("AWARENESS: capability_gap detected in space=%s", space_id)
+            return [whisper]
+        except Exception as exc:
+            logger.warning("AWARENESS: capability_gap LLM failed: %s", exc)
+            return []
 
     def _format_time_insight(self, entry: KnowledgeEntry, hours: float) -> str:
         """Format a foresight signal into natural insight text for the agent."""
