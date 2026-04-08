@@ -318,7 +318,25 @@ After producing the Ledger entry and Living State, determine how many of the mos
 At the very end of your output, on its own line, write:
 SEED_DEPTH: N
 
-Where N is the number of trailing messages to carry forward (minimum 3, maximum 25). A creative scene or active negotiation might need 15-20. Quick factual questions might need 3-5. A multi-step plan or project review might need 8-10."""
+Where N is the number of trailing messages to carry forward (minimum 3, maximum 25). A creative scene or active negotiation might need 15-20. Quick factual questions might need 3-5. A multi-step plan or project review might need 8-10.
+
+---
+
+#### Fact Harvest
+
+After SEED_DEPTH, extract any durable facts from this conversation that should be remembered long-term. For each fact, indicate:
+- ADD: A new fact not already in existing knowledge
+- UPDATE <id>: An update to an existing fact (use the ID from the knowledge list below)
+- REINFORCE <id>: Confirmation of an existing fact
+
+Write:
+FACT_HARVEST:
+ADD: <fact content with subject>
+UPDATE <id>: <updated content>
+REINFORCE <id>
+
+If no new facts, write:
+FACT_HARVEST: NONE"""
 
 
 # ---------------------------------------------------------------------------
@@ -826,12 +844,75 @@ class CompactionService:
     def _strip_seed_depth(doc: str) -> str:
         """Remove the SEED_DEPTH line from the document."""
         lines = doc.rstrip().split("\n")
-        # Strip from the last few lines only (it should be at the very end)
         cleaned = []
         for line in lines:
             if line.strip().upper().startswith("SEED_DEPTH:"):
                 continue
             cleaned.append(line)
+        return "\n".join(cleaned)
+
+    @staticmethod
+    def _parse_fact_harvest(doc: str) -> list[dict]:
+        """Extract FACT_HARVEST section from compaction output.
+
+        Returns list of {action: "add"|"update"|"reinforce", id: str, content: str}.
+        """
+        results = []
+        in_harvest = False
+        for line in doc.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.upper().startswith("FACT_HARVEST:"):
+                rest = stripped[len("FACT_HARVEST:"):].strip()
+                if rest.upper() == "NONE":
+                    return []
+                in_harvest = True
+                # The first line might have content after the colon
+                if rest.upper().startswith("ADD:"):
+                    results.append({"action": "add", "id": "", "content": rest[4:].strip()})
+                elif rest.upper().startswith("UPDATE"):
+                    parts = rest.split(":", 1)
+                    _id = parts[0].replace("UPDATE", "").strip()
+                    _content = parts[1].strip() if len(parts) > 1 else ""
+                    results.append({"action": "update", "id": _id, "content": _content})
+                elif rest.upper().startswith("REINFORCE"):
+                    _id = rest.replace("REINFORCE", "").strip()
+                    results.append({"action": "reinforce", "id": _id, "content": ""})
+                continue
+            if in_harvest:
+                if stripped.upper().startswith("ADD:"):
+                    results.append({"action": "add", "id": "", "content": stripped[4:].strip()})
+                elif stripped.upper().startswith("UPDATE"):
+                    parts = stripped.split(":", 1)
+                    _id = parts[0].replace("UPDATE", "").strip()
+                    _content = parts[1].strip() if len(parts) > 1 else ""
+                    results.append({"action": "update", "id": _id, "content": _content})
+                elif stripped.upper().startswith("REINFORCE"):
+                    _id = stripped.replace("REINFORCE", "").strip()
+                    results.append({"action": "reinforce", "id": _id, "content": ""})
+                elif not stripped:
+                    continue  # blank line in harvest section
+                else:
+                    break  # end of harvest section
+        return results
+
+    @staticmethod
+    def _strip_fact_harvest(doc: str) -> str:
+        """Remove the FACT_HARVEST section from the document."""
+        lines = doc.rstrip().split("\n")
+        cleaned = []
+        in_harvest = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.upper().startswith("FACT_HARVEST:"):
+                in_harvest = True
+                continue
+            if in_harvest:
+                if stripped.upper().startswith(("ADD:", "UPDATE", "REINFORCE")) or not stripped:
+                    continue
+                else:
+                    in_harvest = False
+            if not in_harvest:
+                cleaned.append(line)
         return "\n".join(cleaned)
 
     async def compact_from_log(
@@ -882,6 +963,16 @@ class CompactionService:
             except Exception as exc:
                 logger.warning("Manifest load failed for compaction: %s", exc)
 
+        # Build existing knowledge list for fact harvest
+        _knowledge_section = ""
+        try:
+            _ke = await self.state.query_knowledge(tenant_id, active_only=True, limit=100)
+            if _ke:
+                _ke_lines = [f"  [{e.id}] {e.subject}: {e.content[:100]}" for e in _ke[:50]]
+                _knowledge_section = f"\n\nExisting knowledge (for FACT_HARVEST UPDATE/REINFORCE):\n" + "\n".join(_ke_lines)
+        except Exception:
+            pass
+
         # Build compaction prompt with source log reference
         user_content = ""
         if existing_doc:
@@ -891,6 +982,7 @@ class CompactionService:
             f"You are compacting source log log_{source_log_number:03d}. "
             f"Include this reference in your Ledger entry header.\n\n"
             f"New Message Exchanges:\n\n{log_text}"
+            f"{_knowledge_section}"
         )
 
         updated_doc = await self.reasoning.complete_simple(
@@ -904,6 +996,18 @@ class CompactionService:
         seed_depth = self._parse_seed_depth(updated_doc)
         updated_doc = self._strip_seed_depth(updated_doc)
         comp_state.last_seed_depth = seed_depth
+
+        # Parse and strip fact harvest
+        fact_harvest = self._parse_fact_harvest(updated_doc)
+        updated_doc = self._strip_fact_harvest(updated_doc)
+        if fact_harvest:
+            logger.info("COMPACTION_HARVEST: facts=%d adds=%d updates=%d reinforces=%d",
+                len(fact_harvest),
+                sum(1 for f in fact_harvest if f["action"] == "add"),
+                sum(1 for f in fact_harvest if f["action"] == "update"),
+                sum(1 for f in fact_harvest if f["action"] == "reinforce"))
+        # Store harvest results on comp_state for the handler to process
+        comp_state._fact_harvest = fact_harvest  # type: ignore[attr-defined]
 
         # Write updated document
         active_doc_path.write_text(updated_doc, encoding="utf-8")

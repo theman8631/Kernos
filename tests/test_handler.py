@@ -353,11 +353,15 @@ async def test_handler_tool_failure_results_in_graceful_response():
 
 async def test_handler_no_tools_works_identically_to_1a2():
     handler, mock_provider = _make_handler(tools=[])
-    mock_provider.complete.return_value = _mock_provider_response("Hello!")
+
+    _text = _mock_provider_response("Hello!")
+    _stub = _mock_provider_response("{}")
+    async def _route(**kwargs):
+        return _text if kwargs.get("tools") else _stub
+    mock_provider.complete.side_effect = _route
 
     result = await handler.process(_make_message())
     assert result == "Hello!"
-    assert mock_provider.complete.call_count == 1
 
 
 # --- Persistence (AC19) ---

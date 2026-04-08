@@ -367,3 +367,45 @@ async def parse_preferences_in_message(
             pass  # Best effort
 
     return system_note
+
+
+async def commit_from_analysis(
+    pref_dict: dict,
+    message_text: str,
+    tenant_id: str,
+    space_id: str,
+    state: Any,
+    reasoning_service: Any,
+    trigger_store: Any = None,
+) -> str:
+    """Commit a preference from the Message Analyzer's output.
+
+    Takes the 'preference' dict from MESSAGE_ANALYSIS_SCHEMA and runs
+    the match→commit pipeline (skips detection — already done by analyzer).
+    """
+    if not pref_dict.get("detected"):
+        return ""
+
+    # Build a detection-compatible dict
+    detection = PreferenceDetection(
+        is_preference=True,
+        confidence=pref_dict.get("confidence", "medium"),
+        category=pref_dict.get("category", "behavior"),
+        subject=pref_dict.get("subject", ""),
+        action=pref_dict.get("action", ""),
+        parameters=pref_dict.get("parameters", {}),
+        scope_hint=pref_dict.get("scope_hint", ""),
+        reasoning=pref_dict.get("reasoning", ""),
+    )
+
+    match = await match_candidates(detection, tenant_id, state, space_id)
+    pref, system_note = await commit_preference(
+        detection, match, tenant_id, state, space_id, trigger_store,
+    )
+    if pref:
+        pref.intent = message_text[:500]
+        try:
+            await state.save_preference(pref)
+        except Exception:
+            pass
+    return system_note

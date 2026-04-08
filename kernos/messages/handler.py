@@ -3092,33 +3092,57 @@ class MessageHandler:
                 speaker="user", channel=message.platform, content=user_content,
                 timestamp=message.timestamp.isoformat())
 
-        # --- Concurrent cohort agents -----------------------------------------
-        # Preference parsing and knowledge shaping are independent LLM pipelines.
-        # Running them concurrently via asyncio.gather cuts ~2-3s from assembly.
+        # --- Cohort agents: Message Analyzer + Covenant Query -------------------
+        # Single LLM call replaces separate Preference Parser + Knowledge Shaper.
+        # Four-way classification: preference | procedure | action | conversation.
 
-        async def _run_pref_parsing() -> str | None:
-            """Preference detection — in-turn compile and commit (Phase 6A-4)."""
-            if not (self.preference_parsing_enabled and not _is_diagnostic and user_content.strip()):
-                return None
-            try:
-                from kernos.kernel.preference_parser import parse_preferences_in_message
-                trigger_store = getattr(self.reasoning, '_trigger_store', None)
-                return await parse_preferences_in_message(
-                    user_content, tenant_id, active_space_id,
-                    self.state, self.reasoning, trigger_store,
-                )
-            except Exception as exc:
-                logger.warning("PREF_DETECT: pipeline error: %s", exc)
-                return None
+        MESSAGE_ANALYSIS_SCHEMA = {
+            "type": "object",
+            "properties": {
+                "classification": {
+                    "type": "string",
+                    "enum": ["preference", "procedure", "action", "conversation"],
+                    "description": (
+                        "What kind of message is this? "
+                        "'preference' = short behavioral rule (auto-capture as covenant). "
+                        "'procedure' = multi-step workflow instructions (write to _procedures.md). "
+                        "'action' = user wants something done. "
+                        "'conversation' = chat, question, or continuation."
+                    ),
+                },
+                "preference": {
+                    "type": "object",
+                    "properties": {
+                        "detected": {"type": "boolean"},
+                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "category": {"type": "string"},
+                        "subject": {"type": "string"},
+                        "action": {"type": "string"},
+                        "parameters": {"type": "object"},
+                        "scope_hint": {"type": "string"},
+                        "reasoning": {"type": "string"},
+                    },
+                    "required": ["detected", "confidence", "category", "subject", "action", "parameters", "scope_hint", "reasoning"],
+                    "additionalProperties": False,
+                },
+                "relevant_knowledge_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IDs of knowledge entries relevant to this turn.",
+                },
+            },
+            "required": ["classification", "preference", "relevant_knowledge_ids"],
+            "additionalProperties": False,
+        }
 
-        async def _run_knowledge_pipeline() -> list:
-            """Three-tier selective knowledge injection (SPEC-SELECTIVE-KNOWLEDGE-INJECTION)."""
+        async def _run_message_analysis() -> dict:
+            """Combined message classification + knowledge selection + preference detection."""
+            if _is_diagnostic or not user_content.strip():
+                return {"classification": "conversation", "preference": {"detected": False, "confidence": "low", "category": "", "subject": "", "action": "", "parameters": {}, "scope_hint": "", "reasoning": ""}, "relevant_knowledge_ids": []}
+
+            # Build knowledge candidates (Tier 1/2 filtering, same as before)
             all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
-
-            # Tier 1: Always inject — identity facts (name, age, timezone, location)
             always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
-
-            # Tier 2: Never inject — ephemeral, expired, stale contextual
             _never_archetypes = {"ephemeral"}
             candidates = [
                 e for e in all_ke
@@ -3129,15 +3153,48 @@ class MessageHandler:
                          and _is_stale_knowledge(e, days=14))
             ]
 
-            # Tier 3: LLM shaping — select relevant entries for this turn
-            shaped = []
-            if candidates:
-                relevant_ids = await self._shape_knowledge(candidates, message, ctx)
-                shaped = [e for e in candidates if e.id in relevant_ids]
+            candidate_lines = "\n".join(
+                f"- [{e.id}] \"{e.content}\" ({e.lifecycle_archetype})"
+                for e in candidates
+            ) if candidates else "(no candidates)"
 
-            return always_inject + shaped
+            recent_context = self._get_recent_context_summary(ctx)
 
-        # Fire both LLM pipelines + covenant query concurrently
+            try:
+                import json as _json
+                result_str = await self.reasoning.complete_simple(
+                    system_prompt=(
+                        "Analyze this message. Classify it, detect preferences, and select relevant knowledge.\n\n"
+                        "Classification:\n"
+                        "- 'preference': short behavioral rule like 'always do X' or 'never ask about Y'\n"
+                        "- 'procedure': multi-step workflow like 'when I eat, log it, estimate, show budget'\n"
+                        "- 'action': user wants something done\n"
+                        "- 'conversation': chat, question, continuation\n\n"
+                        "If preference detected: fill in the preference object with category, subject, action.\n"
+                        "Select knowledge entry IDs relevant to answering this message. Return NONE-relevant as empty array."
+                    ),
+                    user_content=(
+                        f"User message: \"{user_content[:300]}\"\n"
+                        f"Recent context: {recent_context}\n\n"
+                        f"Knowledge candidates:\n{candidate_lines}"
+                    ),
+                    output_schema=MESSAGE_ANALYSIS_SCHEMA,
+                    max_tokens=256,
+                    prefer_cheap=True,
+                )
+                parsed = _json.loads(result_str)
+                logger.info("MESSAGE_ANALYSIS: classification=%s pref_detected=%s knowledge=%d",
+                    parsed.get("classification", "?"),
+                    parsed.get("preference", {}).get("detected", False),
+                    len(parsed.get("relevant_knowledge_ids", [])))
+                # Attach always_inject + shaped for downstream
+                parsed["_always_inject"] = always_inject
+                parsed["_candidates"] = candidates
+                return parsed
+            except Exception as exc:
+                logger.warning("MESSAGE_ANALYSIS: failed: %s", exc)
+                return {"classification": "conversation", "preference": {"detected": False, "confidence": "low", "category": "", "subject": "", "action": "", "parameters": {}, "scope_hint": "", "reasoning": ""}, "relevant_knowledge_ids": [], "_always_inject": always_inject, "_candidates": candidates}
+
         # Build scope chain for covenant inheritance (current + ancestors + global)
         _scope_chain = [active_space_id] if active_space_id else []
         if active_space and active_space.parent_id:
@@ -3148,20 +3205,40 @@ class MessageHandler:
                 _seen.add(_cur)
                 _p = await self.state.get_context_space(tenant_id, _cur)
                 _cur = _p.parent_id if _p and _p.parent_id else None
-        space_scope = _scope_chain + [None] if _scope_chain else None  # add None for global
-        pref_note, user_knowledge_entries, contract_rules = await asyncio.gather(
-            _run_pref_parsing(),
-            _run_knowledge_pipeline(),
+        space_scope = _scope_chain + [None] if _scope_chain else None
+
+        # Fire Message Analyzer + Covenant Query in parallel
+        analysis_result, contract_rules = await asyncio.gather(
+            _run_message_analysis(),
             self.state.query_covenant_rules(
                 tenant_id, context_space_scope=space_scope, active_only=True),
         )
 
-        if pref_note:
+        # Extract preference note (commit if detected)
+        _pref = analysis_result.get("preference", {})
+        if _pref.get("detected") and _pref.get("confidence") in ("high", "medium"):
             ctx.pref_detected = True
-            if ctx.results_prefix:
-                ctx.results_prefix += "\n\n" + pref_note
-            else:
-                ctx.results_prefix = pref_note
+            try:
+                from kernos.kernel.preference_parser import commit_from_analysis
+                pref_note = await commit_from_analysis(
+                    _pref, user_content, tenant_id, active_space_id,
+                    self.state, self.reasoning,
+                    getattr(self.reasoning, '_trigger_store', None),
+                )
+                if pref_note:
+                    if ctx.results_prefix:
+                        ctx.results_prefix += "\n\n" + pref_note
+                    else:
+                        ctx.results_prefix = pref_note
+            except Exception as exc:
+                logger.warning("PREF_COMMIT: failed: %s", exc)
+
+        # Extract knowledge entries
+        _relevant_ids = set(analysis_result.get("relevant_knowledge_ids", []))
+        _always = analysis_result.get("_always_inject", [])
+        _cands = analysis_result.get("_candidates", [])
+        shaped = [e for e in _cands if e.id in _relevant_ids]
+        user_knowledge_entries = _always + shaped
 
         # --- Three-tier tool surfacing (TOOL-SURFACING-REDESIGN) ----------------
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
@@ -3589,17 +3666,7 @@ class MessageHandler:
                                     except Exception:
                                         pass
                                 try:
-                                    # Harvest durable facts before compaction
-                                    try:
-                                        from kernos.kernel.fact_harvest import harvest_facts
-                                        await harvest_facts(
-                                            self.reasoning, self.state, self.events,
-                                            tenant_id, ctx.active_space_id, log_text,
-                                            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
-                                        )
-                                    except Exception as _hx:
-                                        logger.warning("FACT_HARVEST: pre-compaction failed: %s", _hx)
-
+                                    # Fact harvest is now integrated into the compaction call
                                     comp_state = await self.compaction.compact_from_log(
                                         tenant_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)
                                     old_num, new_num = await self.conv_logger.roll_log(tenant_id, ctx.active_space_id)
@@ -3613,6 +3680,18 @@ class MessageHandler:
                                     comp_state.last_compaction_failure_at = ""
                                     logger.info("COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
                                         ctx.active_space_id, old_num, new_num)
+
+                                    # Process fact harvest from compaction output
+                                    _harvest = getattr(comp_state, '_fact_harvest', [])
+                                    if _harvest:
+                                        try:
+                                            from kernos.kernel.fact_harvest import process_harvest_results
+                                            await process_harvest_results(
+                                                _harvest, tenant_id, ctx.active_space_id,
+                                                self.state, self.events)
+                                        except Exception as _hx:
+                                            logger.warning("COMPACTION_HARVEST: processing failed: %s", _hx)
+
                                     # Domain assessment + child briefings — async, non-blocking
                                     try:
                                         import asyncio as _aio

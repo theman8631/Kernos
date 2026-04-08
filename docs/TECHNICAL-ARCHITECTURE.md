@@ -38,16 +38,16 @@ Every inbound message flows through six phases:
 
 1. **Provision** — Load soul, tenant profile, initialize spaces
 2. **Route** — LLM router determines target space. Downward search for query_mode. Work_mode logging for domain-specific work.
-3. **Assemble** — Build system prompt (Cognitive UI), select tools (three-tier surfacing), shape knowledge (LLM-selected), parse preferences. Runs cohort agents in parallel via `asyncio.gather`.
+3. **Assemble** — Build system prompt (Cognitive UI), select tools (budgeted window), run Message Analyzer (combined classification + knowledge selection + preference detection). Analyzer runs in parallel with covenant query.
 4. **Reason** — LLM reasoning with tool use loop. Dispatch gate evaluates write actions. Tools execute (kernel, MCP, workspace).
 5. **Consequence** — Confirmation replay, projectors, soul update, cross-domain signal check, tool promotion.
-6. **Persist** — Store messages, conversation log, compaction check, domain assessment, child briefings.
+6. **Persist** — Store messages, conversation log, compaction check (includes fact harvest), domain assessment, child briefings.
 
 ### Key Methods
 
 - `_get_or_init_soul()` — Loads Soul from State Store or creates new; auto-provisions General + System spaces; migrates legacy "Daily" spaces to "General"
 - `_phase_route()` — LLM router, query_mode/work_mode handling, space switching, departure context, workspace lazy registration, catalog version check
-- `_phase_assemble()` — Cognitive UI block construction, three-tier tool surfacing, knowledge shaping, preference detection (all concurrent)
+- `_phase_assemble()` — Cognitive UI block construction, budgeted tool window, Message Analyzer (classification + knowledge + preference in one call)
 - `_phase_reason()` — ReasoningRequest construction, task engine execution
 - `_phase_consequence()` — Post-turn processing, cross-domain signals
 - `_phase_persist()` — Conversation logging, compaction trigger, domain assessment, child briefings

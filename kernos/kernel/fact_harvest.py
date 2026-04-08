@@ -185,3 +185,73 @@ async def harvest_facts(
         logger.warning("FACT_HARVEST_FAILED: tenant=%s space=%s error=%s — falling back to dedup pipeline",
                        tenant_id, space_id, exc)
         return 0
+
+
+async def process_harvest_results(
+    harvest: list[dict],
+    tenant_id: str,
+    space_id: str,
+    state_store: "Any",
+    events: "Any",
+) -> int:
+    """Process fact harvest results from compaction output.
+
+    Takes the parsed FACT_HARVEST section ({action, id, content} dicts)
+    and applies ADD/UPDATE/REINFORCE operations to the state store.
+    """
+    import uuid
+    from kernos.kernel.state import KnowledgeEntry
+
+    changes = 0
+    for item in harvest:
+        action = item.get("action", "")
+        try:
+            if action == "add":
+                content = item.get("content", "").strip()
+                if not content:
+                    continue
+                entry = KnowledgeEntry(
+                    id=f"know_{int(uuid.uuid4().int)%10**16}_{uuid.uuid4().hex[:4]}",
+                    tenant_id=tenant_id,
+                    category="fact",
+                    subject="user",
+                    content=content,
+                    confidence="inferred",
+                    source_event_id="",
+                    source_description="compaction_harvest",
+                    created_at=utc_now(),
+                    last_referenced=utc_now(),
+                    tags=[],
+                    lifecycle_archetype="structural",
+                    context_space=space_id,
+                    valid_at=utc_now(),
+                )
+                await state_store.add_knowledge(entry)
+                changes += 1
+                logger.info("FACT_HARVEST_ADD: tenant=%s content=%r", tenant_id, content[:80])
+            elif action == "update":
+                entry_id = item.get("id", "").strip()
+                content = item.get("content", "").strip()
+                if entry_id and content:
+                    await state_store.update_knowledge(
+                        tenant_id, entry_id,
+                        {"content": content, "updated_at": utc_now()},
+                    )
+                    changes += 1
+                    logger.info("FACT_HARVEST_UPDATE: tenant=%s id=%s content=%r",
+                        tenant_id, entry_id, content[:80])
+            elif action == "reinforce":
+                entry_id = item.get("id", "").strip()
+                if entry_id:
+                    await state_store.update_knowledge(
+                        tenant_id, entry_id,
+                        {"last_referenced": utc_now()},
+                    )
+                    logger.info("FACT_HARVEST_REINFORCE: tenant=%s id=%s", tenant_id, entry_id)
+        except Exception as exc:
+            logger.warning("FACT_HARVEST_ITEM: %s failed: %s", action, exc)
+
+    if changes:
+        logger.info("COMPACTION_HARVEST_COMPLETE: tenant=%s space=%s changes=%d", tenant_id, space_id, changes)
+    return changes
+
