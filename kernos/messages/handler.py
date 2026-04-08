@@ -1984,8 +1984,99 @@ class MessageHandler:
                 "DOMAIN_CREATE: space=%s name=%s parent=%s depth=%d confidence=%s",
                 new_space.id, new_space.name, space_id, new_space.depth, parsed.get("confidence"),
             )
+
+            # Content migration: move domain-specific content from parent to new space
+            try:
+                await self._migrate_domain_content(
+                    tenant_id, space_id, new_space.id, new_space.name, space.name)
+            except Exception as mig_exc:
+                logger.warning("DOMAIN_MIGRATE: failed for %s: %s", new_space.id, mig_exc)
+
         except Exception as exc:
             logger.warning("DOMAIN_ASSESS: failed for space=%s: %s", space_id, exc)
+
+    async def _migrate_domain_content(
+        self, tenant_id: str, parent_id: str, child_id: str,
+        child_name: str, parent_name: str,
+    ) -> None:
+        """Migrate domain-specific content from parent to newly created child space.
+
+        Moves covenants, procedure sections, and files that are clearly
+        specific to the new domain. Runs once on domain creation.
+        """
+        import json as _json
+        migrated: dict[str, list[str]] = {"covenants": [], "files": [], "procedures": []}
+
+        # 1. Migrate covenants scoped to parent that mention the child domain
+        try:
+            rules = await self.state.query_covenant_rules(
+                tenant_id, context_space_scope=[parent_id], active_only=True)
+            for rule in rules:
+                if rule.context_space == parent_id and child_name.lower() in rule.description.lower():
+                    await self.state.update_contract_rule(tenant_id, rule.id, {"context_space": child_id})
+                    migrated["covenants"].append(rule.description[:60])
+        except Exception as exc:
+            logger.warning("DOMAIN_MIGRATE: covenant migration failed: %s", exc)
+
+        # 2. Migrate procedure sections from parent _procedures.md
+        try:
+            parent_procs = await self._files.read_file(tenant_id, parent_id, "_procedures.md")
+            if parent_procs and not parent_procs.startswith("Error:"):
+                # Find sections that mention the child domain name
+                sections = parent_procs.split("\n## ")
+                keep_sections: list[str] = []
+                move_sections: list[str] = []
+                for i, section in enumerate(sections):
+                    if i == 0 and not section.startswith("#"):
+                        keep_sections.append(section)
+                        continue
+                    full_section = ("## " + section) if i > 0 else section
+                    if child_name.lower() in section.lower():
+                        move_sections.append(full_section)
+                        migrated["procedures"].append(section.split("\n")[0][:60])
+                    else:
+                        keep_sections.append(full_section)
+
+                if move_sections:
+                    # Write moved sections to child
+                    child_procs = "\n\n".join(move_sections)
+                    await self._files.write_file(
+                        tenant_id, child_id, "_procedures.md", child_procs,
+                        "Domain procedures migrated from parent")
+                    # Update parent (remove moved sections)
+                    remaining = "\n\n".join(s for s in keep_sections if s.strip())
+                    if remaining.strip():
+                        await self._files.write_file(
+                            tenant_id, parent_id, "_procedures.md", remaining,
+                            "Domain procedures (migrated domain-specific sections)")
+                    else:
+                        await self._files.delete_file(tenant_id, parent_id, "_procedures.md")
+        except Exception as exc:
+            logger.warning("DOMAIN_MIGRATE: procedure migration failed: %s", exc)
+
+        # 3. Migrate files that mention the child domain in their manifest description
+        try:
+            manifest = await self._files.load_manifest(tenant_id, parent_id)
+            for fname, desc in list(manifest.items()):
+                if fname.startswith("_"):
+                    continue  # Skip special files like _procedures.md
+                if child_name.lower() in desc.lower() or child_name.lower() in fname.lower():
+                    content = await self._files.read_file(tenant_id, parent_id, fname)
+                    if content and not content.startswith("Error:"):
+                        await self._files.write_file(tenant_id, child_id, fname, content, desc)
+                        await self._files.delete_file(tenant_id, parent_id, fname)
+                        migrated["files"].append(fname)
+        except Exception as exc:
+            logger.warning("DOMAIN_MIGRATE: file migration failed: %s", exc)
+
+        total = sum(len(v) for v in migrated.values())
+        if total > 0:
+            logger.info("DOMAIN_MIGRATE: space=%s from=%s covenants=%d procedures=%d files=%d",
+                child_id, parent_id, len(migrated["covenants"]),
+                len(migrated["procedures"]), len(migrated["files"]))
+            for cat, items in migrated.items():
+                for item in items:
+                    logger.info("DOMAIN_MIGRATE_ITEM: type=%s item=%s action=moved", cat, item)
 
     async def _produce_child_briefings(
         self, tenant_id: str, space_id: str, space: ContextSpace,
