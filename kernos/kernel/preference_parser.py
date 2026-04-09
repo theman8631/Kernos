@@ -387,13 +387,22 @@ async def commit_from_analysis(
         return ""
 
     # Build a detection-compatible dict
+    # Parse parameters (may be string JSON from Codex schema constraint)
+    _params = pref_dict.get("parameters", {})
+    if isinstance(_params, str):
+        try:
+            import json
+            _params = json.loads(_params) if _params.strip() else {}
+        except (json.JSONDecodeError, ValueError):
+            _params = {}
+
     detection = PreferenceDetection(
         is_preference=True,
         confidence=pref_dict.get("confidence", "medium"),
         category=pref_dict.get("category", "behavior"),
         subject=pref_dict.get("subject", ""),
         action=pref_dict.get("action", ""),
-        parameters=pref_dict.get("parameters", {}),
+        parameters=_params,
         scope_hint=pref_dict.get("scope_hint", ""),
         reasoning=pref_dict.get("reasoning", ""),
     )

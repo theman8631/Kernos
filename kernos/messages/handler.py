@@ -3118,7 +3118,7 @@ class MessageHandler:
                         "category": {"type": "string"},
                         "subject": {"type": "string"},
                         "action": {"type": "string"},
-                        "parameters": {"type": "object"},
+                        "parameters": {"type": "string", "description": "JSON-encoded parameters if any, or empty string"},
                         "scope_hint": {"type": "string"},
                         "reasoning": {"type": "string"},
                     },
