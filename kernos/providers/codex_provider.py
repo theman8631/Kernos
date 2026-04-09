@@ -271,8 +271,9 @@ class OpenAICodexProvider(Provider):
         headers = self._headers()
         headers["accept"] = "text/event-stream"
 
+        _max_retries = int(os.environ.get("KERNOS_CODEX_MAX_RETRIES", "8"))
         last_exc: Exception | None = None
-        for attempt in range(2):
+        for attempt in range(_max_retries):
             try:
                 async with http.stream("POST", url, headers=headers, json=body) as resp:
                     if resp.status_code == 401:
@@ -296,18 +297,22 @@ class OpenAICodexProvider(Provider):
                 raise  # 4xx / known errors — don't retry
             except ReasoningTransientError as exc:
                 last_exc = exc
-                if attempt == 0:
-                    logger.warning("REASON_RETRY: attempt=2 transient=%s", exc)
-                    await asyncio.sleep(1.5)
+                if attempt < _max_retries - 1:
+                    _delay = min(1.5 * (1.5 ** attempt), 10.0)  # 1.5s, 2.25s, 3.4s, 5s, 7.5s, 10s, 10s
+                    logger.warning("REASON_RETRY: attempt=%d/%d delay=%.1fs transient=%s",
+                        attempt + 2, _max_retries, _delay, str(exc)[:80])
+                    await asyncio.sleep(_delay)
                     continue
-                raise ReasoningProviderError(f"Codex transient error after retries: {exc}") from exc
+                raise ReasoningProviderError(f"Codex transient error after {_max_retries} attempts: {exc}") from exc
             except Exception as exc:
                 last_exc = exc
-                if attempt == 0:
-                    logger.warning("REASON_RETRY: attempt=2 error=%s", exc)
-                    await asyncio.sleep(1.5)
+                if attempt < _max_retries - 1:
+                    _delay = min(1.5 * (1.5 ** attempt), 10.0)
+                    logger.warning("REASON_RETRY: attempt=%d/%d delay=%.1fs error=%s",
+                        attempt + 2, _max_retries, _delay, str(exc)[:80])
+                    await asyncio.sleep(_delay)
                     continue
-                raise ReasoningConnectionError(f"Codex request failed: {exc}") from exc
+                raise ReasoningConnectionError(f"Codex request failed after {_max_retries} attempts: {exc}") from exc
 
         raise ReasoningConnectionError(f"Codex request failed: {last_exc}") from last_exc
 
