@@ -260,13 +260,22 @@ def resolve_mcp_credentials(
     return resolved
 
 
+_CONTRACT_TYPE_ORDER = ["spirit", "must_not", "must", "preference", "escalation"]
+
 def _format_contracts(rules: list[CovenantRule], space_names: dict[str, str] | None = None) -> str:
-    """Format behavioral contract rules with source attribution for the system prompt."""
+    """Format behavioral contract rules with source attribution for the system prompt.
+
+    Spirit type renders first (aspirational context before rules).
+    """
     if not rules:
         return ""
     _names = space_names or {}
-    lines = ["BEHAVIORAL CONTRACTS — follow these strictly:"]
-    for rule in rules:
+    # Sort: spirit first, then must_not, must, preference, escalation, then any others
+    sorted_rules = sorted(rules, key=lambda r: (
+        _CONTRACT_TYPE_ORDER.index(r.rule_type) if r.rule_type in _CONTRACT_TYPE_ORDER else 99
+    ))
+    lines = ["BEHAVIORAL CONTRACTS:"]
+    for rule in sorted_rules:
         label = rule.rule_type.replace("_", " ").upper()
         scope_tag = ""
         if rule.context_space:

@@ -594,14 +594,14 @@ async def _list_covenants(state: StateStore, tenant_id: str, show_all: bool) -> 
         groups.setdefault(label, []).append(entry)
 
     lines = ["**Standing Covenant Rules:**\n"]
-    for group_name in ["MUST_NOT", "MUST", "PREFERENCE", "ESCALATION"]:
+    for group_name in ["SPIRIT", "MUST_NOT", "MUST", "PREFERENCE", "ESCALATION"]:
         if group_name in groups:
             lines.append(f"**{group_name}:**")
             lines.extend(groups[group_name])
             lines.append("")
 
     for group_name, entries in groups.items():
-        if group_name not in ["MUST_NOT", "MUST", "PREFERENCE", "ESCALATION"]:
+        if group_name not in ["SPIRIT", "MUST_NOT", "MUST", "PREFERENCE", "ESCALATION"]:
             lines.append(f"**{group_name}:**")
             lines.extend(entries)
             lines.append("")

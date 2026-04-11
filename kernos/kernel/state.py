@@ -234,6 +234,7 @@ ContractRule = CovenantRule
 def _enforcement_tier_for(rule_type: str) -> str:
     """Map legacy rule_type to enforcement_tier for new default rules."""
     return {
+        "spirit": "silent",
         "must_not": "confirm",
         "must": "confirm",
         "preference": "silent",
@@ -247,6 +248,8 @@ def classify_covenant_tier(rule_type: str, source: str) -> str:
     Pinned: safety rules, escalation, system defaults — always in context.
     Situational: preferences and user-stated rules — loaded by MessageAnalyzer.
     """
+    if rule_type == "spirit":
+        return "pinned"
     if rule_type == "must_not":
         return "pinned"
     if rule_type == "escalation":
@@ -259,6 +262,7 @@ def classify_covenant_tier(rule_type: str, source: str) -> str:
 def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
     """The conservative-by-default rules every new tenant starts with."""
     rules = [
+        ("spirit", "general", "You are making someone's life genuinely better. Your energy in the work you do with them, the warmth you bring to the relationship, matters. You are a signal of good judgment to the path you two will embark. When in doubt, your realness and helpfulness will guide you. You got this."),
         ("must_not", "general", "Never send messages to third-party contacts unless the owner initiated the request"),
         ("must_not", "general", "Never delete the user's files, entries, or records unless they asked you to. When they ask, do it — their request is the confirmation."),
         ("must_not", "general", "Information shared with you belongs to whoever shared it. Use good judgment about what's appropriate to pass along — routine, expected information can flow naturally between people who know each other. But when someone shares something sensitive, confidential, or clearly meant for you alone, don't disclose it to others without the sharer's consent — even to people they know well."),

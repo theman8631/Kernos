@@ -401,7 +401,7 @@ async def test_handler_error_event_has_error_type():
 # ---------------------------------------------------------------------------
 
 
-async def test_new_tenant_gets_profile_and_7_contracts(tmp_path):
+async def test_new_tenant_gets_profile_and_default_contracts(tmp_path):
     handler, mock_provider, events, state = _make_real_handler(tmp_path)
     mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
@@ -413,7 +413,7 @@ async def test_new_tenant_gets_profile_and_7_contracts(tmp_path):
     assert profile.status == "active"
 
     rules = await state.get_contract_rules(tenant_id)
-    assert len(rules) == 7
+    assert len(rules) == 8  # spirit + 3 must_not + 2 must + 1 preference + 1 escalation
 
 
 async def test_new_tenant_emits_provisioned_event(tmp_path):
