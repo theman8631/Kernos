@@ -396,7 +396,7 @@ async def commit_from_analysis(
         except (json.JSONDecodeError, ValueError):
             _params = {}
 
-    detection = PreferenceDetection(
+    detection = DetectionResult(
         is_preference=True,
         confidence=pref_dict.get("confidence", "medium"),
         category=pref_dict.get("category", "behavior"),

@@ -603,13 +603,13 @@ class TestSoulDefaults:
 class TestBootstrapPrompt:
     """Spec tests: bootstrap prompt content."""
 
-    def test_contains_you_are_kernos(self):
-        """Build system prompt for unhatched tenant. Assert contains 'You are Kernos'."""
-        assert "You are Kernos" in PRIMARY_TEMPLATE.bootstrap_prompt
+    def test_contains_first_conversation(self):
+        """Build system prompt for unhatched tenant. Assert contains first conversation marker."""
+        assert "FIRST CONVERSATION" in PRIMARY_TEMPLATE.bootstrap_prompt
 
-    def test_contains_dont_narrate(self):
-        """Assert bootstrap contains 'Don't narrate your own state'."""
-        assert "Don't narrate your own state" in PRIMARY_TEMPLATE.bootstrap_prompt
+    def test_contains_one_question(self):
+        """Assert bootstrap contains one-question-at-a-time rule."""
+        assert "one question" in PRIMARY_TEMPLATE.bootstrap_prompt.lower()
 
     def test_no_you_just_came_online(self):
         """Assert bootstrap_prompt does NOT contain 'You just came online'."""
@@ -633,8 +633,8 @@ class TestBootstrapPrompt:
             tenant_id="t1",
         )
         prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
-        assert "You are Kernos" in prompt
-        assert "Don't narrate your own state" in prompt
+        assert "FIRST CONVERSATION" in prompt
+        assert "one question" in prompt.lower()
 
 
 class TestNoSoulMd:

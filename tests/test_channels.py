@@ -156,10 +156,10 @@ class TestBaseAdapterDefaults:
         adapter = _StubAdapter()
         assert not adapter.can_send_outbound
 
-    async def test_default_send_outbound_returns_false(self):
+    async def test_default_send_outbound_returns_zero(self):
         adapter = _StubAdapter()
         result = await adapter.send_outbound("t1", "target", "msg")
-        assert result is False
+        assert result == 0
 
 
 # ---------------------------------------------------------------------------

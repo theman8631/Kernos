@@ -319,7 +319,60 @@ The agent's operating principles include guidance on distinguishing these.
 
 ---
 
-## 10. Awareness & Scheduling
+## 10. Self-Directed Execution
+
+**File:** `kernos/kernel/execution.py`
+
+For complex multi-step tasks, the agent creates a plan (`_plan.json` in workspace space) and executes it autonomously. Each step is a full turn through the pipeline via `continue_plan` kernel tool.
+
+### Plan Structure
+
+JSON plan with phases, steps, budget ceilings (max_steps, max_tokens, max_time_s), usage counters, discoveries list. Markdown view (`_plan.md`) auto-generated on save.
+
+### Execution Flow
+
+1. Agent creates plan, saves via `save_plan()`
+2. Calls `continue_plan(plan_id, step_id, step_description)` at end of turn
+3. Handler reads plan, checks budgets, builds `ExecutionEnvelope`, enqueues self-directed turn
+4. Turn runs through full pipeline with `is_self_directed=True` on `TurnContext`
+5. Self-directed turns skip: preference detection, cross-domain signals
+6. Budget ceiling hit → plan paused, user decides continuation
+7. User messages always interrupt — priority over plan steps
+
+### Discovery Surfacing
+
+`notify_user` parameter on `continue_plan` sends progress/discoveries to user's channel. Plan discoveries list tracks findings across steps.
+
+---
+
+## 11. Improvement Loop — Behavioral Self-Improvement
+
+**File:** `kernos/kernel/behavioral_patterns.py`
+
+The agent improves itself through covenants and procedures without touching source code. Three connected mechanisms:
+
+### Behavioral Pattern Detection
+
+Post-turn, the friction observer tracks recurring user corrections. Four pattern types with thresholds: format_correction (3), workflow_correction (3), boundary_correction (2), preference_drift (2). Correction fingerprints (first 80 chars, normalized) are accumulated in `data/{tenant}/state/behavioral_patterns.json`.
+
+When threshold is met, a whisper is generated proposing a covenant or procedure. Proposals are classified:
+- **behavioral** → propose covenant (tier="situational" via Pass 1 selective injection)
+- **workaround** → flag as SYSTEM_MALFUNCTION (don't paper over code bugs)
+- **uncertain** → surface both options to user
+
+User approves → covenant/procedure created. User declines → not re-proposed (resets after 3 more occurrences).
+
+### Covenant Selective Injection
+
+`tier` field on CovenantRule: "pinned" (always loaded) or "situational" (loaded when MessageAnalyzer deems relevant). Zero additional LLM calls — MessageAnalyzer's schema expanded with `relevant_covenant_ids`.
+
+### System Malfunction Whispers
+
+When the friction observer detects SYSTEM_MALFUNCTION signals (schema errors, provider errors, empty responses), an informational whisper is generated so the user knows something went wrong. Diagnostic reports still written to `data/diagnostics/friction/`.
+
+---
+
+## 12. Awareness & Scheduling
 
 ### Awareness Evaluator
 
@@ -335,7 +388,7 @@ Background task. Evaluates proactive insights ("whispers") on a timer (default 1
 
 ---
 
-## 11. Capabilities & MCP
+## 13. Capabilities & MCP
 
 ### Connected Servers
 

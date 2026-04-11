@@ -78,25 +78,25 @@ class DiscordAdapter(BaseAdapter):
         """
         return response
 
-    async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> bool:
-        """Send an unprompted message to a Discord channel."""
+    async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> int:
+        """Send an unprompted message to a Discord channel. Returns message ID or 0."""
         if not self._client:
             logger.warning("OUTBOUND: discord send failed — client not connected")
-            return False
+            return 0
         try:
             channel = await self._client.fetch_channel(int(channel_target))
-            await channel.send(message)
+            sent = await channel.send(message)
             logger.info(
                 "OUTBOUND: channel=discord target=%s tenant=%s length=%d success=True",
                 channel_target, tenant_id, len(message),
             )
-            return True
+            return sent.id
         except Exception as exc:
             logger.warning(
                 "OUTBOUND: channel=discord target=%s tenant=%s success=False error=%s",
                 channel_target, tenant_id, exc,
             )
-            return False
+            return 0
 
     @property
     def can_send_outbound(self) -> bool:

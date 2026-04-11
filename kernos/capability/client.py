@@ -55,6 +55,12 @@ class MCPClientManager:
     lifetime of the process, call disconnect_all() on shutdown.
     """
 
+    # Per-server rate limiting for burst protection during plan execution.
+    # Servers not listed here have no limit.
+    _RATE_LIMITS: dict[str, tuple[int, float]] = {
+        "brave-search": (2, 1.0),  # max 2 concurrent, 1s between calls
+    }
+
     def __init__(self, events: EventStream | None = None) -> None:
         self._servers: dict[str, StdioServerParameters] = {}
         self._sessions: dict[str, ClientSession] = {}
@@ -64,6 +70,8 @@ class MCPClientManager:
         self._events = events
         self._runtime_stacks: dict[str, AsyncExitStack] = {}
         self._auth_commands: dict[str, AuthCommand] = {}
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._last_call_time: dict[str, float] = {}  # server_name → monotonic timestamp
 
     def register_server(self, name: str, params: StdioServerParameters) -> None:
         """Register an MCP server configuration. Does not connect."""
@@ -455,15 +463,37 @@ class MCPClientManager:
 
         effective_timeout = timeout or self._get_timeout(tool_name)
 
+        # Per-server rate limiting (semaphore + inter-call delay)
+        _rate = self._RATE_LIMITS.get(server_name)
+        if _rate:
+            _max_concurrent, _delay = _rate
+            if server_name not in self._semaphores:
+                self._semaphores[server_name] = asyncio.Semaphore(_max_concurrent)
+
         for attempt in range(1 + MAX_RETRIES):
             exc_ref: Exception | None = None
             error_msg = ""
             try:
-                # Timeout wraps ONLY the actual MCP session call
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, tool_args),
-                    timeout=effective_timeout,
-                )
+                # Rate-limited call: acquire semaphore + enforce delay
+                if _rate:
+                    _sem = self._semaphores[server_name]
+                    async with _sem:
+                        _now = asyncio.get_event_loop().time()
+                        _last = self._last_call_time.get(server_name, 0)
+                        _wait = _rate[1] - (_now - _last)
+                        if _wait > 0:
+                            await asyncio.sleep(_wait)
+                        self._last_call_time[server_name] = asyncio.get_event_loop().time()
+                        result = await asyncio.wait_for(
+                            session.call_tool(tool_name, tool_args),
+                            timeout=effective_timeout,
+                        )
+                else:
+                    # Timeout wraps ONLY the actual MCP session call
+                    result = await asyncio.wait_for(
+                        session.call_tool(tool_name, tool_args),
+                        timeout=effective_timeout,
+                    )
                 # Formatting/processing happens OUTSIDE timeout
                 parts = []
                 for content in result.content:

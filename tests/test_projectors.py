@@ -779,11 +779,12 @@ async def test_coordinator_schedules_tier2():
 # ---------------------------------------------------------------------------
 
 
-def test_name_ask_appended_on_first_interaction_no_name():
+def test_name_ask_not_force_appended_on_first_interaction():
+    """Bootstrap prompt handles the name question — no force-append."""
     soul = Soul(tenant_id="t1", interaction_count=0, user_name="")
     result = _maybe_append_name_ask("Hello! Nice to meet you.", soul)
-    assert result.startswith("Hello! Nice to meet you.")
-    assert "what should I call you" in result.lower() or "call you" in result.lower()
+    # Should return unchanged — no force-appended name question
+    assert result == "Hello! Nice to meet you."
 
 
 def test_name_ask_not_appended_if_name_set():
