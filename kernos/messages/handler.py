@@ -4659,8 +4659,6 @@ class MessageHandler:
                 await self.state.update_context_space(tenant_id, space_id, {
                     "local_affordance_set": aff,
                 })
-                for t in promoted:
-                    logger.info("TOOL_PROMOTED: tool=%s space=%s reason=successful_use", t, space_id)
         except Exception as exc:
             logger.warning("TOOL_PROMOTE: failed: %s", exc)
 
