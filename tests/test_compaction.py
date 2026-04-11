@@ -1153,3 +1153,47 @@ RECURRING_WORKFLOWS:
         assert "RECURRING_WORKFLOWS" not in result
         assert "Before." in result
         assert "After." in result
+
+
+class TestFollowUpParsing:
+    def test_parse_multi_follow_ups(self):
+        doc = """Some text.
+
+FOLLOW_UPS:
+- type: USER_COMMITMENT
+  description: Send the invoice to John
+  due: 2026-04-15
+  context: discussed during budget review
+- type: EXTERNAL_DEADLINE
+  description: Permit expires
+  due: 2026-05-01
+  context: city planning office
+"""
+        result = CompactionService._parse_follow_ups(doc)
+        assert len(result) == 2
+        assert result[0]["type"] == "USER_COMMITMENT"
+        assert result[0]["description"] == "Send the invoice to John"
+        assert result[0]["due"] == "2026-04-15"
+        assert result[1]["type"] == "EXTERNAL_DEADLINE"
+
+    def test_parse_none(self):
+        doc = "Text.\nFOLLOW_UPS: NONE\n"
+        assert CompactionService._parse_follow_ups(doc) == []
+
+    def test_parse_no_section(self):
+        doc = "No follow-ups section here."
+        assert CompactionService._parse_follow_ups(doc) == []
+
+    def test_strip_follow_ups(self):
+        doc = "Before.\n\nFOLLOW_UPS:\n- type: FOLLOW_UP\n  description: check on X\n  due: soon\n  context: test\n\nAfter."
+        result = CompactionService._strip_follow_ups(doc)
+        assert "FOLLOW_UPS" not in result
+        assert "Before." in result
+        assert "After." in result
+
+    def test_strip_none(self):
+        doc = "Before.\nFOLLOW_UPS: NONE\nAfter."
+        result = CompactionService._strip_follow_ups(doc)
+        assert "FOLLOW_UPS" not in result
+        assert "Before." in result
+        assert "After." in result

@@ -82,6 +82,9 @@ class Trigger:
     # Preference linkage (Phase 6A)
     source_preference_id: str = ""      # Preference ID that generated this trigger, or ""
 
+    # Provenance
+    source: str = ""  # "explicit_schedule" | "compaction_commitment" | "" (legacy)
+
     # Audit
     created_by_tool_call: str = ""
 

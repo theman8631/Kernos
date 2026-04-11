@@ -350,7 +350,29 @@ RECURRING_WORKFLOWS:
   trigger: [what starts the workflow]
 
 If no recurring workflows, write:
-RECURRING_WORKFLOWS: NONE"""
+RECURRING_WORKFLOWS: NONE
+
+---
+
+#### Follow-Ups
+
+After RECURRING_WORKFLOWS, extract anything from this conversation that needs follow-up. Four types:
+
+- USER_COMMITMENT: user said they would do something ("I'll send that tomorrow")
+- AGENT_COMMITMENT: you promised to do something ("I'll check on that next week")
+- EXTERNAL_DEADLINE: a date-bound obligation mentioned ("the permit expires March 15")
+- FOLLOW_UP: something that needs checking back on ("let's see how that goes")
+
+Do NOT extract follow-ups more than 90 days in the future. Long-horizon items belong in the Living State or Ledger, not as triggers.
+
+FOLLOW_UPS:
+- type: [USER_COMMITMENT|AGENT_COMMITMENT|EXTERNAL_DEADLINE|FOLLOW_UP]
+  description: [what was committed to]
+  due: [ISO date or "soon" or "next_week" — best estimate]
+  context: [brief context for the reminder]
+
+If no follow-ups, write:
+FOLLOW_UPS: NONE"""
 
 
 # ---------------------------------------------------------------------------
@@ -992,6 +1014,66 @@ class CompactionService:
                 cleaned.append(line)
         return "\n".join(cleaned)
 
+    @staticmethod
+    def _parse_follow_ups(doc: str) -> list[dict]:
+        """Extract FOLLOW_UPS section from compaction output.
+
+        Returns list of {"type": str, "description": str, "due": str, "context": str}.
+        """
+        results = []
+        in_commitments = False
+        current: dict = {}
+        for line in doc.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.upper().startswith("FOLLOW_UPS:"):
+                rest = stripped[len("FOLLOW_UPS:"):].strip()
+                if rest.upper() == "NONE":
+                    return []
+                in_commitments = True
+                continue
+            if in_commitments:
+                if stripped.startswith("- type:"):
+                    if current and current.get("description"):
+                        results.append(current)
+                    current = {"type": stripped[len("- type:"):].strip(), "description": "", "due": "", "context": ""}
+                elif stripped.startswith("type:"):
+                    if current and current.get("description"):
+                        results.append(current)
+                    current = {"type": stripped[len("type:"):].strip(), "description": "", "due": "", "context": ""}
+                elif stripped.startswith("description:"):
+                    current["description"] = stripped[len("description:"):].strip()
+                elif stripped.startswith("due:"):
+                    current["due"] = stripped[len("due:"):].strip()
+                elif stripped.startswith("context:"):
+                    current["context"] = stripped[len("context:"):].strip()
+                elif not stripped:
+                    continue
+                elif not stripped.startswith("-") and ":" not in stripped:
+                    break
+        if current and current.get("description"):
+            results.append(current)
+        return results
+
+    @staticmethod
+    def _strip_follow_ups(doc: str) -> str:
+        """Remove the FOLLOW_UPS section from the document."""
+        lines = doc.rstrip().split("\n")
+        cleaned = []
+        in_commitments = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.upper().startswith("FOLLOW_UPS:"):
+                in_commitments = True
+                continue
+            if in_commitments:
+                if stripped.startswith(("-", "type:", "description:", "due:", "context:")) or not stripped:
+                    continue
+                else:
+                    in_commitments = False
+            if not in_commitments:
+                cleaned.append(line)
+        return "\n".join(cleaned)
+
     async def compact_from_log(
         self,
         tenant_id: str,
@@ -1092,6 +1174,13 @@ class CompactionService:
         if recurring_workflows:
             logger.info("COMPACTION_WORKFLOWS: count=%d", len(recurring_workflows))
         comp_state._recurring_workflows = recurring_workflows  # type: ignore[attr-defined]
+
+        # Parse and strip commitments
+        commitments = self._parse_follow_ups(updated_doc)
+        updated_doc = self._strip_follow_ups(updated_doc)
+        if commitments:
+            logger.info("COMPACTION_FOLLOW_UPS: count=%d", len(commitments))
+        comp_state._follow_ups = commitments  # type: ignore[attr-defined]
 
         # Write updated document
         active_doc_path.write_text(updated_doc, encoding="utf-8")

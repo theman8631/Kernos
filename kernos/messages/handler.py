@@ -1969,6 +1969,125 @@ class MessageHandler:
         "additionalProperties": False,
     }
 
+    async def _process_compaction_follow_ups(
+        self, tenant_id: str, space_id: str, commitments: list[dict],
+    ) -> None:
+        """Process follow-ups extracted from compaction → create triggers.
+
+        Deduplicates against existing triggers (description + due within 2 days).
+        """
+        from kernos.kernel.scheduler import Trigger, _trigger_id, compute_next_fire
+        from datetime import timedelta
+        from kernos.utils import utc_now_dt
+
+        now = utc_now_dt()
+
+        # Load existing triggers for dedup
+        existing = await self._trigger_store.list_all(tenant_id)
+        existing_descs = [(t.action_description.lower(), t.next_fire_at) for t in existing if t.status == "active"]
+
+        _type_messages = {
+            "USER_COMMITMENT": "You mentioned you'd {desc}. Just a reminder.",
+            "AGENT_COMMITMENT": "I committed to {desc}. Following up now.",
+            "EXTERNAL_DEADLINE": "Deadline approaching: {desc}.",
+            "FOLLOW_UP": "Time to check back on: {desc}.",
+        }
+
+        created = 0
+        for c in commitments:
+            desc = c.get("description", "")
+            if not desc:
+                continue
+            ctype = c.get("type", "FOLLOW_UP")
+            due_raw = c.get("due", "")
+            context = c.get("context", "")
+
+            # Parse due date
+            due_dt = None
+            if due_raw:
+                due_lower = due_raw.lower().strip()
+                if due_lower == "soon":
+                    due_dt = now + timedelta(days=1)
+                elif due_lower == "next_week":
+                    due_dt = now + timedelta(days=7)
+                elif due_lower.startswith("20"):
+                    try:
+                        from datetime import datetime as _dt
+                        due_dt = _dt.fromisoformat(due_lower.replace("Z", "+00:00"))
+                        if due_dt.tzinfo is None:
+                            due_dt = due_dt.replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        due_dt = now + timedelta(days=3)
+                else:
+                    due_dt = now + timedelta(days=3)
+            else:
+                due_dt = now + timedelta(days=3)
+
+            # 90-day horizon check
+            if due_dt and (due_dt - now).days > 90:
+                logger.info("FOLLOW_UP_SKIP: desc=%r reason=beyond_90_days", desc[:60])
+                continue
+
+            # Dedup: check if similar trigger exists
+            _dup = False
+            due_iso = due_dt.isoformat() if due_dt else ""
+            for ex_desc, ex_due in existing_descs:
+                if desc.lower()[:40] in ex_desc or ex_desc[:40] in desc.lower():
+                    # Similar description — check date proximity
+                    if ex_due and due_iso:
+                        try:
+                            from datetime import datetime as _dt
+                            ex_dt = _dt.fromisoformat(ex_due.replace("Z", "+00:00"))
+                            if ex_dt.tzinfo is None:
+                                ex_dt = ex_dt.replace(tzinfo=timezone.utc)
+                            if abs((due_dt - ex_dt).days) <= 2:
+                                _dup = True
+                                break
+                        except (ValueError, TypeError):
+                            pass
+                    elif not ex_due and not due_iso:
+                        _dup = True
+                        break
+            if _dup:
+                logger.info("FOLLOW_UP_DUPLICATE: desc=%r", desc[:60])
+                continue
+
+            # Build trigger message
+            msg_template = _type_messages.get(ctype, "Reminder: {desc}.")
+            msg = msg_template.format(desc=desc)
+            if context:
+                msg += f" (Context: {context})"
+
+            # Determine delivery class
+            delivery_class = "ambient"  # Default: whisper
+            if ctype == "EXTERNAL_DEADLINE" and due_dt and (due_dt - now).days <= 1:
+                delivery_class = "interrupt"  # Urgent deadline
+
+            # Create trigger
+            trigger = Trigger(
+                trigger_id=_trigger_id(),
+                tenant_id=tenant_id,
+                space_id=space_id,
+                condition_type="time",
+                condition=due_iso,
+                next_fire_at=due_iso,
+                recurrence="",  # One-shot
+                action_type="notify",
+                action_description=msg,
+                action_params={},
+                delivery_class=delivery_class,
+                status="active",
+                created_at=utc_now(),
+                source="compaction_follow_up",
+            )
+            await self._trigger_store.save(trigger)
+            created += 1
+            logger.info("FOLLOW_UP_CREATED: type=%s desc=%r due=%s source=compaction",
+                ctype, desc[:60], due_iso[:10])
+
+        if created:
+            logger.info("FOLLOW_UP_TOTAL: created=%d from_compaction=%d", created, len(commitments))
+
     async def _assess_domain_creation(
         self, tenant_id: str, space_id: str, space: ContextSpace, comp_state: "CompactionState",
     ) -> None:
@@ -4489,6 +4608,15 @@ class MessageHandler:
                                                         _desc, wf.get("count", 0), ctx.active_space_id)
                                         except Exception as _rwx:
                                             logger.warning("RECURRING_WORKFLOW: processing failed: %s", _rwx)
+
+                                    # Process commitments from compaction output → triggers
+                                    _commitments = getattr(comp_state, '_follow_ups', [])
+                                    if _commitments:
+                                        try:
+                                            await self._process_compaction_follow_ups(
+                                                tenant_id, ctx.active_space_id, _follow_ups)
+                                        except Exception as _cx:
+                                            logger.warning("FOLLOW_UP: processing failed: %s", _cx)
 
                                     # Domain assessment + child briefings — async, non-blocking
                                     try:
