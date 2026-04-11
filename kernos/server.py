@@ -123,6 +123,7 @@ async def wipe_command(interaction: discord.Interaction) -> None:
 
     data_dir = Path(os.getenv("KERNOS_DATA_DIR", "./data"))
 
+    print("\033[2J\033[H", end="", flush=True)  # Clear console — fresh start
     await interaction.response.send_message("Wiping...", ephemeral=True)
     await client.change_presence(activity=discord.Activity(
         type=discord.ActivityType.playing, name="factory reset..."))
