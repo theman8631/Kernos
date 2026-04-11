@@ -368,7 +368,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -502,6 +502,16 @@ class ReasoningService:
                         )
                     return f"Runtime trace ({len(events)} events):\n" + "\n".join(lines)
                 return "Runtime trace is not available."
+            elif tool_name in ("diagnose_issue", "propose_fix", "submit_spec"):
+                from kernos.kernel.diagnostics import handle_diagnose_issue, handle_propose_fix, handle_submit_spec
+                _rt = getattr(self._handler, '_runtime_trace', None) if self._handler else None
+                if tool_name == "diagnose_issue":
+                    return await handle_diagnose_issue(
+                        request.tenant_id, request.active_space_id, tool_input, _rt, self)
+                elif tool_name == "propose_fix":
+                    return await handle_propose_fix(request.tenant_id, tool_input, _rt)
+                else:
+                    return await handle_submit_spec(request.tenant_id, tool_input, self._handler)
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
@@ -973,6 +983,20 @@ class ReasoningService:
                         result = f"Runtime trace ({len(events)} events):\n" + "\n".join(lines)
                 else:
                     result = "Runtime trace is not available."
+            elif block.name in ("diagnose_issue", "propose_fix", "submit_spec"):
+                from kernos.kernel.diagnostics import handle_diagnose_issue, handle_propose_fix, handle_submit_spec
+                _rt = getattr(self._handler, '_runtime_trace', None) if self._handler else None
+                try:
+                    if block.name == "diagnose_issue":
+                        result = await handle_diagnose_issue(
+                            request.tenant_id, request.active_space_id, tool_args, _rt, self)
+                    elif block.name == "propose_fix":
+                        result = await handle_propose_fix(request.tenant_id, tool_args, _rt)
+                    else:
+                        result = await handle_submit_spec(request.tenant_id, tool_args, self._handler)
+                except Exception as exc:
+                    logger.warning("Kernel tool '%s' failed: %s", block.name, exc)
+                    result = f"Diagnostic tool failed: {exc}"
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(

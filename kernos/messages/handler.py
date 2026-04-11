@@ -712,6 +712,9 @@ class MessageHandler:
             "register_tool": "Register a workspace-built tool in the universal catalog from a .tool.json descriptor",
             "manage_plan": "Create, execute, and manage self-directed plans for complex multi-step tasks",
             "read_runtime_trace": "Read structured runtime trace — provider errors, tool failures, gate decisions, timing",
+            "diagnose_issue": "Diagnose a system issue using runtime trace, source code, and friction reports",
+            "propose_fix": "Write a structured fix spec for a diagnosed issue",
+            "submit_spec": "Submit a proposed fix spec for implementation",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -3979,7 +3982,8 @@ class MessageHandler:
                                 MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL,
                                 MANAGE_PLAN_TOOL]
         from kernos.kernel.runtime_trace import READ_RUNTIME_TRACE_TOOL
-        _all_kernel.append(READ_RUNTIME_TRACE_TOOL)
+        from kernos.kernel.diagnostics import DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL
+        _all_kernel.extend([READ_RUNTIME_TRACE_TOOL, DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL])
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)

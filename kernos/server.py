@@ -113,6 +113,74 @@ async def restart_command(interaction: discord.Interaction) -> None:
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
+@tree.command(name="debug", description="Show diagnostic data: friction, trace, specs")
+@app_commands.describe(category="What to show: friction, trace, specs")
+async def debug_command(interaction: discord.Interaction, category: str = "trace") -> None:
+    if interaction.user.id != OWNER_USER_ID:
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+    tenant_id = os.getenv("KERNOS_INSTANCE_ID", "")
+
+    if category == "friction":
+        friction_dir = Path(data_dir) / "diagnostics" / "friction"
+        if not friction_dir.exists():
+            await interaction.followup.send("No friction reports.", ephemeral=True)
+            return
+        reports = sorted(friction_dir.glob("FRICTION_*.md"), reverse=True)[:5]
+        if not reports:
+            await interaction.followup.send("No friction reports.", ephemeral=True)
+            return
+        lines = []
+        for rpt in reports:
+            content = rpt.read_text(encoding="utf-8")[:300]
+            lines.append(f"**{rpt.stem}**\n```\n{content}\n```")
+        await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+
+    elif category == "trace":
+        if handler and hasattr(handler, '_runtime_trace'):
+            import asyncio
+            events = await handler._runtime_trace.read(tenant_id, turns=10)
+            if not events:
+                await interaction.followup.send("No trace events.", ephemeral=True)
+                return
+            lines = []
+            for e in events[-30:]:
+                lines.append(
+                    f"`[{e.get('level', '?')[0].upper()}]` "
+                    f"{e.get('source', '?')}:**{e.get('event', '?')}** — {e.get('detail', '')[:100]}"
+                )
+            await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+        else:
+            await interaction.followup.send("Runtime trace not available.", ephemeral=True)
+
+    elif category == "specs":
+        from kernos.utils import _safe_name
+        specs_base = Path(data_dir) / _safe_name(tenant_id) / "specs"
+        lines = []
+        for stage in ("proposed", "submitted", "implemented"):
+            stage_dir = specs_base / stage
+            if stage_dir.exists():
+                specs = list(stage_dir.glob("*.md"))
+                if specs:
+                    lines.append(f"**{stage.upper()}:** {len(specs)} specs")
+                    for s in specs[:3]:
+                        first_line = s.read_text(encoding="utf-8").split("\n")[0][:80]
+                        lines.append(f"  - {s.stem}: {first_line}")
+        if not lines:
+            await interaction.followup.send("No specs.", ephemeral=True)
+            return
+        await interaction.followup.send("\n".join(lines)[:1900], ephemeral=True)
+
+    else:
+        await interaction.followup.send(
+            "Usage: `/debug friction` | `/debug trace` | `/debug specs`",
+            ephemeral=True,
+        )
+
+
 @tree.command(name="wipe", description="Wipe all data and start fresh (factory reset)")
 async def wipe_command(interaction: discord.Interaction) -> None:
     global handler

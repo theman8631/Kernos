@@ -372,6 +372,29 @@ When the friction observer detects SYSTEM_MALFUNCTION signals (schema errors, pr
 
 ---
 
+## 11b. Improvement Loop Tier 2 — Spec-Driven Code Improvement
+
+### Runtime Trace Log
+
+**File:** `kernos/kernel/runtime_trace.py`
+
+Per-tenant JSONL ring buffer (200 turns) capturing structured events: provider errors, tool failures, gate decisions, timing, plan lifecycle, covenant injection. Agent reads via `read_runtime_trace` kernel tool.
+
+### Diagnostic Tools
+
+**File:** `kernos/kernel/diagnostics.py`
+
+Three tools for the agent to investigate and propose fixes:
+- `diagnose_issue` — gathers runtime trace + source + friction evidence, LLM synthesizes diagnosis
+- `propose_fix` — writes structured spec to `data/{tenant}/specs/proposed/`. Protected boundary check blocks gate/auth/credentials/security.
+- `submit_spec` — moves proposed → submitted, generates whisper notification
+
+### /debug Command
+
+Discord slash command: `/debug friction`, `/debug trace`, `/debug specs`. Ephemeral output for developer visibility.
+
+---
+
 ## 12. Awareness & Scheduling
 
 ### Awareness Evaluator
