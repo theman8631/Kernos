@@ -45,6 +45,8 @@ class OpenAICodexProvider(Provider):
             "OPENAI_CODEX_BASE_URL", "https://chatgpt.com/backend-api"
         )
         self._http: Any = None
+        # Optional callback for retry notifications: async fn(attempt, max_retries, delay)
+        self.on_retry_notify: Any = None
 
     async def _ensure_http(self) -> Any:
         if self._http is None:
@@ -73,6 +75,7 @@ class OpenAICodexProvider(Provider):
             "accept": "application/json",
         }
 
+    @staticmethod
     @staticmethod
     def _translate_tools(tools: list[dict]) -> list[dict]:
         """Convert Anthropic-format tool defs to OpenAI Responses API function format."""
@@ -195,12 +198,32 @@ class OpenAICodexProvider(Provider):
                     args = json.loads(item.get("arguments", "{}"))
                 except json.JSONDecodeError:
                     args = {}
-                content_blocks.append(ContentBlock(
-                    type="tool_use",
-                    id=item.get("call_id", item.get("id", "")),
-                    name=item.get("name", ""),
-                    input=args,
-                ))
+                call_name = item.get("name", "")
+
+                # Unpack synthetic multi_tool_use.parallel into individual calls
+                if call_name == "multi_tool_use.parallel":
+                    for sub_call in args.get("tool_uses", []):
+                        sub_args = sub_call.get("parameters", {})
+                        if isinstance(sub_args, str):
+                            try:
+                                sub_args = json.loads(sub_args)
+                            except json.JSONDecodeError:
+                                sub_args = {}
+                        content_blocks.append(ContentBlock(
+                            type="tool_use",
+                            id=sub_call.get("recipient_name", "") + "_" + item.get("call_id", ""),
+                            name=sub_call.get("recipient_name", ""),
+                            input=sub_args,
+                        ))
+                    logger.info("CODEX_PARALLEL_UNPACK: unpacked %d tool calls from multi_tool_use.parallel",
+                        len(args.get("tool_uses", [])))
+                else:
+                    content_blocks.append(ContentBlock(
+                        type="tool_use",
+                        id=item.get("call_id", item.get("id", "")),
+                        name=call_name,
+                        input=args,
+                    ))
 
         if not content_blocks:
             content_blocks.append(ContentBlock(type="text", text=""))
@@ -234,16 +257,51 @@ class OpenAICodexProvider(Provider):
         await self._ensure_valid_token()
         http = await self._ensure_http()
 
-        # Codex doesn't support prompt caching — flatten to one string
-        if isinstance(system, list):
-            system_str = "\n\n".join(b.get("text", "") for b in system if b.get("text"))
+        # Codex API has a ~32KB limit on the instructions field.
+        # Strategy: use the static/dynamic split from Anthropic's cache boundary.
+        # Static (RULES + ACTIONS) → instructions field (stable, fits in 30KB).
+        # Dynamic (NOW + STATE + RESULTS + MEMORY) → developer message in input
+        # (no size limit beyond the model's context window).
+        # This is intentional architecture, not just overflow handling.
+        _INSTRUCTIONS_LIMIT = 30000
+
+        if isinstance(system, list) and len(system) >= 2:
+            # Cache-boundary format: [static, dynamic]
+            instructions_str = system[0].get("text", "") if isinstance(system[0], dict) else str(system[0])
+            dynamic_str = system[1].get("text", "") if isinstance(system[1], dict) else str(system[1])
+            # If static alone exceeds limit, trim it too
+            if len(instructions_str) > _INSTRUCTIONS_LIMIT:
+                cut = instructions_str.rfind("\n", 0, _INSTRUCTIONS_LIMIT)
+                if cut <= 0:
+                    cut = _INSTRUCTIONS_LIMIT
+                dynamic_str = instructions_str[cut:] + "\n\n" + dynamic_str
+                instructions_str = instructions_str[:cut]
+        elif isinstance(system, list):
+            instructions_str = "\n\n".join(b.get("text", "") for b in system if b.get("text"))
+            dynamic_str = ""
         else:
-            system_str = system
+            instructions_str = system
+            dynamic_str = ""
+
+        # If no split was available and instructions exceed limit, split on newline
+        if not dynamic_str and len(instructions_str) > _INSTRUCTIONS_LIMIT:
+            cut = instructions_str.rfind("\n", 0, _INSTRUCTIONS_LIMIT)
+            if cut <= 0:
+                cut = _INSTRUCTIONS_LIMIT
+            dynamic_str = instructions_str[cut:]
+            instructions_str = instructions_str[:cut]
+
+        translated_input = self._translate_input(messages)
+        if dynamic_str:
+            translated_input.insert(0, {"role": "developer", "content": dynamic_str})
+            logger.info("CODEX_SPLIT: instructions=%dKB developer_msg=%dKB input_items=%d",
+                len(instructions_str) // 1024, len(dynamic_str) // 1024,
+                len(translated_input))
 
         body: dict[str, Any] = {
             "model": model,
-            "instructions": system_str,
-            "input": self._translate_input(messages),
+            "instructions": instructions_str,
+            "input": translated_input,
             "store": False,
             "stream": True,
             "tool_choice": "auto",
@@ -271,7 +329,7 @@ class OpenAICodexProvider(Provider):
         headers = self._headers()
         headers["accept"] = "text/event-stream"
 
-        _max_retries = int(os.environ.get("KERNOS_CODEX_MAX_RETRIES", "8"))
+        _max_retries = int(os.environ.get("KERNOS_CODEX_MAX_RETRIES", "3"))
         last_exc: Exception | None = None
         for attempt in range(_max_retries):
             try:
@@ -298,7 +356,7 @@ class OpenAICodexProvider(Provider):
             except ReasoningTransientError as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
-                    _delay = min(1.5 * (1.5 ** attempt), 10.0)  # 1.5s, 2.25s, 3.4s, 5s, 7.5s, 10s, 10s
+                    _delay = min(1.5 * (1.5 ** attempt), 15.0)
                     logger.warning("REASON_RETRY: attempt=%d/%d delay=%.1fs transient=%s",
                         attempt + 2, _max_retries, _delay, str(exc)[:80])
                     await asyncio.sleep(_delay)
@@ -307,7 +365,7 @@ class OpenAICodexProvider(Provider):
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
-                    _delay = min(1.5 * (1.5 ** attempt), 10.0)
+                    _delay = min(1.5 * (1.5 ** attempt), 15.0)
                     logger.warning("REASON_RETRY: attempt=%d/%d delay=%.1fs error=%s",
                         attempt + 2, _max_retries, _delay, str(exc)[:80])
                     await asyncio.sleep(_delay)
