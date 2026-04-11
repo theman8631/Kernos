@@ -318,13 +318,47 @@ class JsonStateStore(StateStore):
     # -----------------------------------------------------------------------
 
     _COVENANT_MIGRATIONS: list[tuple[str, str]] = [
+        # Historical migrations (Phase 4 → Phase 6)
         (
             "Never send messages to external contacts without owner approval",
             "Never send messages to third-party contacts unless the owner initiated the request",
         ),
+        # Phase 6 → current wording
+        (
+            "Never delete or archive data without owner awareness",
+            "Never delete the user's files, entries, or records unless they asked you to. When they ask, do it — their request is the confirmation.",
+        ),
+        (
+            "Never delete or archive data unless the owner requested it. If the owner asks to delete something specific, do it — their request is the confirmation.",
+            "Never delete the user's files, entries, or records unless they asked you to. When they ask, do it — their request is the confirmation.",
+        ),
+        (
+            "Never share owner's private information with unrecognized senders",
+            "Information shared with you belongs to whoever shared it. Use good judgment about what's appropriate to pass along — routine, expected information can flow naturally between people who know each other. But when someone shares something sensitive, confidential, or clearly meant for you alone, don't disclose it to others without the sharer's consent — even to people they know well.",
+        ),
+        (
+            "Treat information as belonging to whoever shared it. Never disclose someone's information to another person unless the original sharer would clearly expect or want it shared. When uncertain, ask the person who told you before sharing with anyone else — even recognized contacts.",
+            "Information shared with you belongs to whoever shared it. Use good judgment about what's appropriate to pass along — routine, expected information can flow naturally between people who know each other. But when someone shares something sensitive, confidential, or clearly meant for you alone, don't disclose it to others without the sharer's consent — even to people they know well.",
+        ),
+        (
+            "Always confirm before any action that costs money",
+            "Confirm before spending money unless the owner specified the amount and recipient in their request.",
+        ),
         (
             "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized.",
+            "Show drafts before sending to third parties. No confirmation needed for owner-directed channel delivery.",
+        ),
+        (
             "For composed messages to third parties, show the draft before sending. For simple relays, briefly confirm content and recipient. Owner-directed delivery to connected channels needs no confirmation.",
+            "Show drafts before sending to third parties. No confirmation needed for owner-directed channel delivery.",
+        ),
+        (
+            "Keep responses concise unless detail is requested",
+            "Match the depth of your response to what the moment needs. Don't over-explain simple things or under-deliver on complex ones.",
+        ),
+        (
+            "Escalate to owner when request is ambiguous and stakes are non-trivial",
+            "When a request is genuinely ambiguous AND involves irreversible consequences, money, or third-party impact, clarify before acting. If the request is clear, act.",
         ),
     ]
 

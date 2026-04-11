@@ -346,14 +346,17 @@ def test_covenant_rule_loads_from_old_json(tmp_path):
 
 
 def test_default_covenant_rules_updated_wording():
-    """New tenants get the updated covenant wording for third-party comms."""
+    """New tenants get the current covenant wording."""
     rules = default_covenant_rules("t1", _now())
     descs = [r.description for r in rules]
     assert any("third-party contacts unless the owner initiated" in d for d in descs)
-    assert any("Owner-directed delivery to connected channels needs no confirmation" in d for d in descs)
+    assert any("owner-directed channel delivery" in d.lower() for d in descs)
+    assert any("Information shared with you belongs to whoever shared it" in d for d in descs)
+    assert any("Match the depth" in d for d in descs)
+    assert any("genuinely ambiguous AND involves irreversible" in d for d in descs)
     # Old wording should NOT be present
     assert not any("external contacts without owner approval" in d for d in descs)
-    assert not any("THIRD PARTIES" in d for d in descs)
+    assert not any("Keep responses concise unless detail" in d for d in descs)
 
 
 def test_covenant_migration_updates_old_wording(tmp_path):
@@ -387,9 +390,10 @@ def test_covenant_migration_updates_old_wording(tmp_path):
         assert len(rules) == 2
         descs = [r.description for r in rules]
         assert "Never send messages to third-party contacts unless the owner initiated the request" in descs
-        assert any("Owner-directed delivery" in d for d in descs)
+        assert any("owner-directed channel delivery" in d.lower() for d in descs)
         # Old wording gone
         assert not any("external contacts without owner approval" in d for d in descs)
+        assert not any("THIRD PARTIES" in d for d in descs)
         # Verify migration persisted to disk
         raw = _json.loads((state_dir / "contracts.json").read_text())
         assert "third-party contacts" in raw[0]["description"]
