@@ -76,6 +76,9 @@ def _load_covenant_rule(d: dict) -> CovenantRule:
         )
     if "superseded_by" not in data:
         data["superseded_by"] = ""
+    if "tier" not in data:
+        from kernos.kernel.state import classify_covenant_tier
+        data["tier"] = classify_covenant_tier(data.get("rule_type", ""), data.get("source", ""))
     return CovenantRule(**data)
 
 
@@ -86,6 +89,7 @@ _CONTEXT_SPACE_FIELDS = {
     "parent_id", "aliases", "depth",
     "renamed_from", "renamed_at",
     "local_affordance_set", "last_catalog_version",
+    "thinking_emoji",
 }
 
 

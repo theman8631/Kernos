@@ -218,6 +218,9 @@ class CovenantRule:
     # --- Preference linkage (Phase 6A) ---
     source_preference_id: str = ""       # Preference ID that generated this rule, or ""
 
+    # --- Selective injection (Improvement Loop Tier 1) ---
+    tier: str = ""  # "pinned" | "situational" — empty triggers migration on load
+
     # --- Reserved for future phases ---
     agent_id: str = ""
     precondition: str = ""
@@ -236,6 +239,21 @@ def _enforcement_tier_for(rule_type: str) -> str:
         "preference": "silent",
         "escalation": "confirm",
     }.get(rule_type, "confirm")
+
+
+def classify_covenant_tier(rule_type: str, source: str) -> str:
+    """Classify a covenant as pinned (always loaded) or situational (loaded when relevant).
+
+    Pinned: safety rules, escalation, system defaults — always in context.
+    Situational: preferences and user-stated rules — loaded by MessageAnalyzer.
+    """
+    if rule_type == "must_not":
+        return "pinned"
+    if rule_type == "escalation":
+        return "pinned"
+    if source in ("default", "system"):
+        return "pinned"
+    return "situational"
 
 
 def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
@@ -262,6 +280,7 @@ def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
             created_at=now,
             updated_at=now,
             enforcement_tier=_enforcement_tier_for(rt),
+            tier=classify_covenant_tier(rt, "default"),
         )
         for rt, cap, desc in rules
     ]

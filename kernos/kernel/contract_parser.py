@@ -153,6 +153,7 @@ async def classify_and_parse(
                 standing_order=parsed.get("description", instruction_text),
             )
 
+        from kernos.kernel.state import classify_covenant_tier
         rule = CovenantRule(
             id=f"rule_{uuid4().hex[:8]}",
             tenant_id="",  # Set by caller
@@ -170,6 +171,7 @@ async def classify_and_parse(
             if parsed["rule_type"] == "must_not"
             else "silent",
             layer="practice",
+            tier=classify_covenant_tier(parsed["rule_type"], "user_stated"),
         )
 
         return ParseResult(

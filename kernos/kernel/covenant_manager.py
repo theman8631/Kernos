@@ -589,7 +589,8 @@ async def _list_covenants(state: StateStore, tenant_id: str, show_all: bool) -> 
             status = f" [SUPERSEDED by {rule.superseded_by}]"
         scope = f" (space: {rule.context_space})" if rule.context_space else ""
         source_tag = f" [{rule.source}]" if rule.source != "default" else ""
-        entry = f"  - [{rule.id}] {rule.description}{scope}{source_tag}{status}"
+        tier_tag = f" {{{rule.tier}}}" if rule.tier else ""
+        entry = f"  - [{rule.id}] {rule.description}{scope}{source_tag}{tier_tag}{status}"
         groups.setdefault(label, []).append(entry)
 
     lines = ["**Standing Covenant Rules:**\n"]
