@@ -154,6 +154,7 @@ class ReasoningService:
     """
 
     MAX_TOOL_ITERATIONS = 10
+    MAX_TOOL_ITERATIONS_PLAN = 25  # Self-directed plan steps need more room for research
 
     def __init__(
         self,
@@ -161,8 +162,14 @@ class ReasoningService:
         events: EventStream,
         mcp: Any,    # MCPClientManager — Any avoids circular import with capability layer
         audit: Any,  # AuditStore
+        fallback_providers: list[Provider] | None = None,
+        # Legacy single fallback — converted to list internally
+        fallback_provider: Provider | None = None,
     ) -> None:
         self._provider = provider
+        self._fallback_providers: list[Provider] = fallback_providers or []
+        if fallback_provider and fallback_provider not in self._fallback_providers:
+            self._fallback_providers.append(fallback_provider)
         self._events = events
         self._mcp = mcp
         self._audit = audit
@@ -361,7 +368,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -472,6 +479,11 @@ class ReasoningService:
                     _desc_file = tool_input.get("descriptor_file", "") or tool_input
                     return await self._workspace.register_tool(request.tenant_id, request.active_space_id, _desc_file)
                 return "Workspace manager is not available."
+            elif tool_name == "manage_plan":
+                if hasattr(self, '_handler') and self._handler:
+                    return await self._handler._handle_manage_plan(
+                        request.tenant_id, request.active_space_id, tool_input)
+                return "Self-directed execution is not available."
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
@@ -913,6 +925,16 @@ class ReasoningService:
                         result = f"Registration failed: {exc}"
                 else:
                     result = "Workspace manager is not available."
+            elif block.name == "manage_plan":
+                if hasattr(self, '_handler') and self._handler:
+                    try:
+                        result = await self._handler._handle_manage_plan(
+                            request.tenant_id, request.active_space_id, tool_args)
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'manage_plan' failed: %s", exc)
+                        result = f"Plan operation failed: {exc}"
+                else:
+                    result = "Self-directed execution is not available."
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(
@@ -1441,6 +1463,25 @@ class ReasoningService:
             s.resolved_by = reason
             s.resolved_at = datetime.now(timezone.utc).isoformat()
             await self._state.save_suppression(tenant_id, s)
+
+            # If this was a behavioral pattern whisper, mark pattern as declined
+            if s.foresight_signal.startswith("behavioral_pattern:"):
+                try:
+                    _bp_id = s.foresight_signal.split(":", 1)[1]
+                    data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                    from kernos.kernel.behavioral_patterns import load_patterns, save_patterns
+                    patterns = load_patterns(data_dir, tenant_id)
+                    for p in patterns:
+                        if p.pattern_id == _bp_id:
+                            p.proposal_declined = True
+                            p.proposal_surfaced = False  # Allow re-proposal after reset
+                            p.threshold_met = False
+                            save_patterns(data_dir, tenant_id, patterns)
+                            logger.info("BEHAVIORAL_RESOLVED: fingerprint=%s action=declined", p.fingerprint[:40])
+                            break
+                except Exception as exc:
+                    logger.debug("BEHAVIORAL_PATTERN: decline handling failed: %s", exc)
+
             return f"Dismissed whisper {whisper_id}. Won't bring this up again."
         return f"Whisper {whisper_id} not found in suppression registry."
 
@@ -1650,13 +1691,42 @@ class ReasoningService:
             ]
         else:
             _system = request.system_prompt
-        response = await self._provider.complete(
-            model=request.model,
-            system=_system,
-            messages=messages,
-            tools=tools,
-            max_tokens=request.max_tokens,
-        )
+        try:
+            response = await self._provider.complete(
+                model=request.model,
+                system=_system,
+                messages=messages,
+                tools=tools,
+                max_tokens=request.max_tokens,
+            )
+        except (ReasoningProviderError, ReasoningConnectionError) as primary_exc:
+            if not self._fallback_providers:
+                raise
+            # Primary provider exhausted retries — try fallback chain
+            _last_exc = primary_exc
+            for _fb in self._fallback_providers:
+                _fb_name = getattr(_fb, 'provider_name', 'unknown')
+                _fb_model = getattr(_fb, 'main_model', request.model)
+                logger.warning("FALLBACK: trying %s/%s after %s",
+                    _fb_name, _fb_model, type(_last_exc).__name__)
+                try:
+                    response = await _fb.complete(
+                        model=_fb_model,
+                        system=_system,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=request.max_tokens,
+                    )
+                    logger.info("FALLBACK: success via %s/%s", _fb_name, _fb_model)
+                    break  # Success — use this response
+                except Exception as fb_exc:
+                    logger.warning("FALLBACK: %s/%s also failed: %s", _fb_name, _fb_model, fb_exc)
+                    _last_exc = fb_exc
+                    continue
+            else:
+                # All fallbacks exhausted
+                logger.error("FALLBACK: all %d providers failed", len(self._fallback_providers))
+                raise primary_exc from _last_exc
         duration_ms = int((time.monotonic() - t0) * 1000)
         total_input_tokens += response.input_tokens
         total_output_tokens += response.output_tokens
@@ -1730,10 +1800,12 @@ class ReasoningService:
 
         # --- Tool-use loop ---
         iterations = 0
+        _is_plan_step = (request.input_text or "").startswith("[PLAN STEP")
+        _max_iters = self.MAX_TOOL_ITERATIONS_PLAN if _is_plan_step else self.MAX_TOOL_ITERATIONS
         _gate_cache: dict[str, Any] = {}  # tool_name → GateResult (for lazy-load re-runs)
         while (
             response.stop_reason == "tool_use"
-            and iterations < self.MAX_TOOL_ITERATIONS
+            and iterations < _max_iters
         ):
             iterations += 1
             tool_results: list[dict] = []
@@ -1904,13 +1976,40 @@ class ReasoningService:
                 len(messages), len(tools), request.max_tokens,
             )
             t0 = time.monotonic()
-            response = await self._provider.complete(
-                model=request.model,
-                system=_system,
-                messages=messages,
-                tools=tools,
-                max_tokens=request.max_tokens,
-            )
+            try:
+                response = await self._provider.complete(
+                    model=request.model,
+                    system=_system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=request.max_tokens,
+                )
+            except (ReasoningProviderError, ReasoningConnectionError) as tool_loop_exc:
+                if not self._fallback_providers:
+                    raise
+                # Tool-loop iteration failed — try fallback chain
+                _last_exc = tool_loop_exc
+                for _fb in self._fallback_providers:
+                    _fb_name = getattr(_fb, 'provider_name', 'unknown')
+                    _fb_model = getattr(_fb, 'main_model', request.model)
+                    logger.warning("FALLBACK_TOOLLOOP: trying %s/%s iter=%d",
+                        _fb_name, _fb_model, iterations)
+                    try:
+                        response = await _fb.complete(
+                            model=_fb_model,
+                            system=_system,
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=request.max_tokens,
+                        )
+                        logger.info("FALLBACK_TOOLLOOP: success via %s/%s", _fb_name, _fb_model)
+                        break
+                    except Exception as fb_exc:
+                        logger.warning("FALLBACK_TOOLLOOP: %s/%s failed: %s", _fb_name, _fb_model, fb_exc)
+                        _last_exc = fb_exc
+                        continue
+                else:
+                    raise tool_loop_exc from _last_exc
             duration_ms = int((time.monotonic() - t0) * 1000)
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens
@@ -1980,8 +2079,9 @@ class ReasoningService:
                 request.max_tokens, iterations,
             )
 
-        if iterations >= self.MAX_TOOL_ITERATIONS:
-            logger.warning("TOOL_LOOP EXHAUSTED after %d iterations", iterations)
+        if iterations >= _max_iters:
+            logger.warning("TOOL_LOOP EXHAUSTED after %d iterations (limit=%d plan=%s)",
+                iterations, _max_iters, _is_plan_step)
             return ReasoningResult(
                 text="I'm having trouble completing that request. Try asking in a simpler way.",
                 model=request.model,

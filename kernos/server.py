@@ -27,11 +27,60 @@ from kernos.kernel.state_json import JsonStateStore
 from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
 
 load_dotenv()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+
+
+class _ColorFormatter(logging.Formatter):
+    """Console formatter that color-codes log lines by event type."""
+
+    # ANSI color codes
+    _COLORS = {
+        "ROUTE": "\033[36m",        # cyan — routing decisions
+        "SPACE_SWITCH": "\033[35m",  # magenta — space changes
+        "TOOL_": "\033[33m",         # yellow — tool surfacing/budget/promotion
+        "REASON_": "\033[32m",       # green — reasoning/LLM
+        "LLM_": "\033[32m",          # green — LLM calls
+        "CODEX_": "\033[32m",        # green — provider
+        "COMPACTION": "\033[34m",    # blue — compaction
+        "FACT_HARVEST": "\033[34m",  # blue — fact harvest
+        "DOMAIN_": "\033[35m",       # magenta — domain creation/migration
+        "GATE": "\033[91m",          # bright red — gate decisions
+        "PLAN_": "\033[95m",         # bright magenta — plan execution
+        "CODE_EXEC": "\033[93m",     # bright yellow — code execution
+        "WORKSPACE": "\033[93m",     # bright yellow — workspace
+        "CROSS_DOMAIN": "\033[96m",  # bright cyan — cross-domain signals
+        "AWARENESS": "\033[96m",     # bright cyan — awareness
+        "WARNING": "\033[91m",       # bright red — warnings
+        "ERROR": "\033[91m",         # bright red — errors
+        "FRICTION": "\033[91m",      # bright red — friction
+        "MESSAGE_ANALYSIS": "\033[36m",  # cyan — message analyzer
+        "PHASE_TIMING": "\033[90m",  # gray — timing (low priority)
+        "TURN_TIMING": "\033[90m",   # gray — timing
+    }
+    _RESET = "\033[0m"
+
+    def format(self, record):
+        msg = super().format(record)
+        # Check for event prefixes in the message
+        for prefix, color in self._COLORS.items():
+            if prefix in record.getMessage():
+                return f"{color}{msg}{self._RESET}"
+        # Color by level
+        if record.levelno >= logging.ERROR:
+            return f"\033[91m{msg}{self._RESET}"
+        if record.levelno >= logging.WARNING:
+            return f"\033[93m{msg}{self._RESET}"
+        return msg
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_ColorFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
+logging.root.addHandler(_handler)
+logging.root.setLevel(logging.INFO)
+# Prevent duplicate output from basicConfig
+for h in logging.root.handlers:
+    if h is not _handler:
+        logging.root.removeHandler(h)
+
 logger = logging.getLogger(__name__)
 
 intents = discord.Intents.default()
@@ -44,11 +93,12 @@ OWNER_USER_ID = int(os.getenv("DISCORD_OWNER_ID", "0"))
 _PENDING_CONFIRMATION_PATH = Path("/tmp/kernos_pending_confirmation.json")
 
 
-def _write_pending_confirmation(channel_id: int, message: str) -> None:
+def _write_pending_confirmation(channel_id: int, message: str, delete_message_id: int = 0) -> None:
     """Write a pending confirmation file for the new process to pick up."""
-    _PENDING_CONFIRMATION_PATH.write_text(
-        json.dumps({"channel_id": channel_id, "message": message})
-    )
+    data = {"channel_id": channel_id, "message": message}
+    if delete_message_id:
+        data["delete_message_id"] = delete_message_id
+    _PENDING_CONFIRMATION_PATH.write_text(json.dumps(data))
 
 
 @tree.command(name="restart", description="Restart the Kernos bot")
@@ -57,8 +107,9 @@ async def restart_command(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     logger.info("Restart requested by %s", interaction.user)
-    await interaction.response.send_message("Restarting Kernos...")
-    _write_pending_confirmation(interaction.channel_id, "\u2705 Restarted successfully.")
+    await interaction.response.send_message("Restarting...", ephemeral=True)
+    restart_msg = await interaction.channel.send("⏳")
+    _write_pending_confirmation(interaction.channel_id, "Ready.", delete_message_id=restart_msg.id)
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
@@ -72,10 +123,11 @@ async def wipe_command(interaction: discord.Interaction) -> None:
 
     data_dir = Path(os.getenv("KERNOS_DATA_DIR", "./data"))
 
-    await interaction.response.send_message(
-        "Wiping all data (factory reset) and restarting...", ephemeral=True
-    )
-    _write_pending_confirmation(interaction.channel_id, "\u2705 Wiped and restarted. Fresh start.")
+    await interaction.response.send_message("Wiping...", ephemeral=True)
+    await client.change_presence(activity=discord.Activity(
+        type=discord.ActivityType.playing, name="factory reset..."))
+    wipe_msg = await interaction.channel.send("⏳")
+    _write_pending_confirmation(interaction.channel_id, "Ready.", delete_message_id=wipe_msg.id)
 
     # 1. Null the handler so on_message rejects new messages during wipe.
     current_handler = handler
@@ -215,12 +267,51 @@ async def on_ready():
         from kernos.kernel.credentials import resolve_openai_codex_credential
         from kernos.kernel.reasoning import OpenAICodexProvider
         provider = OpenAICodexProvider(credential=resolve_openai_codex_credential())
+    elif provider_name == "ollama":
+        from kernos.providers.ollama_provider import OllamaProvider
+        provider = OllamaProvider()
     else:
         provider = AnthropicProvider(api_key=resolve_anthropic_credential())
-    reasoning = ReasoningService(provider, events, mcp_manager, audit)
+
+    # Build fallback chain (automatic failover: primary → fallback1 → fallback2 → ...)
+    # KERNOS_LLM_FALLBACK is comma-separated: "ollama:glm-5.1:cloud,ollama:gemma4:31b-cloud"
+    fallback_providers: list = []
+    fallback_spec = os.getenv("KERNOS_LLM_FALLBACK", "")
+    if fallback_spec:
+        for entry in fallback_spec.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                if entry.startswith("ollama:"):
+                    from kernos.providers.ollama_provider import OllamaProvider
+                    _model = entry[len("ollama:"):]
+                    fb = OllamaProvider(model=_model)
+                    fallback_providers.append(fb)
+                    logger.info("Fallback provider ready: ollama/%s", _model)
+                elif entry == "ollama":
+                    from kernos.providers.ollama_provider import OllamaProvider
+                    fb = OllamaProvider()
+                    fallback_providers.append(fb)
+                    logger.info("Fallback provider ready: ollama (default model)")
+                elif entry == "openai-codex":
+                    from kernos.kernel.credentials import resolve_openai_codex_credential
+                    from kernos.kernel.reasoning import OpenAICodexProvider
+                    fb = OpenAICodexProvider(credential=resolve_openai_codex_credential())
+                    fallback_providers.append(fb)
+                    logger.info("Fallback provider ready: openai-codex")
+                elif entry == "anthropic":
+                    fb = AnthropicProvider(api_key=resolve_anthropic_credential())
+                    fallback_providers.append(fb)
+                    logger.info("Fallback provider ready: anthropic")
+            except Exception as exc:
+                logger.warning("Failed to init fallback provider %s: %s", entry, exc)
+
+    reasoning = ReasoningService(provider, events, mcp_manager, audit, fallback_providers=fallback_providers)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
     handler.register_mcp_tools_in_catalog()
+
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 
     # Register adapters and channels for outbound messaging
@@ -270,18 +361,52 @@ async def on_ready():
         try:
             pending = json.loads(_PENDING_CONFIRMATION_PATH.read_text())
             channel = await client.fetch_channel(pending["channel_id"])
-            await channel.send(pending["message"])
+
+            # Delete the pre-restart placeholder (⏳)
+            _del_id = pending.get("delete_message_id")
+            if _del_id:
+                try:
+                    old_msg = await channel.fetch_message(int(_del_id))
+                    await old_msg.delete()
+                except Exception:
+                    pass
+
+            # Send "Ready." and auto-delete after 5 seconds
+            conf_msg = await channel.send(pending["message"])
             logger.info("Sent pending confirmation to channel %s", pending["channel_id"])
             _PENDING_CONFIRMATION_PATH.unlink()
+
+            async def _delete_after(msg, delay=5):
+                import asyncio as _aio
+                await _aio.sleep(delay)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            import asyncio as _aio
+            _aio.create_task(_delete_after(conf_msg))
         except Exception as exc:
             logger.warning("Failed to send pending confirmation: %s", exc)
 
     # AwarenessEvaluator starts lazily per-tenant on first message
     # (handler._maybe_start_evaluator). No startup guessing needed.
 
+    # Recover any plans interrupted by crash/restart
+    try:
+        await handler.recover_active_plans()
+    except Exception as exc:
+        logger.warning("Failed to recover active plans: %s", exc)
+
     await tree.sync()
     logger.info("Slash commands synced")
 
+
+
+
+
+import random
+
+_DEFAULT_THINKING_EMOJI = ["⏳", "🤔", "💭", "🧠", "👀", "💡", "🔍"]
 
 DISCORD_MAX_LENGTH = 2000
 
@@ -289,8 +414,11 @@ DISCORD_MAX_LENGTH = 2000
 def _chunk_response(text: str) -> list[str]:
     """Split text into chunks that fit Discord's 2000-char limit.
 
+    Collapses triple+ newlines to double (prevents excessive spacing in Discord).
     Splits on newlines where possible; falls back to hard cuts.
     """
+    import re
+    text = re.sub(r'\n{3,}', '\n\n', text)
     if len(text) <= DISCORD_MAX_LENGTH:
         return [text]
 
@@ -379,11 +507,41 @@ async def on_message(message):
             if not text_attachments and not message.content:
                 return
 
-    async with message.channel.typing():
-        response_text = await handler.process(normalized)
-    if not response_text:  # Merged message — response comes from primary turn
+    # Send placeholder, edit to final response (eliminates dead air)
+    # Pick emoji from active space if available, else defaults
+    _emoji_pool = _DEFAULT_THINKING_EMOJI
+    try:
+        _tp = await handler.state.get_tenant_profile(normalized.tenant_id)
+        if _tp and _tp.last_active_space_id:
+            _sp = await handler.state.get_context_space(normalized.tenant_id, _tp.last_active_space_id)
+            if _sp and getattr(_sp, 'thinking_emoji', None):
+                _emoji_pool = _sp.thinking_emoji
+    except Exception:
+        pass
+    # Emoji placeholder (just the emoji, no text) + typing animation while processing
+    placeholder = await message.channel.send(random.choice(_emoji_pool))
+    try:
+        async with message.channel.typing():
+            response_text = await handler.process(normalized)
+    except Exception as exc:
+        logger.error("Handler error: %s", exc, exc_info=True)
+        await placeholder.edit(content="Something went wrong — try again in a moment.")
+        try:
+            await message.add_reaction("⚠️")
+        except Exception:
+            pass
         return
-    for chunk in _chunk_response(response_text):
+
+    if not response_text:  # Merged message — response comes from primary turn
+        try:
+            await placeholder.delete()
+        except Exception:
+            pass
+        return
+
+    chunks = _chunk_response(response_text)
+    await placeholder.edit(content=chunks[0])
+    for chunk in chunks[1:]:
         await message.channel.send(chunk)
 
 

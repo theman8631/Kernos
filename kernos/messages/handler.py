@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import time
@@ -129,6 +131,7 @@ class TurnContext:
     previous_space_id: str = ""
     space_switched: bool = False
     upload_notifications: list[str] = field(default_factory=list)
+    is_self_directed: bool = False  # True for self-directed plan execution turns
 
     # Phase 3: Assemble
     system_prompt: str = ""
@@ -275,18 +278,17 @@ def _format_contracts(rules: list[CovenantRule], space_names: dict[str, str] | N
 
 
 def _maybe_append_name_ask(response_text: str, soul: Soul) -> str:
-    """On the first interaction, if name still unknown, append a natural name question.
+    """Safety net: if first interaction and agent didn't ask for name, don't force it.
 
-    Only fires on the very first message (interaction_count == 0, before the post-
-    response increment). Only if Tier 1 didn't catch a name. Only if the response
-    doesn't already contain a name question.
+    The bootstrap prompt handles the name question. This just logs if it was missed.
+    Previously this force-appended a name question, but that caused double-asking.
     """
     if soul.interaction_count != 0 or soul.user_name:
         return response_text
     name_question_signals = ["your name", "call you", "who am i talking", "what should i call"]
-    if any(signal in response_text.lower() for signal in name_question_signals):
-        return response_text
-    return response_text.rstrip() + "\n\nBy the way — what should I call you?"
+    if not any(signal in response_text.lower() for signal in name_question_signals):
+        logger.debug("BOOTSTRAP: first message didn't include name question — trusting agent pacing")
+    return response_text
 
 
 def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
@@ -355,6 +357,7 @@ def _build_rules_block(
 def _build_now_block(
     message: NormalizedMessage, soul: Soul,
     active_space: ContextSpace | None,
+    execution_envelope: dict | None = None,
 ) -> str:
     """## NOW — turn-local operating situation: time, platform, auth, space."""
     from kernos.utils import utc_now_dt, format_user_datetime
@@ -382,6 +385,44 @@ def _build_now_block(
             f"your core values or hard boundaries.)\n"
             f"{active_space.posture}"
         )
+    # Self-directed execution context
+    if execution_envelope:
+        plan_id = execution_envelope.get("plan_id", "?")
+        step_id = execution_envelope.get("step_id", "?")
+        step_desc = execution_envelope.get("step_description", "")
+        budget_remaining = execution_envelope.get("budget_steps", 0) - execution_envelope.get("steps_used", 0)
+        if execution_envelope.get("paused"):
+            # Paused plan — user is sending a regular message
+            reason = execution_envelope.get("paused_reason", "budget limit")
+            _reason_display = {"step_limit": "step limit", "token_budget": "token budget", "time_limit": "time limit"}.get(reason, reason)
+            parts.append(
+                f"PAUSED PLAN\n"
+                f"Plan {plan_id} is paused at step {step_id} ({_reason_display}). "
+                f"Used {execution_envelope.get('steps_used', 0)}/{execution_envelope.get('budget_steps', '?')} steps.\n"
+                f"Next step was: {step_desc}\n"
+                f"If the user wants to continue, call manage_plan with action='continue' "
+                f"and the same plan_id. The budget will be extended automatically.\n"
+                f"If the user wants to change limits, pass budget_override with "
+                f"max_steps, max_tokens, or max_time_s. Set to 0 for no limit."
+            )
+        else:
+            _is_final = execution_envelope.get("is_final_step", False)
+            _step_instruction = (
+                f"This is the FINAL STEP. Your response will be sent directly to the user. "
+                f"Choose delivery: if the user is waiting for results, produce the full "
+                f"detailed deliverable (not a summary). If unclear, offer a short notice. "
+                f"If not useful to show now, produce no text (just complete the work). "
+                f"If delivery depends on an event, use manage_schedule instead."
+                if _is_final else
+                f"Execute this step, then call manage_plan with action='continue' and the next step_id. "
+                f"If you discover something the user should know, set notify_user."
+            )
+            parts.append(
+                f"SELF-DIRECTED EXECUTION\n"
+                f"Plan: {plan_id} | Step: {step_id} | Budget remaining: {budget_remaining} steps\n"
+                f"Objective: {step_desc}\n"
+                f"{_step_instruction}"
+            )
     return "## NOW\n" + "\n".join(parts)
 
 
@@ -612,6 +653,10 @@ class MessageHandler:
             enabled=os.getenv("KERNOS_FRICTION_OBSERVER", "1") != "0",
         )
 
+        # Plan progress message IDs — for auto-deleting step notifications
+        # plan_id → (channel_id, message_id)
+        self._plan_progress_msgs: dict[str, tuple[int, int]] = {}
+
         # Tool catalog — universal registry for three-tier surfacing
         from kernos.kernel.tool_catalog import ToolCatalog
         self._tool_catalog = ToolCatalog()
@@ -649,6 +694,7 @@ class MessageHandler:
             "execute_code": "Execute Python code in a sandboxed environment for building tools and running computations",
             "manage_workspace": "Manage workspace artifacts — list, add, update, or archive built tools and scripts",
             "register_tool": "Register a workspace-built tool in the universal catalog from a .tool.json descriptor",
+            "manage_plan": "Create, execute, and manage self-directed plans for complex multi-step tasks",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -666,6 +712,49 @@ class MessageHandler:
             else:
                 desc = name.replace("-", " ").replace("_", " ")
             self._tool_catalog.register(name, desc, f"mcp")
+
+    async def recover_active_plans(self) -> None:
+        """Scan for active plans interrupted by crash/restart and re-enqueue them.
+
+        Called once during startup after adapters and channels are registered.
+        """
+        from kernos.kernel.execution import scan_active_plans, build_envelope_from_plan
+
+        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+        active_plans = scan_active_plans(data_dir)
+        if not active_plans:
+            return
+
+        for tenant_id, space_id, plan in active_plans:
+            plan_id = plan.get("plan_id", "?")
+            # Find the in-progress step
+            for phase in plan.get("phases", []):
+                for step in phase.get("steps", []):
+                    if step.get("status") == "in_progress":
+                        step_id = step["id"]
+                        step_desc = step.get("title", "")
+                        envelope = build_envelope_from_plan(plan, step_id, step_desc)
+                        # Check if this is the last pending step
+                        _remaining = [
+                            s for p in plan.get("phases", [])
+                            for s in p.get("steps", [])
+                            if s.get("status") == "pending"
+                        ]
+                        envelope.is_final_step = len(_remaining) == 0
+
+                        logger.info("PLAN_RECOVER: plan=%s step=%s tenant=%s space=%s — re-enqueuing",
+                            plan_id, step_id, tenant_id, space_id)
+                        asyncio.create_task(
+                            self._execute_self_directed_step(tenant_id, space_id, envelope))
+
+                        try:
+                            await self.send_outbound(
+                                tenant_id, tenant_id, None,
+                                f"Recovered from restart — resuming plan at step {step_id}.",
+                            )
+                        except Exception:
+                            pass
+                        break  # Only re-enqueue the first in-progress step per plan
 
     async def _get_system_space(self, tenant_id: str):
         """Return the system context space for this tenant, or None."""
@@ -955,10 +1044,10 @@ class MessageHandler:
     async def send_outbound(
         self, tenant_id: str, member_id: str,
         channel_name: str | None, message: str,
-    ) -> bool:
+    ) -> int:
         """Send an unprompted message to the user on a specific or default channel.
 
-        Returns True if sent, False on failure.
+        Returns message ID if sent, 0 on failure.
         """
         from kernos.kernel.channels import ChannelInfo
 
@@ -974,26 +1063,51 @@ class MessageHandler:
                 "OUTBOUND: no channel available tenant=%s member=%s channel=%s",
                 tenant_id, member_id, channel_name,
             )
-            return False
+            return 0
 
         if ch.status != "connected":
             logger.warning(
                 "OUTBOUND: channel=%s not connected (status=%s)",
                 ch.name, ch.status,
             )
-            return False
+            return 0
 
         adapter = self._adapters.get(ch.platform)
         if not adapter:
             logger.warning("OUTBOUND: no adapter for platform=%s", ch.platform)
-            return False
+            return 0
 
-        success = await adapter.send_outbound(tenant_id, ch.channel_target, message)
+        msg_id = await adapter.send_outbound(tenant_id, ch.channel_target, message)
         logger.info(
-            "OUTBOUND: channel=%s target=%s tenant=%s member=%s length=%d success=%s",
-            ch.name, ch.channel_target, tenant_id, member_id, len(message), success,
+            "OUTBOUND: channel=%s target=%s tenant=%s member=%s length=%d msg_id=%s",
+            ch.name, ch.channel_target, tenant_id, member_id, len(message), msg_id,
         )
-        return success
+        return msg_id
+
+    def _get_outbound_channel_id(self) -> int:
+        """Get the outbound Discord channel ID. Returns 0 if unavailable."""
+        capable = self._channel_registry.get_outbound_capable()
+        ch = capable[0] if capable else None
+        if ch and ch.channel_target:
+            try:
+                return int(ch.channel_target)
+            except (ValueError, TypeError):
+                pass
+        return 0
+
+    async def _delete_discord_msg(self, channel_id: int, msg_id: int) -> None:
+        """Delete a Discord message by channel + message ID. Best-effort."""
+        adapter = self._adapters.get("discord")
+        if not adapter or not hasattr(adapter, '_client') or not adapter._client:
+            logger.debug("PLAN_MSG_DELETE: no discord adapter")
+            return
+        try:
+            channel = await adapter._client.fetch_channel(channel_id)
+            msg = await channel.fetch_message(msg_id)
+            await msg.delete()
+            logger.debug("PLAN_MSG_DELETE: deleted msg_id=%d channel=%d", msg_id, channel_id)
+        except Exception as exc:
+            logger.debug("PLAN_MSG_DELETE: failed msg_id=%d error=%s", msg_id, exc)
 
     async def _maybe_run_covenant_cleanup(self, tenant_id: str) -> None:
         """Run one-time covenant dedup/contradiction cleanup per tenant per process."""
@@ -1506,6 +1620,25 @@ class MessageHandler:
             except Exception as exc:
                 logger.warning("BRIEFING_LOAD: failed for space=%s: %s", active_space_id, exc)
 
+        # 4b. File manifest → RESULTS (so agent knows what files exist)
+        try:
+            _files_dir = self._files._space_files_dir(tenant_id, active_space_id)
+            if _files_dir.exists():
+                _visible = [
+                    f.name for f in sorted(_files_dir.iterdir())
+                    if f.is_file()
+                    and not f.name.startswith("tr_")  # tool result cache
+                    and not f.name.startswith("_plan.")  # plan internals
+                    and not f.name.startswith(".")  # hidden files
+                    and f.name != "_manifest.json"  # internal
+                ]
+                if _visible:
+                    results_parts.append(
+                        f"Files in this space: {', '.join(_visible)}"
+                    )
+        except Exception:
+            pass
+
         results_prefix = "\n\n".join(results_parts) if results_parts else None
         memory_prefix = "\n\n".join(memory_parts) if memory_parts else None
 
@@ -1805,8 +1938,14 @@ class MessageHandler:
                 "type": "array", "items": {"type": "string"},
                 "description": "Section titles from parent _procedures.md that belong in the new domain",
             },
+            "thinking_emoji": {
+                "type": "array", "items": {"type": "string"},
+                "description": "3-7 emoji that feel right as thinking/processing indicators for this domain. "
+                "Pick emoji that match the domain's vibe. Health → 💊🩺🧬. "
+                "D&D → 🎲🐉⚔️. Finance → 📊💰🧮. Creative → 🎨✨🌀.",
+            },
         },
-        "required": ["create_domain", "confidence", "name", "description", "posture", "reasoning", "rename", "new_name", "rename_evidence", "migrate_covenants", "migrate_files", "migrate_procedure_sections"],
+        "required": ["create_domain", "confidence", "name", "description", "posture", "reasoning", "rename", "new_name", "rename_evidence", "migrate_covenants", "migrate_files", "migrate_procedure_sections", "thinking_emoji"],
         "additionalProperties": False,
     }
 
@@ -1961,6 +2100,7 @@ class MessageHandler:
                 depth=space.depth + 1,
                 created_at=now,
                 last_active_at=now,
+                thinking_emoji=parsed.get("thinking_emoji", []),
             )
             await self.state.save_context_space(new_space)
 
@@ -2410,6 +2550,10 @@ class MessageHandler:
                 # Process as one turn using the first message's context
                 primary_msg, primary_ctx, primary_future = merged_messages[0]
                 primary_ctx.merged_count = len(merged_messages)
+                # Detect self-directed turns
+                if (primary_msg.context and isinstance(primary_msg.context, dict)
+                        and primary_msg.context.get("execution_envelope", {}).get("source") == "self_directed"):
+                    primary_ctx.is_self_directed = True
 
                 # Log merged messages to conversation log so agent sees them
                 for extra_msg, extra_ctx, extra_future in merged_messages[1:]:
@@ -2448,8 +2592,9 @@ class MessageHandler:
                         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
                             primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
+                            _err_msg = "the API is having persistent issues — I retried 20 times. Try again shortly, or this may be a broader outage" if "after" in str(exc) else "try again in a moment"
                             response = await self._handle_reasoning_error(
-                                primary_ctx, exc, "try again in a moment")
+                                primary_ctx, exc, _err_msg)
                             if not primary_future.done():
                                 primary_future.set_result(response)
                             for _, _, ef in merged_messages[1:]:
@@ -2470,8 +2615,9 @@ class MessageHandler:
                         except ReasoningProviderError as exc:
                             primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
+                            _err_msg = "the API is having persistent issues — I retried 20 times. Try again shortly, or this may be a broader outage" if "after" in str(exc) else "try again in a moment"
                             response = await self._handle_reasoning_error(
-                                primary_ctx, exc, "try again in a moment")
+                                primary_ctx, exc, _err_msg)
                             if not primary_future.done():
                                 primary_future.set_result(response)
                             for _, _, ef in merged_messages[1:]:
@@ -2723,6 +2869,478 @@ class MessageHandler:
             "These commands bypass the reasoning engine and are not stored "
             "in conversation history."
         )
+
+    async def _handle_manage_plan(
+        self, tenant_id: str, space_id: str, tool_input: dict,
+    ) -> str:
+        """Handle manage_plan tool call — create, continue, status, pause."""
+        from kernos.kernel.execution import (
+            load_plan, save_plan, check_budget, build_envelope_from_plan,
+            generate_plan_id, ExecutionEnvelope,
+        )
+
+        action = tool_input.get("action", "")
+        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+
+        # --- CREATE ---
+        # Handle show_progress toggle on any action
+        _show_progress_override = tool_input.get("show_progress")
+
+        if action == "create":
+            title = tool_input.get("title", "Untitled Plan")
+            phases = tool_input.get("phases", [])
+            if not phases:
+                return "Error: 'phases' is required for create. Each phase needs id, title, and steps."
+            budget_override = tool_input.get("budget_override")
+            plan_id = generate_plan_id()
+            # Build plan structure
+            for phase in phases:
+                for step in phase.get("steps", []):
+                    step.setdefault("status", "pending")
+            budget = {"max_steps": 30, "max_tokens": 500000, "max_time_s": 3600}
+            if budget_override and isinstance(budget_override, dict):
+                for key in ("max_steps", "max_tokens", "max_time_s"):
+                    if key in budget_override:
+                        val = budget_override[key]
+                        if val == 0:
+                            budget[key] = 999999 if "time" not in key else 86400
+                        elif isinstance(val, (int, float)) and val > 0:
+                            budget[key] = int(val)
+            plan = {
+                "plan_id": plan_id,
+                "title": title,
+                "status": "active",
+                "workspace_id": space_id,
+                "phases": phases,
+                "budget": budget,
+                "usage": {"steps_used": 0, "tokens_used": 0, "elapsed_s": 0},
+                "discoveries": [],
+                "show_progress": _show_progress_override if _show_progress_override is not None else True,
+                "created_at": utc_now(),
+            }
+            await save_plan(data_dir, tenant_id, space_id, plan)
+            # Find the first step and kick it off
+            first_step = phases[0]["steps"][0] if phases and phases[0].get("steps") else None
+            if first_step:
+                step_id = first_step["id"]
+                step_desc = first_step["title"]
+                envelope = build_envelope_from_plan(plan, step_id, step_desc)
+                _total_steps = sum(len(p.get("steps", [])) for p in phases)
+                envelope.is_final_step = _total_steps == 1
+                plan["current_step"] = step_id
+                plan["usage"]["steps_used"] = 1
+                first_step["status"] = "in_progress"
+                await save_plan(data_dir, tenant_id, space_id, plan)
+                import asyncio
+                asyncio.create_task(self._execute_self_directed_step(tenant_id, space_id, envelope))
+                logger.info("PLAN_CREATE: plan=%s title=%r steps=%d first_step=%s",
+                    plan_id, title, _total_steps, step_id)
+                # Ephemeral progress notification (deleted when step completes)
+                if plan.get("show_progress", True):
+                    try:
+                        _pmid = await self.send_outbound(
+                            tenant_id, tenant_id, None,
+                            f"📋 **{title}** — step 1/{_total_steps}: {step_desc}",
+                        )
+                        if _pmid:
+                            _chid = self._get_outbound_channel_id()
+                            self._plan_progress_msgs[plan_id] = (_chid, _pmid)
+                    except Exception:
+                        pass
+                return f"Plan '{title}' created ({plan_id}). Starting step {step_id}: {step_desc}"
+            logger.info("PLAN_CREATE: plan=%s title=%r (no steps)", plan_id, title)
+            return f"Plan '{title}' created ({plan_id}). No steps defined — add phases with steps."
+
+        # --- STATUS ---
+        if action == "status":
+            plan_id = tool_input.get("plan_id", "")
+            plan = await load_plan(data_dir, tenant_id, space_id)
+            if not plan:
+                return "No plan found in this space."
+            from kernos.kernel.execution import _plan_to_markdown
+            return _plan_to_markdown(plan)
+
+        # --- PAUSE ---
+        if action == "pause":
+            plan_id = tool_input.get("plan_id", "")
+            plan = await load_plan(data_dir, tenant_id, space_id)
+            if not plan:
+                return "No plan found in this space."
+            plan["status"] = "paused"
+            plan["paused_reason"] = "user_requested"
+            await save_plan(data_dir, tenant_id, space_id, plan)
+            logger.info("PLAN_PAUSE: plan=%s", plan.get("plan_id", "?"))
+            return f"Plan '{plan.get('title', '?')}' paused."
+
+        # --- CONTINUE ---
+        if action == "continue":
+            plan_id = tool_input.get("plan_id", "")
+            step_id = tool_input.get("step_id", "")
+            step_desc = tool_input.get("step_description", "")
+            notify_user = tool_input.get("notify_user", "")
+            budget_override = tool_input.get("budget_override")
+
+            plan = await load_plan(data_dir, tenant_id, space_id)
+            if not plan:
+                return f"No plan found in this space."
+            plan_id = plan.get("plan_id", plan_id)
+
+            # Apply show_progress toggle if provided
+            if _show_progress_override is not None:
+                plan["show_progress"] = _show_progress_override
+
+            # If no step_id provided, find the next pending step
+            if not step_id:
+                for phase in plan.get("phases", []):
+                    for step in phase.get("steps", []):
+                        if step.get("status") == "pending":
+                            step_id = step["id"]
+                            step_desc = step_desc or step["title"]
+                            break
+                    if step_id:
+                        break
+            if not step_id:
+                # All steps done — mark plan complete
+                plan["status"] = "complete"
+                await save_plan(data_dir, tenant_id, space_id, plan)
+                logger.info("PLAN_COMPLETE: plan=%s (no pending steps on continue call)",
+                    plan.get("plan_id", "?"))
+                return "No pending steps remain. Plan is complete."
+
+            # If step_id doesn't exist in the plan, add it dynamically
+            # (plans are mutable — a step may expand into sub-steps during execution)
+            _valid_step_ids = {
+                step["id"]
+                for phase in plan.get("phases", [])
+                for step in phase.get("steps", [])
+            }
+            if step_id not in _valid_step_ids:
+                # Add to the last phase as a new step
+                if plan.get("phases"):
+                    plan["phases"][-1]["steps"].append({
+                        "id": step_id,
+                        "title": step_desc,
+                        "status": "pending",
+                    })
+                    logger.info("PLAN_STEP_ADDED: plan=%s step=%s title=%r",
+                        plan_id, step_id, step_desc[:60])
+
+            # Apply user-requested budget overrides
+            if budget_override and isinstance(budget_override, dict):
+                _budget = plan.setdefault("budget", {})
+                for key in ("max_steps", "max_tokens", "max_time_s"):
+                    if key in budget_override:
+                        val = budget_override[key]
+                        if val == 0:
+                            _budget[key] = 999999 if "time" not in key else 86400
+                        elif isinstance(val, (int, float)) and val > 0:
+                            _budget[key] = int(val)
+                logger.info("PLAN_BUDGET_OVERRIDE: plan=%s new_budget=%s", plan_id, _budget)
+
+            # If resuming a paused plan, extend the budget
+            if plan.get("status") == "paused":
+                _budget = plan.setdefault("budget", {})
+                _usage = plan.setdefault("usage", {})
+                if not budget_override:
+                    _budget["max_steps"] = _usage.get("steps_used", 0) + _budget.get("max_steps", 30)
+                    _budget["max_tokens"] = _usage.get("tokens_used", 0) + _budget.get("max_tokens", 500000)
+                    _budget["max_time_s"] = _usage.get("elapsed_s", 0) + _budget.get("max_time_s", 3600)
+                plan["status"] = "active"
+                plan.pop("paused_reason", None)
+                plan.pop("paused_at_step", None)
+                plan.pop("paused_next_description", None)
+                logger.info("PLAN_RESUME: plan=%s extended budget steps=%d tokens=%d time=%ds",
+                    plan_id, _budget["max_steps"], _budget["max_tokens"], _budget["max_time_s"])
+
+            # Check budgets
+            budget_hit = check_budget(plan)
+            if budget_hit:
+                plan["status"] = "paused"
+                plan["paused_reason"] = budget_hit
+                plan["paused_at_step"] = step_id
+                plan["paused_next_description"] = step_desc
+                await save_plan(data_dir, tenant_id, space_id, plan)
+                logger.info("PLAN_BUDGET_HIT: plan=%s ceiling=%s step=%s", plan_id, budget_hit, step_id)
+                _reason_display = {"step_limit": "step limit", "token_budget": "token budget", "time_limit": "time limit"}.get(budget_hit, budget_hit)
+                _usage = plan.get("usage", {})
+                _bgt = plan.get("budget", {})
+                _steps_info = f"{_usage.get('steps_used', 0)}/{_bgt.get('max_steps', '?')} steps"
+                _tokens_info = f"{_usage.get('tokens_used', 0):,}/{_bgt.get('max_tokens', '?'):,} tokens"
+                _time_info = f"{_usage.get('elapsed_s', 0)}s/{_bgt.get('max_time_s', '?')}s"
+                try:
+                    await self.send_outbound(
+                        tenant_id, tenant_id, None,
+                        f"Plan paused — hit {_reason_display} at step {step_id}.\n"
+                        f"Budget used: {_steps_info} | {_tokens_info} | {_time_info}\n"
+                        f"Say \"continue\" to resume, or tell me new limits "
+                        f"(e.g. \"continue with no time limit\" or \"set steps to 50\").",
+                    )
+                except Exception:
+                    pass
+                return f"Plan paused — {budget_hit} reached. User needs to approve continuation."
+
+            # Send user notification if provided
+            if notify_user and notify_user.strip():
+                try:
+                    await self.send_outbound(tenant_id, tenant_id, None, notify_user)
+                except Exception:
+                    pass
+
+            # Build envelope and enqueue self-directed turn
+            envelope = build_envelope_from_plan(plan, step_id, step_desc)
+            plan["current_step"] = step_id
+            plan["usage"]["steps_used"] = plan["usage"].get("steps_used", 0) + 1
+            for phase in plan.get("phases", []):
+                for step in phase.get("steps", []):
+                    if step["id"] == step_id:
+                        step["status"] = "in_progress"
+                        break
+
+            # Detect if this is the last pending step
+            _remaining_pending = [
+                s for p in plan.get("phases", [])
+                for s in p.get("steps", [])
+                if s.get("status") == "pending"
+            ]
+            envelope.is_final_step = len(_remaining_pending) == 0
+
+            await save_plan(data_dir, tenant_id, space_id, plan)
+
+            import asyncio
+            asyncio.create_task(self._execute_self_directed_step(tenant_id, space_id, envelope))
+
+            logger.info("PLAN_STEP: plan=%s step=%s description=%r budget_remaining=%d/%d",
+                plan_id, step_id, step_desc[:60],
+                envelope.budget_steps - envelope.steps_used, envelope.budget_steps)
+
+            # Ephemeral progress notification (delete previous, show new)
+            if plan.get("show_progress", True):
+                # Delete the previous step's progress message first
+                _old = self._plan_progress_msgs.pop(plan_id, None)
+                if _old:
+                    _old_ch, _old_mid = _old
+                    try:
+                        await self._delete_discord_msg(_old_ch, _old_mid)
+                    except Exception:
+                        pass
+                _total = sum(len(p.get("steps", [])) for p in plan.get("phases", []))
+                _current = plan["usage"].get("steps_used", 0)
+                try:
+                    _pmid = await self.send_outbound(
+                        tenant_id, tenant_id, None,
+                        f"📋 step {_current}/{_total}: {step_desc}",
+                    )
+                    if _pmid:
+                        _chid = self._get_outbound_channel_id()
+                        self._plan_progress_msgs[plan_id] = (_chid, _pmid)
+                except Exception:
+                    pass
+
+            return f"Step {step_id} enqueued. Executing: {step_desc}"
+
+        return f"Unknown action: {action}. Use create, continue, status, or pause."
+
+    async def _execute_self_directed_step(
+        self, tenant_id: str, space_id: str, envelope: ExecutionEnvelope,
+    ) -> None:
+        """Execute a self-directed step through the pipeline."""
+        from kernos.messages.models import NormalizedMessage, AuthLevel
+
+        # Build a self-directed message
+        msg = NormalizedMessage(
+            content=f"[PLAN STEP {envelope.step_id}] {envelope.step_description}",
+            sender="self_directed",
+            sender_auth_level=AuthLevel.owner_verified,
+            platform="internal",
+            platform_capabilities=["text"],
+            conversation_id=f"plan_{envelope.plan_id}",
+            timestamp=datetime.now(timezone.utc),
+            tenant_id=tenant_id,
+            context={"execution_envelope": {
+                "plan_id": envelope.plan_id,
+                "step_id": envelope.step_id,
+                "step_description": envelope.step_description,
+                "workspace_id": envelope.workspace_id,
+                "budget_steps": envelope.budget_steps,
+                "steps_used": envelope.steps_used,
+                "source": "self_directed",
+                "is_final_step": envelope.is_final_step,
+            }},
+        )
+
+        _max_step_retries = 5
+        _step_backoffs = [30, 60, 120, 300, 600]  # 30s, 1m, 2m, 5m, 10m
+
+        for step_attempt in range(_max_step_retries):
+            try:
+                response = await self.process(msg)
+                logger.info("PLAN_STEP_COMPLETE: plan=%s step=%s response_len=%d",
+                    envelope.plan_id, envelope.step_id, len(response or ""))
+
+                # Delete the progress notification for this step
+                _progress = self._plan_progress_msgs.pop(envelope.plan_id, None)
+                if _progress:
+                    _p_ch, _p_mid = _progress
+                    try:
+                        await self._delete_discord_msg(_p_ch, _p_mid)
+                    except Exception:
+                        pass
+
+                # Mark the step complete in the plan
+                from kernos.kernel.execution import load_plan, save_plan
+                data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                plan = await load_plan(data_dir, tenant_id, space_id)
+                if plan:
+                    for phase in plan.get("phases", []):
+                        for step in phase.get("steps", []):
+                            if step["id"] == envelope.step_id:
+                                step["status"] = "complete"
+                                break
+
+                    # Check if all steps are complete (plan finished)
+                    all_done = all(
+                        step.get("status") in ("complete", "skipped")
+                        for phase in plan.get("phases", [])
+                        for step in phase.get("steps", [])
+                    )
+                    if all_done:
+                        plan["status"] = "complete"
+                        logger.info("PLAN_COMPLETE: plan=%s title=%r steps=%d",
+                            envelope.plan_id, plan.get("title", "?"),
+                            plan.get("usage", {}).get("steps_used", 0))
+                        try:
+                            if response and response.strip():
+                                _title = plan.get("title", "Plan")
+                                await self.send_outbound(
+                                    tenant_id, tenant_id, None,
+                                    f"**{_title}** — complete\n\n{response}",
+                                )
+                        except Exception:
+                            pass
+                    await save_plan(data_dir, tenant_id, space_id, plan)
+                return  # Step succeeded — exit retry loop
+
+            except Exception as exc:
+                _delay = _step_backoffs[min(step_attempt, len(_step_backoffs) - 1)]
+                logger.warning("PLAN_STEP_FAILED: plan=%s step=%s attempt=%d/%d error=%s retry_in=%ds",
+                    envelope.plan_id, envelope.step_id,
+                    step_attempt + 1, _max_step_retries, exc, _delay)
+
+                if step_attempt == 0:
+                    # First failure — notify user
+                    try:
+                        await self.send_outbound(
+                            tenant_id, tenant_id, None,
+                            f"Plan step hit an API error — automatically retrying in {_delay}s.",
+                        )
+                    except Exception:
+                        pass
+
+                if step_attempt < _max_step_retries - 1:
+                    await asyncio.sleep(_delay)
+                    # Rebuild the message for retry (fresh timestamp)
+                    msg = NormalizedMessage(
+                        content=msg.content,
+                        sender="self_directed",
+                        sender_auth_level=msg.sender_auth_level,
+                        platform="internal",
+                        platform_capabilities=["text"],
+                        conversation_id=msg.conversation_id,
+                        timestamp=datetime.now(timezone.utc),
+                        tenant_id=tenant_id,
+                        context=msg.context,
+                    )
+                    continue
+
+                # Fast retries exhausted — switch to hourly slow-poll
+                _slow_interval = int(os.getenv("KERNOS_PLAN_SLOW_RETRY_S", "3600"))
+                try:
+                    await self.send_outbound(
+                        tenant_id, tenant_id, None,
+                        f"The API has been down for ~{sum(_step_backoffs[:_max_step_retries]) // 60} minutes. "
+                        f"I'll keep retrying every hour until it's back.",
+                    )
+                except Exception:
+                    pass
+                logger.warning("PLAN_STEP_SLOW_POLL: plan=%s step=%s — entering hourly retry",
+                    envelope.plan_id, envelope.step_id)
+
+                _slow_attempt = 0
+                while True:
+                    _slow_attempt += 1
+                    await asyncio.sleep(_slow_interval)
+
+                    # Check if plan was cancelled/paused by user while we waited
+                    from kernos.kernel.execution import load_plan as _lp
+                    _check = await _lp(os.getenv("KERNOS_DATA_DIR", "./data"), tenant_id, space_id)
+                    if _check and _check.get("status") in ("paused", "complete", "cancelled"):
+                        logger.info("PLAN_STEP_SLOW_POLL: plan=%s aborted — status=%s",
+                            envelope.plan_id, _check.get("status"))
+                        return
+
+                    try:
+                        msg = NormalizedMessage(
+                            content=msg.content,
+                            sender="self_directed",
+                            sender_auth_level=msg.sender_auth_level,
+                            platform="internal",
+                            platform_capabilities=["text"],
+                            conversation_id=msg.conversation_id,
+                            timestamp=datetime.now(timezone.utc),
+                            tenant_id=tenant_id,
+                            context=msg.context,
+                        )
+                        response = await self.process(msg)
+                        logger.info("PLAN_STEP_RECOVERED: plan=%s step=%s slow_attempt=%d",
+                            envelope.plan_id, envelope.step_id, _slow_attempt)
+                        try:
+                            await self.send_outbound(
+                                tenant_id, tenant_id, None,
+                                f"API is back — plan resuming.",
+                            )
+                        except Exception:
+                            pass
+                        # Mark complete and check plan status (same as success path above)
+                        from kernos.kernel.execution import load_plan, save_plan
+                        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+                        plan = await load_plan(data_dir, tenant_id, space_id)
+                        if plan:
+                            for phase in plan.get("phases", []):
+                                for step in phase.get("steps", []):
+                                    if step["id"] == envelope.step_id:
+                                        step["status"] = "complete"
+                                        break
+                            all_done = all(
+                                step.get("status") in ("complete", "skipped")
+                                for phase in plan.get("phases", [])
+                                for step in phase.get("steps", [])
+                            )
+                            if all_done:
+                                plan["status"] = "complete"
+                                logger.info("PLAN_COMPLETE: plan=%s (recovered)", envelope.plan_id)
+                                try:
+                                    if response and response.strip():
+                                        _title = plan.get("title", "Plan")
+                                        await self.send_outbound(
+                                            tenant_id, tenant_id, None,
+                                            f"**{_title}** — complete\n\n{response}",
+                                        )
+                                except Exception:
+                                    pass
+                            await save_plan(data_dir, tenant_id, space_id, plan)
+                        return  # Recovered — exit
+                    except Exception as slow_exc:
+                        logger.warning("PLAN_STEP_SLOW_POLL: plan=%s attempt=%d still failing: %s",
+                            envelope.plan_id, _slow_attempt, slow_exc)
+                        if _slow_attempt % 3 == 0:  # Notify user every 3 hours
+                            try:
+                                await self.send_outbound(
+                                    tenant_id, tenant_id, None,
+                                    f"Still can't reach the API ({_slow_attempt}h). "
+                                    f"I'll keep trying. Say \"pause plan\" to stop.",
+                                )
+                            except Exception:
+                                pass
 
     async def _handle_spaces(self, ctx: TurnContext, raw_cmd: str) -> str:
         """List spaces or create a new one manually."""
@@ -3130,15 +3748,21 @@ class MessageHandler:
                     "items": {"type": "string"},
                     "description": "IDs of knowledge entries relevant to this turn.",
                 },
+                "relevant_covenant_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IDs of situational covenants relevant to this turn.",
+                },
             },
-            "required": ["classification", "preference", "relevant_knowledge_ids"],
+            "required": ["classification", "preference", "relevant_knowledge_ids", "relevant_covenant_ids"],
             "additionalProperties": False,
         }
 
-        async def _run_message_analysis() -> dict:
-            """Combined message classification + knowledge selection + preference detection."""
+        async def _run_message_analysis(situational_covenants: list | None = None) -> dict:
+            """Combined message classification + knowledge selection + preference detection + covenant relevance."""
+            _empty = {"classification": "conversation", "preference": {"detected": False, "confidence": "low", "category": "", "subject": "", "action": "", "parameters": {}, "scope_hint": "", "reasoning": ""}, "relevant_knowledge_ids": [], "relevant_covenant_ids": []}
             if _is_diagnostic or not user_content.strip():
-                return {"classification": "conversation", "preference": {"detected": False, "confidence": "low", "category": "", "subject": "", "action": "", "parameters": {}, "scope_hint": "", "reasoning": ""}, "relevant_knowledge_ids": []}
+                return _empty
 
             # Build knowledge candidates (Tier 1/2 filtering, same as before)
             all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
@@ -3160,40 +3784,53 @@ class MessageHandler:
 
             recent_context = self._get_recent_context_summary(ctx)
 
+            # Build situational covenant candidates for relevance selection
+            covenant_lines = ""
+            if situational_covenants:
+                _cov_entries = []
+                for c in situational_covenants[:20]:
+                    _desc = c.description[:80]
+                    _cov_entries.append(f"- [{c.id}] {c.rule_type}: \"{_desc}\"")
+                covenant_lines = "\n".join(_cov_entries)
+
             try:
                 import json as _json
                 result_str = await self.reasoning.complete_simple(
                     system_prompt=(
-                        "Analyze this message. Classify it, detect preferences, and select relevant knowledge.\n\n"
+                        "Analyze this message. Classify it, detect preferences, select relevant knowledge, "
+                        "and select relevant situational covenants.\n\n"
                         "Classification:\n"
                         "- 'preference': short behavioral rule like 'always do X' or 'never ask about Y'\n"
                         "- 'procedure': multi-step workflow like 'when I eat, log it, estimate, show budget'\n"
                         "- 'action': user wants something done\n"
                         "- 'conversation': chat, question, continuation\n\n"
                         "If preference detected: fill in the preference object with category, subject, action.\n"
-                        "Select knowledge entry IDs relevant to answering this message. Return NONE-relevant as empty array."
+                        "Select knowledge entry IDs relevant to answering this message.\n"
+                        "Select situational covenant IDs that apply to this turn's context. Return empty arrays for non-relevant."
                     ),
                     user_content=(
                         f"User message: \"{user_content[:300]}\"\n"
                         f"Recent context: {recent_context}\n\n"
                         f"Knowledge candidates:\n{candidate_lines}"
+                        + (f"\n\nSituational covenants:\n{covenant_lines}" if covenant_lines else "")
                     ),
                     output_schema=MESSAGE_ANALYSIS_SCHEMA,
                     max_tokens=256,
                     prefer_cheap=True,
                 )
                 parsed = _json.loads(result_str)
-                logger.info("MESSAGE_ANALYSIS: classification=%s pref_detected=%s knowledge=%d",
+                logger.info("MESSAGE_ANALYSIS: classification=%s pref_detected=%s knowledge=%d covenants=%d",
                     parsed.get("classification", "?"),
                     parsed.get("preference", {}).get("detected", False),
-                    len(parsed.get("relevant_knowledge_ids", [])))
+                    len(parsed.get("relevant_knowledge_ids", [])),
+                    len(parsed.get("relevant_covenant_ids", [])))
                 # Attach always_inject + shaped for downstream
                 parsed["_always_inject"] = always_inject
                 parsed["_candidates"] = candidates
                 return parsed
             except Exception as exc:
                 logger.warning("MESSAGE_ANALYSIS: failed: %s", exc)
-                return {"classification": "conversation", "preference": {"detected": False, "confidence": "low", "category": "", "subject": "", "action": "", "parameters": {}, "scope_hint": "", "reasoning": ""}, "relevant_knowledge_ids": [], "_always_inject": always_inject, "_candidates": candidates}
+                return {"classification": "conversation", "preference": {"detected": False, "confidence": "low", "category": "", "subject": "", "action": "", "parameters": {}, "scope_hint": "", "reasoning": ""}, "relevant_knowledge_ids": [], "relevant_covenant_ids": [], "_always_inject": always_inject, "_candidates": candidates}
 
         # Build scope chain for covenant inheritance (current + ancestors + global)
         _scope_chain = [active_space_id] if active_space_id else []
@@ -3207,16 +3844,29 @@ class MessageHandler:
                 _cur = _p.parent_id if _p and _p.parent_id else None
         space_scope = _scope_chain + [None] if _scope_chain else None
 
-        # Fire Message Analyzer + Covenant Query in parallel
-        analysis_result, contract_rules = await asyncio.gather(
-            _run_message_analysis(),
-            self.state.query_covenant_rules(
-                tenant_id, context_space_scope=space_scope, active_only=True),
-        )
+        # Query covenants first (fast JSON read), partition by tier
+        all_covenants = await self.state.query_covenant_rules(
+            tenant_id, context_space_scope=space_scope, active_only=True)
+        _pinned_covenants = [r for r in all_covenants if r.tier != "situational"]
+        _situational_covenants = [r for r in all_covenants if r.tier == "situational"]
 
-        # Extract preference note (commit if detected)
+        # Fire Message Analyzer with situational covenants as input
+        analysis_result = await _run_message_analysis(
+            situational_covenants=_situational_covenants)
+
+        # Selective injection: pinned (always) + MessageAnalyzer-selected situational
+        _relevant_cov_ids = set(analysis_result.get("relevant_covenant_ids", []))
+        _selected_situational = [r for r in _situational_covenants if r.id in _relevant_cov_ids]
+        contract_rules = _pinned_covenants + _selected_situational
+        _skipped = len(_situational_covenants) - len(_selected_situational)
+        logger.info("COVENANT_TIER: total=%d pinned=%d situational=%d",
+            len(all_covenants), len(_pinned_covenants), len(_situational_covenants))
+        logger.info("COVENANT_INJECT: pinned=%d relevant=%d skipped=%d",
+            len(_pinned_covenants), len(_selected_situational), _skipped)
+
+        # Extract preference note (commit if detected) — skip for self-directed turns
         _pref = analysis_result.get("preference", {})
-        if _pref.get("detected") and _pref.get("confidence") in ("high", "medium"):
+        if _pref.get("detected") and _pref.get("confidence") in ("high", "medium") and not ctx.is_self_directed:
             ctx.pref_detected = True
             try:
                 from kernos.kernel.preference_parser import commit_from_analysis
@@ -3255,13 +3905,15 @@ class MessageHandler:
         from kernos.kernel.tools import INSPECT_STATE_TOOL
         from kernos.kernel.code_exec import EXECUTE_CODE_TOOL
         from kernos.kernel.workspace import MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL
+        from kernos.kernel.execution import MANAGE_PLAN_TOOL
         _all_kernel = FILE_TOOLS + [REQUEST_TOOL, READ_DOC_TOOL, DISMISS_WHISPER_TOOL,
                                 MANAGE_CAPABILITIES_TOOL, REMEMBER_DETAILS_TOOL,
                                 READ_SOURCE_TOOL, READ_SOUL_TOOL, UPDATE_SOUL_TOOL,
                                 MANAGE_COVENANTS_TOOL, MANAGE_CHANNELS_TOOL,
                                 SEND_TO_CHANNEL_TOOL, MANAGE_SCHEDULE_TOOL,
                                 INSPECT_STATE_TOOL, EXECUTE_CODE_TOOL,
-                                MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL]
+                                MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL,
+                                MANAGE_PLAN_TOOL]
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)
@@ -3452,7 +4104,29 @@ class MessageHandler:
                     _space_names[sid] = _s.name
 
         rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul, space_names=_space_names)
-        now_block = _build_now_block(message, soul, active_space)
+        # Extract execution envelope for self-directed turns, or check for paused plan
+        _exec_envelope = None
+        if ctx.is_self_directed and message.context and isinstance(message.context, dict):
+            _exec_envelope = message.context.get("execution_envelope")
+        elif not ctx.is_self_directed:
+            # Check for a paused plan the user might want to resume
+            try:
+                from kernos.kernel.execution import load_plan
+                _paused_plan = await load_plan(
+                    os.getenv("KERNOS_DATA_DIR", "./data"), tenant_id, active_space_id)
+                if _paused_plan and _paused_plan.get("status") == "paused":
+                    _exec_envelope = {
+                        "plan_id": _paused_plan.get("plan_id", "?"),
+                        "step_id": _paused_plan.get("paused_at_step", "?"),
+                        "step_description": _paused_plan.get("paused_next_description", ""),
+                        "paused": True,
+                        "paused_reason": _paused_plan.get("paused_reason", "unknown"),
+                        "budget_steps": _paused_plan.get("budget", {}).get("max_steps", 0),
+                        "steps_used": _paused_plan.get("usage", {}).get("steps_used", 0),
+                    }
+            except Exception:
+                pass
+        now_block = _build_now_block(message, soul, active_space, execution_envelope=_exec_envelope)
         state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries)
         results = _build_results_block(ctx.results_prefix)
         actions = _build_actions_block(capability_prompt, message, self._channel_registry)
@@ -3499,6 +4173,25 @@ class MessageHandler:
         departure_msg = None
         if ctx.space_switched and ctx.previous_space_id:
             departure_msg = await self._build_departure_context(ctx, ctx.previous_space_id)
+
+        # Budget oversized user messages — persist to file, send preview + reference
+        # Same pattern as tool result budgeting. Prevents Codex payload limit failures.
+        _USER_MSG_CHAR_BUDGET = 4000
+        if len(final_user_content) > _USER_MSG_CHAR_BUDGET and active_space_id:
+            try:
+                _preview = final_user_content[:_USER_MSG_CHAR_BUDGET - 200]
+                _fname = f"user_input_{utc_now().replace(':', '').replace('+', '_')[:19]}.txt"
+                await self._files.write_file(tenant_id, active_space_id, _fname, final_user_content,
+                    description="User input (auto-persisted, oversized)")
+                final_user_content = (
+                    f"{_preview}\n\n"
+                    f"[Message continues — full text saved to {_fname}. "
+                    f"Use read_file('{_fname}') to see the complete content.]"
+                )
+                logger.info("USER_MSG_BUDGETED: original=%d preview=%d file=%s",
+                    len(final_user_content), _USER_MSG_CHAR_BUDGET, _fname)
+            except Exception as exc:
+                logger.warning("USER_MSG_BUDGET: failed to persist: %s", exc)
 
         if departure_msg:
             ctx.messages = [departure_msg] + space_messages + [{"role": "user", "content": final_user_content}]
@@ -3604,14 +4297,15 @@ class MessageHandler:
         ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul)
         await self._post_response_soul_update(ctx.soul)
 
-        # Cross-domain signal check — async, non-blocking
-        try:
-            import asyncio as _aio
-            _aio.create_task(self._check_cross_domain_signals(
-                ctx.tenant_id, ctx.active_space_id,
-                ctx.message.content or "", ctx.response_text))
-        except Exception:
-            pass
+        # Cross-domain signal check — skip for self-directed turns
+        if not ctx.is_self_directed:
+            try:
+                import asyncio as _aio
+                _aio.create_task(self._check_cross_domain_signals(
+                    ctx.tenant_id, ctx.active_space_id,
+                    ctx.message.content or "", ctx.response_text))
+            except Exception:
+                pass
 
     async def _phase_persist(self, ctx: TurnContext) -> None:
         """Phase 6: Store messages, write to conv log, compaction, events."""
@@ -3691,6 +4385,39 @@ class MessageHandler:
                                                 self.state, self.events)
                                         except Exception as _hx:
                                             logger.warning("COMPACTION_HARVEST: processing failed: %s", _hx)
+
+                                    # Process recurring workflows from compaction output
+                                    _workflows = getattr(comp_state, '_recurring_workflows', [])
+                                    if _workflows:
+                                        try:
+                                            from kernos.kernel.awareness import Whisper, generate_whisper_id
+                                            for wf in _workflows:
+                                                if wf.get("count", 0) >= 3:
+                                                    _desc = wf.get("description", "")[:100]
+                                                    _trigger = wf.get("trigger", "")[:60]
+                                                    whisper = Whisper(
+                                                        whisper_id=generate_whisper_id(),
+                                                        insight_text=(
+                                                            f"I notice you always do this: {_desc}. "
+                                                            f"Want me to write that as a procedure so it happens automatically?"
+                                                        ),
+                                                        delivery_class="ambient",
+                                                        source_space_id=ctx.active_space_id,
+                                                        target_space_id=ctx.active_space_id,
+                                                        supporting_evidence=[
+                                                            f"Observed {wf.get('count', 0)} times during compaction",
+                                                            f"Trigger: {_trigger}" if _trigger else "No specific trigger",
+                                                        ],
+                                                        reasoning_trace=f"Compaction detected recurring workflow: {_desc}",
+                                                        knowledge_entry_id="",
+                                                        foresight_signal=f"recurring_workflow:{_desc[:40]}",
+                                                        created_at=utc_now(),
+                                                    )
+                                                    await self.state.save_whisper(tenant_id, whisper)
+                                                    logger.info("RECURRING_WORKFLOW: desc=%r count=%d space=%s proposed=true",
+                                                        _desc, wf.get("count", 0), ctx.active_space_id)
+                                        except Exception as _rwx:
+                                            logger.warning("RECURRING_WORKFLOW: processing failed: %s", _rwx)
 
                                     # Domain assessment + child briefings — async, non-blocking
                                     try:
@@ -3912,10 +4639,18 @@ class MessageHandler:
     async def _run_friction_observer(
         self, ctx: TurnContext, provider_errors: list[str] | None = None,
     ) -> None:
-        """Run friction detection post-turn. Non-blocking — failures are logged and swallowed."""
+        """Run friction detection + behavioral pattern tracking post-turn.
+
+        Non-blocking — failures are logged and swallowed.
+        """
+        if ctx.is_self_directed:
+            return  # Self-directed turns are internal — no user-facing friction to detect
+
+        # Standard friction detection
+        signals: list = []
         try:
             surfaced_names = {t.get("name", "") for t in ctx.tools if t.get("name")}
-            await self._friction.observe(
+            signals = await self._friction.observe(
                 tenant_id=ctx.tenant_id,
                 user_message=ctx.message.content or "",
                 response_text=ctx.response_text,
@@ -3930,6 +4665,86 @@ class MessageHandler:
             )
         except Exception as exc:
             logger.debug("FRICTION: observer failed: %s", exc)
+
+        # SYSTEM_MALFUNCTION → informational whisper (not just a file)
+        for sig in signals:
+            if sig.signal_type in ("SCHEMA_ERROR_ON_PROVIDER", "PROVIDER_ERROR_REPEATED", "EMPTY_RESPONSE"):
+                try:
+                    from kernos.kernel.awareness import Whisper, generate_whisper_id
+                    whisper = Whisper(
+                        whisper_id=generate_whisper_id(),
+                        insight_text=(
+                            f"I hit a technical issue ({sig.signal_type.lower().replace('_', ' ')}). "
+                            f"Everything else is working. I've logged the details."
+                        ),
+                        delivery_class="ambient",
+                        source_space_id=ctx.active_space_id,
+                        target_space_id=ctx.active_space_id,
+                        supporting_evidence=sig.evidence[:3],
+                        reasoning_trace=f"Friction observer detected {sig.signal_type}.",
+                        knowledge_entry_id="",
+                        foresight_signal=f"system_malfunction:{sig.signal_type}",
+                        created_at=utc_now(),
+                    )
+                    await self.state.save_whisper(ctx.tenant_id, whisper)
+                    logger.info("FRICTION_WHISPER: class=SYSTEM_MALFUNCTION signal=%s whisper_id=%s",
+                        sig.signal_type, whisper.whisper_id)
+                except Exception as exc:
+                    logger.debug("FRICTION_WHISPER: failed: %s", exc)
+
+        # Behavioral pattern detection — track recurring corrections
+        try:
+            from kernos.kernel.behavioral_patterns import record_correction, build_proposal_whisper
+            data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+            turn_number = ctx.soul.interaction_count if ctx.soul else 0
+            pattern = record_correction(
+                data_dir=data_dir,
+                tenant_id=ctx.tenant_id,
+                user_message=ctx.message.content or "",
+                response_text=ctx.response_text,
+                space_id=ctx.active_space_id,
+                turn_number=turn_number,
+            )
+            if pattern:
+                # Threshold just crossed — generate whisper
+                proposal = build_proposal_whisper(pattern, ctx.active_space_id)
+                classification = proposal.pop("classification", "behavioral")
+                confidence = proposal.pop("confidence", "medium")
+                pattern_id = proposal.pop("pattern_id", "")
+
+                if classification == "workaround":
+                    # Don't propose covenant — flag as system issue instead
+                    logger.info(
+                        "BEHAVIORAL_PROPOSAL: type=system_malfunction desc=%r space=%s "
+                        "classification=workaround confidence=%s",
+                        pattern.fingerprint[:60], ctx.active_space_id, confidence,
+                    )
+                    # Still create a whisper but framed as system issue
+                    from kernos.kernel.awareness import Whisper
+                    whisper = Whisper(**proposal)
+                    await self.state.save_whisper(ctx.tenant_id, whisper)
+                else:
+                    # behavioral or uncertain — propose covenant/procedure
+                    from kernos.kernel.awareness import Whisper
+                    whisper = Whisper(**proposal)
+                    await self.state.save_whisper(ctx.tenant_id, whisper)
+                    # Mark pattern as proposal surfaced
+                    from kernos.kernel.behavioral_patterns import load_patterns, save_patterns
+                    patterns = load_patterns(data_dir, ctx.tenant_id)
+                    for p in patterns:
+                        if p.pattern_id == pattern_id:
+                            p.proposal_surfaced = True
+                            break
+                    save_patterns(data_dir, ctx.tenant_id, patterns)
+                    logger.info(
+                        "BEHAVIORAL_PROPOSAL: type=%s desc=%r space=%s "
+                        "classification=%s confidence=%s whisper_id=%s",
+                        "covenant" if pattern.pattern_type != "workflow_correction" else "procedure",
+                        pattern.fingerprint[:60], ctx.active_space_id,
+                        classification, confidence, whisper.whisper_id,
+                    )
+        except Exception as exc:
+            logger.debug("BEHAVIORAL_PATTERN: detection failed: %s", exc)
 
     # --- Selective knowledge injection helpers ---
 

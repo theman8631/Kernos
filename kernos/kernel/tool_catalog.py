@@ -39,6 +39,7 @@ ALWAYS_PINNED: set[str] = {
     "inspect_state",      # self-awareness + space listing
     "manage_workspace",   # artifact tracking
     "send_to_channel",    # communication
+    "manage_plan",        # self-directed execution
 }
 
 # Common MCP tools that get priority in the active window (not pinned, but preferred)
