@@ -154,6 +154,9 @@ class TurnContext:
     # Phase timing (ms) — populated by process() and _run_space_loop
     phase_timings: dict[str, int] = field(default_factory=dict)
 
+    # Runtime trace collector — structured events for diagnostic visibility
+    trace: Any = None  # TurnEventCollector, set at turn start
+
 
 # Turn serialization: per-(tenant, space) mailbox/runner
 MERGE_WINDOW_MS = 300  # Wait up to 300ms for follow-up messages
@@ -662,6 +665,10 @@ class MessageHandler:
             enabled=os.getenv("KERNOS_FRICTION_OBSERVER", "1") != "0",
         )
 
+        # Runtime trace — structured event log for diagnostic visibility
+        from kernos.kernel.runtime_trace import RuntimeTrace
+        self._runtime_trace = RuntimeTrace(os.getenv("KERNOS_DATA_DIR", "./data"))
+
         # Plan progress message IDs — for auto-deleting step notifications
         # plan_id → (channel_id, message_id)
         self._plan_progress_msgs: dict[str, tuple[int, int]] = {}
@@ -704,6 +711,7 @@ class MessageHandler:
             "manage_workspace": "Manage workspace artifacts — list, add, update, or archive built tools and scripts",
             "register_tool": "Register a workspace-built tool in the universal catalog from a .tool.json descriptor",
             "manage_plan": "Create, execute, and manage self-directed plans for complex multi-step tasks",
+            "read_runtime_trace": "Read structured runtime trace — provider errors, tool failures, gate decisions, timing",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -2601,6 +2609,9 @@ class MessageHandler:
                         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
                             primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
+                            if primary_ctx.trace:
+                                primary_ctx.trace.record("error", "handler", "PROVIDER_ERROR",
+                                    str(exc)[:300], phase="reason")
                             _err_msg = "the API is having persistent issues — I retried 20 times. Try again shortly, or this may be a broader outage" if "after" in str(exc) else "try again in a moment"
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, _err_msg)
@@ -2613,6 +2624,9 @@ class MessageHandler:
                         except ReasoningRateLimitError as exc:
                             primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
+                            if primary_ctx.trace:
+                                primary_ctx.trace.record("error", "handler", "RATE_LIMIT",
+                                    str(exc)[:300], phase="reason")
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, "overloaded right now. Try again in a minute")
                             if not primary_future.done():
@@ -2624,6 +2638,9 @@ class MessageHandler:
                         except ReasoningProviderError as exc:
                             primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])
+                            if primary_ctx.trace:
+                                primary_ctx.trace.record("error", "handler", "PROVIDER_ERROR",
+                                    str(exc)[:300], phase="reason")
                             _err_msg = "the API is having persistent issues — I retried 20 times. Try again shortly, or this may be a broader outage" if "after" in str(exc) else "try again in a moment"
                             response = await self._handle_reasoning_error(
                                 primary_ctx, exc, _err_msg)
@@ -2687,6 +2704,19 @@ class MessageHandler:
                 )
                 self._record_phase_timings(_pt, _total_ms)
 
+                # Record timing to trace + flush
+                if primary_ctx.trace:
+                    primary_ctx.trace.record(
+                        "info", "handler", "TURN_TIMING",
+                        f"total={_total_ms}ms phases={json.dumps(_pt)}",
+                        duration_ms=_total_ms,
+                    )
+                    try:
+                        await self._runtime_trace.append_turn(
+                            runner.tenant_id, primary_ctx.trace.events)
+                    except Exception as _te:
+                        logger.debug("TRACE_FLUSH: failed: %s", _te)
+
                 # Resolve all futures — primary gets the response,
                 # merged messages get empty (adapter sends nothing)
                 if not primary_future.done():
@@ -2735,7 +2765,9 @@ class MessageHandler:
         phases (assemble → reason → consequence → persist) are submitted
         to a per-(tenant, space) runner that serializes turns.
         """
+        from kernos.kernel.runtime_trace import TurnEventCollector, generate_turn_id
         ctx = TurnContext(message=message)
+        ctx.trace = TurnEventCollector(generate_turn_id())
 
         # Early return paths (secure input)
         early = await self._check_early_return(ctx)
@@ -3891,6 +3923,10 @@ class MessageHandler:
             len(all_covenants), len(_pinned_covenants), len(_situational_covenants))
         logger.info("COVENANT_INJECT: pinned=%d relevant=%d skipped=%d",
             len(_pinned_covenants), len(_selected_situational), _skipped)
+        if ctx.trace:
+            ctx.trace.record("info", "handler", "COVENANT_INJECT",
+                f"pinned={len(_pinned_covenants)} relevant={len(_selected_situational)} skipped={_skipped}",
+                phase="assemble")
 
         # Extract preference note (commit if detected) — skip for self-directed turns
         _pref = analysis_result.get("preference", {})
@@ -3942,6 +3978,8 @@ class MessageHandler:
                                 INSPECT_STATE_TOOL, EXECUTE_CODE_TOOL,
                                 MANAGE_WORKSPACE_TOOL, REGISTER_TOOL_TOOL,
                                 MANAGE_PLAN_TOOL]
+        from kernos.kernel.runtime_trace import READ_RUNTIME_TRACE_TOOL
+        _all_kernel.append(READ_RUNTIME_TRACE_TOOL)
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)

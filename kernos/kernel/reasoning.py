@@ -368,7 +368,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -484,6 +484,24 @@ class ReasoningService:
                     return await self._handler._handle_manage_plan(
                         request.tenant_id, request.active_space_id, tool_input)
                 return "Self-directed execution is not available."
+            elif tool_name == "read_runtime_trace":
+                if hasattr(self, '_handler') and self._handler:
+                    _turns = tool_input.get("turns", 10)
+                    _filter = tool_input.get("filter", None)
+                    _turn_id = tool_input.get("turn_id", None)
+                    events = await self._handler._runtime_trace.read(
+                        request.tenant_id, turns=_turns,
+                        filter_level=_filter, turn_id=_turn_id)
+                    if not events:
+                        return "No trace events found."
+                    lines = []
+                    for e in events:
+                        lines.append(
+                            f"[{e.get('timestamp', '?')[:19]}] {e.get('level', '?').upper()} "
+                            f"{e.get('source', '?')}:{e.get('event', '?')} — {e.get('detail', '')[:200]}"
+                        )
+                    return f"Runtime trace ({len(events)} events):\n" + "\n".join(lines)
+                return "Runtime trace is not available."
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
@@ -935,6 +953,26 @@ class ReasoningService:
                         result = f"Plan operation failed: {exc}"
                 else:
                     result = "Self-directed execution is not available."
+            elif block.name == "read_runtime_trace":
+                if hasattr(self, '_handler') and self._handler:
+                    _turns = tool_args.get("turns", 10)
+                    _filter = tool_args.get("filter", None)
+                    _turn_id = tool_args.get("turn_id", None)
+                    events = await self._handler._runtime_trace.read(
+                        request.tenant_id, turns=_turns,
+                        filter_level=_filter, turn_id=_turn_id)
+                    if not events:
+                        result = "No trace events found."
+                    else:
+                        lines = []
+                        for e in events:
+                            lines.append(
+                                f"[{e.get('timestamp', '?')[:19]}] {e.get('level', '?').upper()} "
+                                f"{e.get('source', '?')}:{e.get('event', '?')} — {e.get('detail', '')[:200]}"
+                            )
+                        result = f"Runtime trace ({len(events)} events):\n" + "\n".join(lines)
+                else:
+                    result = "Runtime trace is not available."
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(
