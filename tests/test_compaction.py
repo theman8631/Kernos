@@ -1105,3 +1105,51 @@ class TestContextDocument:
         assert "Compaction #20" in result
         # Very old entries should not be present
         assert "Compaction #1\n" not in result or "Compaction #2\n" not in result
+
+
+# ---------------------------------------------------------------------------
+# Recurring workflow parsing (Pass 3)
+# ---------------------------------------------------------------------------
+
+class TestRecurringWorkflows:
+    def test_parse_multi_line_workflows(self):
+        doc = """Some compaction text.
+
+RECURRING_WORKFLOWS:
+- description: User mentions food then asks for calorie estimate then budget
+  count: 4
+  trigger: user mentions food they ate
+- description: User checks calendar then asks about prep time
+  count: 3
+  trigger: user asks about upcoming events
+"""
+        result = CompactionService._parse_recurring_workflows(doc)
+        assert len(result) == 2
+        assert result[0]["description"] == "User mentions food then asks for calorie estimate then budget"
+        assert result[0]["count"] == 4
+        assert result[0]["trigger"] == "user mentions food they ate"
+        assert result[1]["count"] == 3
+
+    def test_parse_none(self):
+        doc = "Some text.\nRECURRING_WORKFLOWS: NONE\n"
+        result = CompactionService._parse_recurring_workflows(doc)
+        assert result == []
+
+    def test_parse_no_section(self):
+        doc = "Some text without the section."
+        result = CompactionService._parse_recurring_workflows(doc)
+        assert result == []
+
+    def test_strip_workflows(self):
+        doc = "Before.\n\nRECURRING_WORKFLOWS:\n- description: test\n  count: 3\n  trigger: foo\n\nAfter."
+        result = CompactionService._strip_recurring_workflows(doc)
+        assert "RECURRING_WORKFLOWS" not in result
+        assert "Before." in result
+        assert "After." in result
+
+    def test_strip_none(self):
+        doc = "Before.\nRECURRING_WORKFLOWS: NONE\nAfter."
+        result = CompactionService._strip_recurring_workflows(doc)
+        assert "RECURRING_WORKFLOWS" not in result
+        assert "Before." in result
+        assert "After." in result

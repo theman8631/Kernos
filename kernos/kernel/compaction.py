@@ -336,7 +336,21 @@ UPDATE <id>: <updated content>
 REINFORCE <id>
 
 If no new facts, write:
-FACT_HARVEST: NONE"""
+FACT_HARVEST: NONE
+
+---
+
+#### Recurring Workflows
+
+After FACT_HARVEST, if you notice the user repeatedly following the same multi-step workflow (3+ times in this conversation), note it. These are positive patterns worth formalizing as procedures.
+
+RECURRING_WORKFLOWS:
+- description: [what the user does each time]
+  count: [how many times observed]
+  trigger: [what starts the workflow]
+
+If no recurring workflows, write:
+RECURRING_WORKFLOWS: NONE"""
 
 
 # ---------------------------------------------------------------------------
@@ -915,6 +929,69 @@ class CompactionService:
                 cleaned.append(line)
         return "\n".join(cleaned)
 
+    @staticmethod
+    def _parse_recurring_workflows(doc: str) -> list[dict]:
+        """Extract RECURRING_WORKFLOWS section from compaction output.
+
+        Returns list of {"description": str, "count": int, "trigger": str}.
+        """
+        results = []
+        in_workflows = False
+        current: dict = {}
+        for line in doc.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.upper().startswith("RECURRING_WORKFLOWS:"):
+                rest = stripped[len("RECURRING_WORKFLOWS:"):].strip()
+                if rest.upper() == "NONE":
+                    return []
+                in_workflows = True
+                continue
+            if in_workflows:
+                if stripped.startswith("- description:"):
+                    if current:
+                        results.append(current)
+                    current = {"description": stripped[len("- description:"):].strip(), "count": 0, "trigger": ""}
+                elif stripped.startswith("description:"):
+                    if current:
+                        results.append(current)
+                    current = {"description": stripped[len("description:"):].strip(), "count": 0, "trigger": ""}
+                elif stripped.startswith("count:"):
+                    try:
+                        current["count"] = int(stripped[len("count:"):].strip())
+                    except ValueError:
+                        pass
+                elif stripped.startswith("trigger:"):
+                    current["trigger"] = stripped[len("trigger:"):].strip()
+                elif not stripped:
+                    continue
+                elif not stripped.startswith("-") and ":" not in stripped:
+                    # End of section
+                    break
+            # Also handle single-line format: "- description | count | trigger"
+        if current and current.get("description"):
+            results.append(current)
+        return results
+
+    @staticmethod
+    def _strip_recurring_workflows(doc: str) -> str:
+        """Remove the RECURRING_WORKFLOWS section from the document."""
+        lines = doc.rstrip().split("\n")
+        cleaned = []
+        in_workflows = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.upper().startswith("RECURRING_WORKFLOWS:"):
+                in_workflows = True
+                continue
+            if in_workflows:
+                if stripped.startswith(("-", "description:", "count:", "trigger:")) or not stripped:
+                    continue
+                else:
+                    in_workflows = False
+            if not in_workflows:
+                cleaned.append(line)
+        return "\n".join(cleaned)
+
     async def compact_from_log(
         self,
         tenant_id: str,
@@ -1008,6 +1085,13 @@ class CompactionService:
                 sum(1 for f in fact_harvest if f["action"] == "reinforce"))
         # Store harvest results on comp_state for the handler to process
         comp_state._fact_harvest = fact_harvest  # type: ignore[attr-defined]
+
+        # Parse and strip recurring workflows
+        recurring_workflows = self._parse_recurring_workflows(updated_doc)
+        updated_doc = self._strip_recurring_workflows(updated_doc)
+        if recurring_workflows:
+            logger.info("COMPACTION_WORKFLOWS: count=%d", len(recurring_workflows))
+        comp_state._recurring_workflows = recurring_workflows  # type: ignore[attr-defined]
 
         # Write updated document
         active_doc_path.write_text(updated_doc, encoding="utf-8")

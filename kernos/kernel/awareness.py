@@ -202,8 +202,10 @@ class AwarenessEvaluator:
         awareness_every_n = max(1, self._interval // self._trigger_interval)
         interrupt_check_every_n = max(1, 300 // self._trigger_interval)  # ~5 minutes
         event_every_n = max(1, EVENT_POLL_INTERVAL_SECONDS // self._trigger_interval)
+        plan_sweep_every_n = max(1, 600 // self._trigger_interval)  # ~10 minutes
         _interrupt_tick_count = 0
         _event_tick_count = 0
+        _plan_sweep_tick_count = 0
 
         while self._running:
             self._awareness_tick_count += 1
@@ -294,7 +296,66 @@ class AwarenessEvaluator:
                         except Exception as e:
                             logger.warning("EVENT_TRIGGERS_FAILED: %s", e)
 
+            # Phase 4: Plan sweep — re-enqueue stale active plans
+            _plan_sweep_tick_count += 1
+            if _plan_sweep_tick_count >= plan_sweep_every_n:
+                _plan_sweep_tick_count = 0
+                if self._handler:
+                    try:
+                        await self._sweep_stale_plans(tenant_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning("PLAN_SWEEP: error: %s", e)
+
             await asyncio.sleep(self._trigger_interval)
+
+    async def _sweep_stale_plans(self, tenant_id: str) -> None:
+        """Check for active plans with in-progress steps that aren't being executed.
+
+        If a step has been in_progress for more than 10 minutes with no active
+        asyncio task running it, re-enqueue it. This catches plans that stalled
+        due to errors, crashes, or slow-poll exhaustion.
+        """
+        import os
+        from kernos.kernel.execution import scan_active_plans, build_envelope_from_plan
+
+        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+        active_plans = scan_active_plans(data_dir)
+        if not active_plans:
+            return
+
+        for plan_tenant, space_id, plan in active_plans:
+            if plan_tenant != tenant_id:
+                continue
+            plan_id = plan.get("plan_id", "?")
+
+            # Find in-progress steps
+            for phase in plan.get("phases", []):
+                for step in phase.get("steps", []):
+                    if step.get("status") != "in_progress":
+                        continue
+
+                    # Check if this plan already has an active task
+                    # (tracked by _plan_progress_msgs — if there's a message, it's running)
+                    if hasattr(self._handler, '_plan_progress_msgs') and plan_id in self._handler._plan_progress_msgs:
+                        continue  # Still actively executing
+
+                    step_id = step["id"]
+                    step_desc = step.get("title", "")
+                    envelope = build_envelope_from_plan(plan, step_id, step_desc)
+                    _remaining = [
+                        s for p in plan.get("phases", [])
+                        for s in p.get("steps", [])
+                        if s.get("status") == "pending"
+                    ]
+                    envelope.is_final_step = len(_remaining) == 0
+
+                    logger.info("PLAN_SWEEP: re-enqueuing stale step plan=%s step=%s",
+                        plan_id, step_id)
+                    asyncio.create_task(
+                        self._handler._execute_self_directed_step(tenant_id, space_id, envelope))
+                    break  # One step per plan per sweep
 
     async def _evaluate(self, tenant_id: str) -> None:
         """Run all evaluation passes for a tenant."""
@@ -473,6 +534,8 @@ class AwarenessEvaluator:
                 target_space_id=space_id,
                 supporting_evidence=["capability_gap_detection"],
                 reasoning_trace="Awareness evaluator detected a potential capability gap from recent conversation patterns.",
+                knowledge_entry_id="",
+                foresight_signal="capability_gap",
                 created_at=now.isoformat(),
             )
             logger.info("AWARENESS: capability_gap detected in space=%s", space_id)
