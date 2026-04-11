@@ -3144,7 +3144,26 @@ class MessageHandler:
         self, tenant_id: str, space_id: str, envelope: ExecutionEnvelope,
     ) -> None:
         """Execute a self-directed step through the pipeline."""
+        from kernos.kernel.execution import load_plan
         from kernos.messages.models import NormalizedMessage, AuthLevel
+
+        # Guard: check plan is still active and step is still executable
+        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+        plan = await load_plan(data_dir, tenant_id, space_id)
+        if not plan:
+            logger.info("PLAN_STEP_SKIP: plan=%s — plan not found, skipping", envelope.plan_id)
+            return
+        if plan.get("status") in ("complete", "cancelled"):
+            logger.info("PLAN_STEP_SKIP: plan=%s step=%s — plan already %s",
+                envelope.plan_id, envelope.step_id, plan.get("status"))
+            return
+        # Check if this specific step is already complete
+        for phase in plan.get("phases", []):
+            for step in phase.get("steps", []):
+                if step["id"] == envelope.step_id and step.get("status") == "complete":
+                    logger.info("PLAN_STEP_SKIP: plan=%s step=%s — step already complete",
+                        envelope.plan_id, envelope.step_id)
+                    return
 
         # Build a self-directed message
         msg = NormalizedMessage(

@@ -78,25 +78,52 @@ class DiscordAdapter(BaseAdapter):
         """
         return response
 
+    _MAX_LENGTH = 2000
+
     async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> int:
-        """Send an unprompted message to a Discord channel. Returns message ID or 0."""
+        """Send an unprompted message to a Discord channel. Returns message ID or 0.
+
+        Splits long messages into chunks that fit Discord's 2000-char limit.
+        Returns the ID of the LAST sent message (for deletion tracking).
+        """
         if not self._client:
             logger.warning("OUTBOUND: discord send failed — client not connected")
             return 0
         try:
             channel = await self._client.fetch_channel(int(channel_target))
-            sent = await channel.send(message)
+            chunks = self._chunk(message)
+            last_id = 0
+            for chunk in chunks:
+                sent = await channel.send(chunk)
+                last_id = sent.id
             logger.info(
-                "OUTBOUND: channel=discord target=%s tenant=%s length=%d success=True",
-                channel_target, tenant_id, len(message),
+                "OUTBOUND: channel=discord target=%s tenant=%s length=%d chunks=%d success=True",
+                channel_target, tenant_id, len(message), len(chunks),
             )
-            return sent.id
+            return last_id
         except Exception as exc:
             logger.warning(
                 "OUTBOUND: channel=discord target=%s tenant=%s success=False error=%s",
                 channel_target, tenant_id, exc,
             )
             return 0
+
+    @classmethod
+    def _chunk(cls, text: str) -> list[str]:
+        """Split text into chunks that fit Discord's limit."""
+        if len(text) <= cls._MAX_LENGTH:
+            return [text]
+        chunks: list[str] = []
+        while text:
+            if len(text) <= cls._MAX_LENGTH:
+                chunks.append(text)
+                break
+            cut = text.rfind("\n", 0, cls._MAX_LENGTH)
+            if cut <= 0:
+                cut = cls._MAX_LENGTH
+            chunks.append(text[:cut])
+            text = text[cut:].lstrip("\n")
+        return chunks
 
     @property
     def can_send_outbound(self) -> bool:

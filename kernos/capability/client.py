@@ -57,8 +57,10 @@ class MCPClientManager:
 
     # Per-server rate limiting for burst protection during plan execution.
     # Servers not listed here have no limit.
+    # Format: (max_concurrent, min_delay_seconds_between_calls)
+    # Semaphore(1) + delay = fully sequential with spacing.
     _RATE_LIMITS: dict[str, tuple[int, float]] = {
-        "brave-search": (2, 1.0),  # max 2 concurrent, 1s between calls
+        "brave-search": (1, 1.0),  # sequential, 1s between each call
     }
 
     def __init__(self, events: EventStream | None = None) -> None:
@@ -474,20 +476,22 @@ class MCPClientManager:
             exc_ref: Exception | None = None
             error_msg = ""
             try:
-                # Rate-limited call: acquire semaphore + enforce delay
+                # Rate-limited call: serialize through semaphore + enforce delay
                 if _rate:
                     _sem = self._semaphores[server_name]
                     async with _sem:
+                        # Wait until min_delay has elapsed since last call finished
                         _now = asyncio.get_event_loop().time()
                         _last = self._last_call_time.get(server_name, 0)
                         _wait = _rate[1] - (_now - _last)
                         if _wait > 0:
                             await asyncio.sleep(_wait)
-                        self._last_call_time[server_name] = asyncio.get_event_loop().time()
                         result = await asyncio.wait_for(
                             session.call_tool(tool_name, tool_args),
                             timeout=effective_timeout,
                         )
+                        # Record AFTER call completes — next caller waits from this point
+                        self._last_call_time[server_name] = asyncio.get_event_loop().time()
                 else:
                     # Timeout wraps ONLY the actual MCP session call
                     result = await asyncio.wait_for(
