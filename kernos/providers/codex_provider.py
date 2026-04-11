@@ -45,8 +45,7 @@ class OpenAICodexProvider(Provider):
             "OPENAI_CODEX_BASE_URL", "https://chatgpt.com/backend-api"
         )
         self._http: Any = None
-        # Optional callback for retry notifications: async fn(attempt, max_retries, delay)
-        self.on_retry_notify: Any = None
+        self._trace: Any = None  # TurnEventCollector — set per-turn by reasoning
 
     async def _ensure_http(self) -> Any:
         if self._http is None:
@@ -355,15 +354,24 @@ class OpenAICodexProvider(Provider):
                 raise  # 4xx / known errors — don't retry
             except ReasoningTransientError as exc:
                 last_exc = exc
+                if self._trace:
+                    self._trace.record("warning", "codex_provider", "CODEX_STREAM_ERROR",
+                        str(exc)[:300], phase="reason")
                 if attempt < _max_retries - 1:
                     _delay = min(1.5 * (1.5 ** attempt), 15.0)
                     logger.warning("REASON_RETRY: attempt=%d/%d delay=%.1fs transient=%s",
                         attempt + 2, _max_retries, _delay, str(exc)[:80])
+                    if self._trace:
+                        self._trace.record("warning", "codex_provider", "REASON_RETRY",
+                            f"attempt={attempt + 2}/{_max_retries} delay={_delay:.1f}s", phase="reason")
                     await asyncio.sleep(_delay)
                     continue
                 raise ReasoningProviderError(f"Codex transient error after {_max_retries} attempts: {exc}") from exc
             except Exception as exc:
                 last_exc = exc
+                if self._trace:
+                    self._trace.record("error", "codex_provider", "CODEX_ERROR",
+                        str(exc)[:300], phase="reason")
                 if attempt < _max_retries - 1:
                     _delay = min(1.5 * (1.5 ** attempt), 15.0)
                     logger.warning("REASON_RETRY: attempt=%d/%d delay=%.1fs error=%s",

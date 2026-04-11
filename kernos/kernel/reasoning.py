@@ -88,6 +88,7 @@ class ReasoningRequest:
     is_reactive: bool = True   # True when responding to a user message; False for scheduler/background
     system_prompt_static: str = ""   # Cacheable prefix (RULES + ACTIONS)
     system_prompt_dynamic: str = ""  # Fresh per turn (NOW + STATE + RESULTS + MEMORY)
+    trace: Any = None  # TurnEventCollector — for runtime trace instrumentation
 
 
 # GateResult and ApprovalToken extracted to kernos/kernel/gate.py (re-exported above)
@@ -190,6 +191,12 @@ class ReasoningService:
         self._turn_tool_trace: list[dict] = []
         # Hybrid token counting: real input_tokens from last principal reasoning call per tenant
         self._last_real_input_tokens: dict[str, int] = {}  # tenant_id → tokens
+
+    @staticmethod
+    def _trace(request: "ReasoningRequest", level: str, source: str, event: str, detail: str, **kw: Any) -> None:
+        """Record a trace event if collector is available."""
+        if request and getattr(request, 'trace', None):
+            request.trace.record(level, source, event, detail, **kw)
 
     def _get_gate(self) -> DispatchGate:
         """Lazy gate creation — registry/state set after construction."""
@@ -738,6 +745,11 @@ class ReasoningService:
             except Exception as exc:
                 logger.warning("Failed to emit dispatch.gate: %s", exc)
 
+            self._trace(request, "info" if gate_result.allowed else "warning",
+                "gate", "GATE",
+                f"tool={block.name} effect={tool_effect} allowed={gate_result.allowed} "
+                f"reason={gate_result.reason} method={gate_result.method}",
+                phase="reason")
             logger.info(
                 "GATE: tool=%s effect=%s allowed=%s reason=%s method=%s",
                 block.name, tool_effect, gate_result.allowed,
@@ -1256,6 +1268,9 @@ class ReasoningService:
             "AGENT_RESULT: tool=%s success=%s preview=%s",
             block.name, not is_error, result[:100],
         )
+        if is_error:
+            self._trace(request, "warning", "reasoning", "TOOL_FAILED",
+                f"tool={block.name} result={result[:200]}", phase="reason")
 
         # Emit tool.result
         try:
@@ -1745,6 +1760,9 @@ class ReasoningService:
             len(messages), len(tools), request.max_tokens,
         )
         t0 = time.monotonic()
+        # Thread trace to provider for internal event capture
+        if hasattr(self._provider, '_trace'):
+            self._provider._trace = getattr(request, 'trace', None)
         # Build cache-boundary system prompt if static/dynamic split is available
         if request.system_prompt_static:
             _system: str | list[dict] = [
@@ -1762,6 +1780,8 @@ class ReasoningService:
                 max_tokens=request.max_tokens,
             )
         except (ReasoningProviderError, ReasoningConnectionError) as primary_exc:
+            self._trace(request, "error", "reasoning", "PROVIDER_EXHAUSTED",
+                f"primary failed: {str(primary_exc)[:200]}", phase="reason")
             if not self._fallback_providers:
                 raise
             # Primary provider exhausted retries — try fallback chain
@@ -1769,6 +1789,8 @@ class ReasoningService:
             for _fb in self._fallback_providers:
                 _fb_name = getattr(_fb, 'provider_name', 'unknown')
                 _fb_model = getattr(_fb, 'main_model', request.model)
+                self._trace(request, "warning", "reasoning", "FALLBACK",
+                    f"trying {_fb_name}/{_fb_model}", phase="reason")
                 logger.warning("FALLBACK: trying %s/%s after %s",
                     _fb_name, _fb_model, type(_last_exc).__name__)
                 try:
@@ -1779,14 +1801,20 @@ class ReasoningService:
                         tools=tools,
                         max_tokens=request.max_tokens,
                     )
+                    self._trace(request, "info", "reasoning", "FALLBACK_SUCCESS",
+                        f"via {_fb_name}/{_fb_model}", phase="reason")
                     logger.info("FALLBACK: success via %s/%s", _fb_name, _fb_model)
                     break  # Success — use this response
                 except Exception as fb_exc:
+                    self._trace(request, "warning", "reasoning", "FALLBACK_FAILED",
+                        f"{_fb_name}/{_fb_model}: {str(fb_exc)[:150]}", phase="reason")
                     logger.warning("FALLBACK: %s/%s also failed: %s", _fb_name, _fb_model, fb_exc)
                     _last_exc = fb_exc
                     continue
             else:
                 # All fallbacks exhausted
+                self._trace(request, "error", "reasoning", "ALL_PROVIDERS_FAILED",
+                    f"all {len(self._fallback_providers)} fallbacks exhausted", phase="reason")
                 logger.error("FALLBACK: all %d providers failed", len(self._fallback_providers))
                 raise primary_exc from _last_exc
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -2038,6 +2066,8 @@ class ReasoningService:
                 len(messages), len(tools), request.max_tokens,
             )
             t0 = time.monotonic()
+            if hasattr(self._provider, '_trace'):
+                self._provider._trace = getattr(request, 'trace', None)
             try:
                 response = await self._provider.complete(
                     model=request.model,
@@ -2047,6 +2077,8 @@ class ReasoningService:
                     max_tokens=request.max_tokens,
                 )
             except (ReasoningProviderError, ReasoningConnectionError) as tool_loop_exc:
+                self._trace(request, "error", "reasoning", "TOOLLOOP_PROVIDER_FAILED",
+                    f"iter={iterations} error={str(tool_loop_exc)[:150]}", phase="reason")
                 if not self._fallback_providers:
                     raise
                 # Tool-loop iteration failed — try fallback chain
@@ -2054,6 +2086,8 @@ class ReasoningService:
                 for _fb in self._fallback_providers:
                     _fb_name = getattr(_fb, 'provider_name', 'unknown')
                     _fb_model = getattr(_fb, 'main_model', request.model)
+                    self._trace(request, "warning", "reasoning", "FALLBACK_TOOLLOOP",
+                        f"trying {_fb_name}/{_fb_model} iter={iterations}", phase="reason")
                     logger.warning("FALLBACK_TOOLLOOP: trying %s/%s iter=%d",
                         _fb_name, _fb_model, iterations)
                     try:

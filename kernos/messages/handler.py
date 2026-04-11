@@ -4284,6 +4284,7 @@ class MessageHandler:
             trigger="user_message", active_space_id=ctx.active_space_id,
             input_text=ctx.message.content, active_space=ctx.active_space,
             user_timezone=ctx.soul.timezone,
+            trace=ctx.trace,
         )
         ctx.task = await self.engine.execute(ctx.task, request)
         ctx.response_text = ctx.task.result_text
