@@ -1,8 +1,8 @@
 ## NOW
 
-**Status:** Improvement Loop Tier 2 + Follow-up Tracking + Whisper Hardening shipped. 1733 tests.
+**Status:** Improvement Loop Tier 2 shipped. Follow-up tracking shipped. Whisper hardening shipped. 1733 tests.
 **Owner:** Founder
-**Action:** Resume demo deployment + continued live testing.
+**Action:** Extended live testing + next build item.
 **Tests:** 1733
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
@@ -47,9 +47,11 @@ None currently active. Next spec will be assigned by founder.
 | IL-1 | Improvement Loop Pass 1 — covenant selective injection (pinned/situational tiers) | 1655 | 2026-04-10 |
 | IL-2 | Improvement Loop Pass 2 — behavioral pattern detection, friction→whisper loop | 1688 | 2026-04-10 |
 | IL-3 | Improvement Loop Pass 3 — positive workflow capture from compaction | 1693 | 2026-04-10 |
+| COV-R | Default Covenants Revision — 8 covenants incl. spirit type, user-intent-is-authorization, information stewardship | 1693 | 2026-04-11 |
 | IL-T2 | Improvement Loop Tier 2 — runtime trace, diagnostic tools (diagnose/propose/submit), /debug | 1721 | 2026-04-11 |
-| FUT | Follow-Up Tracking — compaction-extracted commitments → triggers, dedup, provenance | 1733 | 2026-04-11 |
-| WH | Whisper Hardening — dedup by foresight_signal, 48h expiry, busy-state suppression | 1733 | 2026-04-11 |
+| TI-FIX | Trace Instrumentation Fix — collector threaded through handler → reasoning → providers | 1721 | 2026-04-11 |
+| FUT | Follow-Up Tracking — compaction-driven trigger creation for implicit commitments/deadlines | 1733 | 2026-04-11 |
+| WH | Whisper Hardening — dedup, 48h expiry, busy-state suppression | 1733 | 2026-04-11 |
 
 ---
 
@@ -85,6 +87,14 @@ These are load-bearing decisions that Claude Code should always respect:
 14. **Plans never rot.** Three-tier resilience: provider retries → step retries with backoff → hourly slow-poll. Plan sweep every 10 minutes catches stale plans. Recovery on restart re-enqueues in-progress steps. Only explicit user action pauses a plan.
 15. **Personality via principles, not traits.** "Your personality is the shape of your attention." Decision principles produce behavior; trait lists produce cosplay. Operating principles split into core non-negotiables (always enforced) and situational guidance (prefer/generally).
 16. **Covenant selective injection.** Covenants classified as pinned (safety, system) or situational (preferences). MessageAnalyzer selects relevant situational covenants per turn. Prevents prompt bloat as covenants accumulate.
+17. **User intent IS authorization.** When the user explicitly requests an action (amount, recipient, target specified), don't re-confirm. Their request is the confirmation. Gate only intervenes for ambiguous + high-stakes.
+18. **Information belongs to whoever shared it.** Routine information flows naturally between known contacts. Sensitive/confidential information requires the sharer's consent before disclosure — even to people they know well.
+19. **Spirit covenant renders first.** The agent reads purpose and warmth before rules and constraints. "You got this" before "never do X."
+20. **browser-use REJECTED.** Nested agent frameworks that wrap the LLM in another agent layer are an anti-pattern for Kernos. Native MCP tools (Lightpanda) are the right abstraction.
+21. **DuckDuckGo as search fallback.** Brave primary → DDG safety net on rate limit. Self-hosted SearXNG parked as future option if Brave remains problematic.
+22. **Follow-ups: dual-path.** Explicit via manage_schedule (real-time), implicit via compaction extraction (safety net). Compaction follow-ups are provisional — deduped against existing triggers before creation.
+23. **Whisper delivery: ambient by default.** Direct message only for EXTERNAL_DEADLINE type with due date within 24 hours. Everything else surfaces as a whisper the agent weaves into conversation.
+24. **90-day horizon cap.** Compaction-extracted follow-ups beyond 90 days are rejected. Long-horizon items belong in Living State or Ledger, not triggers.
 
 ---
 
