@@ -2,7 +2,7 @@
 
 > **What this is:** A map of what exists today — components, data structures, data flows, and interfaces. The agent reads this via `read_doc`. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-04-06 (reflects: CS-1 through CS-5, Tool Surfacing Redesign, AW-1 through AW-4, Context UI Hotfix, Architecture Audit)
+> **Last updated:** 2026-04-12 (reflects: through SQLite State Migration, Bjork Activation, Improvement Loop T1+T2, Self-Directed Execution)
 
 ---
 
@@ -411,7 +411,29 @@ Background task. Evaluates proactive insights ("whispers") on a timer (default 1
 
 ---
 
-## 13. Capabilities & MCP
+## 13. State Storage
+
+### SQLite Backend
+
+**File:** `kernos/kernel/state_sqlite.py`
+
+`SqliteStateStore` implements the `StateStore` ABC (38 methods) using SQLite + WAL mode. One database per tenant (`data/{tenant}/kernos.db`). Hybrid storage: frequently queried fields as indexed columns, rest in JSON overflow blob. Selectable via `KERNOS_STORE_BACKEND=sqlite` env var. `JsonStateStore` remains as fallback.
+
+### Instance Database
+
+**File:** `kernos/kernel/instance_db.py`
+
+Shared database (`data/instance.db`) for cross-tenant state: members, member_channels, message_relay (V2), shared_spaces (V2). Nearly empty in V1 — just the owner as a member. Architectural slot for multi-tenant without a second migration.
+
+### Migration Tool
+
+**File:** `kernos/tools/migrate_to_sqlite.py`
+
+One-time per-tenant migration: reads JSON files, writes to SQLite, validates counts, backs up JSON to `json_backup/`. Supports `--dry-run`.
+
+---
+
+## 14. Capabilities & MCP
 
 ### Connected Servers
 

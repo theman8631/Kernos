@@ -249,7 +249,33 @@ async def on_ready():
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
     events = JsonEventStream(data_dir)
-    state = JsonStateStore(data_dir)
+    store_backend = os.getenv("KERNOS_STORE_BACKEND", "json")
+    if store_backend == "sqlite":
+        from kernos.kernel.state_sqlite import SqliteStateStore
+        state = SqliteStateStore(data_dir)
+        logger.info("State backend: SQLite (WAL mode)")
+    else:
+        state = JsonStateStore(data_dir)
+        logger.info("State backend: JSON files")
+
+    # Initialize instance database (shared across all tenants)
+    from kernos.kernel.instance_db import InstanceDB
+    instance_db = InstanceDB(data_dir)
+    try:
+        await instance_db.connect()
+        # Register the owner as a member
+        _owner_discord = os.getenv("DISCORD_OWNER_ID", "")
+        _tenant_id = os.getenv("KERNOS_INSTANCE_ID", "")
+        if _owner_discord and _tenant_id:
+            await instance_db.ensure_owner(
+                member_id=f"discord:{_owner_discord}",
+                display_name="owner",
+                tenant_id=_tenant_id,
+                platform="discord",
+                channel_id=_owner_discord,
+            )
+    except Exception as exc:
+        logger.warning("Instance DB init failed (non-fatal): %s", exc)
 
     try:
         await emit_event(

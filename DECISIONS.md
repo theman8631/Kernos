@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Improvement Loop Tier 2 shipped. Follow-up tracking shipped. Whisper hardening shipped. 1733 tests.
+**Status:** SQLite state migration shipped. Bjork memory activated. 1763 tests.
 **Owner:** Founder
-**Action:** Extended live testing + next build item.
-**Tests:** 1733
+**Action:** Migrate live tenant to SQLite, extended testing.
+**Tests:** 1763
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -52,6 +52,10 @@ None currently active. Next spec will be assigned by founder.
 | TI-FIX | Trace Instrumentation Fix — collector threaded through handler → reasoning → providers | 1721 | 2026-04-11 |
 | FUT | Follow-Up Tracking — compaction-driven trigger creation for implicit commitments/deadlines | 1733 | 2026-04-11 |
 | WH | Whisper Hardening — dedup, 48h expiry, busy-state suppression | 1733 | 2026-04-11 |
+| COV-R2 | Default Covenants Revision — 8 covenants incl. spirit, stewardship, response depth | 1733 | 2026-04-11 |
+| CAL-TZ | Calendar Timezone Fix + orphaned plan steps + brave_local_search removal | 1733 | 2026-04-11 |
+| BJORK | Bjork Dual-Strength Activation — retrieval ranking, reinforcement on use, storage on REINFORCE | 1746 | 2026-04-12 |
+| SQLITE | SQLite State Migration — SqliteStateStore (38 methods), instance.db, migration tool | 1763 | 2026-04-12 |
 
 ---
 
@@ -95,6 +99,8 @@ These are load-bearing decisions that Claude Code should always respect:
 22. **Follow-ups: dual-path.** Explicit via manage_schedule (real-time), implicit via compaction extraction (safety net). Compaction follow-ups are provisional — deduped against existing triggers before creation.
 23. **Whisper delivery: ambient by default.** Direct message only for EXTERNAL_DEADLINE type with due date within 24 hours. Everything else surfaces as a whisper the agent weaves into conversation.
 24. **90-day horizon cap.** Compaction-extracted follow-ups beyond 90 days are rejected. Long-horizon items belong in Living State or Ledger, not triggers.
+25. **SQLite per tenant, instance.db shared.** Each tenant gets `data/{tenant}/kernos.db` with WAL mode. Shared cross-tenant state (members, channels, relay) lives in `data/instance.db`. Schema designed for access patterns, not JSON mirroring — indexed columns for queries, JSON overflow for rare fields.
+26. **Bjork dual-strength memory.** Knowledge entries ranked by `compute_retrieval_strength()` before MessageAnalyzer sees them. Well-established facts (high storage_strength) resist decay. Entries below 0.10 strength filtered entirely. Replaces the crude `_is_stale_knowledge(days=14)` check.
 
 ---
 
