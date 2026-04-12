@@ -13,9 +13,6 @@ from mcp.client.stdio import stdio_client
 if TYPE_CHECKING:
     from kernos.kernel.events import EventStream
 
-# Brave search tools eligible for DDG fallback on rate limit
-_BRAVE_SEARCH_TOOLS = frozenset({"brave_web_search", "brave_local_search"})
-
 
 @dataclass
 class AuthCommand:
@@ -449,66 +446,6 @@ class MCPClientManager:
         """Return the timeout for a given tool."""
         return TOOL_TIMEOUT_OVERRIDES.get(tool_name, TOOL_TIMEOUT_SECONDS)
 
-    # ------------------------------------------------------------------
-    # Search fallback: Brave rate limit → DuckDuckGo
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _is_rate_limit_error(result: str) -> bool:
-        """Check if a tool result indicates a rate limit error."""
-        lower = result.lower()
-        return any(s in lower for s in ["rate limit", "429", "too many requests"])
-
-    async def _search_fallback(self, tool_name: str, tool_args: dict) -> str:
-        """Fallback chain when Brave search hits rate limits.
-
-        brave_local_search → brave_web_search (same query) → DDG → error.
-        brave_web_search → DDG → error.
-        """
-        query = tool_args.get("query", "")
-        count = tool_args.get("count", 10)
-
-        # brave_local_search → try brave_web_search with the same query
-        # (query already contains location terms from the user)
-        if tool_name == "brave_local_search" and "brave_web_search" in self._tool_to_session:
-            logger.info("SEARCH_FALLBACK: local→web query=%r", query)
-            result = await self.call_tool("brave_web_search", {"query": query, "count": count})
-            if not result.startswith("Tool error:"):
-                return result
-            # brave_web_search also rate limited — its own fallback will have
-            # already tried DDG, so just return what it returned
-            return result
-
-        # brave_web_search → DDG
-        logger.info("SEARCH_FALLBACK: query=%r provider=duckduckgo", query)
-        return await self._ddg_web_search(query, count)
-
-    @staticmethod
-    async def _ddg_web_search(query: str, count: int = 10) -> str:
-        """Search DuckDuckGo and format results to match Brave output shape."""
-        import asyncio
-
-        def _search() -> list[dict]:
-            from ddgs import DDGS
-            return DDGS().text(query, max_results=min(count, 20))
-
-        try:
-            results = await asyncio.to_thread(_search)
-            if not results:
-                return "Tool error: DuckDuckGo search returned no results."
-            formatted = []
-            for r in results:
-                formatted.append(
-                    f"Title: {r.get('title', '')}\n"
-                    f"Description: {r.get('body', '')}\n"
-                    f"URL: {r.get('href', '')}"
-                )
-            logger.info("SEARCH_FALLBACK: query=%r provider=duckduckgo results=%d", query, len(results))
-            return "\n\n".join(formatted)
-        except Exception as exc:
-            logger.warning("SEARCH_FALLBACK: DDG failed: %s", exc)
-            return f"Tool error: Search unavailable — both Brave and DuckDuckGo failed. ({exc})"
-
     async def call_tool(self, tool_name: str, tool_args: dict,
                         timeout: float | None = None) -> str:
         """Call an MCP tool by name. Returns result text or an error string.
@@ -632,10 +569,6 @@ class MCPClientManager:
                 "TOOL_FAILED: tool=%s attempts=%d error=%s",
                 tool_name, attempt + 1, error_msg[:200],
             )
-            # Search fallback: Brave rate limit → DDG
-            if (tool_name in _BRAVE_SEARCH_TOOLS
-                    and self._is_rate_limit_error(error_msg)):
-                return await self._search_fallback(tool_name, tool_args)
             return error_msg
 
         # Should not reach here, but satisfy type checker

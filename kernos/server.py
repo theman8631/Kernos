@@ -249,14 +249,14 @@ async def on_ready():
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
     events = JsonEventStream(data_dir)
-    store_backend = os.getenv("KERNOS_STORE_BACKEND", "sqlite")
-    if store_backend == "json":
-        state = JsonStateStore(data_dir)
-        logger.info("State backend: JSON files")
-    else:
+    store_backend = os.getenv("KERNOS_STORE_BACKEND", "json")
+    if store_backend == "sqlite":
         from kernos.kernel.state_sqlite import SqliteStateStore
         state = SqliteStateStore(data_dir)
         logger.info("State backend: SQLite (WAL mode)")
+    else:
+        state = JsonStateStore(data_dir)
+        logger.info("State backend: JSON files")
 
     # Initialize instance database (shared across all tenants)
     from kernos.kernel.instance_db import InstanceDB
