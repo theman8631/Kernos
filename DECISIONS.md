@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Improvement Loop Tier 1 shipped. Self-directed execution shipped. 1693 tests.
+**Status:** Improvement Loop Tier 2 + Follow-up Tracking + Whisper Hardening shipped. 1733 tests.
 **Owner:** Founder
 **Action:** Resume demo deployment + continued live testing.
-**Tests:** 1693
+**Tests:** 1733
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -47,6 +47,9 @@ None currently active. Next spec will be assigned by founder.
 | IL-1 | Improvement Loop Pass 1 — covenant selective injection (pinned/situational tiers) | 1655 | 2026-04-10 |
 | IL-2 | Improvement Loop Pass 2 — behavioral pattern detection, friction→whisper loop | 1688 | 2026-04-10 |
 | IL-3 | Improvement Loop Pass 3 — positive workflow capture from compaction | 1693 | 2026-04-10 |
+| IL-T2 | Improvement Loop Tier 2 — runtime trace, diagnostic tools (diagnose/propose/submit), /debug | 1721 | 2026-04-11 |
+| FUT | Follow-Up Tracking — compaction-extracted commitments → triggers, dedup, provenance | 1733 | 2026-04-11 |
+| WH | Whisper Hardening — dedup by foresight_signal, 48h expiry, busy-state suppression | 1733 | 2026-04-11 |
 
 ---
 
