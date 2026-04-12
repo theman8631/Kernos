@@ -719,12 +719,17 @@ class MessageHandler:
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
 
+    # MCP tools excluded from the catalog (still registered as MCP tools, just not surfaced)
+    _MCP_CATALOG_EXCLUDE = {"brave_local_search"}  # Rate limits on single calls; web_search covers it
+
     def register_mcp_tools_in_catalog(self) -> None:
         """Register MCP tools in the catalog. Called after MCP connect_all."""
         if not self.mcp:
             return
         for tool in self.mcp.get_tools():
             name = tool.get("name", "")
+            if name in self._MCP_CATALOG_EXCLUDE:
+                continue
             desc = tool.get("description", "")
             # Truncate to one line
             if desc:
@@ -1751,11 +1756,16 @@ class MessageHandler:
         merged_orphans: list[str] = []
         while recent_messages and recent_messages[-1]["role"] == "user":
             orphan = recent_messages.pop()
-            merged_orphans.insert(0, orphan["content"])
+            _content = orphan["content"]
+            # Silently discard completed plan step messages — they're stale internal turns
+            if _content.startswith("[PLAN STEP "):
+                logger.debug("ORPHANED_PLAN_STEP: discarded stale step message: %.80s", _content)
+                continue
+            merged_orphans.insert(0, _content)
             logger.info(
                 "ORPHANED_USER_MSG: merging trailing user message into next turn. "
                 "Content: %.100s",
-                orphan["content"],
+                _content,
             )
         # Orphaned content will be prepended to the current user message in _phase_assemble
         if merged_orphans:
