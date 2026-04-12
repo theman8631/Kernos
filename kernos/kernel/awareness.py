@@ -203,9 +203,11 @@ class AwarenessEvaluator:
         interrupt_check_every_n = max(1, 300 // self._trigger_interval)  # ~5 minutes
         event_every_n = max(1, EVENT_POLL_INTERVAL_SECONDS // self._trigger_interval)
         plan_sweep_every_n = max(1, 600 // self._trigger_interval)  # ~10 minutes
+        console_clear_every_n = max(1, 21600 // self._trigger_interval)  # ~6 hours
         _interrupt_tick_count = 0
         _event_tick_count = 0
         _plan_sweep_tick_count = 0
+        _console_clear_tick_count = 0
 
         while self._running:
             self._awareness_tick_count += 1
@@ -307,6 +309,13 @@ class AwarenessEvaluator:
                         raise
                     except Exception as e:
                         logger.warning("PLAN_SWEEP: error: %s", e)
+
+            # Phase 5: Periodic console clear (~6 hours)
+            _console_clear_tick_count += 1
+            if _console_clear_tick_count >= console_clear_every_n:
+                _console_clear_tick_count = 0
+                print("\033[2J\033[H", end="", flush=True)
+                logger.info("CONSOLE_CLEAR: periodic (6h)")
 
             await asyncio.sleep(self._trigger_interval)
 
