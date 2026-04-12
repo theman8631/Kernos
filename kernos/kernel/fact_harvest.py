@@ -243,11 +243,21 @@ async def process_harvest_results(
             elif action == "reinforce":
                 entry_id = item.get("id", "").strip()
                 if entry_id:
+                    # Load entry to increment storage_strength properly
+                    _existing = await state_store.get_knowledge_entry(tenant_id, entry_id)
+                    _ss = (_existing.storage_strength + 1.0) if _existing else 2.0
+                    _rc = (_existing.reinforcement_count + 1) if _existing else 2
                     await state_store.update_knowledge(
                         tenant_id, entry_id,
-                        {"last_referenced": utc_now()},
+                        {
+                            "last_referenced": utc_now(),
+                            "last_reinforced_at": utc_now(),
+                            "reinforcement_count": _rc,
+                            "storage_strength": _ss,
+                        },
                     )
-                    logger.info("FACT_HARVEST_REINFORCE: tenant=%s id=%s", tenant_id, entry_id)
+                    logger.info("FACT_HARVEST_REINFORCE: tenant=%s id=%s storage_strength=%.1f reinforcement_count=%d",
+                        tenant_id, entry_id, _ss, _rc)
         except Exception as exc:
             logger.warning("FACT_HARVEST_ITEM: %s failed: %s", action, exc)
 

@@ -3972,21 +3972,44 @@ class MessageHandler:
             if _is_diagnostic or not user_content.strip():
                 return _empty
 
-            # Build knowledge candidates (Tier 1/2 filtering, same as before)
+            # Build knowledge candidates with Bjork dual-strength ranking
+            from kernos.kernel.state import compute_retrieval_strength
             all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
             always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
             _never_archetypes = {"ephemeral"}
-            candidates = [
-                e for e in all_ke
-                if e not in always_inject
-                and e.lifecycle_archetype not in _never_archetypes
-                and not getattr(e, "expired_at", "")
-                and not (e.lifecycle_archetype == "contextual"
-                         and _is_stale_knowledge(e, days=14))
-            ]
+            _now_iso = utc_now()
+            candidates = []
+            for e in all_ke:
+                if e in always_inject:
+                    continue
+                if e.lifecycle_archetype in _never_archetypes:
+                    continue
+                if getattr(e, "expired_at", ""):
+                    continue
+                # Compute retrieval strength — replaces the crude _is_stale_knowledge check
+                _rs = compute_retrieval_strength(e, _now_iso)
+                if _rs < 0.10:
+                    continue  # Effectively forgotten — skip entirely
+                e._retrieval_strength = _rs  # type: ignore[attr-defined]
+                candidates.append(e)
+
+            # Sort by retrieval strength (strongest first)
+            candidates.sort(key=lambda e: e._retrieval_strength, reverse=True)
+
+            # Budget cap: if over 50 candidates, drop bottom 20% by strength
+            if len(candidates) > 50:
+                _cutoff = int(len(candidates) * 0.8)
+                _dropped = len(candidates) - _cutoff
+                candidates = candidates[:_cutoff]
+                logger.info("KNOWLEDGE_BUDGET: dropped=%d weakest candidates", _dropped)
+
+            if candidates:
+                logger.info("KNOWLEDGE_RANKED: candidates=%d top=%.2f bottom=%.2f",
+                    len(candidates), candidates[0]._retrieval_strength,
+                    candidates[-1]._retrieval_strength if candidates else 0)
 
             candidate_lines = "\n".join(
-                f"- [{e.id}] \"{e.content}\" ({e.lifecycle_archetype})"
+                f"- [{e.id}] \"{e.content}\" ({e.lifecycle_archetype}, strength={e._retrieval_strength:.2f})"
                 for e in candidates
             ) if candidates else "(no candidates)"
 
@@ -4101,6 +4124,17 @@ class MessageHandler:
         _cands = analysis_result.get("_candidates", [])
         shaped = [e for e in _cands if e.id in _relevant_ids]
         user_knowledge_entries = _always + shaped
+
+        # Touch injected entries — updates last_reinforced_at + reinforcement_count
+        # This feeds the Bjork decay model: used entries stay accessible longer
+        for _ke in shaped:
+            try:
+                await self.state.update_knowledge(tenant_id, _ke.id, {
+                    "last_reinforced_at": utc_now(),
+                    "reinforcement_count": getattr(_ke, 'reinforcement_count', 1) + 1,
+                })
+            except Exception:
+                pass
 
         # --- Three-tier tool surfacing (TOOL-SURFACING-REDESIGN) ----------------
         from kernos.kernel.reasoning import REQUEST_TOOL, READ_DOC_TOOL, REMEMBER_DETAILS_TOOL, MANAGE_CAPABILITIES_TOOL
