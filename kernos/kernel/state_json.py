@@ -677,18 +677,47 @@ class JsonStateStore(StateStore):
                 raw[i] = _asdict(whisper)
                 self._write_json(path, raw)
                 return
+        # Dedup: skip if a pending whisper with the same foresight_signal exists
+        _signal = getattr(whisper, 'foresight_signal', '')
+        if _signal:
+            for d in raw:
+                if d.get("foresight_signal") == _signal and not d.get("surfaced_at"):
+                    logger.info("WHISPER_DEDUP: signal=%r already pending, skipping", _signal[:60])
+                    return
         raw.append(_asdict(whisper))
         self._write_json(path, raw)
 
     async def get_pending_whispers(self, tenant_id: str) -> list:
         from kernos.kernel.awareness import Whisper
+        from datetime import datetime, timezone
         path = self._awareness_dir(tenant_id) / "whispers.json"
         raw = self._read_json(path, [])
-        return [
-            Whisper(**d)
-            for d in raw
-            if not d.get("surfaced_at")
-        ]
+        now = datetime.now(timezone.utc)
+        pending = []
+        changed = False
+        for d in raw:
+            if d.get("surfaced_at"):
+                continue
+            # Expire whispers older than 48 hours
+            created = d.get("created_at", "")
+            if created:
+                try:
+                    created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    age_hours = (now - created_dt).total_seconds() / 3600
+                    if age_hours > 48:
+                        d["surfaced_at"] = now.isoformat()  # Mark as resolved
+                        changed = True
+                        logger.info("WHISPER_EXPIRED: id=%s age_hours=%.1f",
+                            d.get("whisper_id", "?"), age_hours)
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            pending.append(Whisper(**d))
+        if changed:
+            self._write_json(path, raw)
+        return pending
 
     async def mark_whisper_surfaced(self, tenant_id: str, whisper_id: str) -> None:
         from datetime import datetime, timezone

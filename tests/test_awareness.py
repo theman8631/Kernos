@@ -530,12 +530,13 @@ class TestQueueBounding:
         events = JsonEventStream(tmp_path)
         evaluator = AwarenessEvaluator(store, events)
 
-        # Create 15 whispers
+        # Create 15 whispers with unique signals (dedup-safe)
         for i in range(15):
             w = _make_whisper(
                 whisper_id=f"wsp_{i:03d}",
                 knowledge_entry_id=f"know_{i}",
                 delivery_class="ambient",
+                foresight_signal=f"signal_{i}",
             )
             await store.save_whisper("test_tenant", w)
 
@@ -548,14 +549,14 @@ class TestQueueBounding:
         events = JsonEventStream(tmp_path)
         evaluator = AwarenessEvaluator(store, events)
 
-        # 8 ambient + 5 stage = 13
+        # 8 ambient + 5 stage = 13 (unique signals for dedup)
         for i in range(8):
             w = _make_whisper(whisper_id=f"wsp_amb_{i}", delivery_class="ambient",
-                              knowledge_entry_id=f"know_a{i}")
+                              knowledge_entry_id=f"know_a{i}", foresight_signal=f"amb_signal_{i}")
             await store.save_whisper("test_tenant", w)
         for i in range(5):
             w = _make_whisper(whisper_id=f"wsp_stg_{i}", delivery_class="stage",
-                              knowledge_entry_id=f"know_s{i}")
+                              knowledge_entry_id=f"know_s{i}", foresight_signal=f"stg_signal_{i}")
             await store.save_whisper("test_tenant", w)
 
         await evaluator._enforce_queue_bound("test_tenant", max_whispers=10)
@@ -572,7 +573,8 @@ class TestQueueBounding:
         evaluator = AwarenessEvaluator(store, events)
 
         for i in range(5):
-            w = _make_whisper(whisper_id=f"wsp_{i}", knowledge_entry_id=f"know_{i}")
+            w = _make_whisper(whisper_id=f"wsp_{i}", knowledge_entry_id=f"know_{i}",
+                              foresight_signal=f"signal_{i}")
             await store.save_whisper("test_tenant", w)
 
         await evaluator._enforce_queue_bound("test_tenant", max_whispers=10)
@@ -734,11 +736,11 @@ class TestHandlerWhisperInjection:
 
         w_ambient = _make_whisper(
             whisper_id="wsp_amb", delivery_class="ambient",
-            knowledge_entry_id="know_2",
+            knowledge_entry_id="know_2", foresight_signal="signal_ambient",
         )
         w_stage = _make_whisper(
             whisper_id="wsp_stg", delivery_class="stage",
-            knowledge_entry_id="know_3",
+            knowledge_entry_id="know_3", foresight_signal="signal_stage",
         )
         await state.save_whisper("test_tenant", w_ambient)
         await state.save_whisper("test_tenant", w_stage)

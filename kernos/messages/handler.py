@@ -1783,6 +1783,22 @@ class MessageHandler:
         if not relevant:
             return ""
 
+        # Busy-state suppression: during active plan execution, defer non-interrupt whispers
+        try:
+            from kernos.kernel.execution import load_plan
+            data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+            _plan = await load_plan(data_dir, tenant_id, active_space_id)
+            if _plan and _plan.get("status") == "active":
+                _deferred = [w for w in relevant if w.delivery_class != "interrupt"]
+                if _deferred:
+                    relevant = [w for w in relevant if w.delivery_class == "interrupt"]
+                    logger.info("WHISPER_DEFERRED: plan=%s deferred=%d non-interrupt whispers",
+                        _plan.get("plan_id", "?"), len(_deferred))
+                    if not relevant:
+                        return ""
+        except Exception:
+            pass
+
         # Sort: stage before ambient
         relevant.sort(key=lambda w: 0 if w.delivery_class == "stage" else 1)
 
