@@ -98,6 +98,13 @@ class InstanceDB:
             stmt = stmt.strip()
             if stmt:
                 await self._conn.execute(stmt)
+        # Migrations: add columns that may be missing from older databases
+        try:
+            await self._conn.execute(
+                "ALTER TABLE invite_codes ADD COLUMN platform TEXT DEFAULT ''"
+            )
+        except Exception:
+            pass  # Column already exists
         await self._conn.commit()
         logger.info("Instance DB ready: %s", self._db_path)
 
