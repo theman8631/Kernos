@@ -1818,6 +1818,14 @@ class ReasoningService:
                     self._trace(request, "info", "reasoning", "FALLBACK_SUCCESS",
                         f"via {_fb_name}/{_fb_model}", phase="reason")
                     logger.info("FALLBACK: success via %s/%s", _fb_name, _fb_model)
+                    # Surface to agent on next turn so they can inform the user
+                    if hasattr(self, '_handler') and self._handler:
+                        self._handler.queue_system_event(
+                            request.instance_id,
+                            f"[SYSTEM] Primary LLM provider failed — this response was handled by "
+                            f"the fallback provider ({_fb_name}/{_fb_model}). The primary provider "
+                            f"may need attention (token refresh, configuration, or service issue)."
+                        )
                     break  # Success — use this response
                 except Exception as fb_exc:
                     self._trace(request, "warning", "reasoning", "FALLBACK_FAILED",
