@@ -374,6 +374,12 @@ async def on_ready():
         name="discord", display_name="Discord", platform="discord",
         can_send_outbound=True, channel_target="",  # Updated per-message
     )
+    # Persist Discord bot identity for invite instructions
+    if client.user:
+        await instance_db.set_platform_config("discord", {
+            "bot_name": client.user.display_name or str(client.user),
+            "bot_id": str(client.user.id),
+        })
 
     # Register SMS channel if Twilio credentials are configured
     twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -398,6 +404,8 @@ async def on_ready():
             interval=float(os.getenv("KERNOS_SMS_POLL_INTERVAL", "30")),
         )
         await sms_poller.start()
+        # Persist SMS identity for invite instructions
+        await instance_db.set_platform_config("sms", {"phone_number": twilio_phone})
         logger.info(
             "SMS channel registered — polling interval=%ss, outbound to %s",
             sms_poller._interval, owner_phone,
@@ -418,6 +426,10 @@ async def on_ready():
             adapter=tg_adapter, handler=handler,
             bot_token=telegram_token,
         )
+        # Discover and persist Telegram bot identity for invite instructions
+        tg_identity = await tg_poller.discover_identity()
+        if tg_identity:
+            await instance_db.set_platform_config("telegram", tg_identity)
         await tg_poller.start()
         logger.info("Telegram channel registered — long polling active")
     else:

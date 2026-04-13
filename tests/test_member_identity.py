@@ -147,3 +147,56 @@ class TestInviteCodes:
         members = await idb.list_members()
         assert len(members[0]["channels"]) == 1
         assert members[0]["channels"][0]["platform"] == "discord"
+
+
+class TestPlatformConfig:
+    async def test_get_empty_config(self, idb):
+        config = await idb.get_platform_config("telegram")
+        assert config == {}
+
+    async def test_set_and_get_config(self, idb):
+        await idb.set_platform_config("telegram", {"bot_username": "my_test_bot", "bot_name": "Test Bot"})
+        config = await idb.get_platform_config("telegram")
+        assert config["bot_username"] == "my_test_bot"
+        assert config["bot_name"] == "Test Bot"
+
+    async def test_update_config(self, idb):
+        await idb.set_platform_config("telegram", {"bot_username": "old_bot"})
+        await idb.set_platform_config("telegram", {"bot_username": "new_bot"})
+        config = await idb.get_platform_config("telegram")
+        assert config["bot_username"] == "new_bot"
+
+    async def test_multiple_platforms(self, idb):
+        await idb.set_platform_config("telegram", {"bot_username": "tg_bot"})
+        await idb.set_platform_config("sms", {"phone_number": "+15551234567"})
+        tg = await idb.get_platform_config("telegram")
+        sms = await idb.get_platform_config("sms")
+        assert tg["bot_username"] == "tg_bot"
+        assert sms["phone_number"] == "+15551234567"
+
+
+class TestDynamicInviteInstructions:
+    async def test_telegram_with_username(self, idb):
+        await idb.set_platform_config("telegram", {"bot_username": "kernos_test_bot"})
+        instructions = await idb.get_invite_instructions("telegram")
+        assert "@kernos_test_bot" in instructions
+
+    async def test_telegram_without_username(self, idb):
+        instructions = await idb.get_invite_instructions("telegram")
+        assert "Kernos bot" in instructions  # Fallback text
+        assert "@" not in instructions
+
+    async def test_discord_with_bot_name(self, idb):
+        await idb.set_platform_config("discord", {"bot_name": "Kernos#1234"})
+        instructions = await idb.get_invite_instructions("discord")
+        assert "Kernos#1234" in instructions
+
+    async def test_sms_with_phone(self, idb):
+        await idb.set_platform_config("sms", {"phone_number": "+15551234567"})
+        instructions = await idb.get_invite_instructions("sms")
+        assert "+15551234567" in instructions
+
+    async def test_invite_code_includes_dynamic_instructions(self, idb):
+        await idb.set_platform_config("telegram", {"bot_username": "dynamic_bot"})
+        result = await idb.create_invite_code("owner1", platform="telegram", display_name="Sarah")
+        assert "@dynamic_bot" in result["instructions"]

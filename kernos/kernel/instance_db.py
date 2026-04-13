@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS shared_spaces (
     updated_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS platform_config (
+    platform    TEXT PRIMARY KEY,
+    config      TEXT DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS invite_codes (
     code         TEXT PRIMARY KEY,
     created_by   TEXT NOT NULL,
@@ -134,8 +139,8 @@ class InstanceDB:
         )
         await self._conn.commit()
 
-    # Platform-specific instructions returned with invite codes
-    _INVITE_INSTRUCTIONS: dict[str, str] = {
+    # Fallback invite instructions when platform_config is unavailable
+    _INVITE_INSTRUCTIONS_FALLBACK: dict[str, str] = {
         "discord": (
             "Send this code as a DM to the Kernos bot on Discord. "
             "The bot will recognize the code and link your account."
@@ -149,6 +154,34 @@ class InstanceDB:
             "The system will recognize the code and link your account."
         ),
     }
+
+    async def get_invite_instructions(self, platform: str) -> str:
+        """Get invite instructions with actual bot handle/phone interpolated."""
+        config = await self.get_platform_config(platform)
+        if platform == "telegram":
+            username = config.get("bot_username", "")
+            if username:
+                return (
+                    f"Open Telegram, search for @{username}, and send this code as a message. "
+                    f"The bot will recognize the code and link your account."
+                )
+        elif platform == "discord":
+            bot_name = config.get("bot_name", "")
+            if bot_name:
+                return (
+                    f"Send this code as a DM to {bot_name} on Discord. "
+                    f"The bot will recognize the code and link your account."
+                )
+        elif platform == "sms":
+            phone = config.get("phone_number", "")
+            if phone:
+                return (
+                    f"Text this code to {phone}. "
+                    f"The system will recognize the code and link your account."
+                )
+        return self._INVITE_INSTRUCTIONS_FALLBACK.get(
+            platform, f"Send this code on {platform} to connect."
+        )
 
     _SETUP_INSTRUCTIONS: dict[str, str] = {
         "discord": (
@@ -218,17 +251,40 @@ class InstanceDB:
 
     # --- Invite Codes ---
 
-    def get_invite_instructions(self, platform: str) -> str:
-        """Get invite instructions for a platform. Extensible for future adapters."""
-        return self._INVITE_INSTRUCTIONS.get(platform, f"Send this code to Kernos via {platform}.")
-
     def get_setup_instructions(self, platform: str) -> str:
         """Get first-time setup instructions for a platform."""
         return self._SETUP_INSTRUCTIONS.get(platform, f"Setup instructions for {platform} are not yet available.")
 
     def get_supported_platforms(self) -> list[str]:
         """Return all platforms that have known instructions."""
-        return list(self._INVITE_INSTRUCTIONS.keys())
+        return list(self._INVITE_INSTRUCTIONS_FALLBACK.keys())
+
+    async def get_platform_config(self, platform: str) -> dict:
+        """Get persisted config for a platform (bot username, phone number, etc.)."""
+        if not self._conn:
+            return {}
+        async with self._conn.execute(
+            "SELECT config FROM platform_config WHERE platform=?", (platform,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
+
+    async def set_platform_config(self, platform: str, config: dict) -> None:
+        """Persist config for a platform (bot username, phone number, etc.)."""
+        if not self._conn:
+            return
+        await self._conn.execute(
+            "INSERT INTO platform_config (platform, config) VALUES (?, ?) "
+            "ON CONFLICT(platform) DO UPDATE SET config=?",
+            (platform, json.dumps(config), json.dumps(config)),
+        )
+        await self._conn.commit()
+        logger.info("Platform config stored: %s → %s", platform, list(config.keys()))
 
     async def create_invite_code(
         self, created_by: str, platform: str,
@@ -265,7 +321,7 @@ class InstanceDB:
         logger.info("INVITE_CODE_CREATED: code=%s by=%s for=%s name=%s platform=%s expires=%s",
             code, created_by, for_member or "new_user", display_name, platform, expires[:10])
 
-        instructions = self.get_invite_instructions(platform)
+        instructions = await self.get_invite_instructions(platform)
         return {
             "code": code,
             "platform": platform,

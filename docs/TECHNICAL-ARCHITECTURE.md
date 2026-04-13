@@ -471,7 +471,13 @@ Three adapters: Discord (event-driven via discord.py), SMS (Twilio polling), Tel
 
 ### Invite Codes (Platform-Locked)
 
-Codes are KERN-XXXX format, one-time use, platform-locked at generation. A code for Discord rejects on Telegram/SMS. The `manage_members` tool returns the code AND platform-specific instructions. If the platform isn't connected (no adapter registered), setup instructions are returned instead. Instructions registry (`_INVITE_INSTRUCTIONS`, `_SETUP_INSTRUCTIONS`) is extensible for future adapters.
+Codes are KERN-XXXX format, one-time use, platform-locked at generation. A code for Discord rejects on Telegram/SMS. The `manage_members` tool returns the code AND platform-specific instructions. If the platform isn't connected (no adapter registered), setup instructions are returned instead.
+
+### Platform Identity Discovery
+
+Each adapter discovers its public-facing identity on startup (Telegram: `getMe` → bot username, Discord: `client.user`, SMS: phone from env) and persists to the `platform_config` table in `instance.db`. `get_invite_instructions()` interpolates the actual handle into invite instructions — `@my_bot` instead of "find the Kernos bot."
+
+Adapter development methodology: `docs/ADAPTER-GUIDE.md`.
 
 ### Secure Credential Input for Adapters
 

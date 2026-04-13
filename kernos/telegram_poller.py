@@ -36,6 +36,27 @@ class TelegramPoller:
             self._http = httpx.AsyncClient(timeout=self._poll_timeout + 10)
         return self._http
 
+    async def discover_identity(self) -> dict:
+        """Call Telegram's getMe to learn the bot's username and display name.
+
+        Returns dict with bot_username, bot_name. Empty dict on failure.
+        """
+        try:
+            http = await self._ensure_http()
+            resp = await http.get(f"{self._base_url}/getMe")
+            if resp.status_code == 200:
+                data = resp.json().get("result", {})
+                identity = {
+                    "bot_username": data.get("username", ""),
+                    "bot_name": data.get("first_name", ""),
+                }
+                logger.info("TELEGRAM_IDENTITY: @%s (%s)", identity["bot_username"], identity["bot_name"])
+                return identity
+            logger.warning("TELEGRAM_IDENTITY: getMe returned %d", resp.status_code)
+        except Exception as exc:
+            logger.warning("TELEGRAM_IDENTITY: getMe failed: %s", exc)
+        return {}
+
     async def start(self) -> None:
         self._task = asyncio.create_task(self._poll_loop())
 

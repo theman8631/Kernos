@@ -1041,6 +1041,11 @@ class MessageHandler:
                 tg_poller = TelegramPoller(
                     adapter=tg_adapter, handler=self, bot_token=token,
                 )
+                # Discover and persist bot identity for invite instructions
+                if hasattr(self, '_instance_db') and self._instance_db:
+                    tg_identity = await tg_poller.discover_identity()
+                    if tg_identity:
+                        await self._instance_db.set_platform_config("telegram", tg_identity)
                 await tg_poller.start()
                 logger.info("Hot-started Telegram adapter — long polling active")
                 return True
