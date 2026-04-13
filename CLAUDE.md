@@ -9,6 +9,7 @@ A personal agentic operating system. As-built architecture: `docs/TECHNICAL-ARCH
 1. **Read `DECISIONS.md` first.** The NOW block tells you what to do. It contains the Active Spec you should execute and recent architectural decisions. If something in DECISIONS.md conflicts with other documents, DECISIONS.md wins (it's more recent).
 2. **Read `docs/TECHNICAL-ARCHITECTURE.md`** for as-built architecture — components, data flows, interfaces. (`docs/BLUEPRINT.md` is a historical vision document, not the current reference.)
 3. **Execute only the Active Spec** in DECISIONS.md. Don't jump ahead to future phases. Don't build things not in the current spec. Planning lives in Notion; specs come to you via DECISIONS.md.
+4. **Check instance_id naming** — the codebase uses `instance_id` (not `tenant_id`). All state is keyed to `instance_id`.
 
 ## Kernel Architecture Context
 
@@ -16,7 +17,7 @@ For Phase 1B work, read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel des
 
 - **Event emission is best-effort.** Every `emit()` call is wrapped in try/except. Event logging failures never break the user's message flow.
 - **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.
-- **Concurrency:** JSON-on-disk uses `filelock` for single-process safety. Not safe for multi-worker. The abstract interfaces allow swapping backends.
+- **Concurrency:** SQLite with WAL mode (shipped 2026-04-12). Concurrent reads supported. Write serialization handled by SQLite's single-writer model. busy_timeout=5000ms. Legacy JSON backend available via `KERNOS_STORE_BACKEND=json`.
 - **Shadow archive:** No method permanently deletes data. "Removal" sets `active: false`.
 - **Cost logging:** Every reasoning call logs model, tokens, estimated cost, duration via events.
 

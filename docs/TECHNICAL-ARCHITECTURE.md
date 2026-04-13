@@ -2,7 +2,7 @@
 
 > **What this is:** A map of what exists today — components, data structures, data flows, and interfaces. The agent reads this via `read_doc`. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-04-12 (reflects: through SQLite State Migration, Bjork Activation, Improvement Loop T1+T2, Self-Directed Execution)
+> **Last updated:** 2026-04-12 (reflects: through Member Identity, SQLite Migration, Bjork Activation, Improvement Loop T1+T2, Self-Directed Execution, Follow-Up Tracking, Whisper Hardening)
 
 ---
 
@@ -424,6 +424,32 @@ Background task. Evaluates proactive insights ("whispers") on a timer (default 1
 **File:** `kernos/kernel/instance_db.py`
 
 Shared database (`data/instance.db`) for cross-instance state: members, member_channels, message_relay (V2), shared_spaces (V2). Nearly empty in V1 — just the owner as a member. Architectural slot for multi-instance without a second migration.
+
+---
+
+## 13b. Member Identity
+
+**File:** `kernos/kernel/instance_db.py`, `kernos/kernel/members.py`
+
+### Resolution Flow
+
+Every incoming message is resolved to a member_id via instance.db before entering the handler pipeline. Known senders (platform + channel_id in member_channels table) → full pipeline. Unknown senders → static rejection, zero LLM calls.
+
+### Invite Code System (KERN-XXXX)
+
+One mechanism, three use cases: new user registration, existing user connecting a new platform, and spam rejection. Codes are one-time-use with configurable expiry (default 72h). `manage_members` kernel tool: invite, connect_platform, list, remove.
+
+### Bjork Dual-Strength Memory
+
+Knowledge entries ranked by `compute_retrieval_strength()` before the MessageAnalyzer sees them. Storage strength grows with compaction REINFORCE (user re-confirms a fact). Retrieval strength decays over time modulated by archetype (identity=730 days, ephemeral=1 day). Entries below 0.10 strength filtered. Entries touched on injection get reinforcement_count bumped.
+
+### Follow-Up Tracking
+
+Compaction extracts implicit follow-ups (FOLLOW_UPS section): USER_COMMITMENT, AGENT_COMMITMENT, EXTERNAL_DEADLINE, FOLLOW_UP. Creates triggers with `source="compaction_follow_up"`. Deduped against existing triggers. 90-day horizon cap.
+
+### Whisper Hardening
+
+Dedup by foresight_signal (no duplicate pending whispers). 48-hour expiry (stale whispers auto-expire). Busy-state suppression (non-interrupt whispers deferred during active plan execution).
 
 ---
 

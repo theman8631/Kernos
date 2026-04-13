@@ -9,8 +9,8 @@ text message, and earns trust through thousands of correct small actions. Built
 for non-technical users first, with kernel-level safety, memory, and
 orchestration under the hood.
 
-**Status:** 1218 tests passing. Core infrastructure shipped. Active development
-focused on conversation continuity, compaction, and deep recall.
+**Status:** 1773 tests passing. Core architecture shipped. Active development:
+multi-member identity, deep memory, universal connections.
 
 ## What Kernos Does
 
@@ -21,27 +21,36 @@ focused on conversation continuity, compaction, and deep recall.
 - **Learns your preferences** — extracts behavioral patterns from conversation and adapts
 - **Searches and browses** — web search and full page browsing built in
 - **Schedules and reminds** — "Remind me to check on Henderson in 2 hours" just works
+- **Self-improves** — behavioral pattern detection, friction observer, runtime diagnostics, structured spec proposals
+- **Executes plans autonomously** — multi-step research, builds, and synthesis with budget ceilings and user interrupts
+- **Builds tools on demand** — workspace code execution, tool registration, workspace manifests
+- **Tracks commitments** — implicit obligations extracted from compaction, auto-trigger creation
+- **Supports multiple members** — invite code registration, per-member context, knowledge scoping by visibility
 
 ## Architecture
 
-Kernos is built on five primitives: **Memory** (knowledge graph + entity resolution), **Context Spaces** (topic-based conversation routing), **Behavioral Contracts** (covenants the user defines), **Capabilities** (MCP-based tool integration), and **Awareness** (proactive signals from the environment).
+Kernos is built on five primitives: **Memory** (knowledge graph + entity resolution + Bjork dual-strength decay), **Context Spaces** (topic-based conversation routing with hierarchical inheritance), **Behavioral Contracts** (covenants the user defines, including a "spirit" type that renders before rules), **Capabilities** (MCP-based tool integration with three-tier surfacing), and **Awareness** (proactive signals, whispers, follow-up tracking).
 
 The agent thinks freely. The kernel enforces safety. Tool calls go through a dispatch gate. Covenants and validation layers shape what the agent is allowed to do and say. The system prompt creates a confident agent — infrastructure handles the guardrails.
 
+**Storage:** SQLite with WAL mode (one database per instance + shared instance.db). **Execution:** Self-directed plans with three-tier resilience and provider fallback chains. **Improvement Loop:** Friction detection → behavioral patterns → covenant/procedure proposals → runtime diagnostics → structured spec generation.
+
 ### Key Design Principles
 
-- **Memory as the moat** — persistent, structured, evolving knowledge is the core differentiator
+- **Memory as the moat** — persistent, structured, evolving knowledge with dual-strength decay
 - **Ambient, not demanding** — works without requiring user presence
 - **No destructive deletions** — shadow archive architecture
 - **Multi-instance from day one** — every state piece keyed to `instance_id`
-- **Provider-flexible** — supports Anthropic (Claude) and OpenAI Codex (ChatGPT OAuth)
+- **Provider-flexible** — supports Anthropic (Claude), OpenAI Codex, Ollama (Gemma 4, GLM-5.1) with automatic fallback chains
+- **Personality via principles, not traits** — "Your personality is the shape of your attention"
 
 ## Current State
 
-Kernos is functional and under active development. The core infrastructure —
-memory, context spaces, behavioral contracts, scheduling, proactive awareness,
-and cross-channel communication — is in place. Current work is improving
-conversation continuity, compaction pipelines, and deep recall.
+Kernos is functional and under active development. The full architecture — memory,
+context spaces, self-directed execution, behavioral contracts, scheduling,
+proactive awareness, improvement loop, member identity, and cross-channel
+communication — is shipped and live-tested. Current work: multi-member messaging,
+voice integration, and deep memory enhancements.
 
 ## Documentation
 
@@ -70,8 +79,17 @@ Entity resolution + fact dedup, context space routing (LLM router), compaction (
 **Phase 3 — Agent Workspace + Safety Infrastructure:**
 Per-space file system, tool scoping + MCP installation, proactive awareness, dispatch gate, self-documentation, covenants, scheduler, cross-channel instance identity, lazy tool loading, and per-space conversation logs.
 
-**Current — Conversation Log Pipeline:**
-Space-based conversation logs replacing channel-specific storage. P1 (write), P2 (context assembly), P3 (compaction) shipped. P4 (deep recall) in progress.
+**Phase 4 — Hardening + Preferences:**
+Runtime hardening, preference system (6A), friction observer, prompt-contract reduction.
+
+**Phase 5 — Context Intelligence:**
+Context spaces (hierarchy, migration), tool surfacing redesign, agentic workspace, tool window, procedural knowledge, cohort optimization.
+
+**Phase 6 — Self-Directed Execution + Improvement Loop:**
+Plan management (create/continue/pause), three-tier plan resilience, provider fallback chains (Codex → GLM → MiniMax → Gemma), behavioral pattern detection, covenant selective injection, follow-up tracking, runtime trace, diagnostic tools.
+
+**Phase 7 — Infrastructure + Identity:**
+SQLite state migration (WAL mode), instance.db, Bjork dual-strength memory activation, instance_id rename, member identity & resolution (invite codes, manage_members).
 
 ## Quick Start
 

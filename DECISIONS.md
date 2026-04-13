@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** SQLite state migration shipped. Bjork memory activated. 1763 tests.
+**Status:** Member Identity shipped. instance_id rename complete. SQLite backend live. Bjork memory active. 1773 tests.
 **Owner:** Founder
-**Action:** Migrate live tenant to SQLite, extended testing.
-**Tests:** 1763
+**Action:** Extended live testing of member identity + Bjork strength. Next spec: Cross-Member Messaging.
+**Tests:** 1773
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -55,7 +55,9 @@ None currently active. Next spec will be assigned by founder.
 | COV-R2 | Default Covenants Revision — 8 covenants incl. spirit, stewardship, response depth | 1733 | 2026-04-11 |
 | CAL-TZ | Calendar Timezone Fix + orphaned plan steps + brave_local_search removal | 1733 | 2026-04-11 |
 | BJORK | Bjork Dual-Strength Activation — retrieval ranking, reinforcement on use, storage on REINFORCE | 1746 | 2026-04-12 |
-| SQLITE | SQLite State Migration — SqliteStateStore (38 methods), instance.db, migration tool | 1763 | 2026-04-12 |
+| SQLITE | SQLite State Migration — SqliteStateStore (38 methods), instance.db, WAL mode, future-proof schema | 1763 | 2026-04-12 |
+| RENAME | instance_id Rename — mechanical rename tenant_id → instance_id across entire codebase | 1756 | 2026-04-12 |
+| MEMBER | Member Identity & Resolution — invite codes (KERN-XXXX), manage_members tool, per-member scoping | 1773 | 2026-04-12 |
 
 ---
 
@@ -101,6 +103,8 @@ These are load-bearing decisions that Claude Code should always respect:
 24. **90-day horizon cap.** Compaction-extracted follow-ups beyond 90 days are rejected. Long-horizon items belong in Living State or Ledger, not triggers.
 25. **SQLite per instance, instance.db shared.** Each instance gets `data/{instance}/kernos.db` with WAL mode. Shared cross-instance state (members, channels, relay) lives in `data/instance.db`. Schema designed for access patterns, not JSON mirroring — indexed columns for queries, JSON overflow for rare fields.
 26. **Bjork dual-strength memory.** Knowledge entries ranked by `compute_retrieval_strength()` before MessageAnalyzer sees them. Well-established facts (high storage_strength) resist decay. Entries below 0.10 strength filtered entirely. Replaces the crude `_is_stale_knowledge(days=14)` check.
+27. **instance_id replaces tenant_id.** Kernos instances aren't tenants — they're Kernos instances. The naming reflects the product, not infrastructure jargon.
+28. **Invite code system: one mechanism, three use cases.** KERN-XXXX codes handle new user registration, existing user connecting a new platform, and spam rejection. One table, one code path. Zero LLM calls for all unregistered sender paths.
 
 ---
 
