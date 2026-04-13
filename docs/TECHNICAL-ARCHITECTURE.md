@@ -2,7 +2,7 @@
 
 > **What this is:** A map of what exists today — components, data structures, data flows, and interfaces. The agent reads this via `read_doc`. If the code and this document disagree, fix this document.
 >
-> **Last updated:** 2026-04-12 (reflects: through Member Identity, SQLite Migration, Bjork Activation, Improvement Loop T1+T2, Self-Directed Execution, Follow-Up Tracking, Whisper Hardening)
+> **Last updated:** 2026-04-12 (reflects: through Telegram Adapter, Platform-Locked Codes, Member Identity, SQLite Migration, Bjork Activation, Improvement Loop T1+T2)
 
 ---
 
@@ -450,6 +450,16 @@ Compaction extracts implicit follow-ups (FOLLOW_UPS section): USER_COMMITMENT, A
 ### Whisper Hardening
 
 Dedup by foresight_signal (no duplicate pending whispers). 48-hour expiry (stale whispers auto-expire). Busy-state suppression (non-interrupt whispers deferred during active plan execution).
+
+---
+
+## 13c. Platform Adapters
+
+Three adapters: Discord (event-driven via discord.py), SMS (Twilio polling), Telegram (Bot API long polling). All follow the same BaseAdapter pattern — `inbound()` converts to NormalizedMessage, `send_outbound()` delivers responses. Adapters are dumb pipe; identity and authorization live in the handler.
+
+### Invite Codes (Platform-Locked)
+
+Codes are KERN-XXXX format, one-time use, platform-locked at generation. A code for Discord rejects on Telegram/SMS. The `manage_members` tool returns the code AND platform-specific instructions. If the platform isn't connected (no adapter registered), setup instructions are returned instead. Instructions registry (`_INVITE_INSTRUCTIONS`, `_SETUP_INSTRUCTIONS`) is extensible for future adapters.
 
 ---
 

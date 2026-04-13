@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Member Identity shipped. instance_id rename complete. SQLite backend live. Bjork memory active. 1773 tests.
+**Status:** Telegram adapter + platform-locked invite codes shipped. 1783 tests.
 **Owner:** Founder
-**Action:** Extended live testing of member identity + Bjork strength. Next spec: Cross-Member Messaging.
-**Tests:** 1773
+**Action:** Live test multi-member flow (Discord → Telegram invite). Next: Cross-Member Messaging.
+**Tests:** 1783
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -58,6 +58,8 @@ None currently active. Next spec will be assigned by founder.
 | SQLITE | SQLite State Migration — SqliteStateStore (38 methods), instance.db, WAL mode, future-proof schema | 1763 | 2026-04-12 |
 | RENAME | instance_id Rename — mechanical rename tenant_id → instance_id across entire codebase | 1756 | 2026-04-12 |
 | MEMBER | Member Identity & Resolution — invite codes (KERN-XXXX), manage_members tool, per-member scoping | 1773 | 2026-04-12 |
+| TELEGRAM | Telegram Adapter — Bot API long polling, text-only V1, 4096-char chunking | 1781 | 2026-04-12 |
+| PLATLOCK | Platform-Locked Invite Codes — codes bound to platform, setup instructions returned with code | 1783 | 2026-04-12 |
 
 ---
 
@@ -105,6 +107,8 @@ These are load-bearing decisions that Claude Code should always respect:
 26. **Bjork dual-strength memory.** Knowledge entries ranked by `compute_retrieval_strength()` before MessageAnalyzer sees them. Well-established facts (high storage_strength) resist decay. Entries below 0.10 strength filtered entirely. Replaces the crude `_is_stale_knowledge(days=14)` check.
 27. **instance_id replaces tenant_id.** Kernos instances aren't tenants — they're Kernos instances. The naming reflects the product, not infrastructure jargon.
 28. **Invite code system: one mechanism, three use cases.** KERN-XXXX codes handle new user registration, existing user connecting a new platform, and spam rejection. One table, one code path. Zero LLM calls for all unregistered sender paths.
+29. **Invite codes are platform-locked.** A code generated for Discord only redeems on Discord. Instructions travel with the code. If the platform isn't set up, the agent gets setup instructions instead of a code. The instructions registry is extensible for future adapters.
+30. **Adapters are dumb pipe.** Discord, SMS, Telegram adapters know their platform and nothing else. Member identity, authorization, and security are handler concerns. Adding a new platform is ~150 lines of adapter + poller.
 
 ---
 
