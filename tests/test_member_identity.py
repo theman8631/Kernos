@@ -54,13 +54,23 @@ class TestInstanceDB:
 
 class TestInviteCodes:
     async def test_create_code(self, idb):
-        code = await idb.create_invite_code("owner1", display_name="Sarah")
-        assert code.startswith("KERN-")
-        assert len(code) == 9  # KERN- + 4 chars
+        result = await idb.create_invite_code("owner1", platform="discord", display_name="Sarah")
+        assert result["code"].startswith("KERN-")
+        assert result["platform"] == "discord"
+        assert "instructions" in result
+
+    async def test_create_requires_platform(self, idb):
+        result = await idb.create_invite_code("owner1", platform="", display_name="Sarah")
+        assert "error" in result
+
+    async def test_instructions_returned(self, idb):
+        result = await idb.create_invite_code("owner1", platform="telegram", display_name="Bob")
+        assert "Telegram" in result["instructions"] or "telegram" in result["instructions"].lower()
 
     async def test_claim_new_user(self, idb):
         await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
-        code = await idb.create_invite_code("owner1", display_name="Sarah")
+        result = await idb.create_invite_code("owner1", platform="sms", display_name="Sarah")
+        code = result["code"]
 
         result = await idb.claim_invite_code(code, "sms", "+15551234567")
         assert result is not None
@@ -74,7 +84,8 @@ class TestInviteCodes:
 
     async def test_claim_channel_add(self, idb):
         await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
-        code = await idb.create_invite_code("owner1", for_member="owner1")
+        r = await idb.create_invite_code("owner1", platform="sms", for_member="owner1")
+        code = r["code"]
 
         result = await idb.claim_invite_code(code, "sms", "+15559876543")
         assert result is not None
@@ -90,9 +101,21 @@ class TestInviteCodes:
         result = await idb.claim_invite_code("KERN-ZZZZ", "sms", "+1555")
         assert result is None
 
+    async def test_platform_enforcement(self, idb):
+        """Code for discord rejected on sms."""
+        await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
+        r = await idb.create_invite_code("owner1", platform="discord", display_name="Sarah")
+        code = r["code"]
+        # Try to claim on wrong platform
+        result = await idb.claim_invite_code(code, "sms", "+15551111111")
+        assert result is not None
+        assert result["action"] == "rejected"
+        assert "discord" in result["static_response"].lower()
+
     async def test_code_used_once(self, idb):
         await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
-        code = await idb.create_invite_code("owner1", display_name="Sarah")
+        r = await idb.create_invite_code("owner1", platform="sms", display_name="Sarah")
+        code = r["code"]
 
         # First claim succeeds
         result1 = await idb.claim_invite_code(code, "sms", "+15551111111")
@@ -102,19 +125,10 @@ class TestInviteCodes:
         result2 = await idb.claim_invite_code(code, "sms", "+15552222222")
         assert result2 is None
 
-    async def test_expired_code_rejected(self, idb):
-        await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
-        code = await idb.create_invite_code("owner1", expires_hours=0)
-        # expires_hours=0 means immediate expiry
-        # But the code was just created — the expiry timestamp is in the past
-        # Actually expires_hours=0 would set expires="" (no expiry). Let me test with -1
-        # The implementation only expires if expires_at is set and past. With 0 hours,
-        # the timedelta is 0 so expires_at = now, which is essentially expired.
-
     async def test_deactivate_member(self, idb):
         await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
-        code = await idb.create_invite_code("owner1", display_name="Bob")
-        await idb.claim_invite_code(code, "sms", "+15553333333")
+        r = await idb.create_invite_code("owner1", platform="sms", display_name="Bob")
+        await idb.claim_invite_code(r["code"], "sms", "+15553333333")
 
         members_before = await idb.list_members()
         assert len(members_before) == 2

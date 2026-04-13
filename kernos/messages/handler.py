@@ -3118,18 +3118,39 @@ class MessageHandler:
             return "Member management is not available (no instance database)."
 
         action = tool_input.get("action", "")
+        platform = tool_input.get("platform", "")
+
+        if action in ("invite", "connect_platform") and not platform:
+            supported = self._instance_db.get_supported_platforms()
+            return f"Error: platform is required. Specify one of: {', '.join(supported)}"
+
+        # Check if platform is set up (has a registered adapter)
+        if platform and action in ("invite", "connect_platform"):
+            if platform not in self._adapters:
+                setup = self._instance_db.get_setup_instructions(platform)
+                return (
+                    f"{platform.title()} is not connected to this Kernos instance yet.\n\n"
+                    f"{setup}"
+                )
 
         if action == "invite":
             display_name = tool_input.get("display_name", "")
             expires = tool_input.get("expires_hours", 72)
-            # Find who's calling (owner)
             members = await self._instance_db.list_members()
             owner = next((m for m in members if m.get("role") == "owner"), None)
             created_by = owner["member_id"] if owner else "unknown"
-            code = await self._instance_db.create_invite_code(
-                created_by=created_by, display_name=display_name, expires_hours=expires)
+            result = await self._instance_db.create_invite_code(
+                created_by=created_by, platform=platform,
+                display_name=display_name, expires_hours=expires)
+            if isinstance(result, dict) and "error" in result:
+                return f"Error: {result['error']}"
+            code = result["code"]
+            instructions = result["instructions"]
             name_part = f" for {display_name}" if display_name else ""
-            return f"Invite code{name_part}: **{code}** (expires in {expires} hours)"
+            return (
+                f"Invite code{name_part}: **{code}** ({platform}, expires in {expires} hours)\n\n"
+                f"Instructions to give them:\n{instructions}"
+            )
 
         elif action == "connect_platform":
             member_id = tool_input.get("member_id", "")
@@ -3139,9 +3160,17 @@ class MessageHandler:
             members = await self._instance_db.list_members()
             owner = next((m for m in members if m.get("role") == "owner"), None)
             created_by = owner["member_id"] if owner else "unknown"
-            code = await self._instance_db.create_invite_code(
-                created_by=created_by, for_member=member_id, expires_hours=expires)
-            return f"Connection code: **{code}**. Send this from the new platform to link it."
+            result = await self._instance_db.create_invite_code(
+                created_by=created_by, platform=platform,
+                for_member=member_id, expires_hours=expires)
+            if isinstance(result, dict) and "error" in result:
+                return f"Error: {result['error']}"
+            code = result["code"]
+            instructions = result["instructions"]
+            return (
+                f"Connection code: **{code}** ({platform}, expires in {expires} hours)\n\n"
+                f"Instructions:\n{instructions}"
+            )
 
         elif action == "list":
             members = await self._instance_db.list_members()

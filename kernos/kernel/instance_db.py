@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     created_by   TEXT NOT NULL,
     for_member   TEXT DEFAULT '',
     display_name TEXT DEFAULT '',
+    platform     TEXT DEFAULT '',
     role         TEXT DEFAULT 'member',
     status       TEXT DEFAULT 'active',
     used_by      TEXT DEFAULT '',
@@ -126,6 +127,54 @@ class InstanceDB:
         )
         await self._conn.commit()
 
+    # Platform-specific instructions returned with invite codes
+    _INVITE_INSTRUCTIONS: dict[str, str] = {
+        "discord": (
+            "Send this code as a DM to the Kernos bot on Discord. "
+            "The bot will recognize the code and link your account."
+        ),
+        "telegram": (
+            "Open Telegram, find the Kernos bot, and send this code as a message. "
+            "The bot will recognize the code and link your account."
+        ),
+        "sms": (
+            "Text this code to the Kernos phone number. "
+            "The system will recognize the code and link your account."
+        ),
+    }
+
+    _SETUP_INSTRUCTIONS: dict[str, str] = {
+        "discord": (
+            "To set up Discord:\n"
+            "1. Go to the Discord Developer Portal (discord.com/developers/applications)\n"
+            "2. Create a New Application, then go to the Bot section and create a bot\n"
+            "3. Enable the Message Content Intent under Privileged Gateway Intents\n"
+            "4. Copy the bot token and set DISCORD_BOT_TOKEN in .env\n"
+            "5. Set DISCORD_OWNER_ID to your Discord user ID\n"
+            "6. Invite the bot to your server using the OAuth2 URL Generator with bot scope + Send Messages permission\n"
+            "7. Restart Kernos — the bot will appear online and respond to DMs"
+        ),
+        "telegram": (
+            "To set up Telegram:\n"
+            "1. Open Telegram and message @BotFather\n"
+            "2. Send /newbot and follow the prompts to create a bot\n"
+            "3. Copy the bot token BotFather gives you\n"
+            "4. Set TELEGRAM_BOT_TOKEN in .env\n"
+            "5. Restart Kernos — the Telegram poller will start and respond to messages"
+        ),
+        "sms": (
+            "To set up SMS:\n"
+            "1. Create a Twilio account at twilio.com\n"
+            "2. Get a phone number from the Twilio console\n"
+            "3. Set these in .env:\n"
+            "   TWILIO_ACCOUNT_SID=your_account_sid\n"
+            "   TWILIO_AUTH_TOKEN=your_auth_token\n"
+            "   TWILIO_PHONE_NUMBER=+1XXXXXXXXXX\n"
+            "   OWNER_PHONE_NUMBER=+1XXXXXXXXXX (your personal number)\n"
+            "4. Restart Kernos — the SMS poller will start"
+        ),
+    }
+
     async def get_member_by_channel(self, platform: str, channel_id: str) -> dict | None:
         """Look up a member by platform + channel ID."""
         if not self._conn:
@@ -162,14 +211,31 @@ class InstanceDB:
 
     # --- Invite Codes ---
 
+    def get_invite_instructions(self, platform: str) -> str:
+        """Get invite instructions for a platform. Extensible for future adapters."""
+        return self._INVITE_INSTRUCTIONS.get(platform, f"Send this code to Kernos via {platform}.")
+
+    def get_setup_instructions(self, platform: str) -> str:
+        """Get first-time setup instructions for a platform."""
+        return self._SETUP_INSTRUCTIONS.get(platform, f"Setup instructions for {platform} are not yet available.")
+
+    def get_supported_platforms(self) -> list[str]:
+        """Return all platforms that have known instructions."""
+        return list(self._INVITE_INSTRUCTIONS.keys())
+
     async def create_invite_code(
-        self, created_by: str, for_member: str = "",
-        display_name: str = "", role: str = "member",
-        expires_hours: int = 72,
-    ) -> str:
-        """Generate and store an invite code. Returns the code."""
+        self, created_by: str, platform: str,
+        for_member: str = "", display_name: str = "",
+        role: str = "member", expires_hours: int = 72,
+    ) -> dict:
+        """Generate and store a platform-locked invite code.
+
+        Returns dict with code, platform, instructions, expires_hours.
+        """
         if not self._conn:
-            return ""
+            return {"error": "Database not available"}
+        if not platform:
+            return {"error": "Platform is required — specify discord, telegram, or sms"}
         import random
         import string
         from kernos.utils import utc_now
@@ -184,14 +250,21 @@ class InstanceDB:
 
         await self._conn.execute(
             "INSERT INTO invite_codes "
-            "(code, created_by, for_member, display_name, role, status, created_at, expires_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (code, created_by, for_member, display_name, role, "active", now, expires),
+            "(code, created_by, for_member, display_name, platform, role, status, created_at, expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (code, created_by, for_member, display_name, platform, role, "active", now, expires),
         )
         await self._conn.commit()
-        logger.info("INVITE_CODE_CREATED: code=%s by=%s for=%s name=%s expires=%s",
-            code, created_by, for_member or "new_user", display_name, expires[:10])
-        return code
+        logger.info("INVITE_CODE_CREATED: code=%s by=%s for=%s name=%s platform=%s expires=%s",
+            code, created_by, for_member or "new_user", display_name, platform, expires[:10])
+
+        instructions = self.get_invite_instructions(platform)
+        return {
+            "code": code,
+            "platform": platform,
+            "instructions": instructions,
+            "expires_hours": expires_hours,
+        }
 
     async def claim_invite_code(
         self, code: str, platform: str, channel_id: str,
@@ -213,6 +286,16 @@ class InstanceDB:
             return None
 
         d = dict(row)
+
+        # Platform enforcement — code locked to specific platform
+        code_platform = d.get("platform", "")
+        if code_platform and code_platform != platform:
+            logger.info("INVITE_REJECTED: code=%s expected_platform=%s actual_platform=%s",
+                code, code_platform, platform)
+            return {
+                "action": "rejected",
+                "static_response": f"This invite code is for {code_platform}, not {platform}.",
+            }
 
         # Check expiry
         if d.get("expires_at"):
