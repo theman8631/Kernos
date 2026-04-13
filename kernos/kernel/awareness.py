@@ -204,10 +204,12 @@ class AwarenessEvaluator:
         event_every_n = max(1, EVENT_POLL_INTERVAL_SECONDS // self._trigger_interval)
         plan_sweep_every_n = max(1, 600 // self._trigger_interval)  # ~10 minutes
         console_clear_every_n = max(1, 21600 // self._trigger_interval)  # ~6 hours
+        token_refresh_every_n = max(1, 1800 // self._trigger_interval)  # ~30 minutes
         _interrupt_tick_count = 0
         _event_tick_count = 0
         _plan_sweep_tick_count = 0
         _console_clear_tick_count = 0
+        _token_refresh_tick_count = 0
 
         while self._running:
             self._awareness_tick_count += 1
@@ -310,7 +312,24 @@ class AwarenessEvaluator:
                     except Exception as e:
                         logger.warning("PLAN_SWEEP: error: %s", e)
 
-            # Phase 5: Periodic console clear (~6 hours)
+            # Phase 5: Proactive token refresh (~30 minutes)
+            # Keeps Codex OAuth tokens fresh even during idle periods.
+            # Without this, tokens expire during inactivity and the refresh
+            # token can be rotated server-side, leaving us locked out.
+            _token_refresh_tick_count += 1
+            if _token_refresh_tick_count >= token_refresh_every_n:
+                _token_refresh_tick_count = 0
+                if self._handler:
+                    try:
+                        _provider = getattr(self._handler.reasoning, '_provider', None)
+                        if _provider and hasattr(_provider, '_ensure_valid_token'):
+                            await _provider._ensure_valid_token()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning("TOKEN_REFRESH: proactive refresh failed: %s", e)
+
+            # Phase 6: Periodic console clear (~6 hours)
             _console_clear_tick_count += 1
             if _console_clear_tick_count >= console_clear_every_n:
                 _console_clear_tick_count = 0

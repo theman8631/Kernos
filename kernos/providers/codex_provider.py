@@ -54,9 +54,9 @@ class OpenAICodexProvider(Provider):
         return self._http
 
     async def _ensure_valid_token(self) -> None:
-        """Refresh the access token if expired or within 60s of expiry."""
+        """Refresh the access token if expired or within 5 minutes of expiry."""
         now_ms = int(time.time() * 1000)
-        if self._credential["expires"] and self._credential["expires"] > now_ms + 60_000:
+        if self._credential["expires"] and self._credential["expires"] > now_ms + 300_000:
             return
         from kernos.kernel.credentials import refresh_openai_codex_credential
         logger.info("CODEX_REFRESH: token expired or near expiry, refreshing")
