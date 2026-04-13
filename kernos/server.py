@@ -405,6 +405,7 @@ async def on_ready():
     reasoning = ReasoningService(provider, events, mcp_manager, audit, fallback_providers=fallback_providers)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
+    handler._instance_db = instance_db  # Wire instance DB for member resolution
     handler.register_mcp_tools_in_catalog()
 
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)

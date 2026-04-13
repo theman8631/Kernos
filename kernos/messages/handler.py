@@ -337,6 +337,12 @@ def _is_similar_topic(new_name: str, existing_names: list[str]) -> bool:
 
 
 
+def _extract_invite_code(text: str) -> str | None:
+    """Extract KERN-XXXX pattern from message text."""
+    match = re.search(r'\bKERN-[A-Z0-9]{4}\b', text.upper())
+    return match.group(0) if match else None
+
+
 def _is_stale_knowledge(entry, days: int = 14) -> bool:
     """Check if a knowledge entry's last_referenced is older than N days."""
     ref = getattr(entry, "last_referenced", "") or ""
@@ -715,6 +721,7 @@ class MessageHandler:
             "diagnose_issue": "Diagnose a system issue using runtime trace, source code, and friction reports",
             "propose_fix": "Write a structured fix spec for a diagnosed issue",
             "submit_spec": "Submit a proposed fix spec for implementation",
+            "manage_members": "Manage Kernos instance members — invite, list, connect platforms, remove",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -1044,13 +1051,43 @@ class MessageHandler:
         ))
 
     def _resolve_member(self, instance_id: str, platform: str, sender: str) -> str:
-        """Resolve a sender identity signal to a member_id.
+        """Synchronous fallback — resolve sender to owner member_id.
 
-        For now: single member per instance = owner.
-        Future: lookup in members table by identity signal.
+        Used when async resolution isn't available. The async path
+        (_resolve_incoming) is preferred and handles multi-member.
         """
         from kernos.kernel.scheduler import resolve_owner_member_id
         return resolve_owner_member_id(instance_id)
+
+    async def _resolve_incoming(
+        self, platform: str, sender_id: str, message_text: str,
+    ) -> tuple[str, str | None]:
+        """Resolve incoming sender to member_id via instance.db.
+
+        Returns (member_id, static_response).
+        If static_response is not None, send it and skip the pipeline.
+        """
+        if not hasattr(self, '_instance_db') or not self._instance_db:
+            # No instance DB — fall back to owner
+            return "", None
+
+        # 1. Known member?
+        member = await self._instance_db.get_member_by_channel(platform, sender_id)
+        if member:
+            return member["member_id"], None
+
+        # 2. Check for invite code in message
+        code = _extract_invite_code(message_text)
+        if code:
+            result = await self._instance_db.claim_invite_code(code, platform, sender_id)
+            if result:
+                return result.get("member_id", ""), result.get("static_response")
+            else:
+                return "", "That invite code is invalid or has expired."
+
+        # 3. Unknown sender, no valid code
+        logger.info("UNKNOWN_SENDER: platform=%s sender=%s", platform, sender_id)
+        return "", "This is a private Kernos instance. If you were invited, send your invite code."
 
     async def read_log_text(self, instance_id: str, space_id: str, log_number: int) -> str:
         """Read conversation log text — satisfies HandlerProtocol."""
@@ -2958,7 +2995,19 @@ class MessageHandler:
         self.reasoning.reset_conflict_raised()
         self.reasoning.cleanup_expired_authorizations(instance_id)
         self._error_buffer.set_tenant(instance_id)
-        message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
+        # Resolve member via instance.db (multi-member aware)
+        if hasattr(self, '_instance_db') and self._instance_db:
+            _member_id, _static = await self._resolve_incoming(
+                message.platform, message.sender, message.content or "")
+            if _static is not None:
+                # Unknown sender or invite code — send static response, skip pipeline
+                return _static
+            if _member_id:
+                message.member_id = _member_id
+            else:
+                message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
+        else:
+            message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
         if message.platform == "discord":
             self._channel_registry.update_target("discord", message.conversation_id)
 
@@ -3058,6 +3107,60 @@ class MessageHandler:
             "These commands bypass the reasoning engine and are not stored "
             "in conversation history."
         )
+
+    async def _handle_manage_members(
+        self, instance_id: str, tool_input: dict,
+    ) -> str:
+        """Handle manage_members tool — invite, list, connect_platform, remove."""
+        if not hasattr(self, '_instance_db') or not self._instance_db:
+            return "Member management is not available (no instance database)."
+
+        action = tool_input.get("action", "")
+
+        if action == "invite":
+            display_name = tool_input.get("display_name", "")
+            expires = tool_input.get("expires_hours", 72)
+            # Find who's calling (owner)
+            members = await self._instance_db.list_members()
+            owner = next((m for m in members if m.get("role") == "owner"), None)
+            created_by = owner["member_id"] if owner else "unknown"
+            code = await self._instance_db.create_invite_code(
+                created_by=created_by, display_name=display_name, expires_hours=expires)
+            name_part = f" for {display_name}" if display_name else ""
+            return f"Invite code{name_part}: **{code}** (expires in {expires} hours)"
+
+        elif action == "connect_platform":
+            member_id = tool_input.get("member_id", "")
+            if not member_id:
+                return "Error: member_id is required for connect_platform."
+            expires = tool_input.get("expires_hours", 72)
+            members = await self._instance_db.list_members()
+            owner = next((m for m in members if m.get("role") == "owner"), None)
+            created_by = owner["member_id"] if owner else "unknown"
+            code = await self._instance_db.create_invite_code(
+                created_by=created_by, for_member=member_id, expires_hours=expires)
+            return f"Connection code: **{code}**. Send this from the new platform to link it."
+
+        elif action == "list":
+            members = await self._instance_db.list_members()
+            if not members:
+                return "No members registered."
+            lines = ["**Instance Members:**"]
+            for m in members:
+                channels = ", ".join(f"{c['platform']}:{c['channel_id'][:12]}" for c in m.get("channels", []))
+                lines.append(f"- **{m.get('display_name') or m['member_id']}** ({m.get('role', 'member')}) — {channels or 'no channels'}")
+            return "\n".join(lines)
+
+        elif action == "remove":
+            member_id = tool_input.get("member_id", "")
+            if not member_id:
+                return "Error: member_id is required for remove."
+            success = await self._instance_db.deactivate_member(member_id)
+            if success:
+                return f"Member {member_id} has been deactivated."
+            return f"Member {member_id} not found."
+
+        return f"Unknown action: {action}. Use invite, connect_platform, list, or remove."
 
     async def _handle_manage_plan(
         self, instance_id: str, space_id: str, tool_input: dict,
@@ -4162,7 +4265,8 @@ class MessageHandler:
                                 MANAGE_PLAN_TOOL]
         from kernos.kernel.runtime_trace import READ_RUNTIME_TRACE_TOOL
         from kernos.kernel.diagnostics import DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL
-        _all_kernel.extend([READ_RUNTIME_TRACE_TOOL, DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL])
+        from kernos.kernel.members import MANAGE_MEMBERS_TOOL
+        _all_kernel.extend([READ_RUNTIME_TRACE_TOOL, DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL, MANAGE_MEMBERS_TOOL])
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)

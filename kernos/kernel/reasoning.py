@@ -375,7 +375,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -519,6 +519,10 @@ class ReasoningService:
                     return await handle_propose_fix(request.instance_id, tool_input, _rt)
                 else:
                     return await handle_submit_spec(request.instance_id, tool_input, self._handler)
+            elif tool_name == "manage_members":
+                if hasattr(self, '_handler') and self._handler:
+                    return await self._handler._handle_manage_members(request.instance_id, tool_input)
+                return "Member management is not available."
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
@@ -1009,6 +1013,16 @@ class ReasoningService:
                 except Exception as exc:
                     logger.warning("Kernel tool '%s' failed: %s", block.name, exc)
                     result = f"Diagnostic tool failed: {exc}"
+            elif block.name == "manage_members":
+                if hasattr(self, '_handler') and self._handler:
+                    try:
+                        result = await self._handler._handle_manage_members(
+                            request.instance_id, tool_args)
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'manage_members' failed: %s", exc)
+                        result = f"Member management failed: {exc}"
+                else:
+                    result = "Member management is not available."
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(
