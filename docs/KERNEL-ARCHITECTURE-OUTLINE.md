@@ -42,7 +42,7 @@ KERNOS inverts this. The agent receives pre-assembled context, reasons about the
 
 ### Primitive 1: The Event Stream
 
-**What it is:** An append-only, multi-reader log of everything that happens in the system. Every message, tool call, capability change, agent action, trigger firing. One stream per tenant.
+**What it is:** An append-only, multi-reader log of everything that happens in the system. Every message, tool call, capability change, agent action, trigger firing. One stream per instance.
 
 **Why it's primitive:** This is the nervous system. OSBuilder's answer to "what do you wish you'd built from day one?" was unequivocal: a unified event bus. Without it, every subsystem builds its own logging, its own audit trail, its own state tracking — and they don't talk to each other.
 
@@ -64,12 +64,12 @@ KERNOS inverts this. The agent receives pre-assembled context, reasons about the
 
 **Key properties:**
 - Immutable — events are never modified after writing
-- Ordered — strict chronological ordering per tenant
-- Typed — every event has a `type`, `tenant_id`, `timestamp`, `source`, and `payload`
+- Ordered — strict chronological ordering per instance
+- Typed — every event has a `type`, `instance_id`, `timestamp`, `source`, and `payload`
 - Externally readable — not private to any single component
 - **Not the query surface** — the event stream is the source of truth, not the runtime lookup mechanism. Runtime queries go to the State Store. The event stream is for replay, audit, projection rebuilding, and stream processing. Think of it as a database transaction log vs. the tables themselves. You query the tables. The log exists so you can rebuild them.
 
-**Foundation already laid:** The 1A.4 three-store architecture (ConversationStore, AuditStore, TenantStore) is a narrow projection of this. The event stream generalizes it — conversation entries and audit entries are both events in the same stream, separated by type rather than by store.
+**Foundation already laid:** The 1A.4 three-store architecture (ConversationStore, AuditStore, InstanceStore) is a narrow projection of this. The event stream generalizes it — conversation entries and audit entries are both events in the same stream, separated by type rather than by store.
 
 ### Primitive 2: The State Store
 
@@ -92,7 +92,7 @@ This is the query surface for knowledge retrieval. When the user asks "who is Jo
 **Situation state** — the volatile, continuously-updated picture of what's happening now. Updated event-driven (not polling): GPS position arrives → update location. Calendar event starts → update activity estimate. Conversation active → user is engaged. Conversation idle 30 minutes after meeting ended → user probably transitioned. Minimal footprint — only updates when relevant data arrives.
 
 **Key properties:**
-- Scoped by tenant_id (always)
+- Scoped by instance_id (always)
 - Indexed and queryable (this is the runtime lookup surface, not the event stream)
 - Readable by any authorized agent or kernel process (access mediated by kernel)
 - Versioned where it matters (user knowledge, behavioral contracts — changes tracked with provenance)
@@ -538,7 +538,7 @@ Model names. Agent names. Task decomposition. Capability graphs. Event streams. 
 - **Reasoning Service abstraction** — extract LLM calls from handler into kernel service. Model as parameter. Provider interface (even if one provider configured). Cost logging per call.
 - **Capability Graph formalization** — extend MCPClientManager into three-tier registry with dependency awareness. System prompt builder reads live state.
 - **Task Engine (minimal)** — formalize handler as reactive task executor. Zero-cost pass-through for simple tasks. Task metadata and lifecycle. Foundation for decomposition.
-- **State Store abstraction** — generalize TenantStore into richer state model. User knowledge, behavioral contracts (defaults), capability state. Clean interface for future MemOS integration.
+- **State Store abstraction** — generalize InstanceStore into richer state model. User knowledge, behavioral contracts (defaults), capability state. Clean interface for future MemOS integration.
 - **Agent template structure** — define what a template contains. One or two templates (conversational, possibly coding). Seed/hatch for single user.
 - **CLI for kernel operations** — start/stop, capability status, event stream inspection, state queries
 - **Tenant isolation verification** — two tenants on same instance cannot access each other's state

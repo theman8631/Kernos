@@ -44,7 +44,7 @@ from kernos.kernel.events import JsonEventStream
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
 from kernos.kernel.state import CovenantRule
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 
 DATA_DIR = os.getenv("KERNOS_DATA_DIR", "./data")
@@ -65,7 +65,7 @@ def make_msg(content: str, conversation_id: str = CONVERSATION_ID) -> Normalized
         platform_capabilities=["text"],
         conversation_id=conversation_id,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT,
+        instance_id=TENANT,
     )
 
 
@@ -90,7 +90,7 @@ async def build_handler():
         sys.exit(1)
 
     conversations = JsonConversationStore(DATA_DIR)
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     audit = JsonAuditStore(DATA_DIR)
     events = JsonEventStream(DATA_DIR)
     state = JsonStateStore(DATA_DIR)
@@ -211,11 +211,11 @@ async def run_tests():
     # -------------------------------------------------------------------------
     print("\n--- Step 4: Permission override mechanical bypass ---")
     from unittest.mock import AsyncMock
-    from kernos.kernel.state import TenantProfile
+    from kernos.kernel.state import InstanceProfile
 
     mock_state = AsyncMock()
-    mock_state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-        tenant_id="t1", status="active", created_at="2026-01-01",
+    mock_state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+        instance_id="t1", status="active", created_at="2026-01-01",
         permission_overrides={"google-calendar": "always-allow"},
     ))
     mock_state.query_covenant_rules = AsyncMock(return_value=[])
@@ -262,12 +262,12 @@ async def run_tests():
     # -------------------------------------------------------------------------
     print("\n--- Step 5: CONFLICT response type ---")
     mock_state2 = AsyncMock()
-    mock_state2.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-        tenant_id="t1", status="active", created_at="2026-01-01",
+    mock_state2.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+        instance_id="t1", status="active", created_at="2026-01-01",
     ))
     mock_state2.query_covenant_rules = AsyncMock(return_value=[
         CovenantRule(
-            id="r1", tenant_id="t1", capability="email",
+            id="r1", instance_id="t1", capability="email",
             rule_type="must_not", description="Never send emails without asking me first",
             active=True, source="user_stated",
         ),
@@ -370,8 +370,8 @@ async def run_tests():
     # -------------------------------------------------------------------------
     print("\n--- Step 8: Permission overrides not in model rules_text ---")
     mock_state3 = AsyncMock()
-    mock_state3.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-        tenant_id="t1", status="active", created_at="2026-01-01",
+    mock_state3.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+        instance_id="t1", status="active", created_at="2026-01-01",
         permission_overrides={},
     ))
     mock_state3.query_covenant_rules = AsyncMock(return_value=[])
@@ -406,8 +406,8 @@ async def run_tests():
     # -------------------------------------------------------------------------
     print("\n--- Step 9: First-word parser safety ---")
     mock_state4 = AsyncMock()
-    mock_state4.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-        tenant_id="t1", status="active", created_at="2026-01-01",
+    mock_state4.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+        instance_id="t1", status="active", created_at="2026-01-01",
     ))
     mock_state4.query_covenant_rules = AsyncMock(return_value=[])
 

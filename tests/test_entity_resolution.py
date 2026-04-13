@@ -10,7 +10,7 @@ Covers:
 - Enhanced path in run_tier2_extraction
 - get_knowledge_entry by ID
 - query_entity_nodes active_only parameter
-- save_identity_edge per-tenant storage
+- save_identity_edge per_instance storage
 """
 import asyncio
 import json
@@ -38,10 +38,10 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _ent(tenant_id: str, name: str, entity_type: str = "person", **kwargs) -> EntityNode:
+def _ent(instance_id: str, name: str, entity_type: str = "person", **kwargs) -> EntityNode:
     return EntityNode(
         id=f"ent_{uuid.uuid4().hex[:8]}",
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         canonical_name=name,
         entity_type=entity_type,
         active=True,
@@ -51,10 +51,10 @@ def _ent(tenant_id: str, name: str, entity_type: str = "person", **kwargs) -> En
     )
 
 
-def _know(tenant_id: str, subject: str, content: str, category: str = "fact") -> KnowledgeEntry:
+def _know(instance_id: str, subject: str, content: str, category: str = "fact") -> KnowledgeEntry:
     return KnowledgeEntry(
         id=f"know_{uuid.uuid4().hex[:8]}",
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category=category,
         subject=subject,
         content=content,
@@ -65,7 +65,7 @@ def _know(tenant_id: str, subject: str, content: str, category: str = "fact") ->
         last_referenced=_now(),
         tags=[],
         active=True,
-        content_hash=_content_hash(tenant_id, subject, content),
+        content_hash=_content_hash(instance_id, subject, content),
     )
 
 
@@ -77,7 +77,7 @@ def _know(tenant_id: str, subject: str, content: str, category: str = "fact") ->
 def test_entity_node_new_fields():
     node = EntityNode(
         id="ent_abc",
-        tenant_id="t1",
+        instance_id="t1",
         canonical_name="Sarah Henderson",
         entity_type="person",
         relationship_type="client",
@@ -96,7 +96,7 @@ def test_entity_node_new_fields():
 
 
 def test_entity_node_new_fields_defaults():
-    node = EntityNode(id="ent_x", tenant_id="t1", canonical_name="Linda")
+    node = EntityNode(id="ent_x", instance_id="t1", canonical_name="Linda")
     assert node.relationship_type == ""
     assert node.contact_phone == ""
     assert node.contact_email == ""
@@ -108,7 +108,7 @@ def test_entity_node_new_fields_defaults():
 def test_entity_node_serialization_roundtrip():
     node = EntityNode(
         id="ent_a",
-        tenant_id="t1",
+        instance_id="t1",
         canonical_name="Henderson",
         relationship_type="contractor",
         contact_phone="555-9999",
@@ -193,7 +193,7 @@ async def test_embedding_store_delete(tmp_path):
     assert await store.get("t1", "know_x") is None
 
 
-async def test_embedding_store_tenant_isolation(tmp_path):
+async def test_embedding_storeinstance_isolation(tmp_path):
     store = JsonEmbeddingStore(tmp_path)
     await store.save("tenant_a", "know_1", [0.1])
     await store.save("tenant_b", "know_1", [0.9])
@@ -245,7 +245,7 @@ async def test_query_entity_nodes_active_only(tmp_path):
     assert len(results_all) == 2
 
 
-async def test_save_identity_edge_per_tenant(tmp_path):
+async def test_save_identity_edge_per_instance(tmp_path):
     state = JsonStateStore(tmp_path)
     edge = IdentityEdge(
         source_id="ent_a1",
@@ -265,7 +265,7 @@ async def test_save_identity_edge_per_tenant(tmp_path):
     assert edges[0].edge_type == "SAME_AS"
 
 
-async def test_identity_edges_tenant_isolation(tmp_path):
+async def test_identity_edgesinstance_isolation(tmp_path):
     state = JsonStateStore(tmp_path)
     edge_t1 = IdentityEdge(source_id="ent_x", target_id="ent_y", edge_type="SAME_AS", created_at=_now())
     edge_t2 = IdentityEdge(source_id="ent_x", target_id="ent_z", edge_type="MAYBE_SAME_AS", created_at=_now())
@@ -299,7 +299,7 @@ async def test_resolver_tier1_exact_match(tmp_path):
 
     resolver = _make_resolver(state)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Sarah Henderson",
         entity_type="person",
         context="Sarah called about the contract",
@@ -316,7 +316,7 @@ async def test_resolver_tier1_alias_match(tmp_path):
 
     resolver = _make_resolver(state)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Henderson",
         entity_type="person",
         context="Henderson called today",
@@ -332,7 +332,7 @@ async def test_resolver_tier1_contact_phone_match(tmp_path):
 
     resolver = _make_resolver(state)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Sarah",
         entity_type="person",
         context="Sarah called",
@@ -349,7 +349,7 @@ async def test_resolver_tier1_contact_email_match(tmp_path):
 
     resolver = _make_resolver(state)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Bob",
         entity_type="person",
         context="Bob sent an email",
@@ -367,7 +367,7 @@ async def test_resolver_tier1_present_not_presume(tmp_path):
 
     resolver = _make_resolver(state)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Linda",
         entity_type="person",
         context="I met this girl Linda today, she seems nice",
@@ -389,14 +389,14 @@ async def test_resolver_creates_new_entity(tmp_path):
     resolver = _make_resolver(state)
 
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Dr. Kim",
         entity_type="person",
         context="Dr. Kim is my dentist",
     )
     assert res_type == "new_entity"
     assert node.canonical_name == "Dr. Kim"
-    assert node.tenant_id == "t1"
+    assert node.instance_id == "t1"
 
     # Persisted to state
     stored = await state.get_entity_node("t1", node.id)
@@ -413,7 +413,7 @@ async def test_resolver_adds_alias_on_match(tmp_path):
     resolver = _make_resolver(state)
     # Resolve with a different surface form
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Mrs. Henderson",
         entity_type="person",
         # No new-person signals in context — context fits
@@ -442,7 +442,7 @@ async def test_resolver_tier2_scored_match(tmp_path):
 
     resolver = _make_resolver(state, embeddings=mock_embeddings)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Henderson",
         entity_type="person",
         context="Henderson checked in",
@@ -459,7 +459,7 @@ async def test_resolver_tier2_no_candidates(tmp_path):
 
     resolver = _make_resolver(state, embeddings=mock_embeddings)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Unknown Person",
         entity_type="person",
         context="I just met Unknown Person",
@@ -495,7 +495,7 @@ async def test_resolver_tier3_confirmed(tmp_path):
 
     resolver = _make_resolver(state, embeddings=mock_embeddings, reasoning=mock_reasoning)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Henderson",
         entity_type="person",
         context="Henderson called about the contract",
@@ -524,7 +524,7 @@ async def test_resolver_tier3_denied(tmp_path):
 
     resolver = _make_resolver(state, embeddings=mock_embeddings, reasoning=mock_reasoning)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Alex",
         entity_type="person",
         context="Alex from accounting called",
@@ -556,7 +556,7 @@ async def test_dedup_add_no_existing(tmp_path):
 
     candidate = _know("t1", "user", "Works as a software engineer")
     classification, target = await dedup.classify(
-        tenant_id="t1",
+        instance_id="t1",
         candidate=candidate,
         candidate_embedding=[0.1, 0.2, 0.3],
     )
@@ -582,7 +582,7 @@ async def test_dedup_noop_above_threshold(tmp_path):
     candidate_emb = [0.9999, 0.001, 0.0]
 
     classification, target = await dedup.classify(
-        tenant_id="t1",
+        instance_id="t1",
         candidate=candidate,
         candidate_embedding=candidate_emb,
     )
@@ -606,7 +606,7 @@ async def test_dedup_add_below_threshold(tmp_path):
     candidate_emb = [0.0, 1.0, 0.0]
 
     classification, target = await dedup.classify(
-        tenant_id="t1",
+        instance_id="t1",
         candidate=candidate,
         candidate_embedding=candidate_emb,
     )
@@ -639,7 +639,7 @@ async def test_dedup_ambiguous_zone_calls_llm(tmp_path):
     candidate_emb = [0.75, 0.66]
 
     classification, target = await dedup.classify(
-        tenant_id="t1",
+        instance_id="t1",
         candidate=candidate,
         candidate_embedding=candidate_emb,
     )
@@ -663,7 +663,7 @@ async def test_dedup_ambiguous_zone_no_llm_defaults_add(tmp_path):
     candidate_emb = [0.75, 0.66]
 
     classification, target = await dedup.classify(
-        tenant_id="t1",
+        instance_id="t1",
         candidate=candidate,
         candidate_embedding=candidate_emb,
     )
@@ -687,7 +687,7 @@ async def test_dedup_scope_by_category_and_subject(tmp_path):
     candidate_emb = [0.9999, 0.001, 0.0]
 
     classification, target = await dedup.classify(
-        tenant_id="t1",
+        instance_id="t1",
         candidate=candidate,
         candidate_embedding=candidate_emb,
     )
@@ -725,7 +725,7 @@ async def test_noop_reinforcement_via_write_entry_enhanced(tmp_path):
     events = JsonEventStream(tmp_path)
 
     result = await _write_entry_enhanced(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="preference", subject="user", content="Goes by JT",
         confidence="stated", source_description="test",
         existing_hashes=existing_hashes, now=datetime.now(timezone.utc).isoformat(), tags=[],
@@ -761,7 +761,7 @@ async def test_add_classification_writes_entry(tmp_path):
     events = JsonEventStream(tmp_path)
 
     result = await _write_entry_enhanced(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="Is a licensed pilot",
         confidence="stated", source_description="test",
         existing_hashes=existing_hashes, now=datetime.now(timezone.utc).isoformat(), tags=["fact"],
@@ -797,7 +797,7 @@ async def test_update_classification_supersedes_old(tmp_path):
     events = JsonEventStream(tmp_path)
 
     result = await _write_entry_enhanced(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="Moved to Seattle",
         confidence="stated", source_description="test",
         existing_hashes=existing_hashes, now=datetime.now(timezone.utc).isoformat(), tags=["fact"],
@@ -866,7 +866,7 @@ async def test_tier2_legacy_path_unchanged(tmp_path):
 
     state = JsonStateStore(tmp_path)
     events = JsonEventStream(tmp_path)
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
 
     mock_reasoning = AsyncMock()
     mock_reasoning.complete_simple = AsyncMock(
@@ -887,7 +887,7 @@ async def test_tier2_legacy_path_unchanged(tmp_path):
         state=state,
         events=events,
         reasoning_service=mock_reasoning,
-        tenant_id="t1",
+        instance_id="t1",
     )
 
     # SPEC-CHECKPOINTED-FACT-HARVEST: facts no longer extracted per-turn
@@ -907,7 +907,7 @@ async def test_tier2_enhanced_path_entity_resolution(tmp_path):
 
     state = JsonStateStore(tmp_path)
     events = JsonEventStream(tmp_path)
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     emb_store = JsonEmbeddingStore(tmp_path)
 
     mock_reasoning = AsyncMock()
@@ -938,7 +938,7 @@ async def test_tier2_enhanced_path_entity_resolution(tmp_path):
         state=state,
         events=events,
         reasoning_service=mock_reasoning,
-        tenant_id="t1",
+        instance_id="t1",
         entity_resolver=entity_resolver,
         fact_deduplicator=fact_deduplicator,
         embedding_service=mock_embeddings,
@@ -961,7 +961,7 @@ async def test_tier2_enhanced_path_fact_noop_reinforcement(tmp_path):
 
     state = JsonStateStore(tmp_path)
     events = JsonEventStream(tmp_path)
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     emb_store = JsonEmbeddingStore(tmp_path)
 
     # Pre-existing knowledge entry
@@ -995,7 +995,7 @@ async def test_tier2_enhanced_path_fact_noop_reinforcement(tmp_path):
         state=state,
         events=events,
         reasoning_service=mock_reasoning,
-        tenant_id="t1",
+        instance_id="t1",
         entity_resolver=entity_resolver,
         fact_deduplicator=fact_deduplicator,
         embedding_service=mock_embeddings,
@@ -1025,7 +1025,7 @@ async def test_role_match_upgrades_entity(tmp_path):
 
     resolver = EntityResolver(state, embeddings=None, reasoning=None)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Liana",
         entity_type="person",
         context="My wife Liana is amazing",
@@ -1055,7 +1055,7 @@ async def test_role_match_my_form(tmp_path):
 
     resolver = EntityResolver(state, embeddings=None, reasoning=None)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Tom",
         entity_type="person",
         context="My boss Tom just promoted me",
@@ -1075,7 +1075,7 @@ async def test_role_only_no_name_creates_role_entity(tmp_path):
     resolver = EntityResolver(state, embeddings=None, reasoning=None)
 
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="user's wife",
         entity_type="person",
         context="My wife called",
@@ -1095,7 +1095,7 @@ async def test_name_only_no_role_no_existing_creates_entity(tmp_path):
     resolver = EntityResolver(state, embeddings=None, reasoning=None)
 
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Liana",
         entity_type="person",
         context="Liana called me",
@@ -1137,7 +1137,7 @@ async def test_split_entity_reconciliation(tmp_path):
 
     resolver = EntityResolver(state, embeddings=None, reasoning=None)
     merged, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Liana",
         entity_type="person",
         context="My wife Liana is amazing",
@@ -1183,7 +1183,7 @@ async def test_role_match_no_duplicate_no_split(tmp_path):
 
     resolver = EntityResolver(state, embeddings=None, reasoning=None)
     node, res_type = await resolver.resolve(
-        tenant_id="t1",
+        instance_id="t1",
         mention="Liana",
         entity_type="person",
         context="",
@@ -1209,7 +1209,7 @@ async def test_tier2_extraction_role_match_event(tmp_path):
 
     state = JsonStateStore(tmp_path)
     events = JsonEventStream(tmp_path)
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     emb_store = JsonEmbeddingStore(tmp_path)
 
     # Pre-existing role entity
@@ -1244,7 +1244,7 @@ async def test_tier2_extraction_role_match_event(tmp_path):
         state=state,
         events=events,
         reasoning_service=mock_reasoning,
-        tenant_id="t1",
+        instance_id="t1",
         entity_resolver=resolver,
         fact_deduplicator=dedup,
         embedding_service=mock_embeddings,
@@ -1270,7 +1270,7 @@ async def test_correction_generates_embedding(tmp_path):
     state = JsonStateStore(str(tmp_path))
     events = MagicMock()
     events.emit = AsyncMock()
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
 
     mock_embed_service = MagicMock()
     mock_embed_service.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
@@ -1278,7 +1278,7 @@ async def test_correction_generates_embedding(tmp_path):
 
     # Write an old entry to correct
     old_entry = KnowledgeEntry(
-        id="ke_old", tenant_id="t1", category="fact", subject="user.location",
+        id="ke_old", instance_id="t1", category="fact", subject="user.location",
         content="Lives in Portland", confidence="stated",
         source_event_id="", source_description="test",
         created_at=_now(), last_referenced=_now(), tags=[],
@@ -1287,7 +1287,7 @@ async def test_correction_generates_embedding(tmp_path):
 
     await _apply_correction(
         state=state, events=events, soul=soul,
-        tenant_id="t1", field="user.location",
+        instance_id="t1", field="user.location",
         old_value="Portland", new_value="Lives in Seattle",
         now=_now(),
         embedding_service=mock_embed_service,
@@ -1313,11 +1313,11 @@ async def test_correction_without_embedding_service_still_works(tmp_path):
     state = JsonStateStore(str(tmp_path))
     events = MagicMock()
     events.emit = AsyncMock()
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
 
     await _apply_correction(
         state=state, events=events, soul=soul,
-        tenant_id="t1", field="user.location",
+        instance_id="t1", field="user.location",
         old_value="Portland", new_value="Lives in Seattle",
         now=_now(),
         # No embedding_service or embedding_store
@@ -1352,7 +1352,7 @@ async def test_embedding_retry_on_first_failure():
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
         result = await _write_entry_enhanced(
-            state=state, events=events, tenant_id="t1",
+            state=state, events=events, instance_id="t1",
             category="fact", subject="user", content="builds things",
             confidence="stated", lifecycle_archetype="structural",
             source_description="test", existing_hashes=set(), now=_now(),
@@ -1384,7 +1384,7 @@ async def test_embedding_falls_back_after_two_failures():
 
     with patch("asyncio.sleep", new_callable=AsyncMock):
         result = await _write_entry_enhanced(
-            state=state, events=events, tenant_id="t1",
+            state=state, events=events, instance_id="t1",
             category="fact", subject="user", content="builds things",
             confidence="stated", lifecycle_archetype="structural",
             source_description="test", existing_hashes=set(), now=_now(),

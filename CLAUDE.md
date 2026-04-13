@@ -25,7 +25,7 @@ For Phase 1B work, read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel des
 These are non-negotiable. Violating any of these is a build failure regardless of what the Active Spec says:
 
 - **Adapter/handler isolation:** The handler NEVER imports from adapters. Adapters NEVER import from the handler. They share only the NormalizedMessage model.
-- **tenant_id from day one:** Every piece of state is keyed to a `tenant_id`. No code ever assumes a single user.
+- **instance_id from day one:** Every piece of state is keyed to a `instance_id`. No code ever assumes a single user.
 - **Protect user data based on loss cost:** Destructive actions on user data require judgment at the dispatch boundary. Low ambiguity + low loss cost = execute ("delete the 5:00 entry we just made"). High loss cost = confirm first ("delete all my calendar events"). Ambiguity + any loss cost = clarify ("clear my reminders" — which ones?). Internal operational artifacts (expired tokens, whispers, suppression entries) are housekeeping — delete freely. This is not a universal ban on deletes; it's a principle of proportional caution.
 - **Graceful errors:** Every failure mode produces a friendly user-facing response. Never a silent crash, never a raw exception.
 - **MCP for capabilities:** Tools and data are accessed through MCP. No direct API integrations that bypass the capability abstraction layer.

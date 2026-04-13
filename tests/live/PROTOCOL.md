@@ -69,7 +69,7 @@ Every live test file must contain these sections, in order:
 ```markdown
 # Live Test: SPEC-{ID} — {Spec Title}
 
-**Tenant ID (copy-paste):** `{tenant_id}`
+**Tenant ID (copy-paste):** `{instance_id}`
 
 **Prerequisites:**
 - {List of setup conditions}

@@ -27,7 +27,7 @@ def _now_iso():
 
 
 def _make_rule(
-    tenant_id: str = "test_tenant",
+    instance_id: str = "test_tenant",
     rule_type: str = "must_not",
     description: str = "Never bring up divorce",
     source: str = "user_stated",
@@ -37,7 +37,7 @@ def _make_rule(
 ) -> CovenantRule:
     return CovenantRule(
         id=rule_id or _rule_id(),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         capability="general",
         rule_type=rule_type,
         description=description,
@@ -65,7 +65,7 @@ class TestSupersededByField:
         state_dir = store._state_dir("test_tenant")
         state_dir.mkdir(parents=True, exist_ok=True)
         old_rule = {
-            "id": "rule_old1", "tenant_id": "test_tenant",
+            "id": "rule_old1", "instance_id": "test_tenant",
             "capability": "general", "rule_type": "must_not",
             "description": "Never do bad things", "active": True, "source": "default",
         }

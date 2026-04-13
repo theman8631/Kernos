@@ -18,7 +18,7 @@ from kernos.kernel.events import JsonEventStream
 from kernos.kernel.router import LLMRouter, RouterResult
 from kernos.kernel.spaces import ContextSpace
 from kernos.kernel.soul import Soul
-from kernos.kernel.state import CovenantRule, TenantProfile, default_covenant_rules
+from kernos.kernel.state import CovenantRule, InstanceProfile, default_covenant_rules
 from kernos.kernel.state_json import JsonStateStore
 from kernos.messages.models import AuthLevel, NormalizedMessage
 from kernos.persistence.json_file import JsonConversationStore
@@ -32,10 +32,10 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _daily_space(tenant_id: str, space_id: str = "space_daily") -> ContextSpace:
+def _daily_space(instance_id: str, space_id: str = "space_daily") -> ContextSpace:
     return ContextSpace(
         id=space_id,
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         name="General",
         description="General conversation and daily life",
         space_type="general",
@@ -47,7 +47,7 @@ def _daily_space(tenant_id: str, space_id: str = "space_daily") -> ContextSpace:
 
 
 def _project_space(
-    tenant_id: str,
+    instance_id: str,
     space_id: str = "space_project",
     name: str = "Test Project",
     posture: str = "",
@@ -56,7 +56,7 @@ def _project_space(
 ) -> ContextSpace:
     return ContextSpace(
         id=space_id,
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         name=name,
         description=description,
         space_type="project",
@@ -77,7 +77,7 @@ def _msg(content: str, platform: str = "discord", sender: str = "user1"):
         platform_capabilities=["text"],
         conversation_id="conv_test",
         timestamp=datetime.now(timezone.utc),
-        tenant_id=f"{platform}:{sender}",
+        instance_id=f"{platform}:{sender}",
     )
 
 
@@ -299,7 +299,7 @@ class TestGetRecentFull:
             "content": "hello",
             "timestamp": "2026-03-10T10:00:00+00:00",
             "platform": "discord",
-            "tenant_id": tid,
+            "instance_id": tid,
             "conversation_id": cid,
             "space_tags": ["space_daily"],
         }
@@ -356,7 +356,7 @@ class TestGetSpaceThread:
 
         await store.append(tid, cid, {
             "role": "user", "content": "test", "space_tags": ["space_x"],
-            "timestamp": "2026-03-10T10:00:00+00:00", "tenant_id": tid,
+            "timestamp": "2026-03-10T10:00:00+00:00", "instance_id": tid,
         })
         thread = await store.get_space_thread(tid, cid, "space_x")
         assert len(thread) == 1
@@ -538,17 +538,17 @@ class TestQueryCovenantRulesScoped:
         tid = "t_rules"
         now = _now()
         global_rule = CovenantRule(
-            id="rule_global", tenant_id=tid, capability="general",
+            id="rule_global", instance_id=tid, capability="general",
             rule_type="must", description="Global rule", active=True,
             source="default", context_space=None, created_at=now, updated_at=now,
         )
         scoped_a = CovenantRule(
-            id="rule_a", tenant_id=tid, capability="general",
+            id="rule_a", instance_id=tid, capability="general",
             rule_type="must", description="Space A rule", active=True,
             source="default", context_space="space_a", created_at=now, updated_at=now,
         )
         scoped_b = CovenantRule(
-            id="rule_b", tenant_id=tid, capability="general",
+            id="rule_b", instance_id=tid, capability="general",
             rule_type="must", description="Space B rule", active=True,
             source="default", context_space="space_b", created_at=now, updated_at=now,
         )
@@ -576,12 +576,12 @@ class TestQueryCovenantRulesGlobal:
         tid = "t_rules_all"
         now = _now()
         r1 = CovenantRule(
-            id="rule_1", tenant_id=tid, capability="general",
+            id="rule_1", instance_id=tid, capability="general",
             rule_type="must", description="Rule 1", active=True,
             source="default", context_space=None, created_at=now, updated_at=now,
         )
         r2 = CovenantRule(
-            id="rule_2", tenant_id=tid, capability="general",
+            id="rule_2", instance_id=tid, capability="general",
             rule_type="must", description="Rule 2", active=True,
             source="default", context_space="space_x", created_at=now, updated_at=now,
         )
@@ -601,7 +601,7 @@ class TestSystemPromptPosture:
     """Posture injected for non-daily space."""
 
     def _make_soul(self) -> Soul:
-        return Soul(tenant_id="t_prompt", user_name="Kit")
+        return Soul(instance_id="t_prompt", user_name="Kit")
 
     def _make_message(self):
         return NormalizedMessage(
@@ -612,7 +612,7 @@ class TestSystemPromptPosture:
             platform_capabilities=["text"],
             conversation_id="conv1",
             timestamp=datetime.now(timezone.utc),
-            tenant_id="discord:user123",
+            instance_id="discord:user123",
         )
 
     def test_posture_injected_for_non_daily_space(self):
@@ -665,11 +665,11 @@ class TestSystemPromptNoPostureDaily:
         from kernos.messages.handler import _build_system_prompt
         from kernos.kernel.template import PRIMARY_TEMPLATE
 
-        soul = Soul(tenant_id="t2", user_name="Kit")
+        soul = Soul(instance_id="t2", user_name="Kit")
         msg = NormalizedMessage(
             content="hello", sender="u", sender_auth_level=AuthLevel.owner_verified,
             platform="discord", platform_capabilities=["text"],
-            conversation_id="c1", timestamp=datetime.now(timezone.utc), tenant_id="u",
+            conversation_id="c1", timestamp=datetime.now(timezone.utc), instance_id="u",
         )
         prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [], active_space=None)
         assert "Current operating context" not in prompt
@@ -687,11 +687,11 @@ class TestSystemPromptCrossDomainPrefix:
         from kernos.messages.handler import _build_system_prompt
         from kernos.kernel.template import PRIMARY_TEMPLATE
 
-        soul = Soul(tenant_id="t3", user_name="Kit")
+        soul = Soul(instance_id="t3", user_name="Kit")
         msg = NormalizedMessage(
             content="hello", sender="u", sender_auth_level=AuthLevel.owner_verified,
             platform="discord", platform_capabilities=["text"],
-            conversation_id="c1", timestamp=datetime.now(timezone.utc), tenant_id="u",
+            conversation_id="c1", timestamp=datetime.now(timezone.utc), instance_id="u",
         )
         # The prefix now comes pre-formatted from _assemble_space_context with section headers
         prefix = (
@@ -709,11 +709,11 @@ class TestSystemPromptCrossDomainPrefix:
         from kernos.messages.handler import _build_system_prompt
         from kernos.kernel.template import PRIMARY_TEMPLATE
 
-        soul = Soul(tenant_id="t4", user_name="Kit")
+        soul = Soul(instance_id="t4", user_name="Kit")
         msg = NormalizedMessage(
             content="hello", sender="u", sender_auth_level=AuthLevel.owner_verified,
             platform="discord", platform_capabilities=["text"],
-            conversation_id="c1", timestamp=datetime.now(timezone.utc), tenant_id="u",
+            conversation_id="c1", timestamp=datetime.now(timezone.utc), instance_id="u",
         )
         prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [], cross_domain_prefix=None)
         assert "Recent activity in other areas" not in prompt
@@ -736,7 +736,7 @@ def _make_handler(tmp_path):
         ReasoningService,
     )
     from kernos.messages.handler import MessageHandler
-    from kernos.persistence import AuditStore, ConversationStore, TenantStore
+    from kernos.persistence import AuditStore, ConversationStore, InstanceStore
 
     mcp = MagicMock(spec=MCPClientManager)
     mcp.get_tools.return_value = []
@@ -748,9 +748,9 @@ def _make_handler(tmp_path):
     conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
 
-    tenants = AsyncMock(spec=TenantStore)
+    tenants = AsyncMock(spec=InstanceStore)
     tenants.get_or_create.return_value = {
-        "tenant_id": "discord:user1",
+        "instance_id": "discord:user1",
         "status": "active",
         "created_at": "2026-03-01T00:00:00Z",
         "capabilities": {},
@@ -815,11 +815,11 @@ class TestHandlerSpaceSwitch:
         await handler.state.save_context_space(project)
 
         now = _now()
-        profile = TenantProfile(
-            tenant_id=tid, status="active", created_at=now,
+        profile = InstanceProfile(
+            instance_id=tid, status="active", created_at=now,
             last_active_space_id=daily.id,
         )
-        await handler.state.save_tenant_profile(tid, profile)
+        await handler.state.save_instance_profile(tid, profile)
 
         # Mock router to say we're switching to project
         mock_router = AsyncMock()
@@ -830,7 +830,7 @@ class TestHandlerSpaceSwitch:
 
         await handler.process(_msg("project work"))
 
-        loaded = await handler.state.get_tenant_profile(tid)
+        loaded = await handler.state.get_instance_profile(tid)
         assert loaded.last_active_space_id == project.id
 
     async def test_space_switch_emits_event(self, tmp_path):
@@ -843,11 +843,11 @@ class TestHandlerSpaceSwitch:
         await handler.state.save_context_space(project)
 
         now = _now()
-        profile = TenantProfile(
-            tenant_id=tid, status="active", created_at=now,
+        profile = InstanceProfile(
+            instance_id=tid, status="active", created_at=now,
             last_active_space_id=daily.id,
         )
-        await handler.state.save_tenant_profile(tid, profile)
+        await handler.state.save_instance_profile(tid, profile)
 
         mock_router = AsyncMock()
         mock_router.route = AsyncMock(return_value=RouterResult(
@@ -858,7 +858,7 @@ class TestHandlerSpaceSwitch:
         await handler.process(_msg("project work"))
 
         events = await handler.events.query(
-            tenant_id=tid,
+            instance_id=tid,
             event_types=[EventType.CONTEXT_SPACE_SWITCHED],
         )
         assert len(events) >= 1
@@ -945,7 +945,7 @@ class TestHandlerSingleSpace:
         assert response
 
         events = await handler.events.query(
-            tenant_id=tid,
+            instance_id=tid,
             event_types=[EventType.CONTEXT_SPACE_SWITCHED],
         )
         assert len(events) == 0
@@ -969,7 +969,7 @@ class TestKnowledgeScoping:
             now = _now()
 
             wrote = await _write_entry(
-                state=state, events=events, tenant_id="t_scope",
+                state=state, events=events, instance_id="t_scope",
                 category="fact", subject="user", content="Lives in Portland",
                 confidence="stated", lifecycle_archetype="structural",
                 source_description="test", existing_hashes=set(), now=now,
@@ -990,7 +990,7 @@ class TestKnowledgeScoping:
             now = _now()
 
             wrote = await _write_entry(
-                state=state, events=events, tenant_id="t_scope2",
+                state=state, events=events, instance_id="t_scope2",
                 category="fact", subject="Sarah", content="Working on Project X",
                 confidence="stated", lifecycle_archetype="contextual",
                 source_description="test", existing_hashes=set(), now=now,
@@ -1003,30 +1003,30 @@ class TestKnowledgeScoping:
 
 
 # ---------------------------------------------------------------------------
-# TestTenantProfileSpaceField
+# TestInstanceProfileSpaceField
 # ---------------------------------------------------------------------------
 
 
-class TestTenantProfileSpaceField:
+class TestInstanceProfileSpaceField:
     """last_active_space_id persists correctly."""
 
     async def test_new_field_defaults_empty(self, tmp_path):
         state = JsonStateStore(tmp_path)
         tid = "t_field"
-        profile = TenantProfile(
-            tenant_id=tid, status="active", created_at=_now(),
+        profile = InstanceProfile(
+            instance_id=tid, status="active", created_at=_now(),
         )
-        await state.save_tenant_profile(tid, profile)
-        loaded = await state.get_tenant_profile(tid)
+        await state.save_instance_profile(tid, profile)
+        loaded = await state.get_instance_profile(tid)
         assert loaded.last_active_space_id == ""
 
     async def test_field_persists(self, tmp_path):
         state = JsonStateStore(tmp_path)
         tid = "t_field2"
-        profile = TenantProfile(
-            tenant_id=tid, status="active", created_at=_now(),
+        profile = InstanceProfile(
+            instance_id=tid, status="active", created_at=_now(),
             last_active_space_id="space_abc",
         )
-        await state.save_tenant_profile(tid, profile)
-        loaded = await state.get_tenant_profile(tid)
+        await state.save_instance_profile(tid, profile)
+        loaded = await state.get_instance_profile(tid)
         assert loaded.last_active_space_id == "space_abc"

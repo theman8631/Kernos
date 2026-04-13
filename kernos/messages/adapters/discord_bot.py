@@ -27,7 +27,7 @@ class DiscordAdapter(BaseAdapter):
 
     def __init__(self) -> None:
         self._owner_id = os.getenv("DISCORD_OWNER_ID", "")
-        self._tenant_id = os.getenv("KERNOS_INSTANCE_ID") or os.getenv("OWNER_PHONE_NUMBER", "")
+        self._instance_id = os.getenv("KERNOS_INSTANCE_ID") or os.getenv("OWNER_PHONE_NUMBER", "")
         self._client: discord.Client | None = None
 
     def set_client(self, client: discord.Client) -> None:
@@ -63,8 +63,8 @@ class DiscordAdapter(BaseAdapter):
             # Discord has real channels/threads — use channel ID for conversation continuity.
             conversation_id=str(raw_request.channel.id),
             timestamp=raw_request.created_at,
-            # Phase 1A: single-tenant. tenant_id is the owner's phone number.
-            tenant_id=self._tenant_id,
+            # Phase 1A: single-tenant. instance_id is the owner's phone number.
+            instance_id=self._instance_id,
             context=context,
         )
 
@@ -80,7 +80,7 @@ class DiscordAdapter(BaseAdapter):
 
     _MAX_LENGTH = 2000
 
-    async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> int:
+    async def send_outbound(self, instance_id: str, channel_target: str, message: str) -> int:
         """Send an unprompted message to a Discord channel. Returns message ID or 0.
 
         Splits long messages into chunks that fit Discord's 2000-char limit.
@@ -97,14 +97,14 @@ class DiscordAdapter(BaseAdapter):
                 sent = await channel.send(chunk)
                 last_id = sent.id
             logger.info(
-                "OUTBOUND: channel=discord target=%s tenant=%s length=%d chunks=%d success=True",
-                channel_target, tenant_id, len(message), len(chunks),
+                "OUTBOUND: channel=discord target=%s instance=%s length=%d chunks=%d success=True",
+                channel_target, instance_id, len(message), len(chunks),
             )
             return last_id
         except Exception as exc:
             logger.warning(
-                "OUTBOUND: channel=discord target=%s tenant=%s success=False error=%s",
-                channel_target, tenant_id, exc,
+                "OUTBOUND: channel=discord target=%s instance=%s success=False error=%s",
+                channel_target, instance_id, exc,
             )
             return 0
 

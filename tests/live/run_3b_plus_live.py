@@ -28,9 +28,9 @@ TENANT_ID = "discord:000000000000000000"
 CONVERSATION_ID = TENANT_ID
 
 
-def _safe_tenant_name(tenant_id: str) -> str:
+def _safe_instance_name(instance_id: str) -> str:
     import re
-    return re.sub(r"[^\w.-]", "_", tenant_id)
+    return re.sub(r"[^\w.-]", "_", instance_id)
 
 
 async def build_handler():
@@ -46,7 +46,7 @@ async def build_handler():
     from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
     from kernos.kernel.state_json import JsonStateStore
     from kernos.messages.handler import MessageHandler
-    from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+    from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
     secrets_dir = os.getenv("KERNOS_SECRETS_DIR", "./secrets")
@@ -57,7 +57,7 @@ async def build_handler():
     # Don't connect real MCP servers for live test — calendar is AVAILABLE not CONNECTED
 
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
     registry = CapabilityRegistry(mcp=mcp_manager)
@@ -74,24 +74,24 @@ async def build_handler():
     return handler, events, data_dir, secrets_dir
 
 
-def _make_message(content: str, tenant_id: str = TENANT_ID):
+def _make_message(content: str, instance_id: str = TENANT_ID):
     from kernos.messages.models import NormalizedMessage, AuthLevel
     from datetime import datetime, timezone
     return NormalizedMessage(
-        sender=tenant_id.split(":")[1],
+        sender=instance_id.split(":")[1],
         content=content,
         platform="discord",
         platform_capabilities=["text"],
         conversation_id=CONVERSATION_ID,
         sender_auth_level=AuthLevel.owner_verified,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
     )
 
 
-def _find_events_since(data_dir: str, tenant_id: str, event_type: str, after_ts: str) -> list:
+def _find_events_since(data_dir: str, instance_id: str, event_type: str, after_ts: str) -> list:
     """Find events of a given type emitted after a timestamp."""
-    safe_name = _safe_tenant_name(tenant_id)
+    safe_name = _safe_instance_name(instance_id)
     event_files = glob.glob(f"{data_dir}/{safe_name}/events/*.json")
     found = []
     for ef in sorted(event_files):
@@ -246,7 +246,7 @@ async def run_tests():
     # Step 5: Check secrets directory
     # ------------------------------------------------------------------
     print("\n### Step 5 — Secrets directory check\n")
-    safe_name = _safe_tenant_name(TENANT_ID)
+    safe_name = _safe_instance_name(TENANT_ID)
     secret_path = Path(secrets_dir) / safe_name / "google-calendar.key"
     file_exists = secret_path.exists()
     key_content = secret_path.read_text().strip() if file_exists else ""
@@ -431,8 +431,8 @@ async def run_tests():
            f"status={getattr(cap_after_restart, 'status', 'NOT FOUND')}")
 
     # Cleanup: remove test artifacts
-    test_key_path = Path(secrets_dir) / _safe_tenant_name(TENANT_ID) / "google-calendar.key"
-    test_live_key_path = Path(secrets_dir) / _safe_tenant_name(TENANT_ID) / "test-live-tool.key"
+    test_key_path = Path(secrets_dir) / _safe_instance_name(TENANT_ID) / "google-calendar.key"
+    test_live_key_path = Path(secrets_dir) / _safe_instance_name(TENANT_ID) / "test-live-tool.key"
     for p in [test_live_key_path]:  # Keep google-calendar.key for AC 14 verification
         if p.exists():
             p.unlink()

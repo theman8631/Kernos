@@ -48,9 +48,9 @@ def _is_protected(location: str) -> bool:
 # Spec directory management
 # ---------------------------------------------------------------------------
 
-def _specs_dir(data_dir: str, tenant_id: str, stage: str) -> Path:
-    """Get the specs directory for a tenant and stage."""
-    path = Path(data_dir) / _safe_name(tenant_id) / "specs" / stage
+def _specs_dir(data_dir: str, instance_id: str, stage: str) -> Path:
+    """Get the specs directory for an instance and stage."""
+    path = Path(data_dir) / _safe_name(instance_id) / "specs" / stage
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -166,7 +166,7 @@ SUBMIT_SPEC_TOOL = {
 # ---------------------------------------------------------------------------
 
 async def handle_diagnose_issue(
-    tenant_id: str,
+    instance_id: str,
     space_id: str,
     tool_input: dict,
     runtime_trace: Any,
@@ -185,11 +185,11 @@ async def handle_diagnose_issue(
     # 1. Runtime trace events
     if runtime_trace:
         if turn_id:
-            events = await runtime_trace.read(tenant_id, turn_id=turn_id)
+            events = await runtime_trace.read(instance_id, turn_id=turn_id)
         else:
-            events = await runtime_trace.read(tenant_id, turns=5, filter_level="error")
+            events = await runtime_trace.read(instance_id, turns=5, filter_level="error")
             if not events:
-                events = await runtime_trace.read(tenant_id, turns=5, filter_level="warning")
+                events = await runtime_trace.read(instance_id, turns=5, filter_level="warning")
         if events:
             trace_lines = []
             for e in events[:20]:
@@ -251,7 +251,7 @@ async def handle_diagnose_issue(
 
 
 async def handle_propose_fix(
-    tenant_id: str,
+    instance_id: str,
     tool_input: dict,
     runtime_trace: Any = None,
 ) -> str:
@@ -273,12 +273,12 @@ async def handle_propose_fix(
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
     spec_id = _generate_spec_id()
-    spec_dir = _specs_dir(data_dir, tenant_id, "proposed")
+    spec_dir = _specs_dir(data_dir, instance_id, "proposed")
 
     # Gather trace evidence if available
     trace_evidence = ""
     if runtime_trace:
-        events = await runtime_trace.read(tenant_id, turns=3, filter_level="error")
+        events = await runtime_trace.read(instance_id, turns=3, filter_level="error")
         if events:
             trace_evidence = "\n".join(
                 f"- [{e.get('event', '?')}] {e.get('detail', '')[:100]}"
@@ -326,7 +326,7 @@ async def handle_propose_fix(
 
 
 async def handle_submit_spec(
-    tenant_id: str,
+    instance_id: str,
     tool_input: dict,
     handler: Any = None,
 ) -> str:
@@ -338,8 +338,8 @@ async def handle_submit_spec(
         return "Error: spec_id is required."
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-    proposed_dir = _specs_dir(data_dir, tenant_id, "proposed")
-    submitted_dir = _specs_dir(data_dir, tenant_id, "submitted")
+    proposed_dir = _specs_dir(data_dir, instance_id, "proposed")
+    submitted_dir = _specs_dir(data_dir, instance_id, "submitted")
 
     spec_path = proposed_dir / f"{spec_id}.md"
     if not spec_path.exists():
@@ -375,7 +375,7 @@ async def handle_submit_spec(
                 foresight_signal=f"fix_spec:{spec_id}",
                 created_at=utc_now(),
             )
-            await handler.state.save_whisper(tenant_id, whisper)
+            await handler.state.save_whisper(instance_id, whisper)
         except Exception as exc:
             logger.warning("SUBMIT_SPEC: whisper failed: %s", exc)
 

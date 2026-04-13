@@ -177,7 +177,7 @@ class DispatchGate:
         tool_input: dict,
         effect: str,
         user_message: str,
-        tenant_id: str,
+        instance_id: str,
         active_space_id: str,
         messages: list[dict] | None = None,
         approval_token_id: str | None = None,
@@ -210,7 +210,7 @@ class DispatchGate:
         cap_name = self._get_capability_for_tool(tool_name)
         if cap_name and self._state:
             try:
-                tenant = await self._state.get_tenant_profile(tenant_id)
+                tenant = await self._state.get_instance_profile(instance_id)
                 if tenant and tenant.permission_overrides.get(cap_name) == "always-allow":
                     self._denial_counts.pop(tool_name, None)
                     logger.info("GATE: permission_override tool=%s cap=%s", tool_name, cap_name)
@@ -230,7 +230,7 @@ class DispatchGate:
             if self._state:
                 try:
                     rules = await self._state.query_covenant_rules(
-                        tenant_id, context_space_scope=[active_space_id, None], active_only=True,
+                        instance_id, context_space_scope=[active_space_id, None], active_only=True,
                     )
                     cap_name = self._get_capability_for_tool(tool_name) or ""
                     for r in rules:
@@ -257,7 +257,7 @@ class DispatchGate:
         # Step 4: Model evaluation
         result = await self._evaluate_model(
             tool_name, tool_input, effect, messages, agent_reasoning,
-            tenant_id, active_space_id, user_message=user_message,
+            instance_id, active_space_id, user_message=user_message,
         )
         # Track denials / reset on approve
         if result.allowed:
@@ -273,7 +273,7 @@ class DispatchGate:
         effect: str,
         messages: list[dict] | None,
         agent_reasoning: str,
-        tenant_id: str,
+        instance_id: str,
         active_space_id: str,
         user_message: str = "",
     ) -> GateResult:
@@ -305,7 +305,7 @@ class DispatchGate:
         if self._state:
             try:
                 rules = await self._state.query_covenant_rules(
-                    tenant_id, context_space_scope=[active_space_id, None], active_only=True,
+                    instance_id, context_space_scope=[active_space_id, None], active_only=True,
                 )
                 rule_lines = []
                 for r in rules:

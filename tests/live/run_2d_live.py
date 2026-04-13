@@ -27,7 +27,7 @@ from kernos.kernel.engine import TaskEngine
 from kernos.kernel.events import JsonEventStream
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 from datetime import datetime, timezone
 
 
@@ -49,7 +49,7 @@ def make_msg(content: str) -> NormalizedMessage:
         platform_capabilities=["text"],
         conversation_id=CONVERSATION_ID,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT,
+        instance_id=TENANT,
     )
 
 
@@ -85,7 +85,7 @@ async def main():
     events = JsonEventStream(DATA_DIR)
     state = JsonStateStore(DATA_DIR)
     conversations = JsonConversationStore(DATA_DIR)
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     audit = JsonAuditStore(DATA_DIR)
     provider = AnthropicProvider(api_key)
     mcp = MCPClientManager()

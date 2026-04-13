@@ -32,7 +32,7 @@ def make_cap(
 def make_space(space_type="domain", active_tools=None):
     return ContextSpace(
         id="space_test01",
-        tenant_id="tenant_test",
+        instance_id="tenant_test",
         name="Test Space",
         space_type=space_type,
         active_tools=active_tools if active_tools is not None else [],

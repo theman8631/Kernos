@@ -13,7 +13,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from kernos.persistence.base import AuditStore, ConversationStore, TenantStore
+from kernos.persistence.base import AuditStore, ConversationStore, InstanceStore
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ from kernos.utils import utc_now
 
 
 
-def _ensure_tenant_dirs(tenant_root: Path) -> None:
+def _ensureinstance_dirs(tenant_root: Path) -> None:
     """Create the full tenant directory structure including all archive subdirs."""
     (tenant_root / "conversations").mkdir(parents=True, exist_ok=True)
     (tenant_root / "audit").mkdir(parents=True, exist_ok=True)
@@ -50,17 +50,17 @@ class JsonConversationStore(ConversationStore):
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
 
-    def _conversation_path(self, tenant_id: str, conversation_id: str) -> Path:
+    def _conversation_path(self, instance_id: str, conversation_id: str) -> Path:
         return (
             self._data_dir
-            / _safe_name(tenant_id)
+            / _safe_name(instance_id)
             / "conversations"
             / f"{_safe_name(conversation_id)}.json"
         )
 
-    async def append(self, tenant_id: str, conversation_id: str, entry: dict) -> None:
-        path = self._conversation_path(tenant_id, conversation_id)
-        # Ensure directories exist (safety net — TenantStore.get_or_create runs first normally)
+    async def append(self, instance_id: str, conversation_id: str, entry: dict) -> None:
+        path = self._conversation_path(instance_id, conversation_id)
+        # Ensure directories exist (safety net — InstanceStore.get_or_create runs first normally)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = str(path) + ".lock"
         with FileLock(lock_path):
@@ -74,9 +74,9 @@ class JsonConversationStore(ConversationStore):
                 json.dump(entries, f, ensure_ascii=False, indent=2)
 
     async def get_recent(
-        self, tenant_id: str, conversation_id: str, limit: int = 20
+        self, instance_id: str, conversation_id: str, limit: int = 20
     ) -> list[dict]:
-        path = self._conversation_path(tenant_id, conversation_id)
+        path = self._conversation_path(instance_id, conversation_id)
         if not path.exists():
             return []
         with open(path, "r", encoding="utf-8") as f:
@@ -86,9 +86,9 @@ class JsonConversationStore(ConversationStore):
         return [{"role": e["role"], "content": e["content"]} for e in recent]
 
     async def get_recent_full(
-        self, tenant_id: str, conversation_id: str, limit: int = 20
+        self, instance_id: str, conversation_id: str, limit: int = 20
     ) -> list[dict]:
-        path = self._conversation_path(tenant_id, conversation_id)
+        path = self._conversation_path(instance_id, conversation_id)
         if not path.exists():
             return []
         with open(path, "r", encoding="utf-8") as f:
@@ -96,12 +96,12 @@ class JsonConversationStore(ConversationStore):
         return entries[-limit:] if len(entries) > limit else entries
 
     async def get_space_thread(
-        self, tenant_id: str, conversation_id: str,
+        self, instance_id: str, conversation_id: str,
         space_id: str, max_messages: int = 50,
         include_untagged: bool = False,
         include_timestamp: bool = False,
     ) -> list[dict]:
-        path = self._conversation_path(tenant_id, conversation_id)
+        path = self._conversation_path(instance_id, conversation_id)
         if not path.exists():
             return []
         with open(path, "r", encoding="utf-8") as f:
@@ -123,10 +123,10 @@ class JsonConversationStore(ConversationStore):
         return space_messages[-max_messages:]
 
     async def get_cross_domain_messages(
-        self, tenant_id: str, conversation_id: str,
+        self, instance_id: str, conversation_id: str,
         active_space_id: str, last_n_turns: int = 5,
     ) -> list[dict]:
-        path = self._conversation_path(tenant_id, conversation_id)
+        path = self._conversation_path(instance_id, conversation_id)
         if not path.exists():
             return []
         with open(path, "r", encoding="utf-8") as f:
@@ -139,14 +139,14 @@ class JsonConversationStore(ConversationStore):
         ]
         return cross[-(last_n_turns * 2):]
 
-    async def archive(self, tenant_id: str, conversation_id: str) -> None:
-        path = self._conversation_path(tenant_id, conversation_id)
+    async def archive(self, instance_id: str, conversation_id: str) -> None:
+        path = self._conversation_path(instance_id, conversation_id)
         if not path.exists():
             return
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         dest_dir = (
             self._data_dir
-            / _safe_name(tenant_id)
+            / _safe_name(instance_id)
             / "archive"
             / "conversations"
             / timestamp
@@ -159,7 +159,7 @@ class JsonConversationStore(ConversationStore):
 
         archived = {
             "archived_at": utc_now(),
-            "tenant_id": tenant_id,
+            "instance_id": instance_id,
             "conversation_id": conversation_id,
             "entries": original,
         }
@@ -169,34 +169,34 @@ class JsonConversationStore(ConversationStore):
         # Relocate — not delete. Original removed, archive copy preserved.
         path.unlink()
         logger.info(
-            "Archived conversation %s for tenant %s to %s",
+            "Archived conversation %s for instance %s to %s",
             conversation_id,
-            tenant_id,
+            instance_id,
             dest,
         )
 
 
-class JsonTenantStore(TenantStore):
+class JsonInstanceStore(InstanceStore):
     """JSON file-backed tenant record store."""
 
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
 
-    def _tenant_path(self, tenant_id: str) -> Path:
-        return self._data_dir / _safe_name(tenant_id) / "tenant.json"
+    def instance_path(self, instance_id: str) -> Path:
+        return self._data_dir / _safe_name(instance_id) / "tenant.json"
 
-    async def get_or_create(self, tenant_id: str) -> dict:
-        path = self._tenant_path(tenant_id)
+    async def get_or_create(self, instance_id: str) -> dict:
+        path = self.instance_path(instance_id)
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
 
         # Auto-provision: create the full directory structure and tenant record.
-        tenant_root = self._data_dir / _safe_name(tenant_id)
-        _ensure_tenant_dirs(tenant_root)
+        tenant_root = self._data_dir / _safe_name(instance_id)
+        _ensureinstance_dirs(tenant_root)
 
         record: dict = {
-            "tenant_id": tenant_id,
+            "instance_id": instance_id,
             "status": "active",
             "created_at": utc_now(),
             "capabilities": {},
@@ -211,11 +211,11 @@ class JsonTenantStore(TenantStore):
                 with open(path, "r", encoding="utf-8") as f:
                     record = json.load(f)
 
-        logger.info("Auto-provisioned new tenant: %s", tenant_id)
+        logger.info("Auto-provisioned new tenant: %s", instance_id)
         return record
 
-    async def save(self, tenant_id: str, record: dict) -> None:
-        path = self._tenant_path(tenant_id)
+    async def save(self, instance_id: str, record: dict) -> None:
+        path = self.instance_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = str(path) + ".lock"
         with FileLock(lock_path):
@@ -229,12 +229,12 @@ class JsonAuditStore(AuditStore):
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
 
-    def _audit_path(self, tenant_id: str) -> Path:
+    def _audit_path(self, instance_id: str) -> Path:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return self._data_dir / _safe_name(tenant_id) / "audit" / f"{date_str}.json"
+        return self._data_dir / _safe_name(instance_id) / "audit" / f"{date_str}.json"
 
-    async def log(self, tenant_id: str, entry: dict) -> None:
-        path = self._audit_path(tenant_id)
+    async def log(self, instance_id: str, entry: dict) -> None:
+        path = self._audit_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = str(path) + ".lock"
         with FileLock(lock_path):

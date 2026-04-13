@@ -91,7 +91,7 @@ KERNOS inverts this. The agent receives pre-assembled context, reasons about the
 
 The kernel has five core primitives that compose into three modes of operation. This was distilled into the Kernel Architecture Outline v2 (now in the repo at `docs/KERNEL-ARCHITECTURE-OUTLINE.md`). Here I capture the *reasoning* behind the choices that the outline encodes but doesn't explain.
 
-**1. Event Stream** — Chosen as Primitive 1 because OSBuilder's answer to "what do you wish you'd built from day one?" was unequivocal: a unified event bus. We had already built event-sourcing into 1A.4's persistence layer. The key decision was: generalize the three stores (ConversationStore, AuditStore, TenantStore) into a single typed event stream that multiple consumers can read. Conversation entries and audit entries are both events in the same stream, separated by type rather than by store.
+**1. Event Stream** — Chosen as Primitive 1 because OSBuilder's answer to "what do you wish you'd built from day one?" was unequivocal: a unified event bus. We had already built event-sourcing into 1A.4's persistence layer. The key decision was: generalize the three stores (ConversationStore, AuditStore, InstanceStore) into a single typed event stream that multiple consumers can read. Conversation entries and audit entries are both events in the same stream, separated by type rather than by store.
 
 **2. State Store** — The *query surface*, not the event stream. This distinction matters. The event stream is history (what happened). The State Store is knowledge (what is known, right now). Runtime queries hit the State Store. The event stream is for replay, audit, and projection rebuilding. Think: database transaction log vs. the tables. You query the tables.
 
@@ -447,32 +447,32 @@ Two-year arc: scattered mentions in daily conversation → 40+ knowledge entries
 
 ### Shared-Agent Scenarios
 
-Three distinct patterns emerged for multi-tenant access to a single agent identity:
+Three distinct patterns emerged for multi-instance access to a single agent identity:
 
 **Pattern 1: Household — shared personality, individual contracts**
 
 A husband and wife both communicate with the same agent. The soul (personality, values, relational style) is shared — it's one entity that knows the family. But each person has individual behavioral contracts. Perhaps one spouse manages business email through the agent; the other doesn't have access to business communications but can manage the shared family calendar.
 
-**Architecture implication:** The soul belongs to a *workspace*, not a tenant. Both spouses are tenants within the same workspace. They share the agent's personality and shared resources (family calendar, household knowledge), but contracts are per-tenant. The agent knows who it's talking to and adjusts permissions accordingly, not personality.
+**Architecture implication:** The soul belongs to a *workspace*, not a tenant. Both spouses are tenants within the same workspace. They share the agent's personality and shared resources (family calendar, household knowledge), but contracts are per-instance. The agent knows who it's talking to and adjusts permissions accordingly, not personality.
 
 **Pattern 2: Plumber's clients — owner plus scoped external access**
 
 The plumber's clients text the agent's number to schedule appointments. They interact with the same agent (same personality, same business knowledge) but with radically restricted access. Clients can request scheduling, ask about availability, and get confirmations. They cannot read the plumber's email, modify prices, or access private business data.
 
-**Architecture implication:** External contacts are tenants with minimal contracts — mostly "read-only public capabilities." The agent's personality is consistent (professional, helpful) but its contract model is completely different per tenant class. The Blueprint's external contact handling section already sketches this, but the workspace model makes it cleaner: the plumber's workspace has an owner tenant and multiple client tenants, each with scoped contracts.
+**Architecture implication:** External contacts are tenants with minimal contracts — mostly "read-only public capabilities." The agent's personality is consistent (professional, helpful) but its contract model is completely different per instance class. The Blueprint's external contact handling section already sketches this, but the workspace model makes it cleaner: the plumber's workspace has an owner tenant and multiple client tenants, each with scoped contracts.
 
 **Pattern 3: Demo — completely separate tenants**
 
 When showcasing the system, each new phone number or Discord account should get a completely separate tenant with a fresh hatch process. No shared state, no shared soul, no cross-contamination.
 
-**Architecture implication:** This already works with the current `derive_tenant_id()` logic — each sender identity gets its own tenant_id. No workspace sharing. The demo case is the default behavior, not a special mode.
+**Architecture implication:** This already works with the current `derive_instance_id()` logic — each sender identity gets its own instance_id. No workspace sharing. The demo case is the default behavior, not a special mode.
 
 **Implementation timeline:**
 
 Pattern 3 works today. Patterns 1 and 2 require the workspace abstraction — a layer between "system" and "tenant" where shared resources live. This is Phase 2 work, but the soul data model reserves `workspace_id` from 1B.5 to avoid retrofitting.
 
 **Open questions:**
-- How does the agent's greeting differ when it recognizes tenant A vs. tenant B in the same workspace? Same personality, but "hey Sarah" vs. "hey Mike" — does the user context portion of the soul need per-tenant variants within a shared workspace?
+- How does the agent's greeting differ when it recognizes tenant A vs. tenant B in the same workspace? Same personality, but "hey Sarah" vs. "hey Mike" — does the user context portion of the soul need per-instance variants within a shared workspace?
 - For the plumber's clients: when a new unknown number texts, does the agent hatch a new client tenant automatically, or does it route to a generic "public-facing" tenant first?
 - Workspace administration: who can add/remove tenants from a workspace? Only the owner? Can ownership be shared?
 
@@ -592,7 +592,7 @@ The website example assumes the agent maintains what it built. But what happens 
 
 "Never send email without approval" is clear. But what about "be more proactive about scheduling"? That's a preference that touches multiple capabilities. How granular should contract specifications be? Per-capability? Per-action-type? Per-situation? The answer probably isn't uniform — some capabilities need fine-grained control (email) while others work with broad strokes (research).
 
-### How does multi-tenant external contact routing actually work?
+### How does multi-instance external contact routing actually work?
 
 The plumber's customer texts the plumber's number — clean routing. But what about Discord, where the bot is shared? What about a customer who interacts with multiple KERNOS users' agents? The channel-solves-routing principle works for dedicated numbers but may need augmentation for shared platforms.
 

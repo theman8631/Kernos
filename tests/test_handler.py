@@ -23,9 +23,9 @@ from kernos.kernel.template import PRIMARY_TEMPLATE
 from kernos.messages.handler import MessageHandler, _build_system_prompt
 from kernos.messages.models import AuthLevel, NormalizedMessage
 from kernos.capability.client import MCPClientManager
-from kernos.persistence import AuditStore, ConversationStore, TenantStore
+from kernos.persistence import AuditStore, ConversationStore, InstanceStore
 from kernos.kernel.events import EventStream
-from kernos.kernel.state import StateStore, TenantProfile
+from kernos.kernel.state import StateStore, InstanceProfile
 
 
 def _make_message(content: str = "Hello", platform: str = "sms") -> NormalizedMessage:
@@ -37,7 +37,7 @@ def _make_message(content: str = "Hello", platform: str = "sms") -> NormalizedMe
         platform_capabilities=["text", "mms"],
         conversation_id="+15555550100",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
     )
 
 
@@ -113,9 +113,9 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
     conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
 
-    tenants = AsyncMock(spec=TenantStore)
+    tenants = AsyncMock(spec=InstanceStore)
     tenants.get_or_create.return_value = {
-        "tenant_id": "sms:+15555550100",
+        "instance_id": "sms:+15555550100",
         "status": "active",
         "created_at": "2026-03-01T00:00:00Z",
         "capabilities": {},
@@ -129,18 +129,18 @@ def _make_handler(tools: list[dict] | None = None) -> tuple[MessageHandler, Asyn
 
     state = AsyncMock(spec=StateStore)
     # Return an existing profile so provisioning is skipped in most tests
-    state.get_tenant_profile.return_value = TenantProfile(
-        tenant_id="sms:+15555550100",
+    state.get_instance_profile.return_value = InstanceProfile(
+        instance_id="sms:+15555550100",
         status="active",
         created_at="2026-03-01T00:00:00Z",
     )
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
-    state.save_tenant_profile.return_value = None
+    state.save_instance_profile.return_value = None
     # Return a hatched soul with user_name set so name-ask doesn't fire.
     # Tests that specifically test first-interaction behavior use their own setup.
     state.get_soul.return_value = Soul(
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         user_name="TestUser",
         hatched=True,
         interaction_count=5,
@@ -233,11 +233,11 @@ def test_system_prompt_includes_platform():
         platform_capabilities=["text"],
         conversation_id="+15555550100",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="+15555550100",
+        instance_id="+15555550100",
     )
 
     cap_prompt = "CURRENT CAPABILITIES — conversation only."
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
 
     discord_msg = NormalizedMessage(**base, platform="discord")
     assert "Discord" in _build_system_prompt(discord_msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
@@ -252,7 +252,7 @@ def test_system_prompt_includes_platform():
 
 def test_system_prompt_includes_capability_prompt():
     msg = _make_message()
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     cap_prompt = "CONNECTED CAPABILITIES — you can use these:\n- Google Calendar."
     prompt = _build_system_prompt(msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
     assert "CONNECTED CAPABILITIES" in prompt
@@ -261,7 +261,7 @@ def test_system_prompt_includes_capability_prompt():
 
 def test_system_prompt_includes_conversation_only_when_no_caps():
     msg = _make_message()
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     cap_prompt = "CURRENT CAPABILITIES — conversation only."
     prompt = _build_system_prompt(msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
     assert "conversation only" in prompt.lower()
@@ -269,7 +269,7 @@ def test_system_prompt_includes_conversation_only_when_no_caps():
 
 def test_system_prompt_does_not_claim_cannot_remember():
     msg = _make_message()
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     prompt = _build_system_prompt(msg, "CURRENT CAPABILITIES — conversation only.", soul, PRIMARY_TEMPLATE, [])
     assert "cannot remember previous conversations" not in prompt
 
@@ -379,12 +379,12 @@ async def test_handler_stores_user_and_assistant_messages():
     user_entry = calls[0][0][2]
     assert user_entry["role"] == "user"
     assert user_entry["content"] == "How are you?"
-    assert "tenant_id" in user_entry
+    assert "instance_id" in user_entry
 
     assistant_entry = calls[1][0][2]
     assert assistant_entry["role"] == "assistant"
     assert assistant_entry["content"] == "I'm good, thanks!"
-    assert "tenant_id" in assistant_entry
+    assert "instance_id" in assistant_entry
 
 
 async def test_handler_tool_calls_go_to_audit_not_conversation():
@@ -451,17 +451,17 @@ async def test_handler_creates_task_via_engine():
     conversations.get_space_thread.return_value = []
     conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
-    tenants = AsyncMock(spec=TenantStore)
-    tenants.get_or_create.return_value = {"tenant_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
+    tenants = AsyncMock(spec=InstanceStore)
+    tenants.get_or_create.return_value = {"instance_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
     audit = AsyncMock(spec=AuditStore)
     events = AsyncMock(spec=EventStream)
     events.emit.return_value = None
     state = AsyncMock(spec=StateStore)
-    from kernos.kernel.state import TenantProfile
-    state.get_tenant_profile.return_value = TenantProfile(tenant_id="sms:+15555550100", status="active", created_at="2026-03-01T00:00:00Z")
+    from kernos.kernel.state import InstanceProfile
+    state.get_instance_profile.return_value = InstanceProfile(instance_id="sms:+15555550100", status="active", created_at="2026-03-01T00:00:00Z")
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
-    state.save_tenant_profile.return_value = None
+    state.save_instance_profile.return_value = None
     state.get_soul.return_value = None
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
@@ -479,7 +479,7 @@ async def test_handler_creates_task_via_engine():
     captured_task = Task(
         id="task_captured",
         type=TaskType.REACTIVE_SIMPLE,
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         conversation_id="+15555550100",
         status=TaskStatus.COMPLETED,
         result_text="Mock response",
@@ -494,7 +494,7 @@ async def test_handler_creates_task_via_engine():
     call_args = mock_engine.execute.call_args
     task_arg = call_args[0][0]  # first positional arg
     assert task_arg.type == TaskType.REACTIVE_SIMPLE
-    assert task_arg.tenant_id == "sms:+15555550100"
+    assert task_arg.instance_id == "sms:+15555550100"
     assert task_arg.source == "user_message"
     assert task_arg.input_text == "Hello from handler"
 
@@ -508,19 +508,19 @@ async def test_handler_uses_task_result_text_as_response():
     conversations.get_space_thread.return_value = []
     conversations.get_cross_domain_messages.return_value = []
     conversations.append.return_value = None
-    tenants = AsyncMock(spec=TenantStore)
-    tenants.get_or_create.return_value = {"tenant_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
+    tenants = AsyncMock(spec=InstanceStore)
+    tenants.get_or_create.return_value = {"instance_id": "sms:+15555550100", "status": "active", "created_at": "2026-03-01T00:00:00Z", "capabilities": {}}
     audit = AsyncMock(spec=AuditStore)
     events = AsyncMock(spec=EventStream)
     events.emit.return_value = None
     state = AsyncMock(spec=StateStore)
-    from kernos.kernel.state import TenantProfile
-    state.get_tenant_profile.return_value = TenantProfile(tenant_id="sms:+15555550100", status="active", created_at="2026-03-01T00:00:00Z")
+    from kernos.kernel.state import InstanceProfile
+    state.get_instance_profile.return_value = InstanceProfile(instance_id="sms:+15555550100", status="active", created_at="2026-03-01T00:00:00Z")
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
-    state.save_tenant_profile.return_value = None
+    state.save_instance_profile.return_value = None
     state.get_soul.return_value = Soul(
-        tenant_id="sms:+15555550100", user_name="TestUser", hatched=True, interaction_count=5
+        instance_id="sms:+15555550100", user_name="TestUser", hatched=True, interaction_count=5
     )
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
@@ -539,7 +539,7 @@ async def test_handler_uses_task_result_text_as_response():
     mock_engine.execute.return_value = Task(
         id="task_x",
         type=TaskType.REACTIVE_SIMPLE,
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         conversation_id="+15555550100",
         status=TaskStatus.COMPLETED,
         result_text="The answer from the task",
@@ -687,11 +687,11 @@ class TestDepartureContext:
         from kernos.kernel.spaces import ContextSpace
         from kernos.messages.handler import TurnContext
         ctx_obj = TurnContext()
-        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.instance_id = "test-tenant"
         ctx_obj.active_space_id = "space-b"
-        ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Architecture")
+        ctx_obj.active_space = ContextSpace(id="space-b", instance_id="test-tenant", name="Architecture")
 
-        handler.state.get_context_space.return_value = ContextSpace(id="space-a", tenant_id="test-tenant", name="General")
+        handler.state.get_context_space.return_value = ContextSpace(id="space-a", instance_id="test-tenant", name="General")
 
         result = await handler._build_departure_context(ctx_obj, "space-a")
 
@@ -705,7 +705,7 @@ class TestDepartureContext:
         handler, _ = _make_handler()
         from kernos.messages.handler import TurnContext
         ctx_obj = TurnContext()
-        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.instance_id = "test-tenant"
         ctx_obj.active_space_id = "space-a"
 
         result = await handler._build_departure_context(ctx_obj, "space-a")
@@ -719,9 +719,9 @@ class TestDepartureContext:
         from kernos.messages.handler import TurnContext
         from kernos.kernel.spaces import ContextSpace
         ctx_obj = TurnContext()
-        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.instance_id = "test-tenant"
         ctx_obj.active_space_id = "space-b"
-        ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Other")
+        ctx_obj.active_space = ContextSpace(id="space-b", instance_id="test-tenant", name="Other")
 
         result = await handler._build_departure_context(ctx_obj, "space-a")
         assert result is None
@@ -739,9 +739,9 @@ class TestDepartureContext:
         from kernos.messages.handler import TurnContext
         from kernos.kernel.spaces import ContextSpace
         ctx_obj = TurnContext()
-        ctx_obj.tenant_id = "test-tenant"
+        ctx_obj.instance_id = "test-tenant"
         ctx_obj.active_space_id = "space-b"
-        ctx_obj.active_space = ContextSpace(id="space-b", tenant_id="test-tenant", name="Other")
+        ctx_obj.active_space = ContextSpace(id="space-b", instance_id="test-tenant", name="Other")
 
         result = await handler._build_departure_context(ctx_obj, "space-a")
         assert result is not None

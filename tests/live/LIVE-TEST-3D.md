@@ -120,9 +120,9 @@ Found 11 dispatch.gate events
 
 ---
 
-### Step 6 — permission_overrides field on TenantProfile ✓ PASS
+### Step 6 — permission_overrides field on InstanceProfile ✓ PASS
 
-**Action:** Inspect TenantProfile for `permission_overrides` field.
+**Action:** Inspect InstanceProfile for `permission_overrides` field.
 
 **Actual:**
 ```
@@ -228,7 +228,7 @@ Dispatch Interceptor is live and operational:
 - Read tools bypass silently (zero overhead)
 - Write tools gated: explicit instruction fast path fires with no LLM cost
 - `_check_delete_allowed()` consolidated into universal gate (same signals, one code path)
-- `permission_overrides` field on TenantProfile (backward compatible, empty default)
+- `permission_overrides` field on InstanceProfile (backward compatible, empty default)
 - `DISPATCH_GATE` events emitted for every gate decision
 - `GATE:` INFO trace logging with tool, effect, allowed, reason, method
 - Covenant authorization via Haiku call (Step 2) verified by unit tests

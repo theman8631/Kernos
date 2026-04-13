@@ -12,17 +12,17 @@ def test_normalized_message_creation():
         platform_capabilities=["text", "mms"],
         conversation_id="+15555550100",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="+15555550100",
+        instance_id="+15555550100",
     )
     assert msg.content == "Hello"
     assert msg.sender == "+15555550100"
     assert msg.platform == "sms"
-    assert msg.tenant_id == "+15555550100"
+    assert msg.instance_id == "+15555550100"
     assert msg.context is None
 
 
-def test_normalized_message_tenant_id_required():
-    """tenant_id is a required field — omitting it must raise TypeError."""
+def test_normalized_message_instance_id_required():
+    """instance_id is a required field — omitting it must raise TypeError."""
     import pytest
 
     with pytest.raises(TypeError):
@@ -34,7 +34,7 @@ def test_normalized_message_tenant_id_required():
             platform_capabilities=["text"],
             conversation_id="+15555550100",
             timestamp=datetime.now(timezone.utc),
-            # tenant_id omitted
+            # instance_id omitted
         )
 
 
@@ -47,7 +47,7 @@ def test_normalized_message_with_context():
         platform_capabilities=["text"],
         conversation_id="+15555550100",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="+15555550100",
+        instance_id="+15555550100",
         context={"key": "value"},
     )
     assert msg.context == {"key": "value"}

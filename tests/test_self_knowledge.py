@@ -324,7 +324,7 @@ class TestReadSoul:
     async def test_read_soul_returns_soul_fields(self, tmp_path):
         """Call read_soul. Verify it returns soul.json fields (agent_name, emoji, etc.)."""
         store = JsonStateStore(str(tmp_path))
-        soul = Soul(tenant_id="t1", agent_name="Rex", emoji="🔥", personality_notes="bold")
+        soul = Soul(instance_id="t1", agent_name="Rex", emoji="🔥", personality_notes="bold")
         await store.save_soul(soul)
 
         # Wire up a ReasoningService with state
@@ -338,7 +338,7 @@ class TestReadSoul:
         # Simulate read_soul via execute_tool
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
         result = await r.execute_tool("read_soul", {}, request)
@@ -346,7 +346,7 @@ class TestReadSoul:
         assert parsed["agent_name"] == "Rex"
         assert parsed["emoji"] == "🔥"
         assert parsed["personality_notes"] == "bold"
-        assert parsed["tenant_id"] == "t1"
+        assert parsed["instance_id"] == "t1"
 
     async def test_read_soul_no_soul_found(self):
         """read_soul returns error when no soul exists."""
@@ -362,7 +362,7 @@ class TestReadSoul:
 
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
         result = await r.execute_tool("read_soul", {}, request)
@@ -375,7 +375,7 @@ class TestUpdateSoul:
     async def test_update_agent_name(self, tmp_path):
         """Call update_soul to change agent_name to 'Rex'. Call read_soul. Verify."""
         store = JsonStateStore(str(tmp_path))
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         await store.save_soul(soul)
 
         provider = MagicMock()
@@ -387,7 +387,7 @@ class TestUpdateSoul:
 
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
 
@@ -408,7 +408,7 @@ class TestUpdateSoul:
     async def test_reject_hatched_update(self, tmp_path):
         """Call update_soul to change hatched. Verify it returns an error."""
         store = JsonStateStore(str(tmp_path))
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         await store.save_soul(soul)
 
         provider = MagicMock()
@@ -420,7 +420,7 @@ class TestUpdateSoul:
 
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
         result = await r.execute_tool("update_soul", {"field": "hatched", "value": "true"}, request)
@@ -429,7 +429,7 @@ class TestUpdateSoul:
     async def test_reject_interaction_count_update(self, tmp_path):
         """Call update_soul to change interaction_count. Verify it returns an error."""
         store = JsonStateStore(str(tmp_path))
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         await store.save_soul(soul)
 
         provider = MagicMock()
@@ -441,7 +441,7 @@ class TestUpdateSoul:
 
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
         result = await r.execute_tool("update_soul", {"field": "interaction_count", "value": "99"}, request)
@@ -450,7 +450,7 @@ class TestUpdateSoul:
     async def test_reject_bootstrap_graduated_update(self, tmp_path):
         """bootstrap_graduated is not updatable via update_soul."""
         store = JsonStateStore(str(tmp_path))
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         await store.save_soul(soul)
 
         provider = MagicMock()
@@ -462,7 +462,7 @@ class TestUpdateSoul:
 
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
         result = await r.execute_tool("update_soul", {"field": "bootstrap_graduated", "value": "true"}, request)
@@ -471,7 +471,7 @@ class TestUpdateSoul:
     async def test_reject_user_name_update(self, tmp_path):
         """user_name is not updatable via update_soul."""
         store = JsonStateStore(str(tmp_path))
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         await store.save_soul(soul)
 
         provider = MagicMock()
@@ -483,7 +483,7 @@ class TestUpdateSoul:
 
         from kernos.kernel.reasoning import ReasoningRequest
         request = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1", system_prompt="",
+            instance_id="t1", conversation_id="c1", system_prompt="",
             messages=[], tools=[], model="test", trigger="test",
         )
         result = await r.execute_tool("update_soul", {"field": "user_name", "value": "Bob"}, request)
@@ -528,13 +528,13 @@ class TestSoulToolDefinitions:
 
 class TestDeveloperModeField:
     def test_default_false(self):
-        from kernos.kernel.state import TenantProfile
-        tp = TenantProfile(tenant_id="t1", status="active", created_at="2026-01-01T00:00:00Z")
+        from kernos.kernel.state import InstanceProfile
+        tp = InstanceProfile(instance_id="t1", status="active", created_at="2026-01-01T00:00:00Z")
         assert tp.developer_mode is False
 
     def test_set_true(self):
-        from kernos.kernel.state import TenantProfile
-        tp = TenantProfile(tenant_id="t1", status="active", created_at="2026-01-01T00:00:00Z", developer_mode=True)
+        from kernos.kernel.state import InstanceProfile
+        tp = InstanceProfile(instance_id="t1", status="active", created_at="2026-01-01T00:00:00Z", developer_mode=True)
         assert tp.developer_mode is True
 
 
@@ -561,12 +561,12 @@ class TestSoulDefaults:
 
     def test_new_soul_has_default_name(self):
         """Create new tenant. Verify soul has agent_name='Kernos'."""
-        soul = Soul(tenant_id="new_t")
+        soul = Soul(instance_id="new_t")
         assert soul.agent_name == "Kernos"
 
     def test_new_soul_has_default_emoji(self):
         """Create new tenant. Verify soul has emoji='🜁'."""
-        soul = Soul(tenant_id="new_t")
+        soul = Soul(instance_id="new_t")
         assert soul.emoji == "🜁"
 
     async def test_migration_backfills_empty_name(self, tmp_path):
@@ -576,7 +576,7 @@ class TestSoulDefaults:
         state_dir = tmp_path / "t_migrate" / "state"
         state_dir.mkdir(parents=True)
         (state_dir / "soul.json").write_text(json.dumps({
-            "tenant_id": "t_migrate",
+            "instance_id": "t_migrate",
             "agent_name": "",
             "emoji": "",
             "personality_notes": "",
@@ -621,7 +621,7 @@ class TestBootstrapPrompt:
         from kernos.messages.models import NormalizedMessage, AuthLevel
         from datetime import datetime, timezone
 
-        soul = Soul(tenant_id="t1", bootstrap_graduated=False)
+        soul = Soul(instance_id="t1", bootstrap_graduated=False)
         msg = NormalizedMessage(
             content="hello",
             sender="+15555550100",
@@ -630,7 +630,7 @@ class TestBootstrapPrompt:
             sender_auth_level=AuthLevel.owner_verified,
             timestamp=datetime.now(timezone.utc),
             platform_capabilities=[],
-            tenant_id="t1",
+            instance_id="t1",
         )
         prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
         assert "FIRST CONVERSATION" in prompt
@@ -652,7 +652,7 @@ class TestNoSoulMd:
         from kernos.messages.models import NormalizedMessage, AuthLevel
         from datetime import datetime, timezone
 
-        soul = Soul(tenant_id="t1", bootstrap_graduated=True, user_name="Test")
+        soul = Soul(instance_id="t1", bootstrap_graduated=True, user_name="Test")
         msg = NormalizedMessage(
             content="hello",
             sender="+15555550100",
@@ -661,7 +661,7 @@ class TestNoSoulMd:
             sender_auth_level=AuthLevel.owner_verified,
             timestamp=datetime.now(timezone.utc),
             platform_capabilities=[],
-            tenant_id="t1",
+            instance_id="t1",
         )
         prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
         # SOUL.md contained distinctive phrases that should not appear

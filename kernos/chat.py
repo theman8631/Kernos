@@ -50,7 +50,7 @@ async def build_handler():
     from kernos.persistence.json_file import (
         JsonAuditStore,
         JsonConversationStore,
-        JsonTenantStore,
+        JsonInstanceStore,
     )
 
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
@@ -106,7 +106,7 @@ async def build_handler():
     await mcp_manager.connect_all()
 
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
     registry = CapabilityRegistry(mcp=mcp_manager)
@@ -142,7 +142,7 @@ async def build_handler():
 
 
 def _list_tenants() -> list[dict]:
-    """List all tenants with metadata."""
+    """List all instances with metadata."""
     import json
 
     data_dir = Path(os.getenv("KERNOS_DATA_DIR", "./data"))
@@ -159,10 +159,10 @@ def _list_tenants() -> list[dict]:
         if not profile_path.exists():
             continue
 
-        # Reconstruct tenant_id from dir name
-        tenant_id = d.name.replace("_", ":", 1)
+        # Reconstruct instance_id from dir name
+        instance_id = d.name.replace("_", ":", 1)
 
-        info: dict = {"tenant_id": tenant_id, "dir": d.name}
+        info: dict = {"instance_id": instance_id, "dir": d.name}
 
         try:
             profile = json.loads(profile_path.read_text())
@@ -186,7 +186,7 @@ def _list_tenants() -> list[dict]:
     return tenants
 
 
-def _pick_tenant_interactive() -> str:
+def _pickinstance_interactive() -> str:
     """Show available tenants and let the user pick one, or create new."""
     tenants = _list_tenants()
 
@@ -202,7 +202,7 @@ def _pick_tenant_interactive() -> str:
             interactions = t.get("interactions", 0)
             platforms = ", ".join(t.get("platforms", []))
 
-            label = t["tenant_id"]
+            label = t["instance_id"]
             details = []
             if user:
                 details.append(f"user: {user}")
@@ -223,26 +223,26 @@ def _pick_tenant_interactive() -> str:
             choice = input("  Choose [1-{}, N]: ".format(len(tenants))).strip()
 
             if choice.upper() == "N":
-                return _create_tenant_interactive()
+                return _createinstance_interactive()
 
             try:
                 idx = int(choice) - 1
                 if 0 <= idx < len(tenants):
-                    return tenants[idx]["tenant_id"]
+                    return tenants[idx]["instance_id"]
             except ValueError:
                 pass
 
-            # Also accept raw tenant_id
+            # Also accept raw instance_id
             if ":" in choice:
                 return choice
 
             print("  Invalid choice. Try again.")
     else:
         print("  No existing tenants found.\n")
-        return _create_tenant_interactive()
+        return _createinstance_interactive()
 
 
-def _create_tenant_interactive() -> str:
+def _createinstance_interactive() -> str:
     """Prompt for a new tenant ID."""
     print("\n  Create a new tenant. This starts a fresh Kernos instance")
     print("  with no history, no knowledge, no spaces — clean onboarding.\n")
@@ -265,21 +265,21 @@ def _create_tenant_interactive() -> str:
 # ---------------------------------------------------------------------------
 
 
-async def chat_loop(tenant_id: str, handler, mcp_manager) -> None:
+async def chat_loop(instance_id: str, handler, mcp_manager) -> None:
     from kernos.messages.models import AuthLevel, NormalizedMessage
 
     conversation_id = f"cli_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
-    # Split tenant_id into platform + sender so derive_tenant_id reconstructs
-    # the correct tenant_id (e.g., "discord:364303..." → platform="discord", sender="364303...")
-    if ":" in tenant_id:
-        platform, sender = tenant_id.split(":", 1)
+    # Split instance_id into platform + sender so derive_instance_id reconstructs
+    # the correct instance_id (e.g., "discord:364303..." → platform="discord", sender="364303...")
+    if ":" in instance_id:
+        platform, sender = instance_id.split(":", 1)
     else:
-        platform, sender = "cli", tenant_id
+        platform, sender = "cli", instance_id
 
     print(f"\n{'─' * 50}")
     print(f"  Kernos CLI Chat")
-    print(f"  Tenant:  {tenant_id}")
+    print(f"  Tenant:  {instance_id}")
     print(f"  Session: {conversation_id}")
     print(f"{'─' * 50}")
     print(f"  Type 'quit' or 'exit' to end. Ctrl+C also works.\n")
@@ -304,7 +304,7 @@ async def chat_loop(tenant_id: str, handler, mcp_manager) -> None:
             platform_capabilities=["text"],
             conversation_id=conversation_id,
             timestamp=datetime.now(timezone.utc),
-            tenant_id=tenant_id,
+            instance_id=instance_id,
         )
 
         try:
@@ -328,7 +328,7 @@ async def chat_loop(tenant_id: str, handler, mcp_manager) -> None:
 
 
 async def script_loop(
-    tenant_id: str, handler, mcp_manager, script_path: str,
+    instance_id: str, handler, mcp_manager, script_path: str,
 ) -> None:
     """Send each line from a file as a message, print responses."""
     from kernos.messages.models import AuthLevel, NormalizedMessage
@@ -348,14 +348,14 @@ async def script_loop(
 
     conversation_id = f"cli_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
-    if ":" in tenant_id:
-        platform, sender = tenant_id.split(":", 1)
+    if ":" in instance_id:
+        platform, sender = instance_id.split(":", 1)
     else:
-        platform, sender = "cli", tenant_id
+        platform, sender = "cli", instance_id
 
     print(f"\n{'─' * 50}")
     print(f"  Kernos Script Mode")
-    print(f"  Tenant:  {tenant_id}")
+    print(f"  Tenant:  {instance_id}")
     print(f"  Script:  {script_path} ({len(lines)} messages)")
     print(f"  Session: {conversation_id}")
     print(f"{'─' * 50}\n")
@@ -371,7 +371,7 @@ async def script_loop(
             platform_capabilities=["text"],
             conversation_id=conversation_id,
             timestamp=datetime.now(timezone.utc),
-            tenant_id=tenant_id,
+            instance_id=instance_id,
         )
 
         try:
@@ -428,24 +428,24 @@ def main() -> None:
     # Determine tenant
     instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
     if args.new:
-        tenant_id = args.new if ":" in args.new else f"cli:{args.new}"
+        instance_id = args.new if ":" in args.new else f"cli:{args.new}"
     elif args.tenant:
-        tenant_id = args.tenant
+        instance_id = args.tenant
     elif instance_id:
-        tenant_id = instance_id
+        instance_id = instance_id
     else:
-        tenant_id = _pick_tenant_interactive()
+        instance_id = _pickinstance_interactive()
 
-    if not tenant_id:
+    if not instance_id:
         print("No tenant selected.")
         sys.exit(1)
 
     async def run():
         handler, mcp = await build_handler()
         if args.script:
-            await script_loop(tenant_id, handler, mcp, args.script)
+            await script_loop(instance_id, handler, mcp, args.script)
         else:
-            await chat_loop(tenant_id, handler, mcp)
+            await chat_loop(instance_id, handler, mcp)
 
     asyncio.run(run())
 

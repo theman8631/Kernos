@@ -111,15 +111,15 @@ def test_missing_owner_id_env_defaults_to_unknown():
 # --- Tenant ID ---
 
 
-def test_tenant_id_is_owner_phone(adapter):
+def test_instance_id_is_owner_phone(adapter):
     nm = adapter.inbound(make_mock_message())
-    assert nm.tenant_id == OWNER_PHONE
+    assert nm.instance_id == OWNER_PHONE
 
 
-def test_non_owner_tenant_id_is_still_owner_phone(adapter):
+def test_non_owner_instance_id_is_still_owner_phone(adapter):
     """Even non-owner senders resolve to the single owner tenant in Phase 1A."""
     nm = adapter.inbound(make_mock_message(author_id=int(OTHER_DISCORD_ID)))
-    assert nm.tenant_id == OWNER_PHONE
+    assert nm.instance_id == OWNER_PHONE
 
 
 # --- Guild context ---

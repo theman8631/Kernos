@@ -14,7 +14,7 @@ Tests cover:
 - GateResult dataclass (allowed, reason, method, conflicting_rule, raw_response)
 - delete_file consolidation
 - DISPATCH_GATE event type
-- TenantProfile permission_overrides field
+- InstanceProfile permission_overrides field
 - AsyncAnthropic client (no event-loop blocking)
 """
 import json
@@ -28,7 +28,7 @@ from kernos.capability.registry import CapabilityInfo, CapabilityRegistry, Capab
 from kernos.kernel.event_types import EventType
 from kernos.kernel.reasoning import GateResult, PendingAction, ReasoningRequest, ReasoningService
 from kernos.kernel.spaces import ContextSpace
-from kernos.kernel.state import TenantProfile
+from kernos.kernel.state import InstanceProfile
 
 
 # --- Helper factories ---
@@ -65,7 +65,7 @@ def _make_service(tool_effects: dict[str, str] | None = None) -> ReasoningServic
 def _make_space(space_type: str = "domain") -> ContextSpace:
     return ContextSpace(
         id="space_test01",
-        tenant_id="tenant_test",
+        instance_id="tenant_test",
         name="Test Space",
         space_type=space_type,
     )
@@ -224,8 +224,8 @@ class TestGateToolCall:
         """Reactive soft_write bypasses the gate model — user asked for it."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -243,8 +243,8 @@ class TestGateToolCall:
         """Proactive (non-reactive) soft_write still calls the gate model."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -263,8 +263,8 @@ class TestGateToolCall:
         """Proactive soft_write: model can deny."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -283,8 +283,8 @@ class TestGateToolCall:
         """Permission override is Step 2 mechanical bypass — no model call, zero cost."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
             permission_overrides={"google-calendar": "always-allow"},
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
@@ -306,8 +306,8 @@ class TestGateToolCall:
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
         # No override → falls through to model
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
             permission_overrides={},
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
@@ -333,13 +333,13 @@ class TestGateToolCall:
         """Model returns AUTHORIZED for proactive covenant check → allowed."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="rule_1", tenant_id="t1", capability="calendar",
+                id="rule_1", instance_id="t1", capability="calendar",
                 rule_type="must", description="Always add calendar entries when I say so",
                 active=True, source="user_stated",
             ),
@@ -360,13 +360,13 @@ class TestGateToolCall:
         """Model returns DENIED on proactive → blocked."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="rule_1", tenant_id="t1", capability="email",
+                id="rule_1", instance_id="t1", capability="email",
                 rule_type="must", description="Send email confirmations",
                 active=True, source="user_stated",
             ),
@@ -387,8 +387,8 @@ class TestGateToolCall:
         """Any unexpected model response on proactive → denied."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -425,8 +425,8 @@ class TestUnknownToolHandling:
         """A tool not in any capability's tool_effects is treated as hard_write."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -444,37 +444,37 @@ class TestUnknownToolHandling:
 
 
 # ===========================
-# Permission Overrides on TenantProfile
+# Permission Overrides on InstanceProfile
 # ===========================
 
 class TestPermissionOverrides:
     def test_default_empty(self):
-        t = TenantProfile(tenant_id="t1", status="active", created_at="2026-01-01")
+        t = InstanceProfile(instance_id="t1", status="active", created_at="2026-01-01")
         assert t.permission_overrides == {}
 
     def test_set_and_read(self):
-        t = TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        t = InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
             permission_overrides={"google-calendar": "always-allow"},
         )
         assert t.permission_overrides["google-calendar"] == "always-allow"
 
     def test_serialization_roundtrip(self):
-        t = TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        t = InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
             permission_overrides={"gmail": "ask"},
         )
         data = asdict(t)
         assert data["permission_overrides"] == {"gmail": "ask"}
-        restored = TenantProfile(**data)
+        restored = InstanceProfile(**data)
         assert restored.permission_overrides == {"gmail": "ask"}
 
     def test_backward_compat_missing_field(self):
         """Old profiles without permission_overrides should deserialize."""
         data = {
-            "tenant_id": "t1", "status": "active", "created_at": "2026-01-01",
+            "instance_id": "t1", "status": "active", "created_at": "2026-01-01",
         }
-        t = TenantProfile(**data)
+        t = InstanceProfile(**data)
         assert t.permission_overrides == {}
 
 
@@ -512,13 +512,13 @@ class TestConflictResponse:
         """Model returns CONFLICT when user asks but a must_not rule applies."""
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="rule_1", tenant_id="t1", capability="email",
+                id="rule_1", instance_id="t1", capability="email",
                 rule_type="must_not", description="Never send emails without asking me first",
                 active=True, source="user_stated",
             ),
@@ -538,13 +538,13 @@ class TestConflictResponse:
         """CONFLICT result includes the first must_not rule description."""
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="r1", tenant_id="t1", capability="email",
+                id="r1", instance_id="t1", capability="email",
                 rule_type="must_not", description="Never send emails without asking me first",
                 active=True, source="user_stated",
             ),
@@ -562,13 +562,13 @@ class TestConflictResponse:
         """CONFLICT: <rule text> format — rule extracted directly from model response."""
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="r1", tenant_id="t1", capability="email",
+                id="r1", instance_id="t1", capability="email",
                 rule_type="must_not", description="Never send emails without asking me first",
                 active=True, source="user_stated",
             ),
@@ -590,13 +590,13 @@ class TestConflictResponse:
         """User explicitly overrides restriction ('no need to review, just send') → EXPLICIT."""
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="r1", tenant_id="t1", capability="email",
+                id="r1", instance_id="t1", capability="email",
                 rule_type="must_not", description="Never send emails without asking me first",
                 active=True, source="user_stated",
             ),
@@ -616,13 +616,13 @@ class TestConflictResponse:
         """Without must_not rules, proactive soft_write goes to model; CONFLICT never returned."""
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         from kernos.kernel.state import CovenantRule
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="r1", tenant_id="t1", capability="email",
+                id="r1", instance_id="t1", capability="email",
                 rule_type="must", description="Always confirm before sending",
                 active=True, source="user_stated",
             ),
@@ -657,8 +657,8 @@ class TestPermissionOverrideSystemWide:
         """Permission override is per-capability, not per-space — mechanical bypass."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
             permission_overrides={"google-calendar": "always-allow"},
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
@@ -703,8 +703,8 @@ class TestModelGateAuthority:
         """Reactive soft_write is approved without calling the model."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -722,8 +722,8 @@ class TestModelGateAuthority:
         """Gate model prompt includes the current user message (proactive path)."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -749,8 +749,8 @@ class TestModelGateAuthority:
         """Model handles non-English instructions on proactive path."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -768,8 +768,8 @@ class TestModelGateAuthority:
         """Indirect/vague requests denied by model on proactive path."""
         svc = _make_service({"create-event": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -807,8 +807,8 @@ class TestModelGateAuthority:
         """When DENIED on proactive, reason is 'confirm'."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -824,8 +824,8 @@ class TestModelGateAuthority:
         """'DENIED\\n...EXPLICIT...' → reason is 'confirm' not 'approved'."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -845,8 +845,8 @@ class TestModelGateAuthority:
         """agent_reasoning parameter is included in the user_content sent to model."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -873,8 +873,8 @@ class TestModelGateAuthority:
         """Last 5 user messages from messages list are included in model prompt."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -979,8 +979,8 @@ class TestApprovalToken:
         """DENIED: gate produces result with reason='confirm'; [CONFIRM:N] is in system message."""
         svc = _make_service()
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[])
         svc.set_state(state)
@@ -1011,12 +1011,12 @@ class TestApprovalToken:
         from kernos.kernel.state import CovenantRule
         svc = _make_service({"send-email": "soft_write"})
         state = AsyncMock()
-        state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-            tenant_id="t1", status="active", created_at="2026-01-01",
+        state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+            instance_id="t1", status="active", created_at="2026-01-01",
         ))
         state.query_covenant_rules = AsyncMock(return_value=[
             CovenantRule(
-                id="r1", tenant_id="t1", capability="email",
+                id="r1", instance_id="t1", capability="email",
                 rule_type="must_not", description="Never send emails without asking me first",
                 active=True, source="user_stated",
             ),
@@ -1082,7 +1082,7 @@ class TestPendingActions:
     def _store_pending(
         self,
         svc: ReasoningService,
-        tenant_id: str,
+        instance_id: str,
         tool_name: str,
         tool_input: dict,
         proposed_action: str = "Do something",
@@ -1090,8 +1090,8 @@ class TestPendingActions:
         gate_reason: str = "confirm",
     ) -> PendingAction:
         """Simulate what reason() does when a gate blocks: store a PendingAction."""
-        if tenant_id not in svc._pending_actions:
-            svc._pending_actions[tenant_id] = []
+        if instance_id not in svc._pending_actions:
+            svc._pending_actions[instance_id] = []
         action = PendingAction(
             tool_name=tool_name,
             tool_input=dict(tool_input),
@@ -1100,7 +1100,7 @@ class TestPendingActions:
             gate_reason=gate_reason,
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
-        svc._pending_actions[tenant_id].append(action)
+        svc._pending_actions[instance_id].append(action)
         return action
 
     def test_pending_action_stored_on_gate_block(self):
@@ -1237,7 +1237,7 @@ class TestConfirmationReplay:
         svc: ReasoningService,
         response_text: str,
         pending_actions: list[PendingAction],
-        tenant_id: str = "t1",
+        instance_id: str = "t1",
         execute_tool_result: str = "Done",
         request: object = None,
     ) -> str:
@@ -1248,14 +1248,14 @@ class TestConfirmationReplay:
         """
         import re
 
-        svc._pending_actions[tenant_id] = list(pending_actions)
+        svc._pending_actions[instance_id] = list(pending_actions)
         svc.execute_tool = AsyncMock(return_value=execute_tool_result)
 
         if request is None:
             request = MagicMock()
-            request.tenant_id = tenant_id
+            request.instance_id = instance_id
 
-        pending = svc._pending_actions.get(tenant_id)
+        pending = svc._pending_actions.get(instance_id)
         if not pending:
             return response_text
 
@@ -1284,12 +1284,12 @@ class TestConfirmationReplay:
                         execution_results.append(f"Failed: {action.proposed_action} ({exc})")
                 else:
                     execution_results.append(f"Expired: {action.proposed_action}")
-            del svc._pending_actions[tenant_id]
+            del svc._pending_actions[instance_id]
             response_text = confirm_pattern.sub("", response_text).strip()
             if execution_results:
                 response_text += "\n\n" + "\n".join(execution_results)
         else:
-            del svc._pending_actions[tenant_id]
+            del svc._pending_actions[instance_id]
 
         return response_text
 
@@ -1326,17 +1326,17 @@ class TestConfirmationReplay:
         """Response without [CONFIRM:N] clears pending actions without executing."""
         svc = _make_service()
         pending = [self._make_pending_action()]
-        tenant_id = "t1"
+        instance_id = "t1"
         await self._run_confirm_logic(
             svc,
             response_text="Let me know if you want to proceed.",
             pending_actions=pending,
-            tenant_id=tenant_id,
+            instance_id=instance_id,
         )
         # execute_tool should NOT have been called
         svc.execute_tool.assert_not_called()
         # pending_actions should be cleared
-        assert tenant_id not in svc._pending_actions
+        assert instance_id not in svc._pending_actions
 
     async def test_confirm_signal_stripped_from_response(self):
         """[CONFIRM:0] is stripped from final response text."""
@@ -1381,8 +1381,8 @@ class TestConfirmationReplay:
 
         svc.execute_tool = capture_execute
 
-        tenant_id = "t1"
-        svc._pending_actions[tenant_id] = list(pending)
+        instance_id = "t1"
+        svc._pending_actions[instance_id] = list(pending)
 
         import re
         response_text = "Deleting b.md only. [CONFIRM:1]"
@@ -1395,12 +1395,12 @@ class TestConfirmationReplay:
                 actions_to_execute.append(idx)
 
         request = MagicMock()
-        request.tenant_id = tenant_id
+        request.instance_id = instance_id
         for idx in actions_to_execute:
             action = pending[idx]
             await svc.execute_tool(action.tool_name, action.tool_input, request)
 
-        del svc._pending_actions[tenant_id]
+        del svc._pending_actions[instance_id]
 
         # Only b.md (index 1) should have been executed
         assert len(executed_inputs) == 1

@@ -36,7 +36,7 @@ from kernos.kernel.events import JsonEventStream
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 DATA_DIR = os.getenv("KERNOS_DATA_DIR", "./data")
 TENANT_ID = f"discord:{os.getenv('DISCORD_OWNER_ID', '000000000000000000')}"
@@ -61,7 +61,7 @@ def make_message(content: str) -> NormalizedMessage:
         platform_capabilities=["text"],
         conversation_id=CONVERSATION_ID,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT_ID,
+        instance_id=TENANT_ID,
     )
 
 
@@ -89,7 +89,7 @@ async def setup_handler() -> tuple[MessageHandler, JsonStateStore]:
         if cap:
             cap.status = CapabilityStatus.CONNECTED
             cap.tools = [t["name"] for t in tools]
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     audit = JsonAuditStore(DATA_DIR)
     provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
     reasoning = ReasoningService(provider, events, mcp_manager, audit)

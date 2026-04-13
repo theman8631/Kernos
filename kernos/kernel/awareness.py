@@ -150,12 +150,12 @@ class AwarenessEvaluator:
         self.PROACTIVE_BUDGET_MAX = 2        # Max 2 proactive messages per window
         self._proactive_timestamps: list[float] = []
 
-    async def start(self, tenant_id: str) -> None:
-        """Start the periodic evaluator for a tenant."""
+    async def start(self, instance_id: str) -> None:
+        """Start the periodic evaluator for an instance."""
         self._running = True
-        self._task = asyncio.create_task(self._run_loop(tenant_id))
-        logger.info("AWARENESS: evaluator started for tenant=%s awareness=%ds triggers=%ds",
-                     tenant_id, self._interval, self._trigger_interval)
+        self._task = asyncio.create_task(self._run_loop(instance_id))
+        logger.info("AWARENESS: evaluator started for instance=%s awareness=%ds triggers=%ds",
+                     instance_id, self._interval, self._trigger_interval)
 
     async def stop(self) -> None:
         """Stop the evaluator."""
@@ -191,7 +191,7 @@ class AwarenessEvaluator:
         self._proactive_timestamps.append(now)
         return True
 
-    async def _run_loop(self, tenant_id: str) -> None:
+    async def _run_loop(self, instance_id: str) -> None:
         """Main loop — tick every trigger_interval seconds.
 
         Awareness pass runs every N ticks (where N = awareness_interval / trigger_interval).
@@ -214,13 +214,13 @@ class AwarenessEvaluator:
             _interrupt_tick_count += 1
 
             # Phase 0: Boot scan — retire stale triggers (first pass only)
-            if tenant_id not in self._stale_scan_done:
-                self._stale_scan_done.add(tenant_id)
+            if instance_id not in self._stale_scan_done:
+                self._stale_scan_done.add(instance_id)
                 if self._trigger_store and self._handler:
                     try:
                         from kernos.kernel.scheduler import retire_stale_triggers
                         await retire_stale_triggers(
-                            self._trigger_store, tenant_id,
+                            self._trigger_store, instance_id,
                             self._handler.registry,
                             self._handler,
                         )
@@ -231,7 +231,7 @@ class AwarenessEvaluator:
             if self._awareness_tick_count >= awareness_every_n:
                 self._awareness_tick_count = 0
                 try:
-                    await self._evaluate(tenant_id)
+                    await self._evaluate(instance_id)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -242,7 +242,7 @@ class AwarenessEvaluator:
             if _interrupt_tick_count >= interrupt_check_every_n:
                 _interrupt_tick_count = 0
                 try:
-                    await self._interrupt_check(tenant_id)
+                    await self._interrupt_check(instance_id)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -253,11 +253,11 @@ class AwarenessEvaluator:
                 try:
                     from kernos.kernel.scheduler import evaluate_triggers
                     fired = await evaluate_triggers(
-                        self._trigger_store, tenant_id, self._handler,
+                        self._trigger_store, instance_id, self._handler,
                         proactive_budget_check=self._check_proactive_budget,
                     )
                     if fired:
-                        logger.info("TRIGGER_EVAL: tenant=%s fired=%d", tenant_id, fired)
+                        logger.info("TRIGGER_EVAL: instance=%s fired=%d", instance_id, fired)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -275,13 +275,13 @@ class AwarenessEvaluator:
                             # Get user timezone from soul for correct time formatting
                             _user_tz = ""
                             try:
-                                _soul = await self._state.get_soul(tenant_id)
+                                _soul = await self._state.get_soul(instance_id)
                                 if _soul:
                                     _user_tz = getattr(_soul, "timezone", "")
                             except Exception:
                                 pass
                             event_fired, next_poll = await evaluate_event_triggers(
-                                self._trigger_store, tenant_id,
+                                self._trigger_store, instance_id,
                                 self._handler, mcp_client,
                                 user_timezone=_user_tz,
                                 proactive_budget_check=self._check_proactive_budget,
@@ -290,8 +290,8 @@ class AwarenessEvaluator:
                             event_every_n = max(1, next_poll // self._trigger_interval)
                             if event_fired:
                                 logger.info(
-                                    "EVENT_TRIGGERS: tenant=%s fired=%d next_poll=%ds",
-                                    tenant_id, event_fired, next_poll,
+                                    "EVENT_TRIGGERS: instance=%s fired=%d next_poll=%ds",
+                                    instance_id, event_fired, next_poll,
                                 )
                         except asyncio.CancelledError:
                             raise
@@ -304,7 +304,7 @@ class AwarenessEvaluator:
                 _plan_sweep_tick_count = 0
                 if self._handler:
                     try:
-                        await self._sweep_stale_plans(tenant_id)
+                        await self._sweep_stale_plans(instance_id)
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
@@ -319,7 +319,7 @@ class AwarenessEvaluator:
 
             await asyncio.sleep(self._trigger_interval)
 
-    async def _sweep_stale_plans(self, tenant_id: str) -> None:
+    async def _sweep_stale_plans(self, instance_id: str) -> None:
         """Check for active plans with in-progress steps that aren't being executed.
 
         If a step has been in_progress for more than 10 minutes with no active
@@ -334,8 +334,8 @@ class AwarenessEvaluator:
         if not active_plans:
             return
 
-        for plan_tenant, space_id, plan in active_plans:
-            if plan_tenant != tenant_id:
+        for plan_instance, space_id, plan in active_plans:
+            if plan_instance != instance_id:
                 continue
             plan_id = plan.get("plan_id", "?")
 
@@ -363,42 +363,42 @@ class AwarenessEvaluator:
                     logger.info("PLAN_SWEEP: re-enqueuing stale step plan=%s step=%s",
                         plan_id, step_id)
                     asyncio.create_task(
-                        self._handler._execute_self_directed_step(tenant_id, space_id, envelope))
+                        self._handler._execute_self_directed_step(instance_id, space_id, envelope))
                     break  # One step per plan per sweep
 
-    async def _evaluate(self, tenant_id: str) -> None:
-        """Run all evaluation passes for a tenant."""
-        whispers = await self.run_time_pass(tenant_id)
+    async def _evaluate(self, instance_id: str) -> None:
+        """Run all evaluation passes for an instance."""
+        whispers = await self.run_time_pass(instance_id)
 
         # Capability gap detection
         try:
-            gap_whispers = await self.run_capability_gap_pass(tenant_id)
+            gap_whispers = await self.run_capability_gap_pass(instance_id)
             whispers.extend(gap_whispers)
         except Exception as exc:
             logger.warning("AWARENESS: capability_gap pass failed: %s", exc)
 
         for whisper in whispers:
             # Check suppression — don't re-surface
-            if await self._is_suppressed(tenant_id, whisper):
+            if await self._is_suppressed(instance_id, whisper):
                 logger.info("AWARENESS: suppressed whisper=%s signal=%r",
                             whisper.whisper_id, whisper.insight_text[:80])
                 continue
 
             # Interrupt whispers: push immediately via outbound if handler is available
             if whisper.delivery_class == "interrupt" and self._handler:
-                pushed = await self._push_interrupt(tenant_id, whisper)
+                pushed = await self._push_interrupt(instance_id, whisper)
                 if pushed:
                     continue  # Delivered — don't queue for session-start injection
 
             # Save to pending queue (ambient, stage, or failed interrupt)
-            await self._state.save_whisper(tenant_id, whisper)
+            await self._state.save_whisper(instance_id, whisper)
 
             # Emit audit event
             try:
                 await emit_event(
                     self._events,
                     EventType.PROACTIVE_INSIGHT,
-                    tenant_id,
+                    instance_id,
                     "awareness_evaluator",
                     payload={
                         "whisper_id": whisper.whisper_id,
@@ -416,13 +416,13 @@ class AwarenessEvaluator:
                         whisper.whisper_id, whisper.delivery_class,
                         whisper.insight_text[:80])
 
-        # Enforce queue bound — max 10 pending whispers per tenant
-        await self._enforce_queue_bound(tenant_id, max_whispers=10)
+        # Enforce queue bound — max 10 pending whispers per-instance
+        await self._enforce_queue_bound(instance_id, max_whispers=10)
 
         # Periodic cleanup of old suppressions
-        await self._cleanup_old_suppressions(tenant_id)
+        await self._cleanup_old_suppressions(instance_id)
 
-    async def run_time_pass(self, tenant_id: str) -> list[Whisper]:
+    async def run_time_pass(self, instance_id: str) -> list[Whisper]:
         """Check for time-anchored signals worth surfacing.
 
         Queries knowledge entries where foresight_expires falls within
@@ -432,7 +432,7 @@ class AwarenessEvaluator:
         window_end = now + timedelta(hours=48)
 
         entries = await self._state.query_knowledge_by_foresight(
-            tenant_id,
+            instance_id,
             expires_before=window_end.isoformat(),
             expires_after=now.isoformat(),
         )
@@ -481,7 +481,7 @@ class AwarenessEvaluator:
 
         return whispers
 
-    async def run_capability_gap_pass(self, tenant_id: str) -> list[Whisper]:
+    async def run_capability_gap_pass(self, instance_id: str) -> list[Whisper]:
         """Detect workaround patterns that suggest a missing tool.
 
         Reads recent conversation logs looking for patterns where the agent
@@ -490,8 +490,8 @@ class AwarenessEvaluator:
         """
         # Read recent conversation from the active space
         try:
-            from kernos.kernel.state import TenantProfile
-            profile = await self._state.get_tenant_profile(tenant_id)
+            from kernos.kernel.state import InstanceProfile
+            profile = await self._state.get_instance_profile(instance_id)
             if not profile or not profile.last_active_space_id:
                 return []
             space_id = profile.last_active_space_id
@@ -502,7 +502,7 @@ class AwarenessEvaluator:
         try:
             if not self._handler:
                 return []
-            log_text = await self._handler.conv_logger.read_current_log_text(tenant_id, space_id)
+            log_text = await self._handler.conv_logger.read_current_log_text(instance_id, space_id)
             if isinstance(log_text, tuple):
                 log_text = log_text[0]
             if not log_text or len(log_text) < 200:
@@ -570,14 +570,14 @@ class AwarenessEvaluator:
             f"Related knowledge: {entry.content[:200]}"
         )
 
-    async def _enforce_queue_bound(self, tenant_id: str, max_whispers: int = 10) -> None:
+    async def _enforce_queue_bound(self, instance_id: str, max_whispers: int = 10) -> None:
         """Trim the whisper queue to max_whispers.
 
         Priority: stage before ambient. Within same class, newest first.
         Excess whispers are silently dropped (not suppressed — they just
         didn't make the cut).
         """
-        pending = await self._state.get_pending_whispers(tenant_id)
+        pending = await self._state.get_pending_whispers(instance_id)
         if len(pending) <= max_whispers:
             return
 
@@ -603,11 +603,11 @@ class AwarenessEvaluator:
         keep = set(w.whisper_id for w in prioritized[:max_whispers])
         for w in prioritized:
             if w.whisper_id not in keep:
-                await self._state.delete_whisper(tenant_id, w.whisper_id)
+                await self._state.delete_whisper(instance_id, w.whisper_id)
                 logger.info("AWARENESS: trimmed whisper=%s (queue bound %d)",
                             w.whisper_id, max_whispers)
 
-    async def _is_suppressed(self, tenant_id: str, whisper: Whisper) -> bool:
+    async def _is_suppressed(self, instance_id: str, whisper: Whisper) -> bool:
         """Check if this whisper has already been surfaced or dismissed.
 
         Suppression is keyed to knowledge_entry_id, not insight text.
@@ -616,7 +616,7 @@ class AwarenessEvaluator:
         for this entry and nothing changed, suppress.
         """
         suppressions = await self._state.get_suppressions(
-            tenant_id,
+            instance_id,
             knowledge_entry_id=whisper.knowledge_entry_id,
         )
 
@@ -628,7 +628,7 @@ class AwarenessEvaluator:
 
         return False
 
-    async def _push_interrupt(self, tenant_id: str, whisper: Whisper) -> bool:
+    async def _push_interrupt(self, instance_id: str, whisper: Whisper) -> bool:
         """Push an interrupt whisper via outbound messaging.
 
         Returns True if successfully delivered (or suppressed because user is active).
@@ -639,7 +639,7 @@ class AwarenessEvaluator:
 
         # Check: is user currently active? If so, let stage handle it.
         try:
-            spaces = await self._state.list_context_spaces(tenant_id)
+            spaces = await self._state.list_context_spaces(instance_id)
             now = datetime.now(timezone.utc)
             user_active = False
             for space in spaces:
@@ -669,7 +669,7 @@ class AwarenessEvaluator:
 
         # Push via outbound
         success = await self._handler.send_outbound(
-            tenant_id=tenant_id,
+            instance_id=instance_id,
             member_id="",  # V1: owner
             channel_name=whisper.notify_via or None,
             message=whisper.insight_text,
@@ -677,14 +677,14 @@ class AwarenessEvaluator:
 
         if success:
             # Store in conversation history
-            await self._store_whisper_message(tenant_id, whisper)
+            await self._store_whisper_message(instance_id, whisper)
 
             # Write to per-space conversation log
             if self._handler and hasattr(self._handler, "conv_logger"):
                 space_id = whisper.target_space_id or whisper.source_space_id or ""
                 if space_id:
                     await self._handler.conv_logger.append(
-                        tenant_id=tenant_id,
+                        instance_id=instance_id,
                         space_id=space_id,
                         speaker="assistant",
                         channel="whisper",
@@ -692,7 +692,7 @@ class AwarenessEvaluator:
                     )
 
             # Mark surfaced + create suppression
-            await self._state.mark_whisper_surfaced(tenant_id, whisper.whisper_id)
+            await self._state.mark_whisper_surfaced(instance_id, whisper.whisper_id)
             suppression = SuppressionEntry(
                 whisper_id=whisper.whisper_id,
                 knowledge_entry_id=whisper.knowledge_entry_id,
@@ -700,7 +700,7 @@ class AwarenessEvaluator:
                 created_at=whisper.created_at,
                 resolution_state="surfaced",
             )
-            await self._state.save_suppression(tenant_id, suppression)
+            await self._state.save_suppression(instance_id, suppression)
 
             logger.info(
                 "WHISPER_PUSH: id=%s class=interrupt channel=%s signal=%r space=%s",
@@ -716,23 +716,23 @@ class AwarenessEvaluator:
             )
             return False
 
-    async def _interrupt_check(self, tenant_id: str) -> None:
+    async def _interrupt_check(self, instance_id: str) -> None:
         """Fast-path interrupt check — promote pending whispers to interrupt if threshold crossed.
 
         Runs every ~5 minutes. Lightweight: reads pending whispers, checks timestamps,
         promotes if needed. No LLM call.
         """
-        pending = await self._state.get_pending_whispers(tenant_id)
+        pending = await self._state.get_pending_whispers(instance_id)
         promoted = 0
 
         for whisper in pending:
             if whisper.delivery_class == "interrupt":
                 # Already interrupt but not yet pushed — try again
                 if self._handler:
-                    pushed = await self._push_interrupt(tenant_id, whisper)
+                    pushed = await self._push_interrupt(instance_id, whisper)
                     if pushed:
                         # Remove from pending since it was delivered
-                        await self._state.delete_whisper(tenant_id, whisper.whisper_id)
+                        await self._state.delete_whisper(instance_id, whisper.whisper_id)
                         promoted += 1
                 continue
 
@@ -746,29 +746,29 @@ class AwarenessEvaluator:
                 )
                 whisper.delivery_class = "interrupt"
                 if self._handler:
-                    pushed = await self._push_interrupt(tenant_id, whisper)
+                    pushed = await self._push_interrupt(instance_id, whisper)
                     if pushed:
-                        await self._state.delete_whisper(tenant_id, whisper.whisper_id)
+                        await self._state.delete_whisper(instance_id, whisper.whisper_id)
                         promoted += 1
                     else:
                         # Save updated delivery_class even if push failed
-                        await self._state.save_whisper(tenant_id, whisper)
+                        await self._state.save_whisper(instance_id, whisper)
                 else:
-                    await self._state.save_whisper(tenant_id, whisper)
+                    await self._state.save_whisper(instance_id, whisper)
                 promoted += 1
 
         if promoted:
-            logger.info("INTERRUPT_CHECK: tenant=%s promoted=%d", tenant_id, promoted)
+            logger.info("INTERRUPT_CHECK: instance=%s promoted=%d", instance_id, promoted)
 
-    async def _store_whisper_message(self, tenant_id: str, whisper: Whisper) -> None:
+    async def _store_whisper_message(self, instance_id: str, whisper: Whisper) -> None:
         """Store pushed whisper in conversation history so the agent sees it."""
         if not self._handler or not hasattr(self._handler, "conversations"):
             return
 
-        # Find the most recent conversation for this tenant
+        # Find the most recent conversation for this instance
         conversation_id = ""
         try:
-            conversations = await self._state.list_conversations(tenant_id, active_only=True, limit=1)
+            conversations = await self._state.list_conversations(instance_id, active_only=True, limit=1)
             if conversations:
                 conversation_id = conversations[0].conversation_id
         except Exception:
@@ -776,8 +776,8 @@ class AwarenessEvaluator:
 
         if not conversation_id:
             logger.warning(
-                "WHISPER_HISTORY: no conversation found for tenant=%s, skipping",
-                tenant_id,
+                "WHISPER_HISTORY: no conversation found for instance=%s, skipping",
+                instance_id,
             )
             return
 
@@ -788,12 +788,12 @@ class AwarenessEvaluator:
                 "content": f"[WHISPER] {whisper.insight_text}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "platform": "awareness",
-                "tenant_id": tenant_id,
+                "instance_id": instance_id,
                 "conversation_id": conversation_id,
                 "space_tags": [space_id] if space_id else None,
             }
             await self._handler.conversations.append(
-                tenant_id, conversation_id, entry,
+                instance_id, conversation_id, entry,
             )
             logger.info(
                 "WHISPER_HISTORY: stored [WHISPER] message for whisper=%s in space=%s",
@@ -805,16 +805,16 @@ class AwarenessEvaluator:
                 whisper.whisper_id, exc,
             )
 
-    async def _cleanup_old_suppressions(self, tenant_id: str) -> None:
+    async def _cleanup_old_suppressions(self, instance_id: str) -> None:
         """Remove suppression entries older than 7 days."""
-        suppressions = await self._state.get_suppressions(tenant_id)
+        suppressions = await self._state.get_suppressions(instance_id)
         now = datetime.now(timezone.utc)
         removed = 0
         for s in suppressions:
             try:
                 created = datetime.fromisoformat(s.created_at)
                 if (now - created).total_seconds() > 7 * 86400:
-                    await self._state.delete_suppression(tenant_id, s.whisper_id)
+                    await self._state.delete_suppression(instance_id, s.whisper_id)
                     removed += 1
             except (ValueError, TypeError):
                 continue

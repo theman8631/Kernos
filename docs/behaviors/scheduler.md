@@ -53,7 +53,7 @@ Recurring triggers use cron expressions (via `croniter`). After each fire, `next
 
 ## Storage
 
-`data/{tenant_id}/state/triggers.json` — atomic writes (tempfile + os.replace).
+`data/{instance_id}/state/triggers.json` — atomic writes (tempfile + os.replace).
 
 ## Code Locations
 

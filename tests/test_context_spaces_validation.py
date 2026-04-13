@@ -12,7 +12,7 @@ import pytest
 
 from kernos.kernel.router import LLMRouter, RouterResult
 from kernos.kernel.spaces import ContextSpace
-from kernos.kernel.state import TenantProfile
+from kernos.kernel.state import InstanceProfile
 from kernos.kernel.state_json import JsonStateStore
 from kernos.persistence.json_file import JsonConversationStore
 
@@ -21,9 +21,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _general_space(tenant_id: str, space_id: str = "space_general") -> ContextSpace:
+def _general_space(instance_id: str, space_id: str = "space_general") -> ContextSpace:
     return ContextSpace(
-        id=space_id, tenant_id=tenant_id, name="General",
+        id=space_id, instance_id=instance_id, name="General",
         description="General conversation and daily life",
         space_type="general", status="active", is_default=True,
         created_at=_now(), last_active_at=_now(),
@@ -31,11 +31,11 @@ def _general_space(tenant_id: str, space_id: str = "space_general") -> ContextSp
 
 
 def _domain_space(
-    tenant_id: str, space_id: str = "space_dnd",
+    instance_id: str, space_id: str = "space_dnd",
     name: str = "D&D Campaign", description: str = "Tabletop RPG planning",
 ) -> ContextSpace:
     return ContextSpace(
-        id=space_id, tenant_id=tenant_id, name=name,
+        id=space_id, instance_id=instance_id, name=name,
         description=description, space_type="domain", status="active",
         is_default=False, created_at=_now(), last_active_at=_now(),
     )
@@ -94,7 +94,7 @@ class TestDailyToGeneralMigration:
         tid = "t_migrate"
         # Create an old-style "Daily" space
         old_space = ContextSpace(
-            id="space_old", tenant_id=tid, name="Daily",
+            id="space_old", instance_id=tid, name="Daily",
             description="General conversation and daily life",
             space_type="general", status="active", is_default=True,
             created_at=_now(), last_active_at=_now(),
@@ -113,7 +113,7 @@ class TestDailyToGeneralMigration:
         assert default[0].name == "General"
         assert default[0].id == "space_old"  # Same ID, just renamed
 
-    async def test_new_tenant_gets_general_not_daily(self, tmp_path):
+    async def test_newinstance_gets_general_not_daily(self, tmp_path):
         """Fresh tenants get a space named 'General', not 'Daily'."""
         state = JsonStateStore(tmp_path)
         tid = "t_new"
@@ -252,7 +252,7 @@ class TestSpacesCommand:
         handler.state = state
 
         ctx = TurnContext()
-        ctx.tenant_id = tid
+        ctx.instance_id = tid
 
         result = await handler._handle_spaces(ctx, "/spaces")
         assert "General" in result
@@ -272,7 +272,7 @@ class TestSpacesCommand:
         handler.compaction.save_state = AsyncMock()
 
         ctx = TurnContext()
-        ctx.tenant_id = tid
+        ctx.instance_id = tid
 
         result = await handler._handle_spaces(ctx, '/spaces create "D&D Campaign" "Tabletop RPG sessions"')
         assert "D&D Campaign" in result
@@ -292,7 +292,7 @@ class TestSpacesCommand:
         handler.state = JsonStateStore(tmp_path)
 
         ctx = TurnContext()
-        ctx.tenant_id = "t_noargs"
+        ctx.instance_id = "t_noargs"
 
         result = await handler._handle_spaces(ctx, "/spaces create")
         assert "Usage" in result

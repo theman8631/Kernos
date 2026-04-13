@@ -25,7 +25,7 @@ class TwilioSMSAdapter(BaseAdapter):
 
     Twilio webhook fields used:
         From    — sender's E.164 phone number
-        To      — our Twilio number (used for tenant routing once multi-tenant)
+        To      — our Twilio number (used for instance routing once multi-instance)
         Body    — message text
         SmsSid  — per-message Twilio identifier
     """
@@ -69,7 +69,7 @@ class TwilioSMSAdapter(BaseAdapter):
         )
 
         # Instance identity: KERNOS_INSTANCE_ID overrides per-adapter derivation
-        tenant_id = os.getenv("KERNOS_INSTANCE_ID") or self._owner_phone
+        instance_id = os.getenv("KERNOS_INSTANCE_ID") or self._owner_phone
 
         # conversation_id is per-sender — SMS has no thread concept beyond who's talking.
         conversation_id = sender
@@ -82,7 +82,7 @@ class TwilioSMSAdapter(BaseAdapter):
             platform_capabilities=SMS_CAPABILITIES,
             conversation_id=conversation_id,
             timestamp=datetime.now(timezone.utc),
-            tenant_id=tenant_id,
+            instance_id=instance_id,
         )
 
     def outbound(self, response: str, original_message: NormalizedMessage) -> str:
@@ -108,7 +108,7 @@ class TwilioSMSAdapter(BaseAdapter):
         resp.message(text)
         return str(resp)
 
-    async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> bool:
+    async def send_outbound(self, instance_id: str, channel_target: str, message: str) -> bool:
         """Send an outbound SMS via Twilio REST API."""
         if not self._account_sid or not self._auth_token or not self._from_number:
             logger.warning("OUTBOUND: sms send failed — Twilio credentials not configured")
@@ -125,14 +125,14 @@ class TwilioSMSAdapter(BaseAdapter):
                 to=channel_target,
             )
             logger.info(
-                "OUTBOUND: channel=sms target=%s tenant=%s length=%d success=True",
-                channel_target, tenant_id, len(message),
+                "OUTBOUND: channel=sms target=%s instance=%s length=%d success=True",
+                channel_target, instance_id, len(message),
             )
             return True
         except Exception as exc:
             logger.warning(
-                "OUTBOUND: channel=sms target=%s tenant=%s success=False error=%s",
-                channel_target, tenant_id, exc,
+                "OUTBOUND: channel=sms target=%s instance=%s success=False error=%s",
+                channel_target, instance_id, exc,
             )
             return False
 

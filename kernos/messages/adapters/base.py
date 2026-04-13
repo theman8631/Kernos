@@ -17,7 +17,7 @@ class BaseAdapter(ABC):
         """Translate a response string to a platform-native response object."""
         ...
 
-    async def send_outbound(self, tenant_id: str, channel_target: str, message: str) -> int:
+    async def send_outbound(self, instance_id: str, channel_target: str, message: str) -> int:
         """Send an unprompted message to the user. Returns message ID on success, 0 on failure.
 
         Default: not supported. Adapters that support outbound override this.

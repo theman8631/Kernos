@@ -34,7 +34,7 @@ from kernos.capability.client import MCPClientManager
 from kernos.capability.registry import CapabilityRegistry
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 
 DATA_DIR = os.getenv("KERNOS_DATA_DIR", "./data")
@@ -55,7 +55,7 @@ def make_msg(content: str, conversation_id: str = CONVERSATION_ID) -> Normalized
         platform_capabilities=["text"],
         conversation_id=conversation_id,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT,
+        instance_id=TENANT,
     )
 
 
@@ -80,7 +80,7 @@ async def build_handler():
         sys.exit(1)
 
     conversations = JsonConversationStore(DATA_DIR)
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     audit = JsonAuditStore(DATA_DIR)
     events = JsonEventStream(DATA_DIR)
     state = JsonStateStore(DATA_DIR)
@@ -145,7 +145,7 @@ async def run_tests():
     # ==================================================================
     test_entry = KnowledgeEntry(
         id="know_live3c_dentist",
-        tenant_id=TENANT,
+        instance_id=TENANT,
         category="fact",
         subject="calendar",
         content="User has a dentist appointment at 3pm today (live test 3C).",
@@ -270,7 +270,7 @@ async def run_tests():
     # ==================================================================
     expired_entry = KnowledgeEntry(
         id="know_live3c_expired",
-        tenant_id=TENANT,
+        instance_id=TENANT,
         category="fact",
         subject="calendar",
         content="Old meeting that already happened",

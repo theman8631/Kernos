@@ -28,7 +28,7 @@ class TestFileScopeChainRead:
     async def test_reads_local_file(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        space = ContextSpace(id="sp1", tenant_id="t1", name="General", created_at=_now())
+        space = ContextSpace(id="sp1", instance_id="t1", name="General", created_at=_now())
         await store.save_context_space(space)
 
         await svc.write_file("t1", "sp1", "notes.txt", "hello", "notes")
@@ -38,8 +38,8 @@ class TestFileScopeChainRead:
     async def test_reads_parent_file_when_not_local(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
 
@@ -53,8 +53,8 @@ class TestFileScopeChainRead:
     async def test_local_file_shadows_parent(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
 
@@ -68,8 +68,8 @@ class TestFileScopeChainRead:
     async def test_file_not_found_anywhere(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
 
@@ -93,8 +93,8 @@ class TestInheritedManifest:
     async def test_list_shows_inherited_files(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
 
@@ -109,8 +109,8 @@ class TestInheritedManifest:
     async def test_override_shows_in_manifest(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
 
@@ -131,8 +131,8 @@ class TestWriteToParent:
     async def test_write_to_ancestor(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
 
@@ -149,9 +149,9 @@ class TestWriteToParent:
     async def test_write_to_non_ancestor_rejected(self, tmp_path):
         store = JsonStateStore(tmp_path)
         svc = FileService(str(tmp_path), state=store)
-        parent = ContextSpace(id="parent", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="child", tenant_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
-        other = ContextSpace(id="other", tenant_id="t1", name="Work", created_at=_now())
+        parent = ContextSpace(id="parent", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="child", instance_id="t1", name="D&D", parent_id="parent", depth=1, created_at=_now())
+        other = ContextSpace(id="other", instance_id="t1", name="Work", created_at=_now())
         await store.save_context_space(parent)
         await store.save_context_space(child)
         await store.save_context_space(other)
@@ -187,12 +187,12 @@ class TestDomainRename:
         tid = "t1"
 
         space = ContextSpace(
-            id="sp_dnd", tenant_id=tid, name="D&D Campaign",
+            id="sp_dnd", instance_id=tid, name="D&D Campaign",
             space_type="domain", parent_id="sp_gen", depth=1,
             created_at=_now(),
         )
         general = ContextSpace(
-            id="sp_gen", tenant_id=tid, name="General",
+            id="sp_gen", instance_id=tid, name="General",
             space_type="general", is_default=True, created_at=_now(),
         )
         await handler.state.save_context_space(general)
@@ -253,9 +253,9 @@ class TestDriftDetection:
         handler.events = MagicMock()
 
         tid = "t1"
-        general = ContextSpace(id="sp_gen", tenant_id=tid, name="General",
+        general = ContextSpace(id="sp_gen", instance_id=tid, name="General",
             space_type="general", is_default=True, created_at=_now())
-        existing_dnd = ContextSpace(id="sp_dnd", tenant_id=tid, name="D&D Campaign",
+        existing_dnd = ContextSpace(id="sp_dnd", instance_id=tid, name="D&D Campaign",
             space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
         await handler.state.save_context_space(general)
         await handler.state.save_context_space(existing_dnd)
@@ -286,14 +286,14 @@ class TestDriftDetection:
 
 class TestRenameFields:
     def test_defaults(self):
-        space = ContextSpace(id="s1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="s1", instance_id="t1", name="Test")
         assert space.renamed_from == ""
         assert space.renamed_at == ""
 
     async def test_round_trip(self, tmp_path):
         store = JsonStateStore(tmp_path)
         space = ContextSpace(
-            id="s1", tenant_id="t1", name="New Name",
+            id="s1", instance_id="t1", name="New Name",
             renamed_from="Old Name", renamed_at="2026-04-04T12:00:00Z",
             created_at=_now(),
         )

@@ -40,13 +40,13 @@ class TestBlockOrder:
         from kernos.messages.models import NormalizedMessage, AuthLevel
         from datetime import datetime, timezone
 
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         msg = NormalizedMessage(
             content="hello", sender="u1",
             sender_auth_level=AuthLevel.owner_unverified,
             platform="discord", platform_capabilities=["text"],
             conversation_id="c1", timestamp=datetime.now(timezone.utc),
-            tenant_id="t1",
+            instance_id="t1",
         )
         rules = _build_rules_block(PRIMARY_TEMPLATE, [], soul)
         actions = _build_actions_block("caps", msg, None)
@@ -97,7 +97,7 @@ class TestReasoningRequestFields:
     def test_static_dynamic_fields_exist(self):
         from kernos.kernel.reasoning import ReasoningRequest
         req = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1",
+            instance_id="t1", conversation_id="c1",
             system_prompt="full", messages=[], tools=[],
             model="test", trigger="test",
             system_prompt_static="rules + actions",
@@ -109,7 +109,7 @@ class TestReasoningRequestFields:
     def test_defaults_to_empty(self):
         from kernos.kernel.reasoning import ReasoningRequest
         req = ReasoningRequest(
-            tenant_id="t1", conversation_id="c1",
+            instance_id="t1", conversation_id="c1",
             system_prompt="full", messages=[], tools=[],
             model="test", trigger="test",
         )

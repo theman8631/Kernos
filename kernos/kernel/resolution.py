@@ -68,7 +68,7 @@ class EntityResolver:
 
     async def resolve(
         self,
-        tenant_id: str,
+        instance_id: str,
         mention: str,
         entity_type: str,
         context: str,
@@ -84,7 +84,7 @@ class EntityResolver:
         """
         # --- Tier 1: Deterministic ---
         node, res_type = await self._tier1_resolve(
-            tenant_id, mention, entity_type, contact_phone, contact_email, context,
+            instance_id, mention, entity_type, contact_phone, contact_email, context,
             relationship_type=relationship_type,
         )
         if node is not None:
@@ -92,7 +92,7 @@ class EntityResolver:
                 # Name match but context mismatch — create new entity with MAYBE_SAME_AS edge
                 emb = await self._maybe_embed(mention)
                 new_node = await self._create_entity(
-                    tenant_id, mention, entity_type,
+                    instance_id, mention, entity_type,
                     contact_phone=contact_phone, contact_email=contact_email,
                     embedding=emb,
                 )
@@ -104,18 +104,18 @@ class EntityResolver:
                     evidence_signals=["name_match_context_mismatch"],
                     created_at=utc_now(),
                 )
-                await self._state.save_identity_edge(tenant_id, edge)
+                await self._state.save_identity_edge(instance_id, edge)
                 return new_node, "present_not_presume"
 
             elif res_type == "role_match":
                 # Upgrade: real name becomes canonical, role-based name becomes alias
                 return await self._apply_role_match(
-                    tenant_id, node, mention, entity_type, relationship_type
+                    instance_id, node, mention, entity_type, relationship_type
                 )
 
             else:
                 # Definitive match — update last_seen and return
-                await self._update_last_seen(node, tenant_id)
+                await self._update_last_seen(node, instance_id)
                 if mention.lower() not in [a.lower() for a in node.aliases] and \
                    mention.lower() != node.canonical_name.lower():
                     node.aliases.append(mention)
@@ -126,7 +126,7 @@ class EntityResolver:
         if self._embeddings is not None:
             mention_embedding = await self._embeddings.embed(mention)
             node, res_type = await self._tier2_resolve(
-                tenant_id, mention, entity_type, mention_embedding
+                instance_id, mention, entity_type, mention_embedding
             )
             if node is not None:
                 if res_type == "scored_match":
@@ -139,7 +139,7 @@ class EntityResolver:
                         evidence_signals=["multi_signal_score"],
                         created_at=utc_now(),
                     )
-                    await self._update_last_seen(node, tenant_id)
+                    await self._update_last_seen(node, instance_id)
                     if mention.lower() not in [a.lower() for a in node.aliases] and \
                        mention.lower() != node.canonical_name.lower():
                         node.aliases.append(mention)
@@ -158,7 +158,7 @@ class EntityResolver:
                             evidence_signals=["llm_judgment"],
                             created_at=utc_now(),
                         )
-                        await self._update_last_seen(node, tenant_id)
+                        await self._update_last_seen(node, instance_id)
                         if mention.lower() not in [a.lower() for a in node.aliases] and \
                            mention.lower() != node.canonical_name.lower():
                             node.aliases.append(mention)
@@ -167,7 +167,7 @@ class EntityResolver:
                     else:
                         # LLM says different entity — create new + NOT_SAME_AS edge
                         new_node = await self._create_entity(
-                            tenant_id, mention, entity_type,
+                            instance_id, mention, entity_type,
                             contact_phone=contact_phone, contact_email=contact_email,
                             embedding=mention_embedding,
                         )
@@ -179,19 +179,19 @@ class EntityResolver:
                             evidence_signals=["llm_denial"],
                             created_at=utc_now(),
                         )
-                        await self._state.save_identity_edge(tenant_id, not_same_edge)
+                        await self._state.save_identity_edge(instance_id, not_same_edge)
                         return new_node, "new_entity"
 
             # No match at any tier — create new entity
             return await self._create_entity(
-                tenant_id, mention, entity_type,
+                instance_id, mention, entity_type,
                 contact_phone=contact_phone, contact_email=contact_email,
                 embedding=mention_embedding,
             ), "new_entity"
 
         # No embeddings — create new entity based on Tier 1 miss
         return await self._create_entity(
-            tenant_id, mention, entity_type,
+            instance_id, mention, entity_type,
             contact_phone=contact_phone, contact_email=contact_email,
             embedding=[],
         ), "new_entity"
@@ -202,7 +202,7 @@ class EntityResolver:
 
     async def _tier1_resolve(
         self,
-        tenant_id: str,
+        instance_id: str,
         mention: str,
         entity_type: str,
         contact_phone: str,
@@ -210,7 +210,7 @@ class EntityResolver:
         context: str,
         relationship_type: str = "",
     ) -> tuple[EntityNode | None, str]:
-        existing = await self._state.query_entity_nodes(tenant_id, active_only=True)
+        existing = await self._state.query_entity_nodes(instance_id, active_only=True)
 
         # 1. Contact info match → always definitive (same phone = same person)
         if contact_phone:
@@ -268,16 +268,16 @@ class EntityResolver:
 
     async def _tier2_resolve(
         self,
-        tenant_id: str,
+        instance_id: str,
         mention: str,
         entity_type: str,
         mention_embedding: list[float],
     ) -> tuple[EntityNode | None, str]:
         candidates = await self._state.query_entity_nodes(
-            tenant_id, entity_type=entity_type, active_only=True
+            instance_id, entity_type=entity_type, active_only=True
         )
         if not candidates:
-            candidates = await self._state.query_entity_nodes(tenant_id, active_only=True)
+            candidates = await self._state.query_entity_nodes(instance_id, active_only=True)
         if not candidates:
             return None, "no_candidates"
 
@@ -409,7 +409,7 @@ class EntityResolver:
 
     async def _apply_role_match(
         self,
-        tenant_id: str,
+        instance_id: str,
         node: EntityNode,
         mention: str,
         entity_type: str,
@@ -435,7 +435,7 @@ class EntityResolver:
         await self._state.save_entity_node(node)
 
         # Split reconciliation: look for a separate named entity that should be merged
-        existing = await self._state.query_entity_nodes(tenant_id, active_only=True)
+        existing = await self._state.query_entity_nodes(instance_id, active_only=True)
         for other in existing:
             if (other.id == node.id or
                     other.canonical_name.lower() != mention.lower() or
@@ -445,7 +445,7 @@ class EntityResolver:
             for entry_id in other.knowledge_entry_ids:
                 if entry_id not in node.knowledge_entry_ids:
                     node.knowledge_entry_ids.append(entry_id)
-                entry = await self._state.get_knowledge_entry(tenant_id, entry_id)
+                entry = await self._state.get_knowledge_entry(instance_id, entry_id)
                 if entry:
                     entry.entity_node_id = node.id
                     await self._state.save_knowledge_entry(entry)
@@ -462,7 +462,7 @@ class EntityResolver:
                 evidence_signals=["role_name_merge"],
                 created_at=utc_now(),
             )
-            await self._state.save_identity_edge(tenant_id, edge)
+            await self._state.save_identity_edge(instance_id, edge)
             logger.info(
                 "Role-match reconciliation: merged %s (%s) into %s (%s)",
                 other.id, other.canonical_name, node.id, node.canonical_name,
@@ -477,7 +477,7 @@ class EntityResolver:
 
     async def _create_entity(
         self,
-        tenant_id: str,
+        instance_id: str,
         canonical_name: str,
         entity_type: str,
         contact_phone: str = "",
@@ -487,7 +487,7 @@ class EntityResolver:
         now = utc_now()
         node = EntityNode(
             id=_ent_id(),
-            tenant_id=tenant_id,
+            instance_id=instance_id,
             canonical_name=canonical_name,
             entity_type=entity_type,
             embedding=embedding or [],
@@ -500,7 +500,7 @@ class EntityResolver:
         await self._state.save_entity_node(node)
         return node
 
-    async def _update_last_seen(self, node: EntityNode, tenant_id: str) -> None:
+    async def _update_last_seen(self, node: EntityNode, instance_id: str) -> None:
         node.last_seen = utc_now()
         await self._state.save_entity_node(node)
 

@@ -115,7 +115,7 @@ or the service might be down. Try again or check the key.
 
 ### Step 5 — Secrets directory ✓ PASS
 
-**Action:** Check `secrets/{tenant_id}/google-calendar.key` exists with correct content and permissions.
+**Action:** Check `secrets/{instance_id}/google-calendar.key` exists with correct content and permissions.
 
 **Actual:**
 ```
@@ -192,7 +192,7 @@ Config uninstalled: []
 
 ### Step 10 — Disconnect capability ✓ PASS
 
-**Send:** Programmatic `_disconnect_capability(tenant_id, "test-live-tool")`
+**Send:** Programmatic `_disconnect_capability(instance_id, "test-live-tool")`
 
 **Expected:** Registry downgraded to SUPPRESSED, tools cleared, config updated, `tool.uninstalled` event emitted.
 
@@ -283,7 +283,7 @@ When "secure api" was sent (Step 3), the handler correctly inferred "google-cale
 
 The credential message was intercepted at the very top of `process()`, before `tenants.get_or_create()`, before soul init, before LLM routing, before conversation store writes. The early return means the credential never touches any persistence layer, LLM call, or Tier 2 extraction. AC 5 is structurally guaranteed by the implementation.
 
-### Finding 4: _maybe_load_mcp_config runs once per tenant per process
+### Finding 4: _maybe_load_mcp_config runs once per instance per process
 
 The `_mcp_config_loaded` set prevents duplicate loading. On the second call for the same tenant, the method returns immediately without any I/O. This is verified by Step 12's fresh handler and the unit test TestConfigPersistence::test_maybe_load_mcp_config_only_runs_once.
 

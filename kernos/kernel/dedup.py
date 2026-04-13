@@ -54,7 +54,7 @@ class FactDeduplicator:
 
     async def classify(
         self,
-        tenant_id: str,
+        instance_id: str,
         candidate: KnowledgeEntry,
         candidate_embedding: list[float],
     ) -> tuple[str, str | None]:
@@ -65,7 +65,7 @@ class FactDeduplicator:
           ("UPDATE", "know_x")  — supersede the identified entry
           ("NOOP", "know_x")    — skip write; reinforce the identified entry
         """
-        existing = await self._get_comparison_candidates(tenant_id, candidate)
+        existing = await self._get_comparison_candidates(instance_id, candidate)
         if not existing:
             logger.info(
                 "Fact dedup: ADD (no existing, candidate=%s)", candidate.content
@@ -74,7 +74,7 @@ class FactDeduplicator:
 
         # Load embeddings for existing entries (batch for efficiency)
         entry_ids = [e.id for e in existing]
-        emb_map = await self._embedding_store.get_batch(tenant_id, entry_ids)
+        emb_map = await self._embedding_store.get_batch(instance_id, entry_ids)
         existing_embeddings = [emb_map.get(e.id, []) for e in existing]
 
         zone, target_id, similarity = self._classify_by_zone(
@@ -123,11 +123,11 @@ class FactDeduplicator:
             return classification, (llm_target if classification != "ADD" else None)
 
     async def _get_comparison_candidates(
-        self, tenant_id: str, candidate: KnowledgeEntry
+        self, instance_id: str, candidate: KnowledgeEntry
     ) -> list[KnowledgeEntry]:
         """Scope comparison to entries with same category and subject."""
         return await self._state.query_knowledge(
-            tenant_id,
+            instance_id,
             category=candidate.category,
             subject=candidate.subject,
             active_only=True,

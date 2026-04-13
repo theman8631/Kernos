@@ -21,7 +21,7 @@ def _make_entry(
     lr = (now - timedelta(days=days_ago)).isoformat() if last_reinforced else ""
     return KnowledgeEntry(
         id="test_entry",
-        tenant_id="t1",
+        instance_id="t1",
         subject="user",
         content="test fact",
         category="fact",

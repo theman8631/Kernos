@@ -1,13 +1,13 @@
 """JSON-on-disk implementation of StateStore.
 
-Files per tenant under {data_dir}/{tenant_id}/state/:
-  profile.json         — TenantProfile (single object)
+Files per-instance under {data_dir}/{instance_id}/state/:
+  profile.json         — InstanceProfile (single object)
   knowledge.json       — list of KnowledgeEntry
   contracts.json       — list of CovenantRule
   conversations.json   — list of ConversationSummary
   soul.json            — Soul (single object)
   entities.json        — list of EntityNode
-  identity_edges.json  — list of IdentityEdge (per-tenant, Phase 2A)
+  identity_edges.json  — list of IdentityEdge (per-instance, Phase 2A)
   pending_actions.json — list of PendingAction
   preferences.json     — list of Preference (Phase 6A)
 
@@ -31,7 +31,7 @@ from kernos.kernel.state import (
     PendingAction,
     Preference,
     StateStore,
-    TenantProfile,
+    InstanceProfile,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def _load_covenant_rule(d: dict) -> CovenantRule:
 
 
 _CONTEXT_SPACE_FIELDS = {
-    "id", "tenant_id", "name", "description", "space_type", "status",
+    "id", "instance_id", "name", "description", "space_type", "status",
     "posture", "model_preference", "created_at", "last_active_at", "is_default",
     "max_file_size_bytes", "max_space_bytes", "active_tools",
     "parent_id", "aliases", "depth",
@@ -161,8 +161,8 @@ class JsonStateStore(StateStore):
     # Internal helpers
     # -----------------------------------------------------------------------
 
-    def _state_dir(self, tenant_id: str) -> Path:
-        return self._data_dir / _safe_name(tenant_id) / "state"
+    def _state_dir(self, instance_id: str) -> Path:
+        return self._data_dir / _safe_name(instance_id) / "state"
 
     def _read_json(self, path: Path, default):
         if not path.exists():
@@ -181,8 +181,8 @@ class JsonStateStore(StateStore):
     # Soul
     # -----------------------------------------------------------------------
 
-    async def get_soul(self, tenant_id: str) -> Soul | None:
-        path = self._state_dir(tenant_id) / "soul.json"
+    async def get_soul(self, instance_id: str) -> Soul | None:
+        path = self._state_dir(instance_id) / "soul.json"
         data = self._read_json(path, None)
         if data is None:
             return None
@@ -200,24 +200,24 @@ class JsonStateStore(StateStore):
         return soul
 
     async def save_soul(self, soul: Soul, *, source: str = "", trigger: str = "") -> None:
-        path = self._state_dir(soul.tenant_id) / "soul.json"
+        path = self._state_dir(soul.instance_id) / "soul.json"
         self._write_json(path, asdict(soul))
         if source:
-            logger.info("SOUL_WRITE: source=%s trigger=%s tenant=%s", source, trigger, soul.tenant_id)
+            logger.info("SOUL_WRITE: source=%s trigger=%s instance=%s", source, trigger, soul.instance_id)
 
     # -----------------------------------------------------------------------
     # Tenant Profile
     # -----------------------------------------------------------------------
 
-    async def get_tenant_profile(self, tenant_id: str) -> TenantProfile | None:
-        path = self._state_dir(tenant_id) / "profile.json"
+    async def get_instance_profile(self, instance_id: str) -> InstanceProfile | None:
+        path = self._state_dir(instance_id) / "profile.json"
         data = self._read_json(path, None)
         if data is None:
             return None
-        return TenantProfile(**data)
+        return InstanceProfile(**data)
 
-    async def save_tenant_profile(self, tenant_id: str, profile: TenantProfile) -> None:
-        path = self._state_dir(tenant_id) / "profile.json"
+    async def save_instance_profile(self, instance_id: str, profile: InstanceProfile) -> None:
+        path = self._state_dir(instance_id) / "profile.json"
         self._write_json(path, asdict(profile))
 
     # -----------------------------------------------------------------------
@@ -225,21 +225,21 @@ class JsonStateStore(StateStore):
     # -----------------------------------------------------------------------
 
     async def add_knowledge(self, entry: KnowledgeEntry) -> None:
-        path = self._state_dir(entry.tenant_id) / "knowledge.json"
+        path = self._state_dir(entry.instance_id) / "knowledge.json"
         entries = self._read_json(path, [])
         entries.append(asdict(entry))
         self._write_json(path, entries)
 
     async def query_knowledge(
         self,
-        tenant_id: str,
+        instance_id: str,
         subject: str | None = None,
         category: str | None = None,
         tags: list[str] | None = None,
         active_only: bool = True,
         limit: int = 20,
     ) -> list[KnowledgeEntry]:
-        path = self._state_dir(tenant_id) / "knowledge.json"
+        path = self._state_dir(instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
         results: list[KnowledgeEntry] = []
         for d in raw:
@@ -257,7 +257,7 @@ class JsonStateStore(StateStore):
 
     async def save_knowledge_entry(self, entry: KnowledgeEntry) -> None:
         """Upsert a KnowledgeEntry by ID."""
-        path = self._state_dir(entry.tenant_id) / "knowledge.json"
+        path = self._state_dir(entry.instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
             if d.get("id") == entry.id:
@@ -268,19 +268,19 @@ class JsonStateStore(StateStore):
         self._write_json(path, raw)
 
     async def get_knowledge_entry(
-        self, tenant_id: str, entry_id: str
+        self, instance_id: str, entry_id: str
     ) -> KnowledgeEntry | None:
         """Get a single KnowledgeEntry by ID."""
-        path = self._state_dir(tenant_id) / "knowledge.json"
+        path = self._state_dir(instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
         for d in raw:
             if d.get("id") == entry_id:
                 return _load_knowledge_entry(d)
         return None
 
-    async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
+    async def get_knowledge_hashes(self, instance_id: str) -> set[str]:
         """Return content_hash values for all active entries."""
-        path = self._state_dir(tenant_id) / "knowledge.json"
+        path = self._state_dir(instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
         return {
             d["content_hash"]
@@ -289,21 +289,21 @@ class JsonStateStore(StateStore):
         }
 
     async def get_knowledge_by_hash(
-        self, tenant_id: str, content_hash: str
+        self, instance_id: str, content_hash: str
     ) -> KnowledgeEntry | None:
         """Find an active entry by content_hash."""
-        path = self._state_dir(tenant_id) / "knowledge.json"
+        path = self._state_dir(instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
         for d in raw:
             if d.get("content_hash") == content_hash and d.get("active", True):
                 return _load_knowledge_entry(d)
         return None
 
-    async def update_knowledge(self, tenant_id: str, entry_id: str, updates: dict) -> None:
+    async def update_knowledge(self, instance_id: str, entry_id: str, updates: dict) -> None:
         """Find and update a knowledge entry by ID, scoped to the given tenant."""
-        path = self._state_dir(tenant_id) / "knowledge.json"
+        path = self._state_dir(instance_id) / "knowledge.json"
         if not path.exists():
-            logger.warning("update_knowledge: no knowledge file for tenant %s", tenant_id)
+            logger.warning("update_knowledge: no knowledge file for instance %s", instance_id)
             return
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
@@ -311,7 +311,7 @@ class JsonStateStore(StateStore):
                 raw[i].update(updates)
                 self._write_json(path, raw)
                 return
-        logger.warning("update_knowledge: entry_id %s not found for tenant %s", entry_id, tenant_id)
+        logger.warning("update_knowledge: entry_id %s not found for instance %s", entry_id, instance_id)
 
     # -----------------------------------------------------------------------
     # Behavioral Contracts (CovenantRule)
@@ -364,12 +364,12 @@ class JsonStateStore(StateStore):
 
     async def get_contract_rules(
         self,
-        tenant_id: str,
+        instance_id: str,
         capability: str | None = None,
         rule_type: str | None = None,
         active_only: bool = True,
     ) -> list[CovenantRule]:
-        path = self._state_dir(tenant_id) / "contracts.json"
+        path = self._state_dir(instance_id) / "contracts.json"
         raw = self._read_json(path, [])
         # One-time migration: update old default covenant wording
         migrated = False
@@ -380,7 +380,7 @@ class JsonStateStore(StateStore):
                     migrated = True
         if migrated:
             self._write_json(path, raw)
-            logger.info("COVENANT_MIGRATE: tenant=%s migrated default covenant wording", tenant_id)
+            logger.info("COVENANT_MIGRATE: instance=%s migrated default covenant wording", instance_id)
         results: list[CovenantRule] = []
         for d in raw:
             rule = _load_covenant_rule(d)
@@ -397,12 +397,12 @@ class JsonStateStore(StateStore):
 
     async def query_covenant_rules(
         self,
-        tenant_id: str,
+        instance_id: str,
         capability: str | None = None,
         context_space_scope: list[str | None] | None = None,
         active_only: bool = True,
     ) -> list[CovenantRule]:
-        path = self._state_dir(tenant_id) / "contracts.json"
+        path = self._state_dir(instance_id) / "contracts.json"
         raw = self._read_json(path, [])
         results: list[CovenantRule] = []
         for d in raw:
@@ -420,16 +420,16 @@ class JsonStateStore(StateStore):
         return results
 
     async def add_contract_rule(self, rule: CovenantRule) -> None:
-        path = self._state_dir(rule.tenant_id) / "contracts.json"
+        path = self._state_dir(rule.instance_id) / "contracts.json"
         rules = self._read_json(path, [])
         rules.append(asdict(rule))
         self._write_json(path, rules)
 
-    async def update_contract_rule(self, tenant_id: str, rule_id: str, updates: dict) -> None:
+    async def update_contract_rule(self, instance_id: str, rule_id: str, updates: dict) -> None:
         """Find and update a contract rule by ID, scoped to the given tenant."""
-        path = self._state_dir(tenant_id) / "contracts.json"
+        path = self._state_dir(instance_id) / "contracts.json"
         if not path.exists():
-            logger.warning("update_contract_rule: no contracts file for tenant %s", tenant_id)
+            logger.warning("update_contract_rule: no contracts file for instance %s", instance_id)
             return
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
@@ -437,14 +437,14 @@ class JsonStateStore(StateStore):
                 raw[i].update(updates)
                 self._write_json(path, raw)
                 return
-        logger.warning("update_contract_rule: rule_id %s not found for tenant %s", rule_id, tenant_id)
+        logger.warning("update_contract_rule: rule_id %s not found for instance %s", rule_id, instance_id)
 
     # -----------------------------------------------------------------------
     # Entity Resolution (basic CRUD — Phase 2A adds real logic)
     # -----------------------------------------------------------------------
 
     async def save_entity_node(self, node: EntityNode) -> None:
-        path = self._state_dir(node.tenant_id) / "entities.json"
+        path = self._state_dir(node.instance_id) / "entities.json"
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
             if d.get("id") == node.id:
@@ -454,8 +454,8 @@ class JsonStateStore(StateStore):
         raw.append(asdict(node))
         self._write_json(path, raw)
 
-    async def get_entity_node(self, tenant_id: str, entity_id: str) -> EntityNode | None:
-        path = self._state_dir(tenant_id) / "entities.json"
+    async def get_entity_node(self, instance_id: str, entity_id: str) -> EntityNode | None:
+        path = self._state_dir(instance_id) / "entities.json"
         raw = self._read_json(path, [])
         for d in raw:
             if d.get("id") == entity_id:
@@ -464,12 +464,12 @@ class JsonStateStore(StateStore):
 
     async def query_entity_nodes(
         self,
-        tenant_id: str,
+        instance_id: str,
         name: str | None = None,
         entity_type: str | None = None,
         active_only: bool = True,
     ) -> list[EntityNode]:
-        path = self._state_dir(tenant_id) / "entities.json"
+        path = self._state_dir(instance_id) / "entities.json"
         raw = self._read_json(path, [])
         results: list[EntityNode] = []
         for d in raw:
@@ -489,8 +489,8 @@ class JsonStateStore(StateStore):
             results.append(node)
         return results
 
-    async def save_identity_edge(self, tenant_id: str, edge: IdentityEdge) -> None:
-        path = self._state_dir(tenant_id) / "identity_edges.json"
+    async def save_identity_edge(self, instance_id: str, edge: IdentityEdge) -> None:
+        path = self._state_dir(instance_id) / "identity_edges.json"
         raw = self._read_json(path, [])
         key = (edge.source_id, edge.target_id)
         for i, d in enumerate(raw):
@@ -502,9 +502,9 @@ class JsonStateStore(StateStore):
         self._write_json(path, raw)
 
     async def query_identity_edges(
-        self, tenant_id: str, entity_id: str
+        self, instance_id: str, entity_id: str
     ) -> list[IdentityEdge]:
-        path = self._state_dir(tenant_id) / "identity_edges.json"
+        path = self._state_dir(instance_id) / "identity_edges.json"
         raw = self._read_json(path, [])
         results = []
         for d in raw:
@@ -517,7 +517,7 @@ class JsonStateStore(StateStore):
     # -----------------------------------------------------------------------
 
     async def save_pending_action(self, action: PendingAction) -> None:
-        path = self._state_dir(action.tenant_id) / "pending_actions.json"
+        path = self._state_dir(action.instance_id) / "pending_actions.json"
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
             if d.get("id") == action.id:
@@ -528,9 +528,9 @@ class JsonStateStore(StateStore):
         self._write_json(path, raw)
 
     async def get_pending_actions(
-        self, tenant_id: str, status: str = "pending"
+        self, instance_id: str, status: str = "pending"
     ) -> list[PendingAction]:
-        path = self._state_dir(tenant_id) / "pending_actions.json"
+        path = self._state_dir(instance_id) / "pending_actions.json"
         raw = self._read_json(path, [])
         return [
             PendingAction(**d)
@@ -539,11 +539,11 @@ class JsonStateStore(StateStore):
         ]
 
     async def update_pending_action(
-        self, tenant_id: str, action_id: str, updates: dict
+        self, instance_id: str, action_id: str, updates: dict
     ) -> None:
-        path = self._state_dir(tenant_id) / "pending_actions.json"
+        path = self._state_dir(instance_id) / "pending_actions.json"
         if not path.exists():
-            logger.warning("update_pending_action: no file for tenant %s", tenant_id)
+            logger.warning("update_pending_action: no file for instance %s", instance_id)
             return
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
@@ -551,14 +551,14 @@ class JsonStateStore(StateStore):
                 raw[i].update(updates)
                 self._write_json(path, raw)
                 return
-        logger.warning("update_pending_action: id %s not found for tenant %s", action_id, tenant_id)
+        logger.warning("update_pending_action: id %s not found for instance %s", action_id, instance_id)
 
     # -----------------------------------------------------------------------
     # Context Spaces
     # -----------------------------------------------------------------------
 
     async def save_context_space(self, space: ContextSpace) -> None:
-        path = self._state_dir(space.tenant_id) / "spaces.json"
+        path = self._state_dir(space.instance_id) / "spaces.json"
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
             if d.get("id") == space.id:
@@ -569,26 +569,26 @@ class JsonStateStore(StateStore):
         self._write_json(path, raw)
 
     async def get_context_space(
-        self, tenant_id: str, space_id: str
+        self, instance_id: str, space_id: str
     ) -> ContextSpace | None:
-        path = self._state_dir(tenant_id) / "spaces.json"
+        path = self._state_dir(instance_id) / "spaces.json"
         raw = self._read_json(path, [])
         for d in raw:
             if d.get("id") == space_id:
                 return _load_context_space(d)
         return None
 
-    async def list_context_spaces(self, tenant_id: str) -> list[ContextSpace]:
-        path = self._state_dir(tenant_id) / "spaces.json"
+    async def list_context_spaces(self, instance_id: str) -> list[ContextSpace]:
+        path = self._state_dir(instance_id) / "spaces.json"
         raw = self._read_json(path, [])
         return [_load_context_space(d) for d in raw]
 
     async def update_context_space(
-        self, tenant_id: str, space_id: str, updates: dict
+        self, instance_id: str, space_id: str, updates: dict
     ) -> None:
-        path = self._state_dir(tenant_id) / "spaces.json"
+        path = self._state_dir(instance_id) / "spaces.json"
         if not path.exists():
-            logger.warning("update_context_space: no file for tenant %s", tenant_id)
+            logger.warning("update_context_space: no file for instance %s", instance_id)
             return
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
@@ -596,21 +596,21 @@ class JsonStateStore(StateStore):
                 raw[i].update(updates)
                 self._write_json(path, raw)
                 return
-        logger.warning("update_context_space: id %s not found for tenant %s", space_id, tenant_id)
+        logger.warning("update_context_space: id %s not found for instance %s", space_id, instance_id)
 
     # -----------------------------------------------------------------------
     # Space Notices (CS-5 cross-domain signals)
     # -----------------------------------------------------------------------
 
-    def _notices_path(self, tenant_id: str) -> Path:
-        return self._state_dir(tenant_id) / "space_notices.json"
+    def _notices_path(self, instance_id: str) -> Path:
+        return self._state_dir(instance_id) / "space_notices.json"
 
     async def append_space_notice(
-        self, tenant_id: str, space_id: str, text: str,
+        self, instance_id: str, space_id: str, text: str,
         source: str = "", notice_type: str = "cross_domain",
     ) -> None:
         from kernos.utils import utc_now
-        path = self._notices_path(tenant_id)
+        path = self._notices_path(instance_id)
         notices = self._read_json(path, {})
         if space_id not in notices:
             notices[space_id] = []
@@ -620,8 +620,8 @@ class JsonStateStore(StateStore):
         })
         self._write_json(path, notices)
 
-    async def drain_space_notices(self, tenant_id: str, space_id: str) -> list[dict]:
-        path = self._notices_path(tenant_id)
+    async def drain_space_notices(self, instance_id: str, space_id: str) -> list[dict]:
+        path = self._notices_path(instance_id)
         notices = self._read_json(path, {})
         pending = notices.pop(space_id, [])
         if pending:
@@ -634,12 +634,12 @@ class JsonStateStore(StateStore):
 
     async def query_knowledge_by_foresight(
         self,
-        tenant_id: str,
+        instance_id: str,
         expires_before: str,
         expires_after: str = "",
         space_id: str = "",
     ) -> "list[KnowledgeEntry]":
-        path = self._state_dir(tenant_id) / "knowledge.json"
+        path = self._state_dir(instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
         results = []
         for d in raw:
@@ -663,13 +663,13 @@ class JsonStateStore(StateStore):
     # Whispers and Suppressions (Phase 3C)
     # -----------------------------------------------------------------------
 
-    def _awareness_dir(self, tenant_id: str) -> Path:
-        return self._data_dir / _safe_name(tenant_id) / "awareness"
+    def _awareness_dir(self, instance_id: str) -> Path:
+        return self._data_dir / _safe_name(instance_id) / "awareness"
 
-    async def save_whisper(self, tenant_id: str, whisper) -> None:
+    async def save_whisper(self, instance_id: str, whisper) -> None:
         from kernos.kernel.awareness import Whisper
         from dataclasses import asdict as _asdict
-        path = self._awareness_dir(tenant_id) / "whispers.json"
+        path = self._awareness_dir(instance_id) / "whispers.json"
         raw = self._read_json(path, [])
         # Upsert by whisper_id
         for i, d in enumerate(raw):
@@ -687,10 +687,10 @@ class JsonStateStore(StateStore):
         raw.append(_asdict(whisper))
         self._write_json(path, raw)
 
-    async def get_pending_whispers(self, tenant_id: str) -> list:
+    async def get_pending_whispers(self, instance_id: str) -> list:
         from kernos.kernel.awareness import Whisper
         from datetime import datetime, timezone
-        path = self._awareness_dir(tenant_id) / "whispers.json"
+        path = self._awareness_dir(instance_id) / "whispers.json"
         raw = self._read_json(path, [])
         now = datetime.now(timezone.utc)
         pending = []
@@ -719,9 +719,9 @@ class JsonStateStore(StateStore):
             self._write_json(path, raw)
         return pending
 
-    async def mark_whisper_surfaced(self, tenant_id: str, whisper_id: str) -> None:
+    async def mark_whisper_surfaced(self, instance_id: str, whisper_id: str) -> None:
         from datetime import datetime, timezone
-        path = self._awareness_dir(tenant_id) / "whispers.json"
+        path = self._awareness_dir(instance_id) / "whispers.json"
         raw = self._read_json(path, [])
         for i, d in enumerate(raw):
             if d.get("whisper_id") == whisper_id:
@@ -729,16 +729,16 @@ class JsonStateStore(StateStore):
                 self._write_json(path, raw)
                 return
 
-    async def delete_whisper(self, tenant_id: str, whisper_id: str) -> None:
-        path = self._awareness_dir(tenant_id) / "whispers.json"
+    async def delete_whisper(self, instance_id: str, whisper_id: str) -> None:
+        path = self._awareness_dir(instance_id) / "whispers.json"
         raw = self._read_json(path, [])
         raw = [d for d in raw if d.get("whisper_id") != whisper_id]
         self._write_json(path, raw)
 
-    async def save_suppression(self, tenant_id: str, entry) -> None:
+    async def save_suppression(self, instance_id: str, entry) -> None:
         from kernos.kernel.awareness import SuppressionEntry
         from dataclasses import asdict as _asdict
-        path = self._awareness_dir(tenant_id) / "suppressions.json"
+        path = self._awareness_dir(instance_id) / "suppressions.json"
         raw = self._read_json(path, [])
         # Upsert by whisper_id
         for i, d in enumerate(raw):
@@ -751,13 +751,13 @@ class JsonStateStore(StateStore):
 
     async def get_suppressions(
         self,
-        tenant_id: str,
+        instance_id: str,
         knowledge_entry_id: str = "",
         whisper_id: str = "",
         foresight_signal: str = "",
     ) -> list:
         from kernos.kernel.awareness import SuppressionEntry
-        path = self._awareness_dir(tenant_id) / "suppressions.json"
+        path = self._awareness_dir(instance_id) / "suppressions.json"
         raw = self._read_json(path, [])
         results = []
         for d in raw:
@@ -770,8 +770,8 @@ class JsonStateStore(StateStore):
             results.append(SuppressionEntry(**d))
         return results
 
-    async def delete_suppression(self, tenant_id: str, whisper_id: str) -> None:
-        path = self._awareness_dir(tenant_id) / "suppressions.json"
+    async def delete_suppression(self, instance_id: str, whisper_id: str) -> None:
+        path = self._awareness_dir(instance_id) / "suppressions.json"
         raw = self._read_json(path, [])
         raw = [d for d in raw if d.get("whisper_id") != whisper_id]
         self._write_json(path, raw)
@@ -781,9 +781,9 @@ class JsonStateStore(StateStore):
     # -----------------------------------------------------------------------
 
     async def get_conversation_summary(
-        self, tenant_id: str, conversation_id: str
+        self, instance_id: str, conversation_id: str
     ) -> ConversationSummary | None:
-        path = self._state_dir(tenant_id) / "conversations.json"
+        path = self._state_dir(instance_id) / "conversations.json"
         raw = self._read_json(path, [])
         for d in raw:
             if d.get("conversation_id") == conversation_id:
@@ -791,7 +791,7 @@ class JsonStateStore(StateStore):
         return None
 
     async def save_conversation_summary(self, summary: ConversationSummary) -> None:
-        path = self._state_dir(summary.tenant_id) / "conversations.json"
+        path = self._state_dir(summary.instance_id) / "conversations.json"
         raw = self._read_json(path, [])
         # Upsert: replace existing or append
         for i, d in enumerate(raw):
@@ -803,9 +803,9 @@ class JsonStateStore(StateStore):
         self._write_json(path, raw)
 
     async def list_conversations(
-        self, tenant_id: str, active_only: bool = True, limit: int = 20
+        self, instance_id: str, active_only: bool = True, limit: int = 20
     ) -> list[ConversationSummary]:
-        path = self._state_dir(tenant_id) / "conversations.json"
+        path = self._state_dir(instance_id) / "conversations.json"
         raw = self._read_json(path, [])
         results = [ConversationSummary(**d) for d in raw]
         if active_only:
@@ -816,23 +816,23 @@ class JsonStateStore(StateStore):
 
     # --- Preferences (Phase 6A) ---
 
-    def _preferences_path(self, tenant_id: str) -> Path:
-        return self._state_dir(tenant_id) / "preferences.json"
+    def _preferences_path(self, instance_id: str) -> Path:
+        return self._state_dir(instance_id) / "preferences.json"
 
-    async def _maybe_migrate_preferences(self, tenant_id: str) -> None:
+    async def _maybe_migrate_preferences(self, instance_id: str) -> None:
         """Lazy migration: convert category='preference' KnowledgeEntries to Preferences."""
-        if tenant_id in self._preference_migration_done:
+        if instance_id in self._preference_migration_done:
             return
-        self._preference_migration_done.add(tenant_id)
+        self._preference_migration_done.add(instance_id)
 
         from kernos.kernel.state import generate_preference_id
         from kernos.utils import utc_now
 
-        knowledge = await self.query_knowledge(tenant_id, category="preference")
+        knowledge = await self.query_knowledge(instance_id, category="preference")
         if not knowledge:
             return
 
-        existing_prefs = self._load_preferences(tenant_id)
+        existing_prefs = self._load_preferences(instance_id)
         # Skip if migration already happened (check for source_knowledge_id matches)
         existing_source_ids = {e.get("source_knowledge_id", "") for e in existing_prefs}
 
@@ -842,7 +842,7 @@ class JsonStateStore(StateStore):
                 continue  # Already migrated
             pref = Preference(
                 id=generate_preference_id(),
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 intent=entry.content,
                 category="general",
                 subject=entry.subject,
@@ -863,17 +863,17 @@ class JsonStateStore(StateStore):
             migrated_count += 1
 
         if migrated_count:
-            self._save_preferences(tenant_id, existing_prefs)
+            self._save_preferences(instance_id, existing_prefs)
             logger.info(
-                "PREF_MIGRATION: tenant=%s migrated=%d from KnowledgeEntry",
-                tenant_id, migrated_count,
+                "PREF_MIGRATION: instance=%s migrated=%d from KnowledgeEntry",
+                instance_id, migrated_count,
             )
 
-    def _load_preferences(self, tenant_id: str) -> list[dict]:
-        return self._read_json(self._preferences_path(tenant_id), [])
+    def _load_preferences(self, instance_id: str) -> list[dict]:
+        return self._read_json(self._preferences_path(instance_id), [])
 
-    def _save_preferences(self, tenant_id: str, data: list[dict]) -> None:
-        path = self._preferences_path(tenant_id)
+    def _save_preferences(self, instance_id: str, data: list[dict]) -> None:
+        path = self._preferences_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock = FileLock(str(path) + ".lock")
         with lock:
@@ -887,17 +887,17 @@ class JsonStateStore(StateStore):
         return Preference(**filtered)
 
     async def add_preference(self, pref: Preference) -> None:
-        await self._maybe_migrate_preferences(pref.tenant_id)
-        entries = self._load_preferences(pref.tenant_id)
+        await self._maybe_migrate_preferences(pref.instance_id)
+        entries = self._load_preferences(pref.instance_id)
         entries.append(asdict(pref))
-        self._save_preferences(pref.tenant_id, entries)
+        self._save_preferences(pref.instance_id, entries)
         logger.info(
-            "PREF_WRITE: id=%s action=ADD subject=%s category=%s tenant=%s",
-            pref.id, pref.subject, pref.category, pref.tenant_id,
+            "PREF_WRITE: id=%s action=ADD subject=%s category=%s instance=%s",
+            pref.id, pref.subject, pref.category, pref.instance_id,
         )
 
     async def save_preference(self, pref: Preference) -> None:
-        entries = self._load_preferences(pref.tenant_id)
+        entries = self._load_preferences(pref.instance_id)
         found = False
         for i, e in enumerate(entries):
             if e.get("id") == pref.id:
@@ -906,15 +906,15 @@ class JsonStateStore(StateStore):
                 break
         if not found:
             entries.append(asdict(pref))
-        self._save_preferences(pref.tenant_id, entries)
+        self._save_preferences(pref.instance_id, entries)
         logger.info(
-            "PREF_WRITE: id=%s action=%s subject=%s status=%s tenant=%s",
-            pref.id, "UPDATE" if found else "ADD", pref.subject, pref.status, pref.tenant_id,
+            "PREF_WRITE: id=%s action=%s subject=%s status=%s instance=%s",
+            pref.id, "UPDATE" if found else "ADD", pref.subject, pref.status, pref.instance_id,
         )
 
-    async def get_preference(self, tenant_id: str, pref_id: str) -> Preference | None:
-        await self._maybe_migrate_preferences(tenant_id)
-        entries = self._load_preferences(tenant_id)
+    async def get_preference(self, instance_id: str, pref_id: str) -> Preference | None:
+        await self._maybe_migrate_preferences(instance_id)
+        entries = self._load_preferences(instance_id)
         for e in entries:
             if e.get("id") == pref_id:
                 return self._load_preference(e)
@@ -922,15 +922,15 @@ class JsonStateStore(StateStore):
 
     async def query_preferences(
         self,
-        tenant_id: str,
+        instance_id: str,
         status: str = "",
         subject: str = "",
         category: str = "",
         scope: str = "",
         active_only: bool = True,
     ) -> list[Preference]:
-        await self._maybe_migrate_preferences(tenant_id)
-        entries = self._load_preferences(tenant_id)
+        await self._maybe_migrate_preferences(instance_id)
+        entries = self._load_preferences(instance_id)
         results: list[Preference] = []
         for e in entries:
             if active_only and e.get("status", "active") != "active":

@@ -11,7 +11,7 @@ JSON — no markdown fence stripping, no JSON parse fallback needed.
 Enhanced path (entity_resolver + fact_deduplicator provided):
   - Entity mentions resolved to EntityNodes via 3-tier cascade
   - Facts classified by embedding similarity (ADD/UPDATE/NOOP)
-  - Embeddings stored in separate embeddings.json per tenant
+  - Embeddings stored in separate embeddings.json per-instance
 
 Legacy path (no resolver/deduplicator):
   - Hash-based exact dedup only (unchanged from Phase 1B)
@@ -331,14 +331,14 @@ def _make_knowledge_id() -> str:
     return f"know_{ts}_{rand}"
 
 
-async def _build_entity_context(state: StateStore, tenant_id: str) -> str:
+async def _build_entity_context(state: StateStore, instance_id: str) -> str:
     """Build compact entity list for injection into extraction prompt.
 
     At personal scale (~200 entities), this is ~500 tokens.
     Scoped to active entities only.
     """
     try:
-        entities = await state.query_entity_nodes(tenant_id, active_only=True)
+        entities = await state.query_entity_nodes(instance_id, active_only=True)
     except Exception:
         return ""
     if not entities:
@@ -361,7 +361,7 @@ async def run_tier2_extraction(
     state: StateStore,
     events: EventStream,
     reasoning_service,
-    tenant_id: str,
+    instance_id: str,
     entity_resolver: EntityResolver | None = None,
     fact_deduplicator: FactDeduplicator | None = None,
     embedding_service: EmbeddingService | None = None,
@@ -394,7 +394,7 @@ async def run_tier2_extraction(
         # Build entity context for coreference resolution (enhanced path only)
         entity_context = ""
         if enhanced:
-            entity_context = await _build_entity_context(state, tenant_id)
+            entity_context = await _build_entity_context(state, instance_id)
 
         # Build conversation text (last 4 turns)
         turns_text = _format_turns(recent_turns[-4:])
@@ -420,7 +420,7 @@ async def run_tier2_extraction(
 
         extracted = json.loads(raw)
 
-        existing_hashes = await state.get_knowledge_hashes(tenant_id)
+        existing_hashes = await state.get_knowledge_hashes(instance_id)
         now = utc_now()
         wrote_count = 0
 
@@ -453,7 +453,7 @@ async def run_tier2_extraction(
 
                 try:
                     node, resolution_type = await entity_resolver.resolve(
-                        tenant_id=tenant_id,
+                        instance_id=instance_id,
                         mention=name,
                         entity_type=entity_type,
                         context=context_text,
@@ -486,7 +486,7 @@ async def run_tier2_extraction(
                     else:
                         ev = EventType.ENTITY_LINKED
                     try:
-                        await emit_event(events, ev, tenant_id, "entity_resolver",
+                        await emit_event(events, ev, instance_id, "entity_resolver",
                                          payload={"name": name, "resolution_type": resolution_type,
                                                   "entity_id": node.id})
                     except Exception as exc:
@@ -500,7 +500,7 @@ async def run_tier2_extraction(
                 content = f"{name} ({relation})" if relation else name
                 lifecycle_archetype = _durability_to_archetype(item.get("durability", "permanent"))
                 wrote_count += await _write_entry(
-                    state=state, events=events, tenant_id=tenant_id,
+                    state=state, events=events, instance_id=instance_id,
                     category="entity", subject=name, content=content,
                     confidence="stated", lifecycle_archetype=lifecycle_archetype,
                     source_description="tier2_llm entity extraction",
@@ -527,8 +527,8 @@ async def run_tier2_extraction(
             # Ephemeral archetype = reject outright
             if lifecycle_archetype == "ephemeral":
                 logger.info(
-                    "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=ephemeral_archetype",
-                    tenant_id, content[:80],
+                    "KNOWLEDGE_FILTERED: instance=%s content=%r reason=ephemeral_archetype",
+                    instance_id, content[:80],
                 )
                 continue
 
@@ -536,8 +536,8 @@ async def run_tier2_extraction(
             if _is_suspicious_candidate(item) and reasoning_service:
                 if not await _passes_durability_check(content, reasoning_service):
                     logger.info(
-                        "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=durability_check",
-                        tenant_id, content[:80],
+                        "KNOWLEDGE_FILTERED: instance=%s content=%r reason=durability_check",
+                        instance_id, content[:80],
                     )
                     continue
 
@@ -546,7 +546,7 @@ async def run_tier2_extraction(
 
             if enhanced:
                 wrote = await _write_entry_enhanced(
-                    state=state, events=events, tenant_id=tenant_id,
+                    state=state, events=events, instance_id=instance_id,
                     category="fact", subject=subject, content=content,
                     confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                     foresight_signal=foresight_signal, foresight_expires=foresight_expires,
@@ -560,7 +560,7 @@ async def run_tier2_extraction(
                 )
             else:
                 wrote = await _write_entry(
-                    state=state, events=events, tenant_id=tenant_id,
+                    state=state, events=events, instance_id=instance_id,
                     category="fact", subject=subject, content=content,
                     confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                     foresight_signal=foresight_signal, foresight_expires=foresight_expires,
@@ -587,8 +587,8 @@ async def run_tier2_extraction(
             # Ephemeral archetype = reject outright
             if lifecycle_archetype == "ephemeral":
                 logger.info(
-                    "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=ephemeral_archetype",
-                    tenant_id, content[:80],
+                    "KNOWLEDGE_FILTERED: instance=%s content=%r reason=ephemeral_archetype",
+                    instance_id, content[:80],
                 )
                 continue
 
@@ -597,13 +597,13 @@ async def run_tier2_extraction(
             if _is_suspicious_candidate(item) and reasoning_service:
                 if not await _passes_durability_check(content, reasoning_service):
                     logger.info(
-                        "KNOWLEDGE_FILTERED: tenant=%s content=%r reason=durability_check",
-                        tenant_id, content[:80],
+                        "KNOWLEDGE_FILTERED: instance=%s content=%r reason=durability_check",
+                        instance_id, content[:80],
                     )
                     continue
             if enhanced:
                 wrote_count += await _write_entry_enhanced(
-                    state=state, events=events, tenant_id=tenant_id,
+                    state=state, events=events, instance_id=instance_id,
                     category="preference", subject=subject, content=content,
                     confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                     source_description="tier2_llm preference extraction",
@@ -615,7 +615,7 @@ async def run_tier2_extraction(
                 )
             else:
                 wrote_count += await _write_entry(
-                    state=state, events=events, tenant_id=tenant_id,
+                    state=state, events=events, instance_id=instance_id,
                     category="preference", subject=subject, content=content,
                     confidence=confidence, lifecycle_archetype=lifecycle_archetype,
                     source_description="tier2_llm preference extraction",
@@ -632,7 +632,7 @@ async def run_tier2_extraction(
                 continue
             await _apply_correction(
                 state=state, events=events, soul=soul,
-                tenant_id=tenant_id, field=field,
+                instance_id=instance_id, field=field,
                 old_value=old_value, new_value=new_value, now=now,
                 embedding_service=embedding_service,
                 embedding_store=embedding_store,
@@ -643,7 +643,7 @@ async def run_tier2_extraction(
                 await emit_event(
                     events,
                     EventType.KNOWLEDGE_EXTRACTED,
-                    tenant_id,
+                    instance_id,
                     "tier2_llm",
                     payload={"entries_written": wrote_count},
                 )
@@ -651,14 +651,14 @@ async def run_tier2_extraction(
                 logger.warning("Tier 2: failed to emit knowledge.extracted: %s", exc)
 
     except Exception as exc:
-        logger.warning("Tier 2 extraction failed for tenant %s: %s", tenant_id, exc)
+        logger.warning("Tier 2 extraction failed for instance %s: %s", instance_id, exc)
 
 
 async def _write_entry(
     *,
     state: StateStore,
     events: EventStream,
-    tenant_id: str,
+    instance_id: str,
     category: str,
     subject: str,
     content: str,
@@ -674,7 +674,7 @@ async def _write_entry(
     context_space: str = "",
 ) -> int:
     """Write a KnowledgeEntry with dedup and confidence precedence. Returns 1 if written, 0 if skipped."""
-    h = _content_hash(tenant_id, subject, content)
+    h = _content_hash(instance_id, subject, content)
 
     # Exact dedup — same subject + content already exists
     if h in existing_hashes:
@@ -682,13 +682,13 @@ async def _write_entry(
 
     # Confidence precedence: discard inferred if stated entry exists for same subject
     if confidence == "inferred":
-        existing = await state.query_knowledge(tenant_id, subject=subject, active_only=True)
+        existing = await state.query_knowledge(instance_id, subject=subject, active_only=True)
         if any(e.confidence == "stated" for e in existing):
             return 0
 
     # Confidence precedence: stated overrides existing inferred entries for same subject
     if confidence == "stated":
-        existing = await state.query_knowledge(tenant_id, subject=subject, active_only=True)
+        existing = await state.query_knowledge(instance_id, subject=subject, active_only=True)
         for e in existing:
             if e.confidence == "inferred":
                 await state.save_knowledge_entry(
@@ -697,7 +697,7 @@ async def _write_entry(
 
     entry = KnowledgeEntry(
         id=_make_knowledge_id(),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category=category,
         subject=subject,
         content=content,
@@ -724,7 +724,7 @@ async def _write_entry_enhanced(
     *,
     state: StateStore,
     events: EventStream,
-    tenant_id: str,
+    instance_id: str,
     category: str,
     subject: str,
     content: str,
@@ -749,7 +749,7 @@ async def _write_entry_enhanced(
     """
     from datetime import datetime, timezone
 
-    h = _content_hash(tenant_id, subject, content)
+    h = _content_hash(instance_id, subject, content)
 
     # Fast exact-dedup check (O(1)) — bypass embedding entirely for exact duplicates
     if h in existing_hashes:
@@ -770,7 +770,7 @@ async def _write_entry_enhanced(
                 logger.warning("Tier 2: embedding retry failed for %r: %s — falling back to hash dedup", content[:60], exc)
     if candidate_embedding is None:
         return await _write_entry(
-            state=state, events=events, tenant_id=tenant_id,
+            state=state, events=events, instance_id=instance_id,
             category=category, subject=subject, content=content,
             confidence=confidence, lifecycle_archetype=lifecycle_archetype,
             foresight_signal=foresight_signal, foresight_expires=foresight_expires,
@@ -782,7 +782,7 @@ async def _write_entry_enhanced(
     # Build the candidate entry (may or may not be written)
     entry = KnowledgeEntry(
         id=_make_knowledge_id(),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category=category,
         subject=subject,
         content=content,
@@ -803,17 +803,17 @@ async def _write_entry_enhanced(
     )
 
     classification, target_id = await fact_deduplicator.classify(
-        tenant_id, entry, candidate_embedding
+        instance_id, entry, candidate_embedding
     )
 
     if classification == "ADD":
         await state.save_knowledge_entry(entry)
-        await embedding_store.save(tenant_id, entry.id, candidate_embedding)
+        await embedding_store.save(instance_id, entry.id, candidate_embedding)
         existing_hashes.add(h)
         return 1
 
     elif classification == "UPDATE" and target_id:
-        old_entry = await state.get_knowledge_entry(tenant_id, target_id)
+        old_entry = await state.get_knowledge_entry(instance_id, target_id)
         if old_entry:
             old_entry_inactive = _replace(old_entry, active=False)
             await state.save_knowledge_entry(old_entry_inactive)
@@ -826,11 +826,11 @@ async def _write_entry_enhanced(
             # can re-surface with updated content
             try:
                 suppressions = await state.get_suppressions(
-                    tenant_id, knowledge_entry_id=target_id
+                    instance_id, knowledge_entry_id=target_id
                 )
                 for s in suppressions:
                     if s.resolution_state == "surfaced":
-                        await state.delete_suppression(tenant_id, s.whisper_id)
+                        await state.delete_suppression(instance_id, s.whisper_id)
                         logger.info(
                             "AWARENESS: cleared suppression whisper=%s reason=knowledge_updated",
                             s.whisper_id,
@@ -838,13 +838,13 @@ async def _write_entry_enhanced(
             except Exception as exc:
                 logger.warning("Failed to clear suppressions for knowledge update: %s", exc)
         await state.save_knowledge_entry(entry)
-        await embedding_store.save(tenant_id, entry.id, candidate_embedding)
+        await embedding_store.save(instance_id, entry.id, candidate_embedding)
         existing_hashes.add(h)
         return 1
 
     elif classification == "NOOP" and target_id:
         # Reinforce the existing entry
-        existing = await state.get_knowledge_entry(tenant_id, target_id)
+        existing = await state.get_knowledge_entry(instance_id, target_id)
         if existing:
             reinforced = _replace(
                 existing,
@@ -855,7 +855,7 @@ async def _write_entry_enhanced(
             await state.save_knowledge_entry(reinforced)
             try:
                 await emit_event(
-                    events, EventType.KNOWLEDGE_REINFORCED, tenant_id,
+                    events, EventType.KNOWLEDGE_REINFORCED, instance_id,
                     "fact_dedup",
                     payload={
                         "entry_id": target_id,
@@ -874,7 +874,7 @@ async def _apply_correction(
     state: StateStore,
     events: EventStream,
     soul: Soul,
-    tenant_id: str,
+    instance_id: str,
     field: str,
     old_value: str,
     new_value: str,
@@ -884,7 +884,7 @@ async def _apply_correction(
 ) -> None:
     """Handle a correction: find old entry, mark inactive, create new with supersedes."""
     # Search for an active entry whose content contains the old value
-    all_entries = await state.query_knowledge(tenant_id, active_only=True)
+    all_entries = await state.query_knowledge(instance_id, active_only=True)
     old_entry = None
     for e in all_entries:
         if old_value.lower() in e.content.lower():
@@ -898,10 +898,10 @@ async def _apply_correction(
 
     # Create corrected entry
     subject = field or "user"
-    h = _content_hash(tenant_id, subject, new_value)
+    h = _content_hash(instance_id, subject, new_value)
     new_entry = KnowledgeEntry(
         id=_make_knowledge_id(),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category="fact",
         subject=subject,
         content=new_value,
@@ -922,7 +922,7 @@ async def _apply_correction(
     if embedding_service and embedding_store:
         try:
             embedding = await embedding_service.embed(f"{subject} {new_value}")
-            await embedding_store.save(tenant_id, new_entry.id, embedding)
+            await embedding_store.save(instance_id, new_entry.id, embedding)
         except Exception as exc:
             logger.warning("Tier 2: embedding failed for correction %r: %s", new_value[:60], exc)
 
@@ -936,7 +936,7 @@ async def _apply_correction(
         await emit_event(
             events,
             EventType.KNOWLEDGE_EXTRACTED,
-            tenant_id,
+            instance_id,
             "tier2_llm",
             payload={"type": "correction", "field": field, "new_value": new_value},
         )

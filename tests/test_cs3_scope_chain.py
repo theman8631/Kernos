@@ -21,7 +21,7 @@ def _now() -> str:
 
 def _make_knowledge(kid: str, content: str, space: str = "") -> KnowledgeEntry:
     return KnowledgeEntry(
-        id=kid, tenant_id="t1", category="fact", subject="user",
+        id=kid, instance_id="t1", category="fact", subject="user",
         content=content, confidence="stated",
         source_event_id="", source_description="test",
         created_at=_now(), last_referenced=_now(), tags=[],
@@ -37,10 +37,10 @@ def _make_knowledge(kid: str, content: str, space: str = "") -> KnowledgeEntry:
 class TestListChildSpaces:
     async def test_returns_children(self, tmp_path):
         store = JsonStateStore(tmp_path)
-        parent = ContextSpace(id="sp", tenant_id="t1", name="General", created_at=_now())
-        child1 = ContextSpace(id="c1", tenant_id="t1", name="D&D", parent_id="sp", depth=1, created_at=_now())
-        child2 = ContextSpace(id="c2", tenant_id="t1", name="Work", parent_id="sp", depth=1, created_at=_now())
-        other = ContextSpace(id="o1", tenant_id="t1", name="Unrelated", created_at=_now())
+        parent = ContextSpace(id="sp", instance_id="t1", name="General", created_at=_now())
+        child1 = ContextSpace(id="c1", instance_id="t1", name="D&D", parent_id="sp", depth=1, created_at=_now())
+        child2 = ContextSpace(id="c2", instance_id="t1", name="Work", parent_id="sp", depth=1, created_at=_now())
+        other = ContextSpace(id="o1", instance_id="t1", name="Unrelated", created_at=_now())
         for s in [parent, child1, child2, other]:
             await store.save_context_space(s)
 
@@ -50,7 +50,7 @@ class TestListChildSpaces:
 
     async def test_returns_empty_for_no_children(self, tmp_path):
         store = JsonStateStore(tmp_path)
-        parent = ContextSpace(id="sp", tenant_id="t1", name="General", created_at=_now())
+        parent = ContextSpace(id="sp", instance_id="t1", name="General", created_at=_now())
         await store.save_context_space(parent)
 
         children = await store.list_child_spaces("t1", "sp")
@@ -58,8 +58,8 @@ class TestListChildSpaces:
 
     async def test_excludes_archived(self, tmp_path):
         store = JsonStateStore(tmp_path)
-        parent = ContextSpace(id="sp", tenant_id="t1", name="General", created_at=_now())
-        child = ContextSpace(id="c1", tenant_id="t1", name="Old", parent_id="sp", status="archived", created_at=_now())
+        parent = ContextSpace(id="sp", instance_id="t1", name="General", created_at=_now())
+        child = ContextSpace(id="c1", instance_id="t1", name="Old", parent_id="sp", status="archived", created_at=_now())
         for s in [parent, child]:
             await store.save_context_space(s)
 
@@ -76,7 +76,7 @@ class TestScopeChain:
     async def test_flat_space_returns_self(self, tmp_path):
         from kernos.kernel.retrieval import RetrievalService
         store = JsonStateStore(tmp_path)
-        general = ContextSpace(id="gen", tenant_id="t1", name="General", created_at=_now())
+        general = ContextSpace(id="gen", instance_id="t1", name="General", created_at=_now())
         await store.save_context_space(general)
 
         svc = RetrievalService.__new__(RetrievalService)
@@ -87,9 +87,9 @@ class TestScopeChain:
     async def test_child_walks_to_root(self, tmp_path):
         from kernos.kernel.retrieval import RetrievalService
         store = JsonStateStore(tmp_path)
-        root = ContextSpace(id="root", tenant_id="t1", name="General", created_at=_now())
-        mid = ContextSpace(id="mid", tenant_id="t1", name="Wedding", parent_id="root", depth=1, created_at=_now())
-        leaf = ContextSpace(id="leaf", tenant_id="t1", name="Henderson", parent_id="mid", depth=2, created_at=_now())
+        root = ContextSpace(id="root", instance_id="t1", name="General", created_at=_now())
+        mid = ContextSpace(id="mid", instance_id="t1", name="Wedding", parent_id="root", depth=1, created_at=_now())
+        leaf = ContextSpace(id="leaf", instance_id="t1", name="Henderson", parent_id="mid", depth=2, created_at=_now())
         for s in [root, mid, leaf]:
             await store.save_context_space(s)
 
@@ -101,7 +101,7 @@ class TestScopeChain:
     async def test_handles_missing_parent(self, tmp_path):
         from kernos.kernel.retrieval import RetrievalService
         store = JsonStateStore(tmp_path)
-        orphan = ContextSpace(id="orph", tenant_id="t1", name="Orphan", parent_id="gone", created_at=_now())
+        orphan = ContextSpace(id="orph", instance_id="t1", name="Orphan", parent_id="gone", created_at=_now())
         await store.save_context_space(orphan)
 
         svc = RetrievalService.__new__(RetrievalService)
@@ -166,11 +166,11 @@ class TestParentBriefing:
         tid = "t1"
 
         parent = ContextSpace(
-            id="parent_space", tenant_id=tid, name="Wedding Planning",
+            id="parent_space", instance_id=tid, name="Wedding Planning",
             space_type="domain", created_at=_now(),
         )
         child = ContextSpace(
-            id="child_space", tenant_id=tid, name="Henderson",
+            id="child_space", instance_id=tid, name="Henderson",
             space_type="subdomain", parent_id="parent_space", depth=2,
             description="Henderson wedding vendor coordination",
             created_at=_now(),
@@ -190,7 +190,7 @@ class TestParentBriefing:
         tid = "t1"
 
         parent = ContextSpace(
-            id="parent_space", tenant_id=tid, name="General",
+            id="parent_space", instance_id=tid, name="General",
             space_type="general", created_at=_now(),
         )
         await handler.state.save_context_space(parent)

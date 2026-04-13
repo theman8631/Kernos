@@ -76,13 +76,13 @@ None currently active. Next spec will be assigned by founder.
 These are load-bearing decisions that Claude Code should always respect:
 
 1. **Handler never knows about platform adapters; adapters never know about the handler.** All communication through NormalizedMessage.
-2. **Every piece of state keyed to tenant_id.** Multi-tenancy from day one.
+2. **Every piece of state keyed to instance_id.** Multi-instance from day one.
 3. **No destructive deletions.** Shadow archive for user data. Internal operational artifacts (whispers, expired tokens) can be cleaned up.
 4. **Gate philosophy: reactive soft_write = agent acts.** The user's conversational intent IS the authorization — whether explicit ("set an appointment"), confirmation ("Sure"), or rule-based. Gate only evaluates: hard_write (always), third-party impact, proactive/background actions, must_not covenant violations. "Conservative by default" applies to what the AGENT initiates, not what the USER requests.
 5. **Behavioral contracts are the safety mechanism, not access restriction.** "Agent thinks, kernel enforces."
 6. **Cognitive UI grammar:** RULES / NOW / STATE / RESULTS / ACTIONS / MEMORY / CONVERSATION — rebuilt every turn.
 7. **Cohort agent architecture:** One principal reasoning agent surrounded by bounded specialized mediators (Router, Shaper, Surfacer, Gate, Harvester, Budgeter, Friction Observer, Preference Parser, etc.). Each should be bypassable.
-8. **Turn serialization invariant:** For any (tenant, space) pair, only one turn may own reasoning and side effects at a time. Per-space mailbox/runner pattern.
+8. **Turn serialization invariant:** For any (instance, space) pair, only one turn may own reasoning and side effects at a time. Per-space mailbox/runner pattern.
 9. **Depth should be recoverable, not always loaded.** Memory, facts, and tools are selectively loaded per-turn.
 10. **Provider neutral.** Use "lightweight model" or "cheap model" instead of "Haiku." The cheap model varies by provider configuration.
 11. **Subtraction over addition.** When addressing problems, prefer: removal > structural enforcement > simplification > adding instructions. More prompt text has diminishing returns. Enforce in code, not English.
@@ -99,7 +99,7 @@ These are load-bearing decisions that Claude Code should always respect:
 22. **Follow-ups: dual-path.** Explicit via manage_schedule (real-time), implicit via compaction extraction (safety net). Compaction follow-ups are provisional — deduped against existing triggers before creation.
 23. **Whisper delivery: ambient by default.** Direct message only for EXTERNAL_DEADLINE type with due date within 24 hours. Everything else surfaces as a whisper the agent weaves into conversation.
 24. **90-day horizon cap.** Compaction-extracted follow-ups beyond 90 days are rejected. Long-horizon items belong in Living State or Ledger, not triggers.
-25. **SQLite per tenant, instance.db shared.** Each tenant gets `data/{tenant}/kernos.db` with WAL mode. Shared cross-tenant state (members, channels, relay) lives in `data/instance.db`. Schema designed for access patterns, not JSON mirroring — indexed columns for queries, JSON overflow for rare fields.
+25. **SQLite per instance, instance.db shared.** Each instance gets `data/{instance}/kernos.db` with WAL mode. Shared cross-instance state (members, channels, relay) lives in `data/instance.db`. Schema designed for access patterns, not JSON mirroring — indexed columns for queries, JSON overflow for rare fields.
 26. **Bjork dual-strength memory.** Knowledge entries ranked by `compute_retrieval_strength()` before MessageAnalyzer sees them. Well-established facts (high storage_strength) resist decay. Entries below 0.10 strength filtered entirely. Replaces the crude `_is_stale_knowledge(days=14)` check.
 
 ---

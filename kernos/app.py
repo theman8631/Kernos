@@ -30,7 +30,7 @@ from kernos.kernel.events import JsonEventStream, emit_event
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
     logger.info("Capability registry ready — connected: %s", connected or "none")
 
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
     provider_name = os.getenv("KERNOS_LLM_PROVIDER", "anthropic")

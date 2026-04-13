@@ -156,7 +156,7 @@ async def classify_and_parse(
         from kernos.kernel.state import classify_covenant_tier
         rule = CovenantRule(
             id=f"rule_{uuid4().hex[:8]}",
-            tenant_id="",  # Set by caller
+            instance_id="",  # Set by caller
             rule_type=parsed["rule_type"],
             description=parsed["description"],
             capability=parsed.get("capability", "general"),

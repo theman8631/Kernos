@@ -38,7 +38,7 @@ class TestManifestLifecycle:
         ws, _ = _make_workspace(tmp_path)
         manifest = await ws.load_manifest("t1", "sp1")
         assert manifest.artifacts == []
-        assert manifest.tenant_id == "t1"
+        assert manifest.instance_id == "t1"
         assert manifest.space_id == "sp1"
 
     async def test_add_artifact(self, tmp_path):
@@ -256,7 +256,7 @@ class TestLazyRegistration:
         }
         (space_dir / "lazy_tool.tool.json").write_text(json.dumps(descriptor))
         manifest = {
-            "version": 1, "tenant_id": "t1", "space_id": "sp1",
+            "version": 1, "instance_id": "t1", "space_id": "sp1",
             "artifacts": [{
                 "id": "artifact_lazy01",
                 "name": "lazy_tool",

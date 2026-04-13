@@ -17,11 +17,11 @@ from kernos.kernel.reasoning import (
     ProviderResponse,
     ReasoningService,
 )
-from kernos.kernel.state import StateStore, TenantProfile
+from kernos.kernel.state import StateStore, InstanceProfile
 from kernos.kernel.state_json import JsonStateStore
 from kernos.messages.handler import MessageHandler
 from kernos.messages.models import AuthLevel, NormalizedMessage
-from kernos.persistence import AuditStore, ConversationStore, TenantStore
+from kernos.persistence import AuditStore, ConversationStore, InstanceStore
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ def _make_message(content: str = "Hello", platform: str = "sms") -> NormalizedMe
         platform_capabilities=["text", "mms"],
         conversation_id="+15555550100",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
     )
 
 
@@ -69,9 +69,9 @@ def _make_mock_handler(tools: list[dict] | None = None):
     conversations.get_recent.return_value = []
     conversations.append.return_value = None
 
-    tenants = AsyncMock(spec=TenantStore)
+    tenants = AsyncMock(spec=InstanceStore)
     tenants.get_or_create.return_value = {
-        "tenant_id": "sms:+15555550100",
+        "instance_id": "sms:+15555550100",
         "status": "active",
         "created_at": "2026-03-01T00:00:00Z",
         "capabilities": {},
@@ -84,14 +84,14 @@ def _make_mock_handler(tools: list[dict] | None = None):
     events.emit.return_value = None
 
     state = AsyncMock(spec=StateStore)
-    state.get_tenant_profile.return_value = TenantProfile(
-        tenant_id="sms:+15555550100",
+    state.get_instance_profile.return_value = InstanceProfile(
+        instance_id="sms:+15555550100",
         status="active",
         created_at="2026-03-01T00:00:00Z",
     )
     state.get_conversation_summary.return_value = None
     state.save_conversation_summary.return_value = None
-    state.save_tenant_profile.return_value = None
+    state.save_instance_profile.return_value = None
     state.get_soul.return_value = None
     state.save_soul.return_value = None
     state.get_contract_rules.return_value = []
@@ -144,9 +144,9 @@ def _make_real_handler(tmp_path):
     conversations.get_recent.return_value = []
     conversations.append.return_value = None
 
-    tenants = AsyncMock(spec=TenantStore)
+    tenants = AsyncMock(spec=InstanceStore)
     tenants.get_or_create.return_value = {
-        "tenant_id": "sms:+15555550100",
+        "instance_id": "sms:+15555550100",
         "status": "active",
         "created_at": "2026-03-01T00:00:00Z",
         "capabilities": {},
@@ -252,7 +252,7 @@ async def test_message_sent_has_content():
     assert ms.payload["content"].startswith("I'm good!")
 
 
-async def test_all_events_have_tenant_id():
+async def test_all_events_have_instance_id():
     handler, mock_provider = _make_mock_handler()
     mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
@@ -260,7 +260,7 @@ async def test_all_events_have_tenant_id():
 
     emitted = [c.args[0] for c in handler.events.emit.call_args_list]
     for event in emitted:
-        assert event.tenant_id == "sms:+15555550100"
+        assert event.instance_id == "sms:+15555550100"
 
 
 # ---------------------------------------------------------------------------
@@ -401,38 +401,38 @@ async def test_handler_error_event_has_error_type():
 # ---------------------------------------------------------------------------
 
 
-async def test_new_tenant_gets_profile_and_default_contracts(tmp_path):
+async def test_newinstance_gets_profile_and_default_contracts(tmp_path):
     handler, mock_provider, events, state = _make_real_handler(tmp_path)
     mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     await handler.process(_make_message())
 
-    tenant_id = "sms:+15555550100"
-    profile = await state.get_tenant_profile(tenant_id)
+    instance_id = "sms:+15555550100"
+    profile = await state.get_instance_profile(instance_id)
     assert profile is not None
     assert profile.status == "active"
 
-    rules = await state.get_contract_rules(tenant_id)
+    rules = await state.get_contract_rules(instance_id)
     assert len(rules) == 8  # spirit + 3 must_not + 2 must + 1 preference + 1 escalation
 
 
-async def test_new_tenant_emits_provisioned_event(tmp_path):
+async def test_newinstance_emits_provisioned_event(tmp_path):
     handler, mock_provider, events, state = _make_real_handler(tmp_path)
     mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
     await handler.process(_make_message())
 
-    tenant_id = "sms:+15555550100"
-    emitted = await events.query(tenant_id, limit=100)
+    instance_id = "sms:+15555550100"
+    emitted = await events.query(instance_id, limit=100)
     event_types = [e.type for e in emitted]
     assert EventType.TENANT_PROVISIONED in event_types
 
 
-async def test_existing_tenant_skips_provisioning(tmp_path):
+async def test_existinginstance_skips_provisioning(tmp_path):
     handler, mock_provider, events, state = _make_real_handler(tmp_path)
     mock_provider.complete.return_value = _mock_provider_response("Hello!")
 
-    # First call provisions the tenant
+    # First call provisions the instance
     await handler.process(_make_message())
     rules_after_first = await state.get_contract_rules("sms:+15555550100")
 
@@ -449,8 +449,8 @@ async def test_handler_updates_conversation_summary(tmp_path):
 
     await handler.process(_make_message())
 
-    tenant_id = "sms:+15555550100"
-    summary = await state.get_conversation_summary(tenant_id, "+15555550100")
+    instance_id = "sms:+15555550100"
+    summary = await state.get_conversation_summary(instance_id, "+15555550100")
     assert summary is not None
     assert summary.message_count >= 1
     assert summary.platform == "sms"
@@ -463,8 +463,8 @@ async def test_full_event_sequence_written_to_disk(tmp_path):
 
     await handler.process(_make_message())
 
-    tenant_id = "sms:+15555550100"
-    all_events = await events.query(tenant_id, limit=100)
+    instance_id = "sms:+15555550100"
+    all_events = await events.query(instance_id, limit=100)
     types = [e.type for e in all_events]
 
     assert EventType.MESSAGE_RECEIVED in types
@@ -473,14 +473,14 @@ async def test_full_event_sequence_written_to_disk(tmp_path):
     assert EventType.MESSAGE_SENT in types
 
 
-async def test_disk_events_all_have_correct_tenant_id(tmp_path):
+async def test_disk_events_all_have_correct_instance_id(tmp_path):
     handler, mock_provider, events, state = _make_real_handler(tmp_path)
     mock_provider.complete.return_value = _mock_provider_response("Hi!")
 
     await handler.process(_make_message())
 
-    tenant_id = "sms:+15555550100"
-    all_events = await events.query(tenant_id, limit=100)
+    instance_id = "sms:+15555550100"
+    all_events = await events.query(instance_id, limit=100)
     assert len(all_events) > 0
     for event in all_events:
-        assert event.tenant_id == tenant_id
+        assert event.instance_id == instance_id

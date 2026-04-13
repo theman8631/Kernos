@@ -21,7 +21,7 @@ def _now() -> str:
 
 def _make_knowledge(kid: str, content: str, space: str = "", subject: str = "user") -> KnowledgeEntry:
     return KnowledgeEntry(
-        id=kid, tenant_id="t1", category="fact", subject=subject,
+        id=kid, instance_id="t1", category="fact", subject=subject,
         content=content, confidence="stated",
         source_event_id="", source_description="test",
         created_at=_now(), last_referenced=_now(), tags=[],
@@ -86,9 +86,9 @@ class TestCrossDomainSignals:
         tid = "t1"
 
         # Create spaces
-        general = ContextSpace(id="sp_gen", tenant_id=tid, name="General", space_type="general", created_at=_now())
-        wedding = ContextSpace(id="sp_wed", tenant_id=tid, name="Wedding", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
-        plumbing = ContextSpace(id="sp_plumb", tenant_id=tid, name="Plumbing", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
+        general = ContextSpace(id="sp_gen", instance_id=tid, name="General", space_type="general", created_at=_now())
+        wedding = ContextSpace(id="sp_wed", instance_id=tid, name="Wedding", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
+        plumbing = ContextSpace(id="sp_plumb", instance_id=tid, name="Plumbing", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
         await handler.state.save_context_space(general)
         await handler.state.save_context_space(wedding)
         await handler.state.save_context_space(plumbing)
@@ -121,8 +121,8 @@ class TestCrossDomainSignals:
         handler = self._make_handler(tmp_path)
         tid = "t1"
 
-        general = ContextSpace(id="sp_gen", tenant_id=tid, name="General", space_type="general", created_at=_now())
-        wedding = ContextSpace(id="sp_wed", tenant_id=tid, name="Wedding", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
+        general = ContextSpace(id="sp_gen", instance_id=tid, name="General", space_type="general", created_at=_now())
+        wedding = ContextSpace(id="sp_wed", instance_id=tid, name="Wedding", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
         await handler.state.save_context_space(general)
         await handler.state.save_context_space(wedding)
 
@@ -166,8 +166,8 @@ class TestRouterQueryMode:
     async def test_router_parses_query_mode(self, tmp_path):
         state = JsonStateStore(tmp_path)
         tid = "t1"
-        general = ContextSpace(id="sp_gen", tenant_id=tid, name="General", space_type="general", is_default=True, created_at=_now(), last_active_at=_now())
-        dnd = ContextSpace(id="sp_dnd", tenant_id=tid, name="D&D", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now(), last_active_at=_now())
+        general = ContextSpace(id="sp_gen", instance_id=tid, name="General", space_type="general", is_default=True, created_at=_now(), last_active_at=_now())
+        dnd = ContextSpace(id="sp_dnd", instance_id=tid, name="D&D", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now(), last_active_at=_now())
         await state.save_context_space(general)
         await state.save_context_space(dnd)
 
@@ -199,8 +199,8 @@ class TestDownwardSearch:
         handler = self._make_handler(tmp_path)
         tid = "t1"
 
-        general = ContextSpace(id="sp_gen", tenant_id=tid, name="General", space_type="general", created_at=_now())
-        dnd = ContextSpace(id="sp_dnd", tenant_id=tid, name="D&D", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
+        general = ContextSpace(id="sp_gen", instance_id=tid, name="General", space_type="general", created_at=_now())
+        dnd = ContextSpace(id="sp_dnd", instance_id=tid, name="D&D", space_type="domain", parent_id="sp_gen", depth=1, created_at=_now())
         await handler.state.save_context_space(general)
         await handler.state.save_context_space(dnd)
 
@@ -219,7 +219,7 @@ class TestDownwardSearch:
         handler = self._make_handler(tmp_path)
         tid = "t1"
 
-        dnd = ContextSpace(id="sp_dnd", tenant_id=tid, name="D&D", space_type="domain", created_at=_now())
+        dnd = ContextSpace(id="sp_dnd", instance_id=tid, name="D&D", space_type="domain", created_at=_now())
         await handler.state.save_context_space(dnd)
 
         # No knowledge in target space
@@ -230,7 +230,7 @@ class TestDownwardSearch:
         handler = self._make_handler(tmp_path)
         tid = "t1"
 
-        dnd = ContextSpace(id="sp_dnd", tenant_id=tid, name="D&D Campaign", space_type="domain", created_at=_now())
+        dnd = ContextSpace(id="sp_dnd", instance_id=tid, name="D&D Campaign", space_type="domain", created_at=_now())
         await handler.state.save_context_space(dnd)
 
         ke = _make_knowledge("k1", "Budget is $45k", space="sp_dnd")

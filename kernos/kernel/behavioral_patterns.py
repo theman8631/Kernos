@@ -157,13 +157,13 @@ def classify_proposal(pattern: BehavioralPattern) -> str:
 # Persistence
 # ---------------------------------------------------------------------------
 
-def _patterns_path(data_dir: str, tenant_id: str) -> Path:
-    return Path(data_dir) / _safe_name(tenant_id) / "state" / "behavioral_patterns.json"
+def _patterns_path(data_dir: str, instance_id: str) -> Path:
+    return Path(data_dir) / _safe_name(instance_id) / "state" / "behavioral_patterns.json"
 
 
-def load_patterns(data_dir: str, tenant_id: str) -> list[BehavioralPattern]:
-    """Load all behavioral patterns for a tenant."""
-    path = _patterns_path(data_dir, tenant_id)
+def load_patterns(data_dir: str, instance_id: str) -> list[BehavioralPattern]:
+    """Load all behavioral patterns for an instance."""
+    path = _patterns_path(data_dir, instance_id)
     if not path.exists():
         return []
     try:
@@ -173,9 +173,9 @@ def load_patterns(data_dir: str, tenant_id: str) -> list[BehavioralPattern]:
         return []
 
 
-def save_patterns(data_dir: str, tenant_id: str, patterns: list[BehavioralPattern]) -> None:
-    """Save all behavioral patterns for a tenant."""
-    path = _patterns_path(data_dir, tenant_id)
+def save_patterns(data_dir: str, instance_id: str, patterns: list[BehavioralPattern]) -> None:
+    """Save all behavioral patterns for an instance."""
+    path = _patterns_path(data_dir, instance_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps([asdict(p) for p in patterns], indent=2, ensure_ascii=False),
@@ -188,11 +188,11 @@ def save_patterns(data_dir: str, tenant_id: str, patterns: list[BehavioralPatter
 # ---------------------------------------------------------------------------
 
 def mark_pattern_resolved(
-    data_dir: str, tenant_id: str, pattern_id: str,
+    data_dir: str, instance_id: str, pattern_id: str,
     action: str, resolved_id: str = "",
 ) -> None:
     """Mark a behavioral pattern as resolved (covenant created or procedure written)."""
-    patterns = load_patterns(data_dir, tenant_id)
+    patterns = load_patterns(data_dir, instance_id)
     for p in patterns:
         if p.pattern_id == pattern_id:
             p.resolved = True
@@ -202,12 +202,12 @@ def mark_pattern_resolved(
             logger.info("BEHAVIORAL_RESOLVED: fingerprint=%s action=%s id=%s",
                 p.fingerprint[:40], action, resolved_id)
             break
-    save_patterns(data_dir, tenant_id, patterns)
+    save_patterns(data_dir, instance_id, patterns)
 
 
 def record_correction(
     data_dir: str,
-    tenant_id: str,
+    instance_id: str,
     user_message: str,
     response_text: str,
     space_id: str,
@@ -226,7 +226,7 @@ def record_correction(
     pid = _pattern_id(fp, space_id)
     now = utc_now()
 
-    patterns = load_patterns(data_dir, tenant_id)
+    patterns = load_patterns(data_dir, instance_id)
 
     # Find existing pattern or create new
     existing = None
@@ -258,7 +258,7 @@ def record_correction(
         # Check if threshold just crossed
         if not existing.threshold_met and len(existing.occurrences) >= threshold:
             existing.threshold_met = True
-            save_patterns(data_dir, tenant_id, patterns)
+            save_patterns(data_dir, instance_id, patterns)
             logger.info(
                 "BEHAVIORAL_PATTERN: type=%s fingerprint=%s occurrences=%d threshold=%d",
                 correction_type, fp[:40], len(existing.occurrences), threshold,
@@ -275,14 +275,14 @@ def record_correction(
                 existing.proposal_declined = False
                 existing.threshold_met = True
                 existing.decline_count += 1
-                save_patterns(data_dir, tenant_id, patterns)
+                save_patterns(data_dir, instance_id, patterns)
                 logger.info(
                     "BEHAVIORAL_PATTERN: reset after decline type=%s fingerprint=%s",
                     correction_type, fp[:40],
                 )
                 return existing
 
-        save_patterns(data_dir, tenant_id, patterns)
+        save_patterns(data_dir, instance_id, patterns)
         return None
 
     else:
@@ -301,7 +301,7 @@ def record_correction(
             updated_at=now,
         )
         patterns.append(new_pattern)
-        save_patterns(data_dir, tenant_id, patterns)
+        save_patterns(data_dir, instance_id, patterns)
 
         threshold = PATTERN_THRESHOLDS.get(correction_type, 3)
         logger.info(

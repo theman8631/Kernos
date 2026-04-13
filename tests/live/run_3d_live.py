@@ -28,7 +28,7 @@ from kernos.kernel.engine import TaskEngine
 from kernos.kernel.events import JsonEventStream
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 from datetime import datetime, timezone
 
 
@@ -50,7 +50,7 @@ def make_msg(content: str, conversation_id: str = CONVERSATION_ID) -> Normalized
         platform_capabilities=["text"],
         conversation_id=conversation_id,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT,
+        instance_id=TENANT,
     )
 
 
@@ -75,7 +75,7 @@ async def build_handler():
         sys.exit(1)
 
     conversations = JsonConversationStore(DATA_DIR)
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     audit = JsonAuditStore(DATA_DIR)
     events = JsonEventStream(DATA_DIR)
     state = JsonStateStore(DATA_DIR)
@@ -161,13 +161,13 @@ async def run_tests():
            len(gate_events) > 0,
            f"Found {len(gate_events)} dispatch.gate events")
 
-    # Step 6: Verify permission_overrides on TenantProfile
+    # Step 6: Verify permission_overrides on InstanceProfile
     print("\n--- Step 6: Permission overrides field ---")
-    tenant_profile = await state.get_tenant_profile(TENANT)
-    has_field = hasattr(tenant_profile, 'permission_overrides') if tenant_profile else False
-    record(6, "permission_overrides field on TenantProfile",
+    instance_profile = await state.get_instance_profile(TENANT)
+    has_field = hasattr(instance_profile, 'permission_overrides') if instance_profile else False
+    record(6, "permission_overrides field on InstanceProfile",
            has_field,
-           f"Field exists: {has_field}, value: {tenant_profile.permission_overrides if has_field else 'N/A'}")
+           f"Field exists: {has_field}, value: {instance_profile.permission_overrides if has_field else 'N/A'}")
 
     # Step 7: Verify tool classification
     print("\n--- Step 7: Tool classification ---")

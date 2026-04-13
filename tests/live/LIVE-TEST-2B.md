@@ -48,7 +48,7 @@
 ### Working Correctly
 - Alias routing matches space names and aliases case-insensitively
 - Space switch detection and event emission with correct `from_space`/`to_space`/`confident` payload
-- `last_active_space_id` persists on TenantProfile across messages
+- `last_active_space_id` persists on InstanceProfile across messages
 - Posture injection adds exactly the expected content to the system prompt for non-daily spaces
 - Posture correctly absent when daily space is active
 - Scoped covenant rules filter correctly — space-scoped rules only appear when that space is active

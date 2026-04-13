@@ -188,7 +188,7 @@ async def detect_preference(
 
 async def match_candidates(
     detection: DetectionResult,
-    tenant_id: str,
+    instance_id: str,
     state: Any,
     space_id: str = "",
 ) -> MatchResult:
@@ -202,7 +202,7 @@ async def match_candidates(
 
     try:
         existing = await state.query_preferences(
-            tenant_id,
+            instance_id,
             subject=detection.subject,
             category=detection.category,
             active_only=True,
@@ -251,7 +251,7 @@ async def match_candidates(
 async def commit_preference(
     detection: DetectionResult,
     match: MatchResult,
-    tenant_id: str,
+    instance_id: str,
     state: Any,
     space_id: str = "",
     trigger_store: Any = None,
@@ -292,8 +292,8 @@ async def commit_preference(
                 logger.warning("PREF_COMMIT: reconciliation failed: %s", exc)
 
             logger.info(
-                "PREF_COMMIT: action=update id=%s subject=%s tenant=%s",
-                old_pref.id, old_pref.subject, tenant_id,
+                "PREF_COMMIT: action=update id=%s subject=%s instance=%s",
+                old_pref.id, old_pref.subject, instance_id,
             )
             return old_pref, f"[SYSTEM] Updated preference: {old_pref.id}"
         except Exception as exc:
@@ -303,7 +303,7 @@ async def commit_preference(
     # ADD new preference
     pref = Preference(
         id=generate_preference_id(),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         intent=detection.subject,  # We'll use the original message text as intent in the pipeline
         category=detection.category,
         subject=detection.subject,
@@ -319,8 +319,8 @@ async def commit_preference(
     try:
         await state.add_preference(pref)
         logger.info(
-            "PREF_COMMIT: action=add id=%s category=%s subject=%s tenant=%s",
-            pref.id, pref.category, pref.subject, tenant_id,
+            "PREF_COMMIT: action=add id=%s category=%s subject=%s instance=%s",
+            pref.id, pref.category, pref.subject, instance_id,
         )
         return pref, f"[SYSTEM] New preference created: {pref.id} — {detection.category}/{detection.action}"
     except Exception as exc:
@@ -334,7 +334,7 @@ async def commit_preference(
 
 async def parse_preferences_in_message(
     message_text: str,
-    tenant_id: str,
+    instance_id: str,
     space_id: str,
     state: Any,
     reasoning_service: Any,
@@ -352,10 +352,10 @@ async def parse_preferences_in_message(
     # Override intent with the actual user message text
     detection_intent = message_text[:500]
 
-    match = await match_candidates(detection, tenant_id, state, space_id)
+    match = await match_candidates(detection, instance_id, state, space_id)
 
     pref, system_note = await commit_preference(
-        detection, match, tenant_id, state, space_id, trigger_store,
+        detection, match, instance_id, state, space_id, trigger_store,
     )
 
     # If we created/updated, set the real intent from the message
@@ -372,7 +372,7 @@ async def parse_preferences_in_message(
 async def commit_from_analysis(
     pref_dict: dict,
     message_text: str,
-    tenant_id: str,
+    instance_id: str,
     space_id: str,
     state: Any,
     reasoning_service: Any,
@@ -407,9 +407,9 @@ async def commit_from_analysis(
         reasoning=pref_dict.get("reasoning", ""),
     )
 
-    match = await match_candidates(detection, tenant_id, state, space_id)
+    match = await match_candidates(detection, instance_id, state, space_id)
     pref, system_note = await commit_preference(
-        detection, match, tenant_id, state, space_id, trigger_store,
+        detection, match, instance_id, state, space_id, trigger_store,
     )
     if pref:
         pref.intent = message_text[:500]

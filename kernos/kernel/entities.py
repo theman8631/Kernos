@@ -11,7 +11,7 @@ class EntityNode:
     """A distinct entity in the user's world — person, place, organization."""
 
     id: str                          # "ent_{uuid8}"
-    tenant_id: str
+    instance_id: str
     canonical_name: str              # Best/most complete name known
     aliases: list[str] = field(default_factory=list)   # All observed surface forms
     entity_type: str = ""            # "person" | "organization" | "place" | "event" | "other"

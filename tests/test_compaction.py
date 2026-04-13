@@ -395,7 +395,7 @@ class TestCompact:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id="sp1", tenant_id="t1", name="D&D Campaign",
+            id="sp1", instance_id="t1", name="D&D Campaign",
             description="Fantasy campaign", space_type="domain",
         )
 
@@ -464,7 +464,7 @@ class TestCompact:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id="sp1", tenant_id="t1", name="D&D",
+            id="sp1", instance_id="t1", name="D&D",
             description="Campaign", space_type="domain",
         )
 
@@ -504,7 +504,7 @@ class TestCompact:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Test")
 
         cs = CompactionState(
             space_id="sp1",
@@ -552,7 +552,7 @@ class TestRotation:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id="sp1", tenant_id="t1", name="Test",
+            id="sp1", instance_id="t1", name="Test",
             description="Test space", space_type="domain",
         )
 
@@ -616,7 +616,7 @@ class TestRotation:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Test")
 
         cs = CompactionState(
             space_id="sp1",
@@ -660,11 +660,11 @@ class TestPersonalityEvolution:
             side_effect=["Summary of archive.", "Updated personality: curious and driven."]
         )
         mock_state = MagicMock()
-        soul = Soul(tenant_id="t1", personality_notes="Initial personality.")
+        soul = Soul(instance_id="t1", personality_notes="Initial personality.")
         mock_state.get_soul = AsyncMock(return_value=soul)
         mock_state.query_knowledge = AsyncMock(return_value=[
             KnowledgeEntry(
-                id="ke1", tenant_id="t1", category="fact", subject="user",
+                id="ke1", instance_id="t1", category="fact", subject="user",
                 content="Builds software intuitively", confidence="stated",
                 source_event_id="", source_description="test",
                 created_at="2026-01-01T00:00:00+00:00",
@@ -782,7 +782,7 @@ class TestAdaptiveHeadroom:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Test")
 
         cs = CompactionState(
             space_id="sp1",
@@ -821,7 +821,7 @@ class TestHeadroomEstimation:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id="sp1", tenant_id="t1", name="D&D Campaign",
+            id="sp1", instance_id="t1", name="D&D Campaign",
             description="Fantasy RPG", space_type="domain",
         )
 
@@ -840,7 +840,7 @@ class TestHeadroomEstimation:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Big")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Big")
 
         result = await estimate_headroom(mock_reasoning, space)
         assert result == 40000
@@ -857,7 +857,7 @@ class TestHeadroomEstimation:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Small")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Small")
 
         result = await estimate_headroom(mock_reasoning, space)
         assert result == 4000
@@ -873,7 +873,7 @@ class TestHeadroomEstimation:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Test")
 
         result = await estimate_headroom(mock_reasoning, space)
         assert result == DEFAULT_DAILY_HEADROOM
@@ -956,7 +956,7 @@ class TestEventEmission:
         )
 
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="sp1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="sp1", instance_id="t1", name="Test")
 
         cs = CompactionState(
             space_id="sp1", message_ceiling=100000, document_budget=180000,

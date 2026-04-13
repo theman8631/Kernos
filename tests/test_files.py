@@ -419,7 +419,7 @@ class TestCompactionManifestInjection:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id=SPACE_A, tenant_id=TENANT, name="D&D",
+            id=SPACE_A, instance_id=TENANT, name="D&D",
             description="Campaign space", space_type="domain",
         )
 
@@ -464,7 +464,7 @@ class TestCompactionManifestInjection:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id=SPACE_A, tenant_id=TENANT, name="General",
+            id=SPACE_A, instance_id=TENANT, name="General",
             description="General space", space_type="general",
         )
 
@@ -518,18 +518,18 @@ class TestUploadHandling:
 class TestContextSpaceFields:
     def test_max_file_size_bytes_defaults_none(self):
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="s1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="s1", instance_id="t1", name="Test")
         assert space.max_file_size_bytes is None
 
     def test_max_space_bytes_defaults_none(self):
         from kernos.kernel.spaces import ContextSpace
-        space = ContextSpace(id="s1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="s1", instance_id="t1", name="Test")
         assert space.max_space_bytes is None
 
     def test_can_set_limits(self):
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id="s1", tenant_id="t1", name="Test",
+            id="s1", instance_id="t1", name="Test",
             max_file_size_bytes=1_000_000,
             max_space_bytes=10_000_000,
         )

@@ -14,7 +14,7 @@ def test_task_creation_defaults():
     task = Task(
         id="task_123_abcd",
         type=TaskType.REACTIVE_SIMPLE,
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         conversation_id="+15555550100",
     )
     assert task.status == TaskStatus.PENDING

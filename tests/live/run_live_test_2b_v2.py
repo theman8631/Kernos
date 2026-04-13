@@ -34,7 +34,7 @@ from kernos.kernel.events import JsonEventStream, emit_event
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 logging.basicConfig(level=logging.WARNING)  # Quiet for clean output
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def make_message(content: str) -> NormalizedMessage:
         platform_capabilities=["text"],
         conversation_id=CONVERSATION_ID,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT_ID,
+        instance_id=TENANT_ID,
     )
 
 
@@ -99,7 +99,7 @@ class LiveTestRunner:
                 cap.status = CapabilityStatus.CONNECTED
                 cap.tools = [t["name"] for t in tools]
 
-        tenants = JsonTenantStore(DATA_DIR)
+        tenants = JsonInstanceStore(DATA_DIR)
         audit = JsonAuditStore(DATA_DIR)
         provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
         reasoning = ReasoningService(provider, events, mcp_manager, audit)
@@ -125,7 +125,7 @@ class LiveTestRunner:
         elapsed = time.monotonic() - t0
 
         # Get active space after processing
-        profile = await self.state.get_tenant_profile(TENANT_ID)
+        profile = await self.state.get_instance_profile(TENANT_ID)
         active_space_id = profile.last_active_space_id if profile else ""
         active_space = None
         if active_space_id:
@@ -167,7 +167,7 @@ class LiveTestRunner:
         return response
 
     async def inspect_spaces(self) -> list[dict]:
-        """Return current spaces for the tenant."""
+        """Return current spaces for the instance."""
         spaces = await self.state.list_context_spaces(TENANT_ID)
         return [
             {

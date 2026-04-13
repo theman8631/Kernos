@@ -33,7 +33,7 @@ def test_event_fields_all_present():
     e = Event(
         id="evt_123_abcd",
         type="message.received",
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         timestamp="2026-03-03T00:00:00+00:00",
         source="handler",
         payload={"content": "Hello"},
@@ -41,7 +41,7 @@ def test_event_fields_all_present():
     )
     assert e.id == "evt_123_abcd"
     assert e.type == "message.received"
-    assert e.tenant_id == "sms:+15555550100"
+    assert e.instance_id == "sms:+15555550100"
     assert e.source == "handler"
     assert e.payload == {"content": "Hello"}
     assert e.metadata == {"conversation_id": "+15555550100"}
@@ -51,7 +51,7 @@ def test_event_is_immutable():
     e = Event(
         id="evt_1",
         type="test",
-        tenant_id="t1",
+        instance_id="t1",
         timestamp="2026-03-03T00:00:00+00:00",
         source="test",
         payload={},
@@ -95,11 +95,11 @@ async def test_jsonstream_emit_and_query(tmp_path):
     events = await stream.query("tenant1")
     assert len(events) == 1
     assert events[0].type == "message.received"
-    assert events[0].tenant_id == "tenant1"
+    assert events[0].instance_id == "tenant1"
     assert events[0].payload["content"] == "Hi"
 
 
-async def test_jsonstream_tenant_isolation(tmp_path):
+async def test_jsonstreaminstance_isolation(tmp_path):
     stream = JsonEventStream(tmp_path)
     await emit_event(stream, "message.received", "tenant_a", "handler", {"x": 1})
     await emit_event(stream, "message.received", "tenant_b", "handler", {"x": 2})
@@ -171,7 +171,7 @@ async def test_emit_event_helper_returns_event(tmp_path):
     event = await emit_event(stream, "test.type", "t1", "source", {"key": "value"})
     assert event.id.startswith("evt_")
     assert event.type == "test.type"
-    assert event.tenant_id == "t1"
+    assert event.instance_id == "t1"
     assert event.source == "source"
     assert event.payload == {"key": "value"}
 
@@ -184,7 +184,7 @@ async def test_emit_event_persists(tmp_path):
     assert queried[0].id == emitted.id
 
 
-async def test_jsonstream_tenant_id_with_colon(tmp_path):
+async def test_jsonstream_instance_id_with_colon(tmp_path):
     """Tenant IDs like 'sms:+15555550100' map to valid filesystem paths."""
     stream = JsonEventStream(tmp_path)
     await emit_event(stream, "message.received", "sms:+15555550100", "handler", {})

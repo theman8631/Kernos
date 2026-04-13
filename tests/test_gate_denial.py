@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 from kernos.kernel.gate import DispatchGate, GateResult
-from kernos.kernel.state import TenantProfile
+from kernos.kernel.state import InstanceProfile
 
 
 def _make_gate():
@@ -11,8 +11,8 @@ def _make_gate():
     registry = MagicMock()
     registry.get_all.return_value = []
     state = AsyncMock()
-    state.get_tenant_profile = AsyncMock(return_value=TenantProfile(
-        tenant_id="t1", status="active", created_at="2026-01-01"))
+    state.get_instance_profile = AsyncMock(return_value=InstanceProfile(
+        instance_id="t1", status="active", created_at="2026-01-01"))
     state.query_covenant_rules = AsyncMock(return_value=[])
     events = MagicMock()
     gate = DispatchGate(reasoning, registry, state, events)

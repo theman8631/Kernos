@@ -23,13 +23,13 @@ from kernos.kernel.soul import Soul
 from kernos.kernel.state import (
     ConversationSummary,
     KnowledgeEntry,
-    TenantProfile,
+    InstanceProfile,
     default_contract_rules,
 )
 from kernos.kernel.state_json import JsonStateStore
 from kernos.messages.handler import MessageHandler
 from kernos.messages.models import AuthLevel, NormalizedMessage
-from kernos.persistence import AuditStore, ConversationStore, TenantStore
+from kernos.persistence import AuditStore, ConversationStore, InstanceStore
 from kernos.persistence.json_file import JsonConversationStore
 
 
@@ -46,7 +46,7 @@ def _make_message(content: str = "Hello") -> NormalizedMessage:
         platform_capabilities=["text"],
         conversation_id="123456789",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="discord:123456789",
+        instance_id="discord:123456789",
     )
 
 
@@ -68,9 +68,9 @@ def _make_real_handler(tmp_path):
     conversations.get_recent.return_value = []
     conversations.append.return_value = None
 
-    tenants = AsyncMock(spec=TenantStore)
+    tenants = AsyncMock(spec=InstanceStore)
     tenants.get_or_create.return_value = {
-        "tenant_id": "discord:123456789",
+        "instance_id": "discord:123456789",
         "status": "active",
         "created_at": _now(),
         "capabilities": {},
@@ -104,7 +104,7 @@ def _make_real_handler(tmp_path):
 
 async def test_restart_soul_survives(tmp_path):
     store = JsonStateStore(tmp_path)
-    await store.save_soul(Soul(tenant_id="t1", user_name="Alice", hatched=True, interaction_count=5))
+    await store.save_soul(Soul(instance_id="t1", user_name="Alice", hatched=True, interaction_count=5))
     store2 = JsonStateStore(tmp_path)
     loaded = await store2.get_soul("t1")
     assert loaded is not None
@@ -115,9 +115,9 @@ async def test_restart_soul_survives(tmp_path):
 
 async def test_restart_profile_survives(tmp_path):
     store = JsonStateStore(tmp_path)
-    await store.save_tenant_profile("t1", TenantProfile(tenant_id="t1", status="active", created_at=_now()))
+    await store.save_instance_profile("t1", InstanceProfile(instance_id="t1", status="active", created_at=_now()))
     store2 = JsonStateStore(tmp_path)
-    loaded = await store2.get_tenant_profile("t1")
+    loaded = await store2.get_instance_profile("t1")
     assert loaded is not None
     assert loaded.status == "active"
 
@@ -145,7 +145,7 @@ async def test_restart_conversation_summary_survives(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     await store.save_conversation_summary(ConversationSummary(
-        tenant_id="t1", conversation_id="conv_1", platform="discord",
+        instance_id="t1", conversation_id="conv_1", platform="discord",
         message_count=5, first_message_at=now, last_message_at=now,
     ))
     store2 = JsonStateStore(tmp_path)
@@ -158,7 +158,7 @@ async def test_restart_knowledge_survives(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     await store.add_knowledge(KnowledgeEntry(
-        id="know_test", tenant_id="t1", category="entity", subject="Alice",
+        id="know_test", instance_id="t1", category="entity", subject="Alice",
         content="Alice is a developer", confidence="stated",
         source_event_id="evt_1", source_description="test",
         created_at=now, last_referenced=now, tags=["person"],
@@ -180,8 +180,8 @@ async def test_full_message_flow_emits_required_events(tmp_path):
 
     await handler.process(_make_message("Hi there"))
 
-    tenant_id = "discord:123456789"
-    all_events = await events.query(tenant_id, limit=100)
+    instance_id = "discord:123456789"
+    all_events = await events.query(instance_id, limit=100)
     event_types = [e.type for e in all_events]
 
     assert "message.received" in event_types
@@ -197,8 +197,8 @@ async def test_full_message_flow_event_order(tmp_path):
 
     await handler.process(_make_message("Hi"))
 
-    tenant_id = "discord:123456789"
-    all_events = await events.query(tenant_id, limit=100)
+    instance_id = "discord:123456789"
+    all_events = await events.query(instance_id, limit=100)
     event_types = [e.type for e in all_events]
 
     idx_received = event_types.index("message.received")
@@ -219,11 +219,11 @@ async def test_all_events_have_required_fields(tmp_path):
 
     await handler.process(_make_message("Hi"))
 
-    tenant_id = "discord:123456789"
-    for event in await events.query(tenant_id, limit=100):
+    instance_id = "discord:123456789"
+    for event in await events.query(instance_id, limit=100):
         assert event.id
         assert event.type
-        assert event.tenant_id == tenant_id
+        assert event.instance_id == instance_id
         assert event.timestamp
         assert event.source
         assert isinstance(event.payload, dict)
@@ -235,9 +235,9 @@ async def test_reasoning_events_have_model_tokens_cost_duration(tmp_path):
 
     await handler.process(_make_message("Hi"))
 
-    tenant_id = "discord:123456789"
+    instance_id = "discord:123456789"
     reasoning_responses = await events.query(
-        tenant_id, event_types=["reasoning.response"], limit=10
+        instance_id, event_types=["reasoning.response"], limit=10
     )
     assert len(reasoning_responses) >= 1
     payload = reasoning_responses[0].payload
@@ -259,8 +259,8 @@ async def test_cost_tracking_task_completed_has_accurate_fields(tmp_path):
 
     await handler.process(_make_message("Hi"))
 
-    tenant_id = "discord:123456789"
-    completed = await events.query(tenant_id, event_types=["task.completed"], limit=5)
+    instance_id = "discord:123456789"
+    completed = await events.query(instance_id, event_types=["task.completed"], limit=5)
     assert len(completed) >= 1
     payload = completed[0].payload
     assert payload["input_tokens"] == 1000
@@ -313,7 +313,7 @@ async def test_shadow_archive_copy_has_full_metadata(tmp_path):
     with open(archived_file) as f:
         data = json.load(f)
     assert "archived_at" in data
-    assert data["tenant_id"] == "t1"
+    assert data["instance_id"] == "t1"
     assert data["conversation_id"] == "conv_1"
     assert "entries" in data
     assert len(data["entries"]) == 1
@@ -342,7 +342,7 @@ def test_default_contract_rules_source_is_default():
 
 
 def test_default_contract_rules_correct_tenant():
-    assert all(r.tenant_id == "t1" for r in default_contract_rules("t1", _now()))
+    assert all(r.instance_id == "t1" for r in default_contract_rules("t1", _now()))
 
 
 def test_default_contract_rules_type_breakdown():
@@ -353,15 +353,15 @@ def test_default_contract_rules_type_breakdown():
     assert len([r for r in rules if r.rule_type == "escalation"]) == 1
 
 
-async def test_new_tenant_provisioned_with_seven_default_rules(tmp_path):
+async def test_newinstance_provisioned_with_seven_default_rules(tmp_path):
     """Handler provisioning a new tenant creates 7 default contract rules."""
     handler, mock_provider, events, state = _make_real_handler(tmp_path)
     mock_provider.complete.return_value = _mock_response("Hello!")
 
     await handler.process(_make_message())
 
-    tenant_id = "discord:123456789"
-    rules = await state.get_contract_rules(tenant_id)
+    instance_id = "discord:123456789"
+    rules = await state.get_contract_rules(instance_id)
     assert len(rules) == 8
-    assert all(r.tenant_id == tenant_id for r in rules)
+    assert all(r.instance_id == instance_id for r in rules)
     assert all(r.active for r in rules)

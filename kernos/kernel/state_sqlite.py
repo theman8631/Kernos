@@ -1,10 +1,10 @@
 """SQLite State Store — production backend for Kernos state.
 
 Replaces JsonStateStore with SQLite + WAL mode for concurrent readers,
-proper indexing, and future multi-tenant support. Implements the same
+proper indexing, and future multi-instance support. Implements the same
 StateStore ABC — all consumers are unaffected.
 
-One database per tenant: data/{tenant_id}/kernos.db
+One database per-instance: data/{instance_id}/kernos.db
 """
 import json
 import logging
@@ -25,7 +25,7 @@ from kernos.kernel.state import (
     Preference,
     Soul,
     StateStore,
-    TenantProfile,
+    InstanceProfile,
 )
 from kernos.kernel.spaces import ContextSpace
 from kernos.utils import utc_now, _safe_name
@@ -41,14 +41,14 @@ PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 
 CREATE TABLE IF NOT EXISTS soul (
-    tenant_id TEXT PRIMARY KEY,
+    instance_id TEXT PRIMARY KEY,
     data TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS tenant_profile (
-    tenant_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS instance_profile (
+    instance_id TEXT PRIMARY KEY,
     data TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
 
 CREATE TABLE IF NOT EXISTS knowledge (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     content TEXT NOT NULL,
     subject TEXT DEFAULT '',
     category TEXT DEFAULT '',
@@ -78,19 +78,19 @@ CREATE TABLE IF NOT EXISTS knowledge (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_knowledge_tenant ON knowledge(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_knowledge_subject ON knowledge(tenant_id, subject);
-CREATE INDEX IF NOT EXISTS idx_knowledge_archetype ON knowledge(tenant_id, lifecycle_archetype);
-CREATE INDEX IF NOT EXISTS idx_knowledge_foresight ON knowledge(tenant_id, foresight_expires)
+CREATE INDEX IF NOT EXISTS idx_knowledge_tenant ON knowledge(instance_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_subject ON knowledge(instance_id, subject);
+CREATE INDEX IF NOT EXISTS idx_knowledge_archetype ON knowledge(instance_id, lifecycle_archetype);
+CREATE INDEX IF NOT EXISTS idx_knowledge_foresight ON knowledge(instance_id, foresight_expires)
     WHERE foresight_signal != '';
-CREATE INDEX IF NOT EXISTS idx_knowledge_hash ON knowledge(tenant_id, content_hash)
+CREATE INDEX IF NOT EXISTS idx_knowledge_hash ON knowledge(instance_id, content_hash)
     WHERE content_hash != '';
-CREATE INDEX IF NOT EXISTS idx_knowledge_active ON knowledge(tenant_id, active)
+CREATE INDEX IF NOT EXISTS idx_knowledge_active ON knowledge(instance_id, active)
     WHERE active = 1;
 
 CREATE TABLE IF NOT EXISTS covenants (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     capability TEXT DEFAULT 'general',
     rule_type TEXT NOT NULL,
     description TEXT NOT NULL,
@@ -105,23 +105,23 @@ CREATE TABLE IF NOT EXISTS covenants (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_covenants_tenant ON covenants(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_covenants_active ON covenants(tenant_id, active) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_covenants_tenant ON covenants(instance_id);
+CREATE INDEX IF NOT EXISTS idx_covenants_active ON covenants(instance_id, active) WHERE active = 1;
 
 CREATE TABLE IF NOT EXISTS entities (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     canonical_name TEXT NOT NULL,
     entity_type TEXT DEFAULT '',
     data TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_entities_tenant ON entities(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_entities_tenant ON entities(instance_id);
 
 CREATE TABLE IF NOT EXISTS identity_edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
     target_id TEXT NOT NULL,
     edge_type TEXT DEFAULT '',
@@ -129,11 +129,11 @@ CREATE TABLE IF NOT EXISTS identity_edges (
     data TEXT DEFAULT '{}',
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_edges_tenant ON identity_edges(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_edges_tenant ON identity_edges(instance_id);
 
 CREATE TABLE IF NOT EXISTS context_spaces (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     name TEXT NOT NULL,
     parent_id TEXT DEFAULT '',
     status TEXT DEFAULT 'active',
@@ -144,11 +144,11 @@ CREATE TABLE IF NOT EXISTS context_spaces (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_spaces_tenant ON context_spaces(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_spaces_tenant ON context_spaces(instance_id);
 
 CREATE TABLE IF NOT EXISTS preferences (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     category TEXT NOT NULL,
     subject TEXT DEFAULT '',
     status TEXT DEFAULT 'active',
@@ -156,21 +156,21 @@ CREATE TABLE IF NOT EXISTS preferences (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_prefs_tenant ON preferences(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_prefs_tenant ON preferences(instance_id);
 
 CREATE TABLE IF NOT EXISTS pending_actions (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     data TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_actions_tenant ON pending_actions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_actions_tenant ON pending_actions(instance_id);
 
 CREATE TABLE IF NOT EXISTS whispers (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     insight_text TEXT NOT NULL,
     delivery_class TEXT DEFAULT 'ambient',
     source_space_id TEXT DEFAULT '',
@@ -181,13 +181,13 @@ CREATE TABLE IF NOT EXISTS whispers (
     data TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_whispers_tenant ON whispers(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_whispers_pending ON whispers(tenant_id, surfaced_at)
+CREATE INDEX IF NOT EXISTS idx_whispers_tenant ON whispers(instance_id);
+CREATE INDEX IF NOT EXISTS idx_whispers_pending ON whispers(instance_id, surfaced_at)
     WHERE surfaced_at = '';
 
 CREATE TABLE IF NOT EXISTS suppressions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     whisper_id TEXT NOT NULL,
     foresight_signal TEXT DEFAULT '',
     resolution_state TEXT DEFAULT 'surfaced',
@@ -195,34 +195,34 @@ CREATE TABLE IF NOT EXISTS suppressions (
     created_at TEXT NOT NULL,
     resolved_at TEXT DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_suppressions_tenant ON suppressions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_suppressions_tenant ON suppressions(instance_id);
 
 CREATE TABLE IF NOT EXISTS space_notices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     space_id TEXT NOT NULL,
     text TEXT NOT NULL,
     source TEXT DEFAULT '',
     notice_type TEXT DEFAULT 'cross_domain',
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_notices_space ON space_notices(tenant_id, space_id);
+CREATE INDEX IF NOT EXISTS idx_notices_space ON space_notices(instance_id, space_id);
 
 CREATE TABLE IF NOT EXISTS conversation_summaries (
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
     platform TEXT DEFAULT '',
     message_count INTEGER DEFAULT 0,
     data TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, conversation_id)
+    PRIMARY KEY (instance_id, conversation_id)
 );
-CREATE INDEX IF NOT EXISTS idx_convs_tenant ON conversation_summaries(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_convs_tenant ON conversation_summaries(instance_id);
 
 CREATE TABLE IF NOT EXISTS triggers (
     id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
     action_description TEXT NOT NULL,
     action_type TEXT DEFAULT 'notify',
     status TEXT DEFAULT 'active',
@@ -233,8 +233,8 @@ CREATE TABLE IF NOT EXISTS triggers (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_triggers_tenant ON triggers(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_triggers_active ON triggers(tenant_id, status, next_fire_at)
+CREATE INDEX IF NOT EXISTS idx_triggers_tenant ON triggers(instance_id);
+CREATE INDEX IF NOT EXISTS idx_triggers_active ON triggers(instance_id, status, next_fire_at)
     WHERE status = 'active';
 """
 
@@ -296,10 +296,10 @@ class SqliteStateStore(StateStore):
         self._data_dir = Path(data_dir)
         self._connections: dict[str, aiosqlite.Connection] = {}
 
-    async def _db(self, tenant_id: str) -> aiosqlite.Connection:
-        """Get or create a connection for a tenant."""
-        if tenant_id not in self._connections:
-            db_path = self._data_dir / _safe_name(tenant_id) / "kernos.db"
+    async def _db(self, instance_id: str) -> aiosqlite.Connection:
+        """Get or create a connection for an instance."""
+        if instance_id not in self._connections:
+            db_path = self._data_dir / _safe_name(instance_id) / "kernos.db"
             db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = await aiosqlite.connect(str(db_path))
             conn.row_factory = aiosqlite.Row
@@ -309,8 +309,8 @@ class SqliteStateStore(StateStore):
                 if stmt:
                     await conn.execute(stmt)
             await conn.commit()
-            self._connections[tenant_id] = conn
-        return self._connections[tenant_id]
+            self._connections[instance_id] = conn
+        return self._connections[instance_id]
 
     async def close_all(self) -> None:
         """Close all database connections."""
@@ -335,9 +335,9 @@ class SqliteStateStore(StateStore):
     # Soul
     # ===================================================================
 
-    async def get_soul(self, tenant_id: str) -> Soul | None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM soul WHERE tenant_id=?", (tenant_id,)) as cur:
+    async def get_soul(self, instance_id: str) -> Soul | None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM soul WHERE instance_id=?", (instance_id,)) as cur:
             row = await cur.fetchone()
         if not row:
             return None
@@ -345,36 +345,36 @@ class SqliteStateStore(StateStore):
 
     async def save_soul(self, soul: Soul, *, source: str = "", trigger: str = "") -> None:
         now = utc_now()
-        db = await self._db(soul.tenant_id)
+        db = await self._db(soul.instance_id)
         data = _to_json(soul)
         await db.execute(
-            "INSERT INTO soul (tenant_id, data, created_at, updated_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(tenant_id) DO UPDATE SET data=?, updated_at=?",
-            (soul.tenant_id, data, now, now, data, now),
+            "INSERT INTO soul (instance_id, data, created_at, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(instance_id) DO UPDATE SET data=?, updated_at=?",
+            (soul.instance_id, data, now, now, data, now),
         )
         await db.commit()
-        logger.info("SOUL_WRITE: source=%s trigger=%s tenant=%s", source, trigger, soul.tenant_id)
+        logger.info("SOUL_WRITE: source=%s trigger=%s instance=%s", source, trigger, soul.instance_id)
 
     # ===================================================================
     # Tenant Profile
     # ===================================================================
 
-    async def get_tenant_profile(self, tenant_id: str) -> TenantProfile | None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM tenant_profile WHERE tenant_id=?", (tenant_id,)) as cur:
+    async def get_instance_profile(self, instance_id: str) -> InstanceProfile | None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM instance_profile WHERE instance_id=?", (instance_id,)) as cur:
             row = await cur.fetchone()
         if not row:
             return None
-        return _build_dataclass(TenantProfile, _from_json(row["data"]))
+        return _build_dataclass(InstanceProfile, _from_json(row["data"]))
 
-    async def save_tenant_profile(self, tenant_id: str, profile: TenantProfile) -> None:
+    async def save_instance_profile(self, instance_id: str, profile: InstanceProfile) -> None:
         now = utc_now()
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         data = _to_json(profile)
         await db.execute(
-            "INSERT INTO tenant_profile (tenant_id, data, created_at, updated_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(tenant_id) DO UPDATE SET data=?, updated_at=?",
-            (tenant_id, data, now, now, data, now),
+            "INSERT INTO instance_profile (instance_id, data, created_at, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(instance_id) DO UPDATE SET data=?, updated_at=?",
+            (instance_id, data, now, now, data, now),
         )
         await db.commit()
 
@@ -383,7 +383,7 @@ class SqliteStateStore(StateStore):
     # ===================================================================
 
     _KNOWLEDGE_COLS = {
-        "id", "tenant_id", "content", "subject", "category", "lifecycle_archetype",
+        "id", "instance_id", "content", "subject", "category", "lifecycle_archetype",
         "storage_strength", "reinforcement_count", "last_reinforced_at", "salience",
         "foresight_signal", "foresight_expires", "content_hash", "space_id",
         "member_id", "visibility", "source_type", "expired_at", "active",
@@ -395,7 +395,7 @@ class SqliteStateStore(StateStore):
         active = 1 if not d.get("expired_at") else 0
         overflow = self._pack_overflow(e, self._KNOWLEDGE_COLS)
         return (
-            d["id"], d["tenant_id"], d.get("content", ""), d.get("subject", ""),
+            d["id"], d["instance_id"], d.get("content", ""), d.get("subject", ""),
             d.get("category", ""), d.get("lifecycle_archetype", "structural"),
             d.get("storage_strength", 1.0), d.get("reinforcement_count", 1),
             d.get("last_reinforced_at", ""), d.get("salience", 0.5),
@@ -414,11 +414,11 @@ class SqliteStateStore(StateStore):
         return _build_dataclass(KnowledgeEntry, merged)
 
     async def add_knowledge(self, entry: KnowledgeEntry) -> None:
-        db = await self._db(entry.tenant_id)
+        db = await self._db(entry.instance_id)
         vals = self._ke_to_row(entry)
         await db.execute(
             "INSERT OR REPLACE INTO knowledge "
-            "(id, tenant_id, content, subject, category, lifecycle_archetype, "
+            "(id, instance_id, content, subject, category, lifecycle_archetype, "
             "storage_strength, reinforcement_count, last_reinforced_at, salience, "
             "foresight_signal, foresight_expires, content_hash, space_id, "
             "member_id, visibility, source_type, expired_at, active, data, "
@@ -429,13 +429,13 @@ class SqliteStateStore(StateStore):
         await db.commit()
 
     async def query_knowledge(
-        self, tenant_id: str, subject: str | None = None,
+        self, instance_id: str, subject: str | None = None,
         category: str | None = None, tags: list[str] | None = None,
         active_only: bool = True, limit: int = 20,
     ) -> list[KnowledgeEntry]:
-        db = await self._db(tenant_id)
-        clauses = ["tenant_id=?"]
-        params: list = [tenant_id]
+        db = await self._db(instance_id)
+        clauses = ["instance_id=?"]
+        params: list = [instance_id]
         if subject:
             clauses.append("subject=?")
             params.append(subject)
@@ -450,11 +450,11 @@ class SqliteStateStore(StateStore):
             rows = await cur.fetchall()
         return [self._row_to_ke(r) for r in rows]
 
-    async def update_knowledge(self, tenant_id: str, entry_id: str, updates: dict) -> None:
-        db = await self._db(tenant_id)
+    async def update_knowledge(self, instance_id: str, entry_id: str, updates: dict) -> None:
+        db = await self._db(instance_id)
         # Read current, apply updates, write back
-        async with db.execute("SELECT * FROM knowledge WHERE id=? AND tenant_id=?",
-                              (entry_id, tenant_id)) as cur:
+        async with db.execute("SELECT * FROM knowledge WHERE id=? AND instance_id=?",
+                              (entry_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return
@@ -473,49 +473,49 @@ class SqliteStateStore(StateStore):
         cols = list(d.keys())
         vals = [d[c] for c in cols]
         set_clause = ", ".join(f"{c}=?" for c in cols)
-        await db.execute(f"UPDATE knowledge SET {set_clause} WHERE id=? AND tenant_id=?",
-                         vals + [entry_id, tenant_id])
+        await db.execute(f"UPDATE knowledge SET {set_clause} WHERE id=? AND instance_id=?",
+                         vals + [entry_id, instance_id])
         await db.commit()
 
     async def save_knowledge_entry(self, entry: KnowledgeEntry) -> None:
         await self.add_knowledge(entry)  # INSERT OR REPLACE
 
-    async def get_knowledge_entry(self, tenant_id: str, entry_id: str) -> KnowledgeEntry | None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT * FROM knowledge WHERE id=? AND tenant_id=?",
-                              (entry_id, tenant_id)) as cur:
+    async def get_knowledge_entry(self, instance_id: str, entry_id: str) -> KnowledgeEntry | None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT * FROM knowledge WHERE id=? AND instance_id=?",
+                              (entry_id, instance_id)) as cur:
             row = await cur.fetchone()
         return self._row_to_ke(row) if row else None
 
-    async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
-        db = await self._db(tenant_id)
+    async def get_knowledge_hashes(self, instance_id: str) -> set[str]:
+        db = await self._db(instance_id)
         async with db.execute(
-            "SELECT content_hash FROM knowledge WHERE tenant_id=? AND active=1 AND content_hash!=''",
-            (tenant_id,),
+            "SELECT content_hash FROM knowledge WHERE instance_id=? AND active=1 AND content_hash!=''",
+            (instance_id,),
         ) as cur:
             rows = await cur.fetchall()
         return {r["content_hash"] for r in rows}
 
-    async def get_knowledge_by_hash(self, tenant_id: str, content_hash: str) -> KnowledgeEntry | None:
-        db = await self._db(tenant_id)
+    async def get_knowledge_by_hash(self, instance_id: str, content_hash: str) -> KnowledgeEntry | None:
+        db = await self._db(instance_id)
         async with db.execute(
-            "SELECT * FROM knowledge WHERE tenant_id=? AND content_hash=? AND active=1",
-            (tenant_id, content_hash),
+            "SELECT * FROM knowledge WHERE instance_id=? AND content_hash=? AND active=1",
+            (instance_id, content_hash),
         ) as cur:
             row = await cur.fetchone()
         return self._row_to_ke(row) if row else None
 
     async def query_knowledge_by_foresight(
-        self, tenant_id: str, expires_before: str,
+        self, instance_id: str, expires_before: str,
         expires_after: str = "", space_id: str = "",
     ) -> list[KnowledgeEntry]:
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         clauses = [
-            "tenant_id=?", "active=1",
+            "instance_id=?", "active=1",
             "foresight_signal!=''", "foresight_expires!=''",
             "foresight_expires<=?",
         ]
-        params: list = [tenant_id, expires_before]
+        params: list = [instance_id, expires_before]
         if expires_after:
             clauses.append("foresight_expires>?")
             params.append(expires_after)
@@ -533,12 +533,12 @@ class SqliteStateStore(StateStore):
 
     def _cov_to_row(self, r: CovenantRule) -> tuple:
         d = asdict(r)
-        _cols = {"id", "tenant_id", "capability", "rule_type", "description",
+        _cols = {"id", "instance_id", "capability", "rule_type", "description",
                  "active", "source", "layer", "enforcement_tier", "tier",
                  "context_space", "superseded_by", "created_at", "updated_at"}
         overflow = {k: v for k, v in d.items() if k not in _cols}
         return (
-            d["id"], d["tenant_id"], d.get("capability", "general"),
+            d["id"], d["instance_id"], d.get("capability", "general"),
             d["rule_type"], d["description"], 1 if d.get("active") else 0,
             d.get("source", "default"), d.get("layer", "principle"),
             d.get("enforcement_tier", ""), d.get("tier", ""),
@@ -557,12 +557,12 @@ class SqliteStateStore(StateStore):
         return _build_dataclass(CovenantRule, merged)
 
     async def get_contract_rules(
-        self, tenant_id: str, capability: str | None = None,
+        self, instance_id: str, capability: str | None = None,
         rule_type: str | None = None, active_only: bool = True,
     ) -> list[CovenantRule]:
-        db = await self._db(tenant_id)
-        clauses = ["tenant_id=?"]
-        params: list = [tenant_id]
+        db = await self._db(instance_id)
+        clauses = ["instance_id=?"]
+        params: list = [instance_id]
         if capability:
             clauses.append("capability=?")
             params.append(capability)
@@ -578,11 +578,11 @@ class SqliteStateStore(StateStore):
         return [self._row_to_cov(r) for r in rows]
 
     async def query_covenant_rules(
-        self, tenant_id: str, capability: str | None = None,
+        self, instance_id: str, capability: str | None = None,
         context_space_scope: list[str | None] | None = None,
         active_only: bool = True,
     ) -> list[CovenantRule]:
-        rules = await self.get_contract_rules(tenant_id, capability, active_only=active_only)
+        rules = await self.get_contract_rules(instance_id, capability, active_only=active_only)
         if context_space_scope is not None:
             scope_set = set()
             for s in context_space_scope:
@@ -594,11 +594,11 @@ class SqliteStateStore(StateStore):
         return rules
 
     async def add_contract_rule(self, rule: CovenantRule) -> None:
-        db = await self._db(rule.tenant_id)
+        db = await self._db(rule.instance_id)
         vals = self._cov_to_row(rule)
         await db.execute(
             "INSERT OR REPLACE INTO covenants "
-            "(id, tenant_id, capability, rule_type, description, active, source, "
+            "(id, instance_id, capability, rule_type, description, active, source, "
             "layer, enforcement_tier, tier, context_space, superseded_by, data, "
             "created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -606,16 +606,16 @@ class SqliteStateStore(StateStore):
         )
         await db.commit()
 
-    async def update_contract_rule(self, tenant_id: str, rule_id: str, updates: dict) -> None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT * FROM covenants WHERE id=? AND tenant_id=?",
-                              (rule_id, tenant_id)) as cur:
+    async def update_contract_rule(self, instance_id: str, rule_id: str, updates: dict) -> None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT * FROM covenants WHERE id=? AND instance_id=?",
+                              (rule_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return
         d = dict(row)
         overflow = _from_json(d.get("data", "{}"), {})
-        _cols = {"id", "tenant_id", "capability", "rule_type", "description",
+        _cols = {"id", "instance_id", "capability", "rule_type", "description",
                  "active", "source", "layer", "enforcement_tier", "tier",
                  "context_space", "superseded_by", "created_at", "updated_at"}
         for k, v in updates.items():
@@ -630,8 +630,8 @@ class SqliteStateStore(StateStore):
         cols = list(d.keys())
         vals = [d[c] for c in cols]
         set_clause = ", ".join(f"{c}=?" for c in cols)
-        await db.execute(f"UPDATE covenants SET {set_clause} WHERE id=? AND tenant_id=?",
-                         vals + [rule_id, tenant_id])
+        await db.execute(f"UPDATE covenants SET {set_clause} WHERE id=? AND instance_id=?",
+                         vals + [rule_id, instance_id])
         await db.commit()
 
     # ===================================================================
@@ -640,33 +640,33 @@ class SqliteStateStore(StateStore):
 
     async def save_entity_node(self, node: EntityNode) -> None:
         now = utc_now()
-        db = await self._db(node.tenant_id)
+        db = await self._db(node.instance_id)
         data = _to_json(node)
         await db.execute(
             "INSERT OR REPLACE INTO entities "
-            "(id, tenant_id, canonical_name, entity_type, data, created_at, updated_at) "
+            "(id, instance_id, canonical_name, entity_type, data, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?)",
-            (node.id, node.tenant_id, node.canonical_name,
+            (node.id, node.instance_id, node.canonical_name,
              getattr(node, "entity_type", ""), data, now, now),
         )
         await db.commit()
 
-    async def get_entity_node(self, tenant_id: str, entity_id: str) -> EntityNode | None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM entities WHERE id=? AND tenant_id=?",
-                              (entity_id, tenant_id)) as cur:
+    async def get_entity_node(self, instance_id: str, entity_id: str) -> EntityNode | None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM entities WHERE id=? AND instance_id=?",
+                              (entity_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return None
         return _build_dataclass(EntityNode, _from_json(row["data"]))
 
     async def query_entity_nodes(
-        self, tenant_id: str, name: str | None = None,
+        self, instance_id: str, name: str | None = None,
         entity_type: str | None = None, active_only: bool = True,
     ) -> list[EntityNode]:
-        db = await self._db(tenant_id)
-        clauses = ["tenant_id=?"]
-        params: list = [tenant_id]
+        db = await self._db(instance_id)
+        clauses = ["instance_id=?"]
+        params: list = [instance_id]
         if name:
             clauses.append("canonical_name=?")
             params.append(name)
@@ -678,24 +678,24 @@ class SqliteStateStore(StateStore):
             rows = await cur.fetchall()
         return [_build_dataclass(EntityNode, _from_json(r["data"])) for r in rows]
 
-    async def save_identity_edge(self, tenant_id: str, edge: IdentityEdge) -> None:
-        db = await self._db(tenant_id)
+    async def save_identity_edge(self, instance_id: str, edge: IdentityEdge) -> None:
+        db = await self._db(instance_id)
         data = _to_json(edge)
         await db.execute(
             "INSERT INTO identity_edges "
-            "(tenant_id, source_id, target_id, edge_type, confidence, data, created_at) "
+            "(instance_id, source_id, target_id, edge_type, confidence, data, created_at) "
             "VALUES (?,?,?,?,?,?,?)",
-            (tenant_id, edge.source_entity_id, edge.target_entity_id,
+            (instance_id, edge.source_entity_id, edge.target_entity_id,
              getattr(edge, "edge_type", ""), getattr(edge, "confidence", 1.0),
              data, utc_now()),
         )
         await db.commit()
 
-    async def query_identity_edges(self, tenant_id: str, entity_id: str) -> list[IdentityEdge]:
-        db = await self._db(tenant_id)
+    async def query_identity_edges(self, instance_id: str, entity_id: str) -> list[IdentityEdge]:
+        db = await self._db(instance_id)
         async with db.execute(
-            "SELECT data FROM identity_edges WHERE tenant_id=? AND (source_id=? OR target_id=?)",
-            (tenant_id, entity_id, entity_id),
+            "SELECT data FROM identity_edges WHERE instance_id=? AND (source_id=? OR target_id=?)",
+            (instance_id, entity_id, entity_id),
         ) as cur:
             rows = await cur.fetchall()
         return [_build_dataclass(IdentityEdge, _from_json(r["data"])) for r in rows]
@@ -706,30 +706,30 @@ class SqliteStateStore(StateStore):
 
     async def save_pending_action(self, action: PendingAction) -> None:
         now = utc_now()
-        db = await self._db(action.tenant_id)
+        db = await self._db(action.instance_id)
         data = _to_json(action)
         await db.execute(
             "INSERT OR REPLACE INTO pending_actions "
-            "(id, tenant_id, status, data, created_at, updated_at) "
+            "(id, instance_id, status, data, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?)",
-            (action.id, action.tenant_id, getattr(action, "status", "pending"),
+            (action.id, action.instance_id, getattr(action, "status", "pending"),
              data, now, now),
         )
         await db.commit()
 
-    async def get_pending_actions(self, tenant_id: str, status: str = "pending") -> list[PendingAction]:
-        db = await self._db(tenant_id)
+    async def get_pending_actions(self, instance_id: str, status: str = "pending") -> list[PendingAction]:
+        db = await self._db(instance_id)
         async with db.execute(
-            "SELECT data FROM pending_actions WHERE tenant_id=? AND status=?",
-            (tenant_id, status),
+            "SELECT data FROM pending_actions WHERE instance_id=? AND status=?",
+            (instance_id, status),
         ) as cur:
             rows = await cur.fetchall()
         return [_build_dataclass(PendingAction, _from_json(r["data"])) for r in rows]
 
-    async def update_pending_action(self, tenant_id: str, action_id: str, updates: dict) -> None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM pending_actions WHERE id=? AND tenant_id=?",
-                              (action_id, tenant_id)) as cur:
+    async def update_pending_action(self, instance_id: str, action_id: str, updates: dict) -> None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM pending_actions WHERE id=? AND instance_id=?",
+                              (action_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return
@@ -737,8 +737,8 @@ class SqliteStateStore(StateStore):
         d.update(updates)
         now = utc_now()
         await db.execute(
-            "UPDATE pending_actions SET data=?, status=?, updated_at=? WHERE id=? AND tenant_id=?",
-            (json.dumps(d, ensure_ascii=False), d.get("status", "pending"), now, action_id, tenant_id),
+            "UPDATE pending_actions SET data=?, status=?, updated_at=? WHERE id=? AND instance_id=?",
+            (json.dumps(d, ensure_ascii=False), d.get("status", "pending"), now, action_id, instance_id),
         )
         await db.commit()
 
@@ -748,39 +748,39 @@ class SqliteStateStore(StateStore):
 
     async def save_context_space(self, space: ContextSpace) -> None:
         now = utc_now()
-        db = await self._db(space.tenant_id)
+        db = await self._db(space.instance_id)
         data = _to_json(space)
         await db.execute(
             "INSERT OR REPLACE INTO context_spaces "
-            "(id, tenant_id, name, parent_id, status, space_type, posture, "
+            "(id, instance_id, name, parent_id, status, space_type, posture, "
             "is_default, data, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (space.id, space.tenant_id, space.name, space.parent_id or "",
+            (space.id, space.instance_id, space.name, space.parent_id or "",
              space.status, space.space_type, space.posture,
              1 if space.is_default else 0, data, now, now),
         )
         await db.commit()
 
-    async def get_context_space(self, tenant_id: str, space_id: str) -> ContextSpace | None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM context_spaces WHERE id=? AND tenant_id=?",
-                              (space_id, tenant_id)) as cur:
+    async def get_context_space(self, instance_id: str, space_id: str) -> ContextSpace | None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM context_spaces WHERE id=? AND instance_id=?",
+                              (space_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return None
         return _build_dataclass(ContextSpace, _from_json(row["data"]))
 
-    async def list_context_spaces(self, tenant_id: str) -> list[ContextSpace]:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM context_spaces WHERE tenant_id=?",
-                              (tenant_id,)) as cur:
+    async def list_context_spaces(self, instance_id: str) -> list[ContextSpace]:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM context_spaces WHERE instance_id=?",
+                              (instance_id,)) as cur:
             rows = await cur.fetchall()
         return [_build_dataclass(ContextSpace, _from_json(r["data"])) for r in rows]
 
-    async def update_context_space(self, tenant_id: str, space_id: str, updates: dict) -> None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM context_spaces WHERE id=? AND tenant_id=?",
-                              (space_id, tenant_id)) as cur:
+    async def update_context_space(self, instance_id: str, space_id: str, updates: dict) -> None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM context_spaces WHERE id=? AND instance_id=?",
+                              (space_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return
@@ -790,11 +790,11 @@ class SqliteStateStore(StateStore):
         data_str = json.dumps(d, ensure_ascii=False)
         await db.execute(
             "UPDATE context_spaces SET name=?, parent_id=?, status=?, space_type=?, "
-            "posture=?, is_default=?, data=?, updated_at=? WHERE id=? AND tenant_id=?",
+            "posture=?, is_default=?, data=?, updated_at=? WHERE id=? AND instance_id=?",
             (d.get("name", ""), d.get("parent_id", ""), d.get("status", "active"),
              d.get("space_type", "general"), d.get("posture", ""),
              1 if d.get("is_default") else 0, data_str, d["updated_at"],
-             space_id, tenant_id),
+             space_id, instance_id),
         )
         await db.commit()
 
@@ -803,30 +803,30 @@ class SqliteStateStore(StateStore):
     # ===================================================================
 
     async def append_space_notice(
-        self, tenant_id: str, space_id: str, text: str,
+        self, instance_id: str, space_id: str, text: str,
         source: str = "", notice_type: str = "cross_domain",
     ) -> None:
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         await db.execute(
-            "INSERT INTO space_notices (tenant_id, space_id, text, source, notice_type, created_at) "
+            "INSERT INTO space_notices (instance_id, space_id, text, source, notice_type, created_at) "
             "VALUES (?,?,?,?,?,?)",
-            (tenant_id, space_id, text, source, notice_type, utc_now()),
+            (instance_id, space_id, text, source, notice_type, utc_now()),
         )
         await db.commit()
 
-    async def drain_space_notices(self, tenant_id: str, space_id: str) -> list[dict]:
-        db = await self._db(tenant_id)
+    async def drain_space_notices(self, instance_id: str, space_id: str) -> list[dict]:
+        db = await self._db(instance_id)
         async with db.execute(
             "SELECT text, source, notice_type, created_at FROM space_notices "
-            "WHERE tenant_id=? AND space_id=?",
-            (tenant_id, space_id),
+            "WHERE instance_id=? AND space_id=?",
+            (instance_id, space_id),
         ) as cur:
             rows = await cur.fetchall()
         if not rows:
             return []
         notices = [dict(r) for r in rows]
-        await db.execute("DELETE FROM space_notices WHERE tenant_id=? AND space_id=?",
-                         (tenant_id, space_id))
+        await db.execute("DELETE FROM space_notices WHERE instance_id=? AND space_id=?",
+                         (instance_id, space_id))
         await db.commit()
         return notices
 
@@ -834,33 +834,33 @@ class SqliteStateStore(StateStore):
     # Whispers and Suppressions
     # ===================================================================
 
-    async def save_whisper(self, tenant_id: str, whisper) -> None:
+    async def save_whisper(self, instance_id: str, whisper) -> None:
         from kernos.kernel.awareness import Whisper
         from dataclasses import asdict as _asdict
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         d = _asdict(whisper)
         # Dedup: skip if a pending whisper with the same foresight_signal exists
         _signal = d.get("foresight_signal", "")
         if _signal:
             async with db.execute(
-                "SELECT id FROM whispers WHERE tenant_id=? AND foresight_signal=? AND surfaced_at=''",
-                (tenant_id, _signal),
+                "SELECT id FROM whispers WHERE instance_id=? AND foresight_signal=? AND surfaced_at=''",
+                (instance_id, _signal),
             ) as cur:
                 existing = await cur.fetchone()
             if existing:
                 logger.info("WHISPER_DEDUP: signal=%r already pending, skipping", _signal[:60])
                 return
         data = json.dumps({k: v for k, v in d.items()
-                           if k not in ("id", "whisper_id", "tenant_id", "insight_text",
+                           if k not in ("id", "whisper_id", "instance_id", "insight_text",
                                         "delivery_class", "source_space_id", "target_space_id",
                                         "foresight_signal", "knowledge_entry_id", "surfaced_at",
                                         "created_at")}, ensure_ascii=False)
         await db.execute(
             "INSERT OR REPLACE INTO whispers "
-            "(id, tenant_id, insight_text, delivery_class, source_space_id, target_space_id, "
+            "(id, instance_id, insight_text, delivery_class, source_space_id, target_space_id, "
             "foresight_signal, knowledge_entry_id, surfaced_at, data, created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (d.get("whisper_id", ""), tenant_id, d.get("insight_text", ""),
+            (d.get("whisper_id", ""), instance_id, d.get("insight_text", ""),
              d.get("delivery_class", "ambient"), d.get("source_space_id", ""),
              d.get("target_space_id", ""), _signal,
              d.get("knowledge_entry_id", ""), d.get("surfaced_at", ""),
@@ -868,13 +868,13 @@ class SqliteStateStore(StateStore):
         )
         await db.commit()
 
-    async def get_pending_whispers(self, tenant_id: str) -> list:
+    async def get_pending_whispers(self, instance_id: str) -> list:
         from kernos.kernel.awareness import Whisper
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         now = datetime.now(timezone.utc)
         async with db.execute(
-            "SELECT * FROM whispers WHERE tenant_id=? AND surfaced_at=''",
-            (tenant_id,),
+            "SELECT * FROM whispers WHERE instance_id=? AND surfaced_at=''",
+            (instance_id,),
         ) as cur:
             rows = await cur.fetchall()
         pending = []
@@ -913,38 +913,38 @@ class SqliteStateStore(StateStore):
         if expired_ids:
             for wid in expired_ids:
                 await db.execute(
-                    "UPDATE whispers SET surfaced_at=? WHERE id=? AND tenant_id=?",
-                    (now.isoformat(), wid, tenant_id),
+                    "UPDATE whispers SET surfaced_at=? WHERE id=? AND instance_id=?",
+                    (now.isoformat(), wid, instance_id),
                 )
             await db.commit()
         return pending
 
-    async def mark_whisper_surfaced(self, tenant_id: str, whisper_id: str) -> None:
-        db = await self._db(tenant_id)
+    async def mark_whisper_surfaced(self, instance_id: str, whisper_id: str) -> None:
+        db = await self._db(instance_id)
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "UPDATE whispers SET surfaced_at=? WHERE id=? AND tenant_id=?",
-            (now, whisper_id, tenant_id),
+            "UPDATE whispers SET surfaced_at=? WHERE id=? AND instance_id=?",
+            (now, whisper_id, instance_id),
         )
         await db.commit()
 
-    async def delete_whisper(self, tenant_id: str, whisper_id: str) -> None:
-        db = await self._db(tenant_id)
-        await db.execute("DELETE FROM whispers WHERE id=? AND tenant_id=?",
-                         (whisper_id, tenant_id))
+    async def delete_whisper(self, instance_id: str, whisper_id: str) -> None:
+        db = await self._db(instance_id)
+        await db.execute("DELETE FROM whispers WHERE id=? AND instance_id=?",
+                         (whisper_id, instance_id))
         await db.commit()
 
-    async def save_suppression(self, tenant_id: str, entry) -> None:
+    async def save_suppression(self, instance_id: str, entry) -> None:
         from dataclasses import asdict as _asdict
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         d = _asdict(entry)
         # Upsert by whisper_id
         await db.execute(
             "INSERT INTO suppressions "
-            "(tenant_id, whisper_id, foresight_signal, resolution_state, data, created_at, resolved_at) "
+            "(instance_id, whisper_id, foresight_signal, resolution_state, data, created_at, resolved_at) "
             "VALUES (?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET resolution_state=?, resolved_at=?, data=?",
-            (tenant_id, d.get("whisper_id", ""), d.get("foresight_signal", ""),
+            (instance_id, d.get("whisper_id", ""), d.get("foresight_signal", ""),
              d.get("resolution_state", "surfaced"), json.dumps(d, ensure_ascii=False),
              d.get("created_at", utc_now()), d.get("resolved_at", ""),
              d.get("resolution_state", "surfaced"), d.get("resolved_at", ""),
@@ -953,13 +953,13 @@ class SqliteStateStore(StateStore):
         await db.commit()
 
     async def get_suppressions(
-        self, tenant_id: str, knowledge_entry_id: str = "",
+        self, instance_id: str, knowledge_entry_id: str = "",
         whisper_id: str = "", foresight_signal: str = "",
     ) -> list:
         from kernos.kernel.awareness import SuppressionEntry
-        db = await self._db(tenant_id)
-        clauses = ["tenant_id=?"]
-        params: list = [tenant_id]
+        db = await self._db(instance_id)
+        clauses = ["instance_id=?"]
+        params: list = [instance_id]
         if knowledge_entry_id:
             clauses.append("data LIKE ?")
             params.append(f'%"{knowledge_entry_id}"%')
@@ -974,10 +974,10 @@ class SqliteStateStore(StateStore):
             rows = await cur.fetchall()
         return [_build_dataclass(SuppressionEntry, _from_json(r["data"])) for r in rows]
 
-    async def delete_suppression(self, tenant_id: str, whisper_id: str) -> None:
-        db = await self._db(tenant_id)
-        await db.execute("DELETE FROM suppressions WHERE tenant_id=? AND whisper_id=?",
-                         (tenant_id, whisper_id))
+    async def delete_suppression(self, instance_id: str, whisper_id: str) -> None:
+        db = await self._db(instance_id)
+        await db.execute("DELETE FROM suppressions WHERE instance_id=? AND whisper_id=?",
+                         (instance_id, whisper_id))
         await db.commit()
 
     # ===================================================================
@@ -985,12 +985,12 @@ class SqliteStateStore(StateStore):
     # ===================================================================
 
     async def get_conversation_summary(
-        self, tenant_id: str, conversation_id: str,
+        self, instance_id: str, conversation_id: str,
     ) -> ConversationSummary | None:
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         async with db.execute(
-            "SELECT data FROM conversation_summaries WHERE tenant_id=? AND conversation_id=?",
-            (tenant_id, conversation_id),
+            "SELECT data FROM conversation_summaries WHERE instance_id=? AND conversation_id=?",
+            (instance_id, conversation_id),
         ) as cur:
             row = await cur.fetchone()
         if not row:
@@ -999,28 +999,28 @@ class SqliteStateStore(StateStore):
 
     async def save_conversation_summary(self, summary: ConversationSummary) -> None:
         now = utc_now()
-        db = await self._db(summary.tenant_id)
+        db = await self._db(summary.instance_id)
         data = _to_json(summary)
         await db.execute(
             "INSERT INTO conversation_summaries "
-            "(tenant_id, conversation_id, platform, message_count, data, created_at, updated_at) "
+            "(instance_id, conversation_id, platform, message_count, data, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?) "
-            "ON CONFLICT(tenant_id, conversation_id) DO UPDATE SET "
+            "ON CONFLICT(instance_id, conversation_id) DO UPDATE SET "
             "message_count=?, data=?, updated_at=?",
-            (summary.tenant_id, summary.conversation_id,
+            (summary.instance_id, summary.conversation_id,
              summary.platform, summary.message_count, data, now, now,
              summary.message_count, data, now),
         )
         await db.commit()
 
     async def list_conversations(
-        self, tenant_id: str, active_only: bool = True, limit: int = 20,
+        self, instance_id: str, active_only: bool = True, limit: int = 20,
     ) -> list[ConversationSummary]:
-        db = await self._db(tenant_id)
+        db = await self._db(instance_id)
         async with db.execute(
-            "SELECT data FROM conversation_summaries WHERE tenant_id=? "
+            "SELECT data FROM conversation_summaries WHERE instance_id=? "
             "ORDER BY updated_at DESC LIMIT ?",
-            (tenant_id, limit),
+            (instance_id, limit),
         ) as cur:
             rows = await cur.fetchall()
         return [_build_dataclass(ConversationSummary, _from_json(r["data"])) for r in rows]
@@ -1034,34 +1034,34 @@ class SqliteStateStore(StateStore):
 
     async def save_preference(self, pref: Preference) -> None:
         now = utc_now()
-        db = await self._db(pref.tenant_id)
+        db = await self._db(pref.instance_id)
         data = _to_json(pref)
         await db.execute(
             "INSERT OR REPLACE INTO preferences "
-            "(id, tenant_id, category, subject, status, data, created_at, updated_at) "
+            "(id, instance_id, category, subject, status, data, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            (pref.id, pref.tenant_id, getattr(pref, "category", ""),
+            (pref.id, pref.instance_id, getattr(pref, "category", ""),
              getattr(pref, "subject", ""), getattr(pref, "status", "active"),
              data, now, now),
         )
         await db.commit()
 
-    async def get_preference(self, tenant_id: str, pref_id: str) -> Preference | None:
-        db = await self._db(tenant_id)
-        async with db.execute("SELECT data FROM preferences WHERE id=? AND tenant_id=?",
-                              (pref_id, tenant_id)) as cur:
+    async def get_preference(self, instance_id: str, pref_id: str) -> Preference | None:
+        db = await self._db(instance_id)
+        async with db.execute("SELECT data FROM preferences WHERE id=? AND instance_id=?",
+                              (pref_id, instance_id)) as cur:
             row = await cur.fetchone()
         if not row:
             return None
         return _build_dataclass(Preference, _from_json(row["data"]))
 
     async def query_preferences(
-        self, tenant_id: str, status: str = "", subject: str = "",
+        self, instance_id: str, status: str = "", subject: str = "",
         category: str = "", scope: str = "", active_only: bool = True,
     ) -> list[Preference]:
-        db = await self._db(tenant_id)
-        clauses = ["tenant_id=?"]
-        params: list = [tenant_id]
+        db = await self._db(instance_id)
+        clauses = ["instance_id=?"]
+        params: list = [instance_id]
         if status:
             clauses.append("status=?")
             params.append(status)

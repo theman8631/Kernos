@@ -62,4 +62,4 @@ When the agent claims to have used a tool but no tool was actually called (itera
 | GateResult, PendingAction | `kernos/kernel/reasoning.py` |
 | Hallucination retry | `kernos/kernel/reasoning.py` (HALLUCINATION_CHECK/RETRY) |
 | Confirmation replay | `kernos/messages/handler.py` |
-| Permission overrides | `kernos/kernel/state.py` (TenantProfile.permission_overrides) |
+| Permission overrides | `kernos/kernel/state.py` (InstanceProfile.permission_overrides) |

@@ -24,7 +24,7 @@ from kernos.kernel.events import JsonEventStream, emit_event
 from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 load_dotenv()
 
@@ -122,7 +122,7 @@ async def debug_command(interaction: discord.Interaction, category: str = "trace
 
     await interaction.response.defer(ephemeral=True)
     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-    tenant_id = os.getenv("KERNOS_INSTANCE_ID", "")
+    instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
 
     if category == "friction":
         friction_dir = Path(data_dir) / "diagnostics" / "friction"
@@ -142,7 +142,7 @@ async def debug_command(interaction: discord.Interaction, category: str = "trace
     elif category == "trace":
         if handler and hasattr(handler, '_runtime_trace'):
             import asyncio
-            events = await handler._runtime_trace.read(tenant_id, turns=10)
+            events = await handler._runtime_trace.read(instance_id, turns=10)
             if not events:
                 await interaction.followup.send("No trace events.", ephemeral=True)
                 return
@@ -158,7 +158,7 @@ async def debug_command(interaction: discord.Interaction, category: str = "trace
 
     elif category == "specs":
         from kernos.utils import _safe_name
-        specs_base = Path(data_dir) / _safe_name(tenant_id) / "specs"
+        specs_base = Path(data_dir) / _safe_name(instance_id) / "specs"
         lines = []
         for stage in ("proposed", "submitted", "implemented"):
             stage_dir = specs_base / stage
@@ -221,7 +221,7 @@ async def wipe_command(interaction: discord.Interaction) -> None:
     # 4. Delete everything inside data/ — produces a truly blank state.
     #    .env and secrets/ live outside data/ so they are never touched.
     #    All tenant data (conversations, state, events, spaces, awareness,
-    #    compaction, audit, archive) lives under data/{tenant_id}/.
+    #    compaction, audit, archive) lives under data/{instance_id}/.
     if data_dir.exists():
         shutil.rmtree(data_dir)
         logger.info("Wipe: removed %s", data_dir)
@@ -258,19 +258,19 @@ async def on_ready():
         state = SqliteStateStore(data_dir)
         logger.info("State backend: SQLite (WAL mode)")
 
-    # Initialize instance database (shared across all tenants)
+    # Initialize instance database (shared across all instances)
     from kernos.kernel.instance_db import InstanceDB
     instance_db = InstanceDB(data_dir)
     try:
         await instance_db.connect()
         # Register the owner as a member
         _owner_discord = os.getenv("DISCORD_OWNER_ID", "")
-        _tenant_id = os.getenv("KERNOS_INSTANCE_ID", "")
-        if _owner_discord and _tenant_id:
+        _instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
+        if _owner_discord and _instance_id:
             await instance_db.ensure_owner(
                 member_id=f"discord:{_owner_discord}",
                 display_name="owner",
-                tenant_id=_tenant_id,
+                instance_id=_instance_id,
                 platform="discord",
                 channel_id=_owner_discord,
             )
@@ -342,7 +342,7 @@ async def on_ready():
     await mcp_manager.connect_all()
 
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
     # Build capability registry from known catalog, promote connected servers
@@ -483,7 +483,7 @@ async def on_ready():
         except Exception as exc:
             logger.warning("Failed to send pending confirmation: %s", exc)
 
-    # AwarenessEvaluator starts lazily per-tenant on first message
+    # AwarenessEvaluator starts lazily per-instance on first message
     # (handler._maybe_start_evaluator). No startup guessing needed.
 
     # Recover any plans interrupted by crash/restart
@@ -606,9 +606,9 @@ async def on_message(message):
     # Pick emoji from active space if available, else defaults
     _emoji_pool = _DEFAULT_THINKING_EMOJI
     try:
-        _tp = await handler.state.get_tenant_profile(normalized.tenant_id)
+        _tp = await handler.state.get_instance_profile(normalized.instance_id)
         if _tp and _tp.last_active_space_id:
-            _sp = await handler.state.get_context_space(normalized.tenant_id, _tp.last_active_space_id)
+            _sp = await handler.state.get_context_space(normalized.instance_id, _tp.last_active_space_id)
             if _sp and getattr(_sp, 'thinking_emoji', None):
                 _emoji_pool = _sp.thinking_emoji
     except Exception:

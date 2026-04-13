@@ -135,7 +135,7 @@ async def test_match_no_existing_returns_add(tmp_path):
 async def test_match_one_existing_different_params_returns_update(tmp_path):
     store = JsonStateStore(str(tmp_path))
     existing = Preference(
-        id="pref_exist01", tenant_id=T, intent="4 min notification",
+        id="pref_exist01", instance_id=T, intent="4 min notification",
         category="notification", subject="calendar_events", action="notify",
         parameters={"lead_time_minutes": 4}, status="active", created_at=utc_now(),
     )
@@ -156,7 +156,7 @@ async def test_match_multiple_existing_returns_clarify(tmp_path):
     store = JsonStateStore(str(tmp_path))
     for i in range(2):
         await store.add_preference(Preference(
-            id=f"pref_multi{i}", tenant_id=T, intent=f"Notification {i}",
+            id=f"pref_multi{i}", instance_id=T, intent=f"Notification {i}",
             category="notification", subject="calendar_events", action="notify",
             parameters={"lead_time_minutes": i * 5}, status="active", created_at=utc_now(),
         ))
@@ -200,7 +200,7 @@ async def test_commit_add_creates_preference(tmp_path):
 async def test_commit_update_modifies_existing(tmp_path):
     store = JsonStateStore(str(tmp_path))
     existing = Preference(
-        id="pref_upd01", tenant_id=T, intent="4 min",
+        id="pref_upd01", instance_id=T, intent="4 min",
         category="notification", subject="calendar_events", action="notify",
         parameters={"lead_time_minutes": 4}, status="active", created_at=utc_now(),
     )

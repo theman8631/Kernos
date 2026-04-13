@@ -12,9 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-def _content_hash(tenant_id: str, subject: str, content: str) -> str:
-    """SHA256[:16] of (tenant_id|subject|content) for deduplication."""
-    raw = f"{tenant_id}|{subject.lower().strip()}|{content.lower().strip()}"
+def _content_hash(instance_id: str, subject: str, content: str) -> str:
+    """SHA256[:16] of (instance_id|subject|content) for deduplication."""
+    raw = f"{instance_id}|{subject.lower().strip()}|{content.lower().strip()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 from kernos.kernel.soul import Soul
@@ -49,10 +49,10 @@ def _pending_id() -> str:
 
 
 @dataclass
-class TenantProfile:
-    """Enriched tenant record. Richer than TenantStore's tenant.json."""
+class InstanceProfile:
+    """Enriched tenant record. Richer than InstanceStore's tenant.json."""
 
-    tenant_id: str
+    instance_id: str
     status: str                     # "active", "suspended", "cancelled"
     created_at: str                 # ISO timestamp
     platforms: dict[str, Any] = field(default_factory=dict)
@@ -78,7 +78,7 @@ class KnowledgeEntry:
 
     # --- Identity ---
     id: str                          # "know_{uuid8}"
-    tenant_id: str
+    instance_id: str
     category: str                    # "entity", "fact", "preference", "pattern"
     subject: str                     # What this is about
     content: str                     # The knowledge text
@@ -94,7 +94,7 @@ class KnowledgeEntry:
 
     # --- Provenance (extended) ---
     supersedes: str = ""             # ID of the entry this one replaces (provenance chain)
-    content_hash: str = ""           # SHA256[:16] of (tenant_id|subject|content) for dedup
+    content_hash: str = ""           # SHA256[:16] of (instance_id|subject|content) for dedup
     entity_node_id: str = ""         # Link to EntityNode (populated by entity resolution)
 
     # --- Legacy compat: durability is retired, kept for reading old JSON ---
@@ -180,7 +180,7 @@ class CovenantRule:
 
     # --- Preserved from ContractRule (backwards compatible) ---
     id: str                          # "rule_{uuid8}"
-    tenant_id: str
+    instance_id: str
     capability: str                  # "calendar", "email", "general"
     rule_type: str                   # "must", "must_not", "preference", "escalation"
     description: str                 # Human-readable — what the agent reads and user sees
@@ -259,7 +259,7 @@ def classify_covenant_tier(rule_type: str, source: str) -> str:
     return "situational"
 
 
-def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
+def default_covenant_rules(instance_id: str, now: str) -> list[CovenantRule]:
     """The conservative-by-default rules every new tenant starts with."""
     rules = [
         ("spirit", "general", "You are making someone's life genuinely better. Your energy in the work you do with them, the warmth you bring to the relationship, matters. You are a signal of good judgment to the path you two will embark. When in doubt, your realness and helpfulness will guide you. You got this."),
@@ -274,7 +274,7 @@ def default_covenant_rules(tenant_id: str, now: str) -> list[CovenantRule]:
     return [
         CovenantRule(
             id=_rule_id(),
-            tenant_id=tenant_id,
+            instance_id=instance_id,
             capability=cap,
             rule_type=rt,
             description=desc,
@@ -304,7 +304,7 @@ class PendingAction:
     """A tool call staged for user confirmation by the Dispatch Interceptor."""
 
     id: str                     # "pending_{uuid8}"
-    tenant_id: str
+    instance_id: str
     rule_id: str                # Which CovenantRule triggered this
     tool_name: str
     tool_arguments: dict = field(default_factory=dict)
@@ -325,7 +325,7 @@ class PendingAction:
 class ConversationSummary:
     """Lightweight metadata about a conversation. Not the messages themselves."""
 
-    tenant_id: str
+    instance_id: str
     conversation_id: str
     platform: str
     message_count: int
@@ -355,7 +355,7 @@ class Preference:
 
     # Identity
     id: str                       # "pref_{uuid8}"
-    tenant_id: str
+    instance_id: str
 
     # Intent
     intent: str                   # Original user language that created this
@@ -396,17 +396,17 @@ class StateStore(ABC):
 
     # Soul
     @abstractmethod
-    async def get_soul(self, tenant_id: str) -> Soul | None: ...
+    async def get_soul(self, instance_id: str) -> Soul | None: ...
 
     @abstractmethod
     async def save_soul(self, soul: Soul, *, source: str = "", trigger: str = "") -> None: ...
 
     # Tenant Profile
     @abstractmethod
-    async def get_tenant_profile(self, tenant_id: str) -> TenantProfile | None: ...
+    async def get_instance_profile(self, instance_id: str) -> InstanceProfile | None: ...
 
     @abstractmethod
-    async def save_tenant_profile(self, tenant_id: str, profile: TenantProfile) -> None: ...
+    async def save_instance_profile(self, instance_id: str, profile: InstanceProfile) -> None: ...
 
     # Knowledge
     @abstractmethod
@@ -415,7 +415,7 @@ class StateStore(ABC):
     @abstractmethod
     async def query_knowledge(
         self,
-        tenant_id: str,
+        instance_id: str,
         subject: str | None = None,
         category: str | None = None,
         tags: list[str] | None = None,
@@ -424,7 +424,7 @@ class StateStore(ABC):
     ) -> list[KnowledgeEntry]: ...
 
     @abstractmethod
-    async def update_knowledge(self, tenant_id: str, entry_id: str, updates: dict) -> None: ...
+    async def update_knowledge(self, instance_id: str, entry_id: str, updates: dict) -> None: ...
 
     @abstractmethod
     async def save_knowledge_entry(self, entry: KnowledgeEntry) -> None:
@@ -432,18 +432,18 @@ class StateStore(ABC):
         ...
 
     @abstractmethod
-    async def get_knowledge_entry(self, tenant_id: str, entry_id: str) -> "KnowledgeEntry | None":
+    async def get_knowledge_entry(self, instance_id: str, entry_id: str) -> "KnowledgeEntry | None":
         """Get a single KnowledgeEntry by ID. Returns None if not found."""
         ...
 
     @abstractmethod
-    async def get_knowledge_hashes(self, tenant_id: str) -> set[str]:
+    async def get_knowledge_hashes(self, instance_id: str) -> set[str]:
         """Return set of content_hash values for all active entries. O(1) dedup check."""
         ...
 
     @abstractmethod
     async def get_knowledge_by_hash(
-        self, tenant_id: str, content_hash: str
+        self, instance_id: str, content_hash: str
     ) -> "KnowledgeEntry | None":
         """Find an active entry by content_hash. Returns None if not found."""
         ...
@@ -452,7 +452,7 @@ class StateStore(ABC):
     @abstractmethod
     async def get_contract_rules(
         self,
-        tenant_id: str,
+        instance_id: str,
         capability: str | None = None,
         rule_type: str | None = None,
         active_only: bool = True,
@@ -461,7 +461,7 @@ class StateStore(ABC):
     @abstractmethod
     async def query_covenant_rules(
         self,
-        tenant_id: str,
+        instance_id: str,
         capability: str | None = None,
         context_space_scope: list[str | None] | None = None,
         active_only: bool = True,
@@ -477,30 +477,30 @@ class StateStore(ABC):
     async def add_contract_rule(self, rule: CovenantRule) -> None: ...
 
     @abstractmethod
-    async def update_contract_rule(self, tenant_id: str, rule_id: str, updates: dict) -> None: ...
+    async def update_contract_rule(self, instance_id: str, rule_id: str, updates: dict) -> None: ...
 
     # Entity Resolution (Phase 2A will implement real logic)
     @abstractmethod
     async def save_entity_node(self, node: EntityNode) -> None: ...
 
     @abstractmethod
-    async def get_entity_node(self, tenant_id: str, entity_id: str) -> EntityNode | None: ...
+    async def get_entity_node(self, instance_id: str, entity_id: str) -> EntityNode | None: ...
 
     @abstractmethod
     async def query_entity_nodes(
         self,
-        tenant_id: str,
+        instance_id: str,
         name: str | None = None,
         entity_type: str | None = None,
         active_only: bool = True,
     ) -> list[EntityNode]: ...
 
     @abstractmethod
-    async def save_identity_edge(self, tenant_id: str, edge: IdentityEdge) -> None: ...
+    async def save_identity_edge(self, instance_id: str, edge: IdentityEdge) -> None: ...
 
     @abstractmethod
     async def query_identity_edges(
-        self, tenant_id: str, entity_id: str
+        self, instance_id: str, entity_id: str
     ) -> list[IdentityEdge]: ...
 
     # Pending Actions (Phase 2B Dispatch Interceptor)
@@ -509,12 +509,12 @@ class StateStore(ABC):
 
     @abstractmethod
     async def get_pending_actions(
-        self, tenant_id: str, status: str = "pending"
+        self, instance_id: str, status: str = "pending"
     ) -> list[PendingAction]: ...
 
     @abstractmethod
     async def update_pending_action(
-        self, tenant_id: str, action_id: str, updates: dict
+        self, instance_id: str, action_id: str, updates: dict
     ) -> None: ...
 
     # Context Spaces (Phase 2A routing builds on top of this)
@@ -523,31 +523,31 @@ class StateStore(ABC):
 
     @abstractmethod
     async def get_context_space(
-        self, tenant_id: str, space_id: str
+        self, instance_id: str, space_id: str
     ) -> ContextSpace | None: ...
 
     @abstractmethod
-    async def list_context_spaces(self, tenant_id: str) -> list[ContextSpace]: ...
+    async def list_context_spaces(self, instance_id: str) -> list[ContextSpace]: ...
 
     @abstractmethod
     async def update_context_space(
-        self, tenant_id: str, space_id: str, updates: dict
+        self, instance_id: str, space_id: str, updates: dict
     ) -> None: ...
 
-    async def list_child_spaces(self, tenant_id: str, parent_id: str) -> list[ContextSpace]:
+    async def list_child_spaces(self, instance_id: str, parent_id: str) -> list[ContextSpace]:
         """Return all spaces with parent_id matching the given space."""
-        all_spaces = await self.list_context_spaces(tenant_id)
+        all_spaces = await self.list_context_spaces(instance_id)
         return [s for s in all_spaces if s.parent_id == parent_id and s.status == "active"]
 
     # Space notices (cross-domain signals)
     async def append_space_notice(
-        self, tenant_id: str, space_id: str, text: str,
+        self, instance_id: str, space_id: str, text: str,
         source: str = "", notice_type: str = "cross_domain",
     ) -> None:
         """Append a notice to a space's pending notice queue."""
         ...
 
-    async def drain_space_notices(self, tenant_id: str, space_id: str) -> list[dict]:
+    async def drain_space_notices(self, instance_id: str, space_id: str) -> list[dict]:
         """Return and clear all pending notices for a space."""
         ...
 
@@ -556,7 +556,7 @@ class StateStore(ABC):
     @abstractmethod
     async def query_knowledge_by_foresight(
         self,
-        tenant_id: str,
+        instance_id: str,
         expires_before: str,
         expires_after: str = "",
         space_id: str = "",
@@ -573,34 +573,34 @@ class StateStore(ABC):
 
     # Whispers and Suppressions (Phase 3C: Proactive Awareness)
     @abstractmethod
-    async def save_whisper(self, tenant_id: str, whisper: "Whisper") -> None:
+    async def save_whisper(self, instance_id: str, whisper: "Whisper") -> None:
         """Save a pending whisper to the queue."""
         ...
 
     @abstractmethod
-    async def get_pending_whispers(self, tenant_id: str) -> "list[Whisper]":
-        """Get all unsurfaced whispers for a tenant."""
+    async def get_pending_whispers(self, instance_id: str) -> "list[Whisper]":
+        """Get all unsurfaced whispers for an instance."""
         ...
 
     @abstractmethod
-    async def mark_whisper_surfaced(self, tenant_id: str, whisper_id: str) -> None:
+    async def mark_whisper_surfaced(self, instance_id: str, whisper_id: str) -> None:
         """Mark a whisper as surfaced (set surfaced_at)."""
         ...
 
     @abstractmethod
-    async def delete_whisper(self, tenant_id: str, whisper_id: str) -> None:
+    async def delete_whisper(self, instance_id: str, whisper_id: str) -> None:
         """Delete a whisper from the pending queue. Used for queue bounding."""
         ...
 
     @abstractmethod
-    async def save_suppression(self, tenant_id: str, entry: "SuppressionEntry") -> None:
+    async def save_suppression(self, instance_id: str, entry: "SuppressionEntry") -> None:
         """Save a suppression entry."""
         ...
 
     @abstractmethod
     async def get_suppressions(
         self,
-        tenant_id: str,
+        instance_id: str,
         knowledge_entry_id: str = "",
         whisper_id: str = "",
         foresight_signal: str = "",
@@ -609,14 +609,14 @@ class StateStore(ABC):
         ...
 
     @abstractmethod
-    async def delete_suppression(self, tenant_id: str, whisper_id: str) -> None:
+    async def delete_suppression(self, instance_id: str, whisper_id: str) -> None:
         """Delete a suppression entry. Used when knowledge updates clear a suppression."""
         ...
 
     # Conversation Summaries
     @abstractmethod
     async def get_conversation_summary(
-        self, tenant_id: str, conversation_id: str
+        self, instance_id: str, conversation_id: str
     ) -> ConversationSummary | None: ...
 
     @abstractmethod
@@ -624,7 +624,7 @@ class StateStore(ABC):
 
     @abstractmethod
     async def list_conversations(
-        self, tenant_id: str, active_only: bool = True, limit: int = 20
+        self, instance_id: str, active_only: bool = True, limit: int = 20
     ) -> list[ConversationSummary]: ...
 
     # Preferences (Phase 6A)
@@ -639,14 +639,14 @@ class StateStore(ABC):
         ...
 
     @abstractmethod
-    async def get_preference(self, tenant_id: str, pref_id: str) -> Preference | None:
+    async def get_preference(self, instance_id: str, pref_id: str) -> Preference | None:
         """Get a single preference by ID."""
         ...
 
     @abstractmethod
     async def query_preferences(
         self,
-        tenant_id: str,
+        instance_id: str,
         status: str = "",
         subject: str = "",
         category: str = "",

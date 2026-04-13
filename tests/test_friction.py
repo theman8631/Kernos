@@ -14,7 +14,7 @@ class TestRequestForSurfaced:
     async def test_detects_request_for_surfaced_calendar(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="Create a calendar event for 10pm",
             response_text="I'll create that for you",
             tool_trace=[{
@@ -34,7 +34,7 @@ class TestRequestForSurfaced:
     async def test_no_signal_when_tool_not_surfaced(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="Create a calendar event",
             response_text="I'll need to request that tool",
             tool_trace=[{
@@ -54,7 +54,7 @@ class TestRequestForSurfaced:
     async def test_no_signal_when_no_request_tool_call(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="Create a calendar event",
             response_text="Done!",
             tool_trace=[{"name": "create-event", "input": {"summary": "Test"}, "success": True}],
@@ -76,7 +76,7 @@ class TestStaleData:
     async def test_detects_time_query_without_tool(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What time is it?",
             response_text="It's 3:45 PM",
             tool_trace=[],
@@ -93,7 +93,7 @@ class TestStaleData:
     async def test_no_signal_when_tool_called(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What time is it?",
             response_text="It's 3:45 PM",
             tool_trace=[{"name": "get-current-time", "input": {}, "success": True}],
@@ -115,7 +115,7 @@ class TestToolNotUsed:
     async def test_detects_state_query_without_inspect(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What preferences do I have set up?",
             response_text="You like to wake up at 6:30.",
             tool_trace=[],
@@ -131,7 +131,7 @@ class TestToolNotUsed:
     async def test_no_signal_when_inspect_called(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What preferences do I have set up?",
             response_text="Here are your preferences...",
             tool_trace=[{"name": "inspect_state", "input": {}, "success": True}],
@@ -153,7 +153,7 @@ class TestMergedDropped:
     async def test_detects_short_response_for_merged(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="Three things at once",
             response_text="OK",  # Way too short for 3 messages
             tool_trace=[],
@@ -169,7 +169,7 @@ class TestMergedDropped:
     async def test_no_signal_for_single_message(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="Just one thing",
             response_text="OK",
             tool_trace=[],
@@ -191,7 +191,7 @@ class TestPrefMissed:
     async def test_detects_missed_preference(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="From now on, always remind me before meetings",
             response_text="Got it!",
             tool_trace=[],
@@ -207,7 +207,7 @@ class TestPrefMissed:
     async def test_no_signal_when_detected(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="From now on, always remind me before meetings",
             response_text="Got it!",
             tool_trace=[],
@@ -223,7 +223,7 @@ class TestPrefMissed:
     async def test_no_signal_for_non_preference(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What's the weather like today?",
             response_text="It's sunny.",
             tool_trace=[],
@@ -245,7 +245,7 @@ class TestProviderErrorRepeated:
     async def test_detects_repeated_errors(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="hello",
             response_text="hi",
             tool_trace=[],
@@ -268,7 +268,7 @@ class TestProviderErrorRepeated:
     async def test_no_signal_for_single_error(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="hello",
             response_text="hi",
             tool_trace=[],
@@ -285,7 +285,7 @@ class TestProviderErrorRepeated:
     async def test_no_signal_for_no_errors(self):
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="hello",
             response_text="hi",
             tool_trace=[],
@@ -308,7 +308,7 @@ class TestScheduleQueryFalsePositive:
         """'What's on my schedule?' + list-events called → no friction."""
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What reminders do I have?",
             response_text="You have a meeting at 3pm",
             tool_trace=[{"name": "list-events", "input": {}, "success": True}],
@@ -325,7 +325,7 @@ class TestScheduleQueryFalsePositive:
         """'What reminders do I have?' + no manage_schedule → friction."""
         obs = FrictionObserver(enabled=True, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What reminders do I have?",
             response_text="You don't have any reminders",
             tool_trace=[],
@@ -347,7 +347,7 @@ class TestReportWriting:
     async def test_report_written_to_disk(self, tmp_path):
         obs = FrictionObserver(enabled=True, data_dir=str(tmp_path))
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What time is it?",
             response_text="It's noon",
             tool_trace=[],
@@ -374,7 +374,7 @@ class TestReportWriting:
     async def test_report_contains_recommendation(self, tmp_path):
         obs = FrictionObserver(enabled=True, data_dir=str(tmp_path))
         await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What time is it?",
             response_text="It's noon",
             tool_trace=[],
@@ -398,7 +398,7 @@ class TestDisabled:
     async def test_disabled_produces_no_signals(self):
         obs = FrictionObserver(enabled=False, data_dir="/tmp/friction_test")
         signals = await obs.observe(
-            tenant_id="t1",
+            instance_id="t1",
             user_message="What time is it?",
             response_text="It's noon",
             tool_trace=[],

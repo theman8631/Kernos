@@ -47,17 +47,17 @@ def test_inbound_fields(adapter):
     assert msg.conversation_id == OWNER_PHONE
 
 
-def test_inbound_tenant_id_is_owner_phone(adapter):
-    """Phase 1A: tenant_id is always OWNER_PHONE_NUMBER, not the sender."""
+def test_inbound_instance_id_is_owner_phone(adapter):
+    """Phase 1A: instance_id is always OWNER_PHONE_NUMBER, not the sender."""
     msg = adapter.inbound(SAMPLE_FORM)
-    assert msg.tenant_id == OWNER_PHONE
+    assert msg.instance_id == OWNER_PHONE
 
 
-def test_inbound_unknown_sender_tenant_id_is_still_owner_phone(adapter):
+def test_inbound_unknown_sender_instance_id_is_still_owner_phone(adapter):
     """Even unknown senders resolve to the single owner tenant in Phase 1A."""
     data = {**SAMPLE_FORM, "From": OTHER_PHONE}
     msg = adapter.inbound(data)
-    assert msg.tenant_id == OWNER_PHONE
+    assert msg.instance_id == OWNER_PHONE
 
 
 # --- Outbound: basic TwiML ---

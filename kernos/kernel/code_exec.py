@@ -83,7 +83,7 @@ def _validate_filename(name: str) -> bool:
 
 
 async def execute_code(
-    tenant_id: str,
+    instance_id: str,
     space_id: str,
     code: str,
     timeout_seconds: int = DEFAULT_TIMEOUT,
@@ -99,7 +99,7 @@ async def execute_code(
 
     # Resolve the space's working directory
     space_dir = str(
-        Path(data_dir) / _safe_name(tenant_id) / "spaces" / space_id / "files"
+        Path(data_dir) / _safe_name(instance_id) / "spaces" / space_id / "files"
     )
     os.makedirs(space_dir, exist_ok=True)
 

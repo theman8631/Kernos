@@ -53,7 +53,7 @@ The `daily` space is special: it's the default, always exists, and catches every
 ```
 ContextSpace
 ├── id: str                          # "space_{uuid8}"
-├── tenant_id: str                   # Isolation
+├── instance_id: str                   # Isolation
 │
 ├── name: str                        # "TTRPG — Aethoria Campaign"
 ├── description: str                 # One-line, used in handoff annotations

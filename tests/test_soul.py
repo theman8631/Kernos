@@ -26,7 +26,7 @@ def _now() -> str:
 
 
 def test_soul_defaults():
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     assert soul.hatched is False
     assert soul.bootstrap_graduated is False
     assert soul.interaction_count == 0
@@ -35,9 +35,9 @@ def test_soul_defaults():
     assert soul.emoji == "🜁"
 
 
-def test_soul_tenant_id_required():
-    soul = Soul(tenant_id="discord:123")
-    assert soul.tenant_id == "discord:123"
+def test_soul_instance_id_required():
+    soul = Soul(instance_id="discord:123")
+    assert soul.instance_id == "discord:123"
 
 
 # ---------------------------------------------------------------------------
@@ -69,25 +69,25 @@ def test_template_dataclass():
 # ---------------------------------------------------------------------------
 
 
-async def test_get_soul_returns_none_for_new_tenant(tmp_path):
+async def test_get_soul_returns_none_for_new_instance(tmp_path):
     store = JsonStateStore(tmp_path)
-    assert await store.get_soul("new_tenant") is None
+    assert await store.get_soul("new_instance") is None
 
 
 async def test_save_and_get_soul(tmp_path):
     store = JsonStateStore(tmp_path)
-    soul = Soul(tenant_id="t1", user_name="Alice", hatched=True)
+    soul = Soul(instance_id="t1", user_name="Alice", hatched=True)
     await store.save_soul(soul)
     fetched = await store.get_soul("t1")
     assert fetched is not None
-    assert fetched.tenant_id == "t1"
+    assert fetched.instance_id == "t1"
     assert fetched.user_name == "Alice"
     assert fetched.hatched is True
 
 
 async def test_save_soul_overwrites(tmp_path):
     store = JsonStateStore(tmp_path)
-    soul = Soul(tenant_id="t1", interaction_count=5)
+    soul = Soul(instance_id="t1", interaction_count=5)
     await store.save_soul(soul)
     soul.interaction_count = 10
     await store.save_soul(soul)
@@ -95,10 +95,10 @@ async def test_save_soul_overwrites(tmp_path):
     assert fetched.interaction_count == 10
 
 
-async def test_soul_isolated_per_tenant(tmp_path):
+async def test_soul_isolated_per_instance(tmp_path):
     store = JsonStateStore(tmp_path)
-    await store.save_soul(Soul(tenant_id="t1", user_name="Alice"))
-    await store.save_soul(Soul(tenant_id="t2", user_name="Bob"))
+    await store.save_soul(Soul(instance_id="t1", user_name="Alice"))
+    await store.save_soul(Soul(instance_id="t2", user_name="Bob"))
     s1 = await store.get_soul("t1")
     s2 = await store.get_soul("t2")
     assert s1.user_name == "Alice"
@@ -111,13 +111,13 @@ async def test_soul_isolated_per_tenant(tmp_path):
 
 
 def test_soul_not_mature_empty():
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     assert _is_soul_mature(soul) is False
 
 
 def test_soul_not_mature_missing_fields():
     soul = Soul(
-        tenant_id="t1",
+        instance_id="t1",
         user_name="Alice",
         communication_style="direct",
         interaction_count=5,  # below threshold
@@ -127,7 +127,7 @@ def test_soul_not_mature_missing_fields():
 
 def test_soul_mature_all_signals():
     soul = Soul(
-        tenant_id="t1",
+        instance_id="t1",
         user_name="Alice",
         communication_style="direct",
         interaction_count=10,
@@ -137,7 +137,7 @@ def test_soul_mature_all_signals():
 
 def test_soul_not_mature_missing_user_knowledge():
     soul = Soul(
-        tenant_id="t1",
+        instance_id="t1",
         user_name="Alice",
         communication_style="direct",
         interaction_count=15,
@@ -180,12 +180,12 @@ def _make_message_stub(platform: str = "discord"):
         platform_capabilities=["text"],
         conversation_id="conv1",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="t1",
+        instance_id="t1",
     )
 
 
 def test_system_prompt_includes_operating_principles():
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     msg = _make_message_stub()
     now = _now()
     rules = default_contract_rules("t1", now)
@@ -195,21 +195,21 @@ def test_system_prompt_includes_operating_principles():
 
 
 def test_system_prompt_includes_bootstrap_when_not_graduated():
-    soul = Soul(tenant_id="t1", bootstrap_graduated=False)
+    soul = Soul(instance_id="t1", bootstrap_graduated=False)
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert PRIMARY_TEMPLATE.bootstrap_prompt[:50] in prompt
 
 
 def test_system_prompt_excludes_bootstrap_when_graduated():
-    soul = Soul(tenant_id="t1", bootstrap_graduated=True)
+    soul = Soul(instance_id="t1", bootstrap_graduated=True)
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert PRIMARY_TEMPLATE.bootstrap_prompt[:50] not in prompt
 
 
 def test_system_prompt_uses_soul_personality_when_set():
-    soul = Soul(tenant_id="t1", personality_notes="Very sarcastic and dry.")
+    soul = Soul(instance_id="t1", personality_notes="Very sarcastic and dry.")
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert "Very sarcastic and dry." in prompt
@@ -217,21 +217,21 @@ def test_system_prompt_uses_soul_personality_when_set():
 
 
 def test_system_prompt_uses_default_personality_when_soul_empty():
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert PRIMARY_TEMPLATE.default_personality[:20] in prompt
 
 
 def test_system_prompt_includes_user_name_when_set():
-    soul = Soul(tenant_id="t1", user_name="Greg")
+    soul = Soul(instance_id="t1", user_name="Greg")
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert "Greg" in prompt
 
 
 def test_system_prompt_excludes_user_context_section_when_empty():
-    soul = Soul(tenant_id="t1")  # all empty
+    soul = Soul(instance_id="t1")  # all empty
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert "USER CONTEXT:" not in prompt
@@ -239,18 +239,18 @@ def test_system_prompt_excludes_user_context_section_when_empty():
 
 def test_system_prompt_includes_knowledge_entries():
     from kernos.kernel.state import KnowledgeEntry
-    soul = Soul(tenant_id="t1", user_name="JT")
+    soul = Soul(instance_id="t1", user_name="JT")
     msg = _make_message_stub()
     entries = [
         KnowledgeEntry(
-            id="ke1", tenant_id="t1", category="fact", subject="user",
+            id="ke1", instance_id="t1", category="fact", subject="user",
             content="Lives in Seattle", confidence="stated",
             source_event_id="", source_description="test",
             created_at=_now(), last_referenced=_now(), tags=[],
             lifecycle_archetype="structural",
         ),
         KnowledgeEntry(
-            id="ke2", tenant_id="t1", category="fact", subject="user",
+            id="ke2", instance_id="t1", category="fact", subject="user",
             content="Building Kernos", confidence="stated",
             source_event_id="", source_description="test",
             created_at=_now(), last_referenced=_now(), tags=[],
@@ -269,14 +269,14 @@ def test_system_prompt_includes_knowledge_entries():
 
 def test_system_prompt_ignores_deprecated_soul_user_context():
     """soul.user_context should NOT appear in the prompt even if populated."""
-    soul = Soul(tenant_id="t1", user_context="old stale data")
+    soul = Soul(instance_id="t1", user_context="old stale data")
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert "old stale data" not in prompt
 
 
 def test_system_prompt_includes_contracts():
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     msg = _make_message_stub()
     now = _now()
     rules = default_contract_rules("t1", now)
@@ -285,7 +285,7 @@ def test_system_prompt_includes_contracts():
 
 
 def test_system_prompt_includes_capability_prompt():
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     msg = _make_message_stub()
     cap_prompt = "CONNECTED: Google Calendar"
     prompt = _build_system_prompt(msg, cap_prompt, soul, PRIMARY_TEMPLATE, [])
@@ -307,7 +307,7 @@ def _make_normalized_message(platform: str = "discord"):
         platform_capabilities=["text"],
         conversation_id="conv1",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="discord:user123",
+        instance_id="discord:user123",
     )
 
 
@@ -328,8 +328,8 @@ def _make_handler_with_state():
     from kernos.kernel.engine import TaskEngine
     from kernos.kernel.events import EventStream
     from kernos.kernel.reasoning import Provider, ReasoningService
-    from kernos.kernel.state import StateStore, TenantProfile
-    from kernos.persistence import AuditStore, ConversationStore, TenantStore
+    from kernos.kernel.state import StateStore, InstanceProfile
+    from kernos.persistence import AuditStore, ConversationStore, InstanceStore
 
     mcp = MagicMock(spec=MCPClientManager)
     mcp.get_tools.return_value = []
@@ -338,17 +338,17 @@ def _make_handler_with_state():
     conversations.get_recent.return_value = []
     conversations.append.return_value = None
 
-    tenants = AsyncMock(spec=TenantStore)
-    tenants.get_or_create.return_value = {"tenant_id": "t1", "status": "active"}
+    tenants = AsyncMock(spec=InstanceStore)
+    tenants.get_or_create.return_value = {"instance_id": "t1", "status": "active"}
 
     audit = AsyncMock(spec=AuditStore)
     events = AsyncMock(spec=EventStream)
 
     state = AsyncMock(spec=StateStore)
-    state.get_tenant_profile.return_value = TenantProfile(
-        tenant_id="t1", status="active", created_at=_now()
+    state.get_instance_profile.return_value = InstanceProfile(
+        instance_id="t1", status="active", created_at=_now()
     )
-    state.save_tenant_profile.return_value = None
+    state.save_instance_profile.return_value = None
     state.get_soul.return_value = None  # No soul yet — triggers hatch
     state.save_soul.return_value = None
     state.get_conversation_summary.return_value = None
@@ -392,13 +392,13 @@ async def test_hatch_creates_and_marks_soul():
     assert saved_soul.interaction_count == 1
 
 
-async def test_returning_tenant_loads_existing_soul():
+async def test_returninginstance_loads_existing_soul():
     handler, mock_provider, state = _make_handler_with_state()
     mock_provider.complete.return_value = _make_mock_provider_response("Welcome back!")
 
     # Simulate an existing hatched soul
     existing_soul = Soul(
-        tenant_id="t1",
+        instance_id="t1",
         hatched=True,
         hatched_at=_now(),
         interaction_count=5,

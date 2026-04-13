@@ -37,7 +37,7 @@ def _now_iso():
 
 
 def _make_knowledge_entry(
-    tenant_id: str = "test_tenant",
+    instance_id: str = "test_tenant",
     entry_id: str = "know_test1",
     foresight_signal: str = "Dentist appointment",
     foresight_expires: str = "",
@@ -48,7 +48,7 @@ def _make_knowledge_entry(
         foresight_expires = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
     return KnowledgeEntry(
         id=entry_id,
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category="fact",
         subject="calendar",
         content="User has a dentist appointment at 3pm today",
@@ -1013,7 +1013,7 @@ class TestInterruptPush:
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
             id="space_daily",
-            tenant_id="test_tenant",
+            instance_id="test_tenant",
             name="General",
             last_active_at=datetime.now(timezone.utc).isoformat(),
             is_default=True,

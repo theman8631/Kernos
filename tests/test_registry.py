@@ -184,7 +184,7 @@ def test_build_capability_prompt_with_connected():
     from kernos.kernel.spaces import ContextSpace
     reg = CapabilityRegistry()
     reg.register(_calendar_cap(status=CapabilityStatus.CONNECTED))
-    system_space = ContextSpace(id="sys", tenant_id="t1", name="System", space_type="system")
+    system_space = ContextSpace(id="sys", instance_id="t1", name="System", space_type="system")
     prompt = reg.build_capability_prompt(space=system_space)
     assert "CONNECTED CAPABILITIES" in prompt
     assert "Google Calendar" in prompt
@@ -205,7 +205,7 @@ def test_build_capability_prompt_includes_both_tiers():
     reg = CapabilityRegistry()
     reg.register(_calendar_cap(status=CapabilityStatus.CONNECTED))
     reg.register(_gmail_cap(status=CapabilityStatus.AVAILABLE))
-    system_space = ContextSpace(id="sys", tenant_id="t1", name="System", space_type="system")
+    system_space = ContextSpace(id="sys", instance_id="t1", name="System", space_type="system")
     prompt = reg.build_capability_prompt(space=system_space)
     assert "CONNECTED CAPABILITIES" in prompt
     assert "AVAILABLE CAPABILITIES" in prompt

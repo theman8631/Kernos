@@ -23,7 +23,7 @@ from kernos.messages.handler import _maybe_append_name_ask
 # ---------------------------------------------------------------------------
 
 def _soul(**kwargs) -> Soul:
-    return Soul(tenant_id="t1", **kwargs)
+    return Soul(instance_id="t1", **kwargs)
 
 
 def _mock_state() -> AsyncMock:
@@ -41,12 +41,12 @@ def _mock_events() -> AsyncMock:
     return events
 
 
-def _knowledge_entry(tenant_id: str, subject: str, content: str,
+def _knowledge_entry(instance_id: str, subject: str, content: str,
                      confidence: str = "stated", active: bool = True) -> KnowledgeEntry:
-    h = _content_hash(tenant_id, subject, content)
+    h = _content_hash(instance_id, subject, content)
     return KnowledgeEntry(
         id=f"know_test_{h}",
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category="fact",
         subject=subject,
         content=content,
@@ -243,7 +243,7 @@ def test_content_hash_different_content():
     assert h1 != h2
 
 
-def test_content_hash_tenant_isolated():
+def test_content_hashinstance_isolated():
     h1 = _content_hash("t1", "user", "runs a bakery")
     h2 = _content_hash("t2", "user", "runs a bakery")
     assert h1 != h2
@@ -270,7 +270,7 @@ async def test_write_entry_writes_new():
     state = _mock_state()
     events = _mock_events()
     wrote = await _write_entry(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="runs a bakery",
         confidence="stated",
         source_description="test", existing_hashes=set(),
@@ -288,7 +288,7 @@ async def test_write_entry_skips_duplicate_hash():
     events = _mock_events()
     h = _content_hash("t1", "user", "runs a bakery")
     wrote = await _write_entry(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="runs a bakery",
         confidence="stated",
         source_description="test", existing_hashes={h},
@@ -305,7 +305,7 @@ async def test_write_entry_inferred_discarded_when_stated_exists():
     state.query_knowledge.return_value = [existing]
 
     wrote = await _write_entry(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="different content",
         confidence="inferred",
         source_description="test", existing_hashes=set(),
@@ -322,7 +322,7 @@ async def test_write_entry_stated_marks_inferred_inactive():
     state.query_knowledge.return_value = [inferred_entry]
 
     await _write_entry(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="definitely a developer",
         confidence="stated",
         source_description="test", existing_hashes=set(),
@@ -340,7 +340,7 @@ async def test_write_entry_hash_added_to_existing_set():
     events = _mock_events()
     existing = set()
     await _write_entry(
-        state=state, events=events, tenant_id="t1",
+        state=state, events=events, instance_id="t1",
         category="fact", subject="user", content="runs a bakery",
         confidence="stated",
         source_description="test", existing_hashes=existing,
@@ -363,7 +363,7 @@ async def test_apply_correction_marks_old_inactive():
     soul = _soul(user_name="Alice")
 
     await _apply_correction(
-        state=state, events=events, soul=soul, tenant_id="t1",
+        state=state, events=events, soul=soul, instance_id="t1",
         field="user_name", old_value="Alice", new_value="JT",
         now="2026-01-01T00:00:00+00:00",
     )
@@ -386,7 +386,7 @@ async def test_apply_correction_updates_soul_name():
     soul = _soul(user_name="Alice")
 
     await _apply_correction(
-        state=state, events=events, soul=soul, tenant_id="t1",
+        state=state, events=events, soul=soul, instance_id="t1",
         field="user_name", old_value="Alice", new_value="JT",
         now="2026-01-01T00:00:00+00:00",
     )
@@ -402,7 +402,7 @@ async def test_apply_correction_updates_soul_name_dot_notation():
     soul = _soul(user_name="Alice")
 
     await _apply_correction(
-        state=state, events=events, soul=soul, tenant_id="t1",
+        state=state, events=events, soul=soul, instance_id="t1",
         field="user.name", old_value="Alice", new_value="JT",
         now="2026-01-01T00:00:00+00:00",
     )
@@ -418,7 +418,7 @@ async def test_apply_correction_no_old_entry_still_creates_new():
     soul = _soul()
 
     await _apply_correction(
-        state=state, events=events, soul=soul, tenant_id="t1",
+        state=state, events=events, soul=soul, instance_id="t1",
         field="occupation", old_value="teacher", new_value="nurse",
         now="2026-01-01T00:00:00+00:00",
     )
@@ -437,7 +437,7 @@ async def test_apply_correction_emits_event():
     soul = _soul()
 
     await _apply_correction(
-        state=state, events=events, soul=soul, tenant_id="t1",
+        state=state, events=events, soul=soul, instance_id="t1",
         field="name", old_value="old", new_value="new",
         now="2026-01-01T00:00:00+00:00",
     )
@@ -470,7 +470,7 @@ async def test_tier2_writes_facts():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I run a bakery"}],
         soul=soul, state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     # Facts are no longer written per-turn — harvested at boundaries
@@ -494,7 +494,7 @@ async def test_tier2_does_not_append_to_soul_user_context():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I run a bakery"}],
         soul=soul, state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     # soul.user_context still not touched (deprecated)
@@ -512,7 +512,7 @@ async def test_tier2_skips_empty_turns():
     await run_tier2_extraction(
         recent_turns=[],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     reasoning.complete_simple.assert_not_called()
@@ -528,7 +528,7 @@ async def test_tier2_handles_malformed_json_gracefully():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "hi"}],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
     state.save_knowledge_entry.assert_not_called()
 
@@ -543,7 +543,7 @@ async def test_tier2_handles_reasoning_error_gracefully():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "hi"}],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
 
@@ -562,7 +562,7 @@ async def test_tier2_emits_knowledge_extracted_on_writes():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I'm a nurse"}],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     # Facts no longer extracted per-turn → no knowledge.extracted event for facts
@@ -584,7 +584,7 @@ async def test_tier2_no_emit_when_nothing_written():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "hi there"}],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     events.emit.assert_not_called()
@@ -608,7 +608,7 @@ async def test_tier2_deduplicates_via_hash():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I run a bakery"}],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     state.save_knowledge_entry.assert_not_called()
@@ -633,7 +633,7 @@ async def test_tier2_writes_teacher_fact():
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I'm a teacher"}],
         soul=_soul(), state=state, events=events,
-        reasoning_service=reasoning, tenant_id="t1",
+        reasoning_service=reasoning, instance_id="t1",
     )
 
     # Facts harvested at boundaries, not per-turn
@@ -657,7 +657,7 @@ async def test_coordinator_tier1_updates_name():
             user_message="my name is Alice",
             recent_turns=[],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     assert soul.user_name == "Alice"
@@ -675,7 +675,7 @@ async def test_coordinator_tier1_emits_event_on_update():
             user_message="my name is Alice",
             recent_turns=[],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     events.emit.assert_called()
@@ -696,7 +696,7 @@ async def test_coordinator_tier1_overwrites_existing_name():
             user_message="my name is Alice",
             recent_turns=[],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     assert soul.user_name == "Alice"
@@ -715,7 +715,7 @@ async def test_coordinator_tier1_no_save_when_name_unchanged():
             user_message="my name is Alice",
             recent_turns=[],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     assert soul.user_name == "Alice"
@@ -733,7 +733,7 @@ async def test_coordinator_tier1_updates_style():
             user_message="Please be direct with me",
             recent_turns=[],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     assert soul.communication_style == "direct"
@@ -750,7 +750,7 @@ async def test_coordinator_tier1_no_update_on_no_match():
             user_message="What's the weather like?",
             recent_turns=[],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     state.save_soul.assert_not_called()
@@ -768,7 +768,7 @@ async def test_coordinator_schedules_tier2():
             user_message="Hello",
             recent_turns=[{"role": "user", "content": "Hello"}],
             soul=soul, state=state, events=events,
-            reasoning_service=reasoning, tenant_id="t1",
+            reasoning_service=reasoning, instance_id="t1",
         )
 
     mock_create_task.assert_called_once()
@@ -781,40 +781,40 @@ async def test_coordinator_schedules_tier2():
 
 def test_name_ask_not_force_appended_on_first_interaction():
     """Bootstrap prompt handles the name question — no force-append."""
-    soul = Soul(tenant_id="t1", interaction_count=0, user_name="")
+    soul = Soul(instance_id="t1", interaction_count=0, user_name="")
     result = _maybe_append_name_ask("Hello! Nice to meet you.", soul)
     # Should return unchanged — no force-appended name question
     assert result == "Hello! Nice to meet you."
 
 
 def test_name_ask_not_appended_if_name_set():
-    soul = Soul(tenant_id="t1", interaction_count=0, user_name="Alice")
+    soul = Soul(instance_id="t1", interaction_count=0, user_name="Alice")
     result = _maybe_append_name_ask("Hello!", soul)
     assert result == "Hello!"
 
 
 def test_name_ask_not_appended_if_not_first_interaction():
-    soul = Soul(tenant_id="t1", interaction_count=3, user_name="")
+    soul = Soul(instance_id="t1", interaction_count=3, user_name="")
     result = _maybe_append_name_ask("Hello!", soul)
     assert result == "Hello!"
 
 
 def test_name_ask_not_appended_if_response_already_asks_name():
-    soul = Soul(tenant_id="t1", interaction_count=0, user_name="")
+    soul = Soul(instance_id="t1", interaction_count=0, user_name="")
     response = "Hey! What's your name?"
     result = _maybe_append_name_ask(response, soul)
     assert result == response
 
 
 def test_name_ask_not_appended_if_response_says_call_you():
-    soul = Soul(tenant_id="t1", interaction_count=0, user_name="")
+    soul = Soul(instance_id="t1", interaction_count=0, user_name="")
     response = "Hi there! What should I call you?"
     result = _maybe_append_name_ask(response, soul)
     assert result == response
 
 
 def test_name_ask_not_appended_if_response_asks_who_am_i_talking():
-    soul = Soul(tenant_id="t1", interaction_count=0, user_name="")
+    soul = Soul(instance_id="t1", interaction_count=0, user_name="")
     response = "Hey! Who am I talking to today?"
     result = _maybe_append_name_ask(response, soul)
     assert result == response

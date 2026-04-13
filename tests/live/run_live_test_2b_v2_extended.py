@@ -40,7 +40,7 @@ from kernos.kernel.engine import TaskEngine
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.spaces import ContextSpace
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ def make_message(content: str) -> NormalizedMessage:
         platform_capabilities=["text"],
         conversation_id=CONVERSATION_ID,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT_ID,
+        instance_id=TENANT_ID,
     )
 
 
@@ -110,7 +110,7 @@ class ExtendedLiveTestRunner:
                 cap.status = CapabilityStatus.CONNECTED
                 cap.tools = [t["name"] for t in tools]
 
-        tenants = JsonTenantStore(DATA_DIR)
+        tenants = JsonInstanceStore(DATA_DIR)
         audit = JsonAuditStore(DATA_DIR)
         provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
         reasoning = ReasoningService(provider, events, mcp_manager, audit)
@@ -158,7 +158,7 @@ class ExtendedLiveTestRunner:
         else:
             new_dnd = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
-                tenant_id=TENANT_ID,
+                instance_id=TENANT_ID,
                 name="Veloria Campaign",
                 description=(
                     "An ongoing D&D campaign set in Veloria, a high-magic world. "
@@ -184,7 +184,7 @@ class ExtendedLiveTestRunner:
         else:
             biz_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
-                tenant_id=TENANT_ID,
+                instance_id=TENANT_ID,
                 name="Ironclad Consulting",
                 description=(
                     "Business consulting work. Client Henderson and the Ironclad account. "
@@ -209,7 +209,7 @@ class ExtendedLiveTestRunner:
         else:
             studio_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
-                tenant_id=TENANT_ID,
+                instance_id=TENANT_ID,
                 name="Home Studio",
                 description=(
                     "Personal project: building a home recording studio. "
@@ -238,7 +238,7 @@ class ExtendedLiveTestRunner:
         response = await self.handler.process(make_message(content))
         elapsed = time.monotonic() - t0
 
-        profile = await self.state.get_tenant_profile(TENANT_ID)
+        profile = await self.state.get_instance_profile(TENANT_ID)
         active_space_id = profile.last_active_space_id if profile else ""
         active_space = None
         if active_space_id:

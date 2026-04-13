@@ -5,7 +5,7 @@ When developer mode is enabled on a tenant profile (`developer_mode: true`), int
 ## How It Works
 
 1. An `ErrorBuffer` in the message handler captures WARNING and ERROR log entries from `kernos.*` loggers
-2. Entries are stored per-tenant in an in-memory buffer (max 20 entries, oldest dropped beyond that)
+2. Entries are stored per-instance in an in-memory buffer (max 20 entries, oldest dropped beyond that)
 3. When the next message arrives, if `developer_mode` is on, pending errors are formatted as a `[DEVELOPER: Errors since last message]` block and appended to the system prompt
 4. The buffer is cleared after injection — no stale errors accumulate
 
@@ -34,4 +34,4 @@ When developer mode is off (the default), errors are logged to the console as no
 
 ## Enabling Developer Mode
 
-Set `developer_mode: true` on the tenant profile in `data/{tenant_id}/state/profile.json`, or through the admin interface when available.
+Set `developer_mode: true` on the tenant profile in `data/{instance_id}/state/profile.json`, or through the admin interface when available.

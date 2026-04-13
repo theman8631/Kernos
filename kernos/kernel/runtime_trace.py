@@ -72,20 +72,20 @@ class RuntimeTrace:
     def __init__(self, data_dir: str) -> None:
         self._data_dir = data_dir
 
-    def _trace_path(self, tenant_id: str) -> Path:
+    def _trace_path(self, instance_id: str) -> Path:
         return (
             Path(self._data_dir)
-            / _safe_name(tenant_id)
+            / _safe_name(instance_id)
             / "diagnostics"
             / "runtime_trace.jsonl"
         )
 
-    async def append_turn(self, tenant_id: str, events: list[TraceEvent]) -> None:
+    async def append_turn(self, instance_id: str, events: list[TraceEvent]) -> None:
         """Append a turn's events to the trace file. Rotates if needed."""
         if not events:
             return
 
-        path = self._trace_path(tenant_id)
+        path = self._trace_path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Append events as JSONL
@@ -147,7 +147,7 @@ class RuntimeTrace:
 
     async def read(
         self,
-        tenant_id: str,
+        instance_id: str,
         turns: int = 10,
         since: str | None = None,
         filter_level: str | None = None,
@@ -161,7 +161,7 @@ class RuntimeTrace:
             filter_level: "error"|"warning"|"gate"|"timing"|"friction"|"provider"|"tool"
             turn_id: Specific turn ID
         """
-        path = self._trace_path(tenant_id)
+        path = self._trace_path(instance_id)
         if not path.exists():
             return []
 

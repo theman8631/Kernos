@@ -1,7 +1,7 @@
 """Embedding generation for entity resolution and fact deduplication.
 
 Uses Voyage AI's voyage-3-lite model (Anthropic-adjacent, purpose-built for retrieval).
-Embeddings are computed on write and stored in a separate embeddings.json per tenant.
+Embeddings are computed on write and stored in a separate embeddings.json per-instance.
 At personal scale (~hundreds of entries), cost is negligible (~$0.00001 per embedding).
 """
 import asyncio

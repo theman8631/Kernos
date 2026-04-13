@@ -20,7 +20,7 @@ from kernos.kernel.events import JsonEventStream
 from kernos.messages.handler import (
     MessageHandler,
     SecureInputState,
-    _safe_tenant_name,
+    _safe_instance_name,
     resolve_mcp_credentials,
     _SECURE_API_TRIGGER,
 )
@@ -35,16 +35,16 @@ TENANT_ID = "discord:1234567890"
 CONVERSATION_ID = "discord:1234567890"
 
 
-def _make_message(content: str, tenant_id: str = TENANT_ID) -> NormalizedMessage:
+def _make_message(content: str, instance_id: str = TENANT_ID) -> NormalizedMessage:
     return NormalizedMessage(
-        sender=tenant_id.split(":")[1],
+        sender=instance_id.split(":")[1],
         content=content,
         platform="discord",
         platform_capabilities=["text"],
         conversation_id=CONVERSATION_ID,
         sender_auth_level=AuthLevel.owner_verified,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
     )
 
 
@@ -78,7 +78,7 @@ def _make_handler(tmp_path, mcp=None, registry=None):
     """Create a MessageHandler with real stores and minimal mocks for testing."""
     from kernos.kernel.events import JsonEventStream
     from kernos.kernel.state_json import JsonStateStore
-    from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+    from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
     from kernos.kernel.reasoning import ReasoningService, Provider
     from kernos.kernel.engine import TaskEngine
 
@@ -90,7 +90,7 @@ def _make_handler(tmp_path, mcp=None, registry=None):
     events = JsonEventStream(data_dir)
     state = JsonStateStore(data_dir)
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
 
     if mcp is None:
@@ -332,7 +332,7 @@ class TestCredentialStorage:
         handler = _make_handler(tmp_path)
         await handler._store_credential(TENANT_ID, "google-calendar", "my-secret-key")
 
-        safe_name = _safe_tenant_name(TENANT_ID)
+        safe_name = _safe_instance_name(TENANT_ID)
         secret_path = Path(handler._secrets_dir) / safe_name / "google-calendar.key"
         assert secret_path.exists()
         assert secret_path.read_text() == "my-secret-key"
@@ -341,14 +341,14 @@ class TestCredentialStorage:
         handler = _make_handler(tmp_path)
         await handler._store_credential(TENANT_ID, "test-tool", "secret")
 
-        safe_name = _safe_tenant_name(TENANT_ID)
+        safe_name = _safe_instance_name(TENANT_ID)
         secret_path = Path(handler._secrets_dir) / safe_name / "test-tool.key"
         mode = oct(secret_path.stat().st_mode)[-3:]
         assert mode == "600"
 
     def test_resolve_mcp_credentials_injects_value(self, tmp_path):
         secrets_dir = str(tmp_path / "secrets")
-        safe = _safe_tenant_name(TENANT_ID)
+        safe = _safe_instance_name(TENANT_ID)
         key_dir = Path(secrets_dir) / safe
         key_dir.mkdir(parents=True)
         (key_dir / "my-tool.key").write_text("actual-api-key")
@@ -381,7 +381,7 @@ class TestCredentialStorage:
         assert result["STATIC_VAR"] == "literal-value"
 
     def test_credential_safe_name_sanitizes_colon(self):
-        result = _safe_tenant_name("discord:1234567890")
+        result = _safe_instance_name("discord:1234567890")
         assert ":" not in result
 
     async def test_credential_preserved_on_disconnect(self, tmp_path):
@@ -394,7 +394,7 @@ class TestCredentialStorage:
         await handler._disconnect_capability(TENANT_ID, "my-tool")
 
         # Credential file still exists
-        safe_name = _safe_tenant_name(TENANT_ID)
+        safe_name = _safe_instance_name(TENANT_ID)
         secret_path = Path(handler._secrets_dir) / safe_name / "my-tool.key"
         assert secret_path.exists()
         assert secret_path.read_text() == "my-key"
@@ -555,7 +555,7 @@ class TestConfigPersistence:
         from kernos.kernel.spaces import ContextSpace
         system_space = ContextSpace(
             id=f"space_{uuid.uuid4().hex[:8]}",
-            tenant_id=TENANT_ID,
+            instance_id=TENANT_ID,
             name="System",
             description="System",
             space_type="system",
@@ -586,7 +586,7 @@ class TestConfigPersistence:
         from kernos.kernel.spaces import ContextSpace
         system_space = ContextSpace(
             id=f"space_{uuid.uuid4().hex[:8]}",
-            tenant_id=TENANT_ID, name="System", description="System",
+            instance_id=TENANT_ID, name="System", description="System",
             space_type="system", status="active", is_default=False,
             created_at=datetime.now(timezone.utc).isoformat(),
             last_active_at=datetime.now(timezone.utc).isoformat(),
@@ -611,7 +611,7 @@ class TestConfigPersistence:
         from kernos.kernel.spaces import ContextSpace
         system_space = ContextSpace(
             id=f"space_{uuid.uuid4().hex[:8]}",
-            tenant_id=TENANT_ID, name="System", description="System",
+            instance_id=TENANT_ID, name="System", description="System",
             space_type="system", status="active", is_default=False,
             created_at=datetime.now(timezone.utc).isoformat(),
             last_active_at=datetime.now(timezone.utc).isoformat(),
@@ -632,7 +632,7 @@ class TestConfigPersistence:
         assert loaded_cap.status == CapabilityStatus.SUPPRESSED
 
     async def test_maybe_load_mcp_config_only_runs_once(self, tmp_path):
-        """Config is only loaded once per tenant per process lifetime."""
+        """Config is only loaded once per_instance per process lifetime."""
         handler = _make_handler(tmp_path)
         handler._get_system_space = AsyncMock(return_value=None)
 
@@ -654,7 +654,7 @@ class TestConfigPersistence:
         from kernos.kernel.spaces import ContextSpace
         system_space = ContextSpace(
             id=f"space_{uuid.uuid4().hex[:8]}",
-            tenant_id=TENANT_ID, name="System", description="System",
+            instance_id=TENANT_ID, name="System", description="System",
             space_type="system", status="active", is_default=False,
             created_at=datetime.now(timezone.utc).isoformat(),
             last_active_at=datetime.now(timezone.utc).isoformat(),
@@ -720,7 +720,7 @@ class TestInstallEvents:
         # Check event was emitted
         data_dir = str(tmp_path / "data")
         import glob
-        event_files = glob.glob(f"{data_dir}/{_safe_tenant_name(TENANT_ID)}/events/*.json")
+        event_files = glob.glob(f"{data_dir}/{_safe_instance_name(TENANT_ID)}/events/*.json")
         found = False
         for ef in event_files:
             with open(ef) as f:
@@ -748,7 +748,7 @@ class TestInstallEvents:
 
         data_dir = str(tmp_path / "data")
         import glob
-        event_files = glob.glob(f"{data_dir}/{_safe_tenant_name(TENANT_ID)}/events/*.json")
+        event_files = glob.glob(f"{data_dir}/{_safe_instance_name(TENANT_ID)}/events/*.json")
         found = False
         for ef in event_files:
             with open(ef) as f:
@@ -782,7 +782,7 @@ class TestCapabilitiesOverviewRefresh:
         from kernos.kernel.spaces import ContextSpace
         system_space = ContextSpace(
             id=f"space_{uuid.uuid4().hex[:8]}",
-            tenant_id=TENANT_ID, name="System", description="System",
+            instance_id=TENANT_ID, name="System", description="System",
             space_type="system", status="active", is_default=False,
             created_at=datetime.now(timezone.utc).isoformat(),
             last_active_at=datetime.now(timezone.utc).isoformat(),
@@ -813,7 +813,7 @@ class TestCapabilitiesOverviewRefresh:
         from kernos.kernel.spaces import ContextSpace
         system_space = ContextSpace(
             id=f"space_{uuid.uuid4().hex[:8]}",
-            tenant_id=TENANT_ID, name="System", description="System",
+            instance_id=TENANT_ID, name="System", description="System",
             space_type="system", status="active", is_default=False,
             created_at=datetime.now(timezone.utc).isoformat(),
             last_active_at=datetime.now(timezone.utc).isoformat(),

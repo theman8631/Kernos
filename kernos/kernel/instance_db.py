@@ -1,8 +1,8 @@
-"""Instance database — shared state across all tenants.
+"""Instance database — shared state across all instances.
 
 data/instance.db — created at startup if it doesn't exist.
 Starts nearly empty in V1 (just the owner as a member).
-The architectural slot exists for multi-tenant without a second migration.
+The architectural slot exists for multi-instance without a second migration.
 
 Tables:
   members         — who belongs to this Kernos instance
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS members (
     member_id   TEXT PRIMARY KEY,
     display_name TEXT DEFAULT '',
     role        TEXT DEFAULT 'member',  -- 'owner' | 'member' | 'guest'
-    tenant_id   TEXT DEFAULT '',        -- maps to per-tenant DB
+    instance_id   TEXT DEFAULT '',        -- maps to per-instance DB
     status      TEXT DEFAULT 'active',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS shared_spaces (
 
 
 class InstanceDB:
-    """Manages the instance-level database shared across all tenants."""
+    """Manages the instance-level database shared across all instances."""
 
     def __init__(self, data_dir: str) -> None:
         self._db_path = Path(data_dir) / "instance.db"
@@ -93,17 +93,17 @@ class InstanceDB:
             self._conn = None
 
     async def ensure_owner(self, member_id: str, display_name: str,
-                           tenant_id: str, platform: str, channel_id: str) -> None:
+                           instance_id: str, platform: str, channel_id: str) -> None:
         """Ensure the owner exists as a member. Called at startup."""
         if not self._conn:
             return
         from kernos.utils import utc_now
         now = utc_now()
         await self._conn.execute(
-            "INSERT INTO members (member_id, display_name, role, tenant_id, status, created_at, updated_at) "
+            "INSERT INTO members (member_id, display_name, role, instance_id, status, created_at, updated_at) "
             "VALUES (?, ?, 'owner', ?, 'active', ?, ?) "
             "ON CONFLICT(member_id) DO UPDATE SET display_name=?, updated_at=?",
-            (member_id, display_name, tenant_id, now, now, display_name, now),
+            (member_id, display_name, instance_id, now, now, display_name, now),
         )
         await self._conn.execute(
             "INSERT INTO member_channels (member_id, platform, channel_id, is_primary, created_at) "

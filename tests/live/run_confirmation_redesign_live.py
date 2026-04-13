@@ -57,7 +57,7 @@ from kernos.kernel.reasoning import (
 )
 from kernos.kernel.state_json import JsonStateStore
 from kernos.kernel.state import CovenantRule
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 
 DATA_DIR = os.getenv("KERNOS_DATA_DIR", "./data")
@@ -78,7 +78,7 @@ def make_msg(content: str, conversation_id: str = CONVERSATION_ID) -> Normalized
         conversation_id=conversation_id,
         sender_auth_level=AuthLevel.owner_verified,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT,
+        instance_id=TENANT,
     )
 
 
@@ -88,7 +88,7 @@ def make_live_handler(data_dir: str) -> MessageHandler:
     events = JsonEventStream(data_dir)
     state = JsonStateStore(data_dir)
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
     mcp = MCPClientManager()
     registry = CapabilityRegistry(mcp=mcp)
@@ -125,7 +125,7 @@ def _make_mock_service(complete_simple_response="DENIED"):
     svc = ReasoningService(provider, events, mcp, audit)
 
     state = AsyncMock()
-    state.get_tenant_profile.return_value = None
+    state.get_instance_profile.return_value = None
     state.query_covenant_rules.return_value = []
     svc.set_state(state)
     svc.complete_simple = AsyncMock(return_value=complete_simple_response)
@@ -150,9 +150,9 @@ def _text_response(text: str) -> ProviderResponse:
     )
 
 
-def _make_request(tenant_id="t1", space_id="space_1"):
+def _make_request(instance_id="t1", space_id="space_1"):
     return ReasoningRequest(
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         conversation_id="conv1",
         system_prompt="You are an assistant.",
         messages=[{"role": "user", "content": "delete potato.md"}],

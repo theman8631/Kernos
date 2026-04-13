@@ -53,7 +53,7 @@ def _make_entry(
         created_at = _now_iso()
     return KnowledgeEntry(
         id=f"know_test_{hash(content) % 10000}",
-        tenant_id="test-tenant",
+        instance_id="test-tenant",
         category="fact",
         subject=subject,
         content=content,
@@ -86,7 +86,7 @@ def _make_entity(
 ) -> EntityNode:
     return EntityNode(
         id=f"ent_{hash(name) % 10000}",
-        tenant_id="test-tenant",
+        instance_id="test-tenant",
         canonical_name=name,
         aliases=aliases or [],
         entity_type=entity_type,
@@ -679,7 +679,7 @@ class TestContractParser:
 
         from kernos.kernel.spaces import ContextSpace
         space = ContextSpace(
-            id="space_work", tenant_id="test", name="Work",
+            id="space_work", instance_id="test", name="Work",
             description="", space_type="domain", status="active",
         )
 
@@ -816,7 +816,7 @@ class TestRuleDedup:
                 state=state,
                 events=events,
                 reasoning_service=reasoning,
-                tenant_id="test-tenant",
+                instance_id="test-tenant",
                 active_space_id="",
                 active_space=None,
             )
@@ -873,7 +873,7 @@ class TestKernelToolRouting:
         ])
 
         request = ReasoningRequest(
-            tenant_id="test-tenant",
+            instance_id="test-tenant",
             conversation_id="conv_1",
             system_prompt="test",
             messages=[{"role": "user", "content": "What do you know about Henderson?"}],
@@ -943,7 +943,7 @@ class TestKernelToolRouting:
         ])
 
         request = ReasoningRequest(
-            tenant_id="test-tenant",
+            instance_id="test-tenant",
             conversation_id="conv_1",
             system_prompt="test",
             messages=[{"role": "user", "content": "Create a meeting"}],

@@ -28,7 +28,7 @@ class TestHierarchyFields:
     """ContextSpace has parent_id, aliases, depth with correct defaults."""
 
     def test_defaults(self):
-        space = ContextSpace(id="s1", tenant_id="t1", name="General")
+        space = ContextSpace(id="s1", instance_id="t1", name="General")
         assert space.parent_id == ""
         assert space.aliases == []
         assert space.depth == 0
@@ -36,7 +36,7 @@ class TestHierarchyFields:
 
     def test_domain_with_parent(self):
         space = ContextSpace(
-            id="s2", tenant_id="t1", name="D&D",
+            id="s2", instance_id="t1", name="D&D",
             space_type="domain", parent_id="s1", depth=1,
             aliases=["D&D Campaign"],
         )
@@ -47,7 +47,7 @@ class TestHierarchyFields:
 
     def test_subdomain(self):
         space = ContextSpace(
-            id="s3", tenant_id="t1", name="Henderson Sessions",
+            id="s3", instance_id="t1", name="Henderson Sessions",
             space_type="subdomain", parent_id="s2", depth=2,
         )
         assert space.depth == 2
@@ -60,7 +60,7 @@ class TestHierarchyFieldSerialization:
     async def test_round_trip(self, tmp_path):
         store = JsonStateStore(tmp_path)
         space = ContextSpace(
-            id="space_hier", tenant_id="t1", name="Wedding Planning",
+            id="space_hier", instance_id="t1", name="Wedding Planning",
             description="Planning for the wedding",
             space_type="domain", parent_id="space_general",
             depth=1, aliases=["Wedding", "The Wedding"],
@@ -80,7 +80,7 @@ class TestHierarchyFieldSerialization:
         store = JsonStateStore(tmp_path)
         # Simulate old-format space (no parent_id/aliases/depth)
         space = ContextSpace(
-            id="space_old", tenant_id="t1", name="General",
+            id="space_old", instance_id="t1", name="General",
             space_type="general", is_default=True,
             created_at=_now(),
         )
@@ -98,7 +98,7 @@ class TestHierarchyFieldSerialization:
         state_dir = tmp_path / "t1" / "state"
         state_dir.mkdir(parents=True)
         old_data = [{
-            "id": "space_legacy", "tenant_id": "t1", "name": "Daily",
+            "id": "space_legacy", "instance_id": "t1", "name": "Daily",
             "space_type": "daily", "status": "active", "is_default": True,
             "created_at": _now(), "last_active_at": _now(),
         }]
@@ -138,7 +138,7 @@ class TestDomainAssessment:
         tid = "t_assess"
 
         general = ContextSpace(
-            id="space_gen", tenant_id=tid, name="General",
+            id="space_gen", instance_id=tid, name="General",
             space_type="general", is_default=True, created_at=_now(),
         )
         await handler.state.save_context_space(general)
@@ -175,7 +175,7 @@ class TestDomainAssessment:
         tid = "t_med"
 
         general = ContextSpace(
-            id="space_gen", tenant_id=tid, name="General",
+            id="space_gen", instance_id=tid, name="General",
             space_type="general", is_default=True, created_at=_now(),
         )
         await handler.state.save_context_space(general)
@@ -202,7 +202,7 @@ class TestDomainAssessment:
         tid = "t_low"
 
         general = ContextSpace(
-            id="space_gen", tenant_id=tid, name="General",
+            id="space_gen", instance_id=tid, name="General",
             space_type="general", is_default=True, created_at=_now(),
         )
         await handler.state.save_context_space(general)
@@ -229,7 +229,7 @@ class TestDomainAssessment:
         tid = "t_deep"
 
         sub = ContextSpace(
-            id="space_sub", tenant_id=tid, name="Henderson",
+            id="space_sub", instance_id=tid, name="Henderson",
             space_type="subdomain", depth=2, parent_id="space_dnd",
             created_at=_now(),
         )
@@ -249,11 +249,11 @@ class TestDomainAssessment:
         tid = "t_dup"
 
         general = ContextSpace(
-            id="space_gen", tenant_id=tid, name="General",
+            id="space_gen", instance_id=tid, name="General",
             space_type="general", is_default=True, created_at=_now(),
         )
         existing_dnd = ContextSpace(
-            id="space_dnd", tenant_id=tid, name="D&D Campaign",
+            id="space_dnd", instance_id=tid, name="D&D Campaign",
             space_type="domain", parent_id="space_gen", depth=1,
             created_at=_now(),
         )
@@ -291,12 +291,12 @@ class TestRouterAliasResolution:
         tid = "t_alias"
 
         general = ContextSpace(
-            id="space_gen", tenant_id=tid, name="General",
+            id="space_gen", instance_id=tid, name="General",
             space_type="general", is_default=True,
             created_at=_now(), last_active_at=_now(),
         )
         dnd = ContextSpace(
-            id="space_dnd", tenant_id=tid, name="D&D Live Play",
+            id="space_dnd", instance_id=tid, name="D&D Live Play",
             space_type="domain", parent_id="space_gen", depth=1,
             aliases=["D&D Campaign"],
             created_at=_now(), last_active_at=_now(),
@@ -326,12 +326,12 @@ class TestRouterHierarchyInfo:
         tid = "t_hier"
 
         general = ContextSpace(
-            id="space_gen", tenant_id=tid, name="General",
+            id="space_gen", instance_id=tid, name="General",
             space_type="general", is_default=True,
             created_at=_now(), last_active_at=_now(),
         )
         dnd = ContextSpace(
-            id="space_dnd", tenant_id=tid, name="D&D",
+            id="space_dnd", instance_id=tid, name="D&D",
             space_type="domain", parent_id="space_gen", depth=1,
             created_at=_now(), last_active_at=_now(),
         )

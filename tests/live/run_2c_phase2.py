@@ -19,7 +19,7 @@ from kernos.kernel.engine import TaskEngine
 from kernos.kernel.events import JsonEventStream
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 from datetime import datetime, timezone
 
 DATA_DIR = os.getenv("KERNOS_DATA_DIR", "./data")
@@ -34,7 +34,7 @@ def make_msg(content):
         content=content, sender="000000000000000000",
         sender_auth_level=AuthLevel.owner_verified, platform="discord",
         platform_capabilities=["text"], conversation_id=CONVERSATION_ID,
-        timestamp=datetime.now(timezone.utc), tenant_id=TENANT,
+        timestamp=datetime.now(timezone.utc), instance_id=TENANT,
     )
 
 
@@ -48,7 +48,7 @@ async def setup():
     registry = CapabilityRegistry()
     engine = TaskEngine(reasoning, events)
     conversations = JsonConversationStore(DATA_DIR)
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     handler = MessageHandler(
         mcp=mcp, conversations=conversations, tenants=tenants,
         audit=audit, events=events, state=state,

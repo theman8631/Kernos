@@ -34,14 +34,14 @@ from kernos.kernel.state import (
     CovenantRule,
     ConversationSummary,
     StateStore,
-    TenantProfile,
+    InstanceProfile,
     default_covenant_rules,
 )
 # Backwards-compat aliases used elsewhere in this module
 ContractRule = CovenantRule
 default_contract_rules = default_covenant_rules
 from kernos.messages.models import NormalizedMessage
-from kernos.persistence import AuditStore, ConversationStore, TenantStore, derive_tenant_id
+from kernos.persistence import AuditStore, ConversationStore, InstanceStore, derive_instance_id
 
 # Handler knows about NormalizedMessage, MCPClientManager, persistence stores,
 # EventStream, StateStore, ReasoningService, and CapabilityRegistry.
@@ -65,25 +65,25 @@ class ErrorBuffer:
         # Attach to the kernos root logger
         kernos_logger = logging.getLogger("kernos")
         kernos_logger.addHandler(self._handler)
-        self._current_tenant_id: str = ""
+        self._current_instance_id: str = ""
 
-    def set_tenant(self, tenant_id: str) -> None:
+    def set_tenant(self, instance_id: str) -> None:
         """Set which tenant is currently being processed."""
-        self._current_tenant_id = tenant_id
-        self._handler._current_tenant_id = tenant_id
+        self._current_instance_id = instance_id
+        self._handler._current_instance_id = instance_id
 
-    def collect(self, tenant_id: str, entry: str) -> None:
+    def collect(self, instance_id: str, entry: str) -> None:
         """Add an error entry to the buffer."""
-        entries = self._entries.setdefault(tenant_id, [])
+        entries = self._entries.setdefault(instance_id, [])
         if len(entries) >= _MAX_ERROR_BUFFER:
-            self._dropped[tenant_id] = self._dropped.get(tenant_id, 0) + 1
+            self._dropped[instance_id] = self._dropped.get(instance_id, 0) + 1
         else:
             entries.append(entry)
 
-    def drain(self, tenant_id: str) -> str:
-        """Pop all pending errors for a tenant, formatted as a block. Returns '' if none."""
-        entries = self._entries.pop(tenant_id, [])
-        dropped = self._dropped.pop(tenant_id, 0)
+    def drain(self, instance_id: str) -> str:
+        """Pop all pending errors for an instance, formatted as a block. Returns '' if none."""
+        entries = self._entries.pop(instance_id, [])
+        dropped = self._dropped.pop(instance_id, 0)
         if not entries:
             return ""
         lines = ["[DEVELOPER: Errors since last message]"]
@@ -104,13 +104,13 @@ class _ErrorBufferLogHandler(logging.Handler):
     def __init__(self, buffer: ErrorBuffer) -> None:
         super().__init__(level=logging.WARNING)
         self._buffer = buffer
-        self._current_tenant_id: str = ""
+        self._current_instance_id: str = ""
 
     def emit(self, record: logging.LogRecord) -> None:
-        if self._current_tenant_id and record.name.startswith("kernos."):
+        if self._current_instance_id and record.name.startswith("kernos."):
             ts = self.format(record) if self.formatter else record.getMessage()
             entry = f"{record.levelname} {record.name}: {record.getMessage()}"
-            self._buffer.collect(self._current_tenant_id, entry)
+            self._buffer.collect(self._current_instance_id, entry)
 
 
 @dataclass
@@ -118,7 +118,7 @@ class TurnContext:
     """Accumulated state across the six processing phases."""
 
     # Phase 1: Provision
-    tenant_id: str = ""
+    instance_id: str = ""
     conversation_id: str = ""
     member_id: str = ""
     soul: Soul | None = None
@@ -166,7 +166,7 @@ MERGE_WINDOW_MS = 300  # Wait up to 300ms for follow-up messages
 class SpaceRunner:
     """Per-(tenant, space) turn runner with mailbox."""
 
-    tenant_id: str
+    instance_id: str
     space_id: str
     mailbox: asyncio.Queue  # (NormalizedMessage, TurnContext, asyncio.Future) items
     _task: asyncio.Task | None = field(default=None, repr=False)
@@ -224,14 +224,14 @@ class SecureInputState:
     expires_at: datetime
 
 
-def _safe_tenant_name(tenant_id: str) -> str:
-    """Make tenant_id safe for filesystem use."""
-    return re.sub(r"[^\w.-]", "_", tenant_id)
+def _safe_instance_name(instance_id: str) -> str:
+    """Make instance_id safe for filesystem use."""
+    return re.sub(r"[^\w.-]", "_", instance_id)
 
 
 def resolve_mcp_credentials(
     server_config: dict,
-    tenant_id: str,
+    instance_id: str,
     secrets_dir: str,
 ) -> dict[str, str]:
     """Resolve credential references to actual values for MCP server env.
@@ -246,7 +246,7 @@ def resolve_mcp_credentials(
     credential_value = ""
     if credentials_key:
         secret_path = (
-            Path(secrets_dir) / _safe_tenant_name(tenant_id) / f"{credentials_key}.key"
+            Path(secrets_dir) / _safe_instance_name(instance_id) / f"{credentials_key}.key"
         )
         if secret_path.exists():
             credential_value = secret_path.read_text().strip()
@@ -308,7 +308,7 @@ def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
 
     All four signals must be present — interaction count alone is never sufficient.
     has_user_knowledge replaces the deprecated soul.user_context check —
-    True when the tenant has at least one active user-subject KnowledgeEntry.
+    True when the instance has at least one active user-subject KnowledgeEntry.
     """
     return (
         bool(soul.user_name)
@@ -572,7 +572,7 @@ class MessageHandler:
         self,
         mcp: MCPClientManager,
         conversations: ConversationStore,
-        tenants: TenantStore,
+        tenants: InstanceStore,
         audit: AuditStore,
         events: EventStream,
         state: StateStore,
@@ -595,7 +595,7 @@ class MessageHandler:
         self._secure_input_state: dict[str, SecureInputState] = {}
         self._mcp_config_loaded: set[str] = set()
         self._covenant_cleanup_done: set[str] = set()
-        self._evaluators: dict[str, "AwarenessEvaluator"] = {}  # per-tenant evaluators
+        self._evaluators: dict[str, "AwarenessEvaluator"] = {}  # per-instance evaluators
         self._error_buffer = ErrorBuffer()
         self._pending_system_events: dict[str, list[str]] = {}
         self._compacting: set[str] = set()  # space_ids currently compacting
@@ -750,7 +750,7 @@ class MessageHandler:
         if not active_plans:
             return
 
-        for tenant_id, space_id, plan in active_plans:
+        for instance_id, space_id, plan in active_plans:
             plan_id = plan.get("plan_id", "?")
             # Find the in-progress step
             for phase in plan.get("phases", []):
@@ -767,24 +767,24 @@ class MessageHandler:
                         ]
                         envelope.is_final_step = len(_remaining) == 0
 
-                        logger.info("PLAN_RECOVER: plan=%s step=%s tenant=%s space=%s — re-enqueuing",
-                            plan_id, step_id, tenant_id, space_id)
+                        logger.info("PLAN_RECOVER: plan=%s step=%s instance=%s space=%s — re-enqueuing",
+                            plan_id, step_id, instance_id, space_id)
                         asyncio.create_task(
-                            self._execute_self_directed_step(tenant_id, space_id, envelope))
+                            self._execute_self_directed_step(instance_id, space_id, envelope))
 
                         try:
                             await self.send_outbound(
-                                tenant_id, tenant_id, None,
+                                instance_id, instance_id, None,
                                 f"Recovered from restart — resuming plan at step {step_id}.",
                             )
                         except Exception:
                             pass
                         break  # Only re-enqueue the first in-progress step per plan
 
-    async def _get_system_space(self, tenant_id: str):
-        """Return the system context space for this tenant, or None."""
+    async def _get_system_space(self, instance_id: str):
+        """Return the system context space for this instance, or None."""
         try:
-            spaces = await self.state.list_context_spaces(tenant_id)
+            spaces = await self.state.list_context_spaces(instance_id)
             for space in spaces:
                 if space.space_type == "system":
                     return space
@@ -793,7 +793,7 @@ class MessageHandler:
         return None
 
     async def _write_capabilities_overview(
-        self, tenant_id: str, system_space_id: str
+        self, instance_id: str, system_space_id: str
     ) -> None:
         """Write capabilities-overview.md to the system space — called after install/uninstall."""
         if not getattr(self, "_files", None):
@@ -820,7 +820,7 @@ class MessageHandler:
 
         try:
             await self._files.write_file(
-                tenant_id, system_space_id,
+                instance_id, system_space_id,
                 "capabilities-overview.md", content,
                 "What tools are connected and available — updated on changes",
             )
@@ -828,20 +828,20 @@ class MessageHandler:
             logger.warning("Failed to write capabilities-overview.md: %s", exc)
 
     async def _infer_pending_capability(
-        self, tenant_id: str, conversation_id: str
+        self, instance_id: str, conversation_id: str
     ) -> str | None:
         """Infer which capability is being set up from recent system space messages.
 
         Scans the last 5 messages in the system space for capability name mentions.
         Returns the capability name if found, None otherwise.
         """
-        system_space = await self._get_system_space(tenant_id)
+        system_space = await self._get_system_space(instance_id)
         if not system_space:
             return None
 
         try:
             recent = await self.conversations.get_space_thread(
-                tenant_id, conversation_id, system_space.id, max_messages=5
+                instance_id, conversation_id, system_space.id, max_messages=5
             )
         except Exception:
             return None
@@ -856,21 +856,21 @@ class MessageHandler:
         return None
 
     async def _store_credential(
-        self, tenant_id: str, capability_name: str, value: str
+        self, instance_id: str, capability_name: str, value: str
     ) -> None:
         """Store a credential in the secrets directory with restrictive permissions.
 
         Secrets live OUTSIDE the data directory and are never readable by agents.
         """
-        secrets_dir = Path(self._secrets_dir) / _safe_tenant_name(tenant_id)
+        secrets_dir = Path(self._secrets_dir) / _safe_instance_name(instance_id)
         secrets_dir.mkdir(parents=True, exist_ok=True)
         secret_path = secrets_dir / f"{capability_name}.key"
         secret_path.write_text(value.strip())
         secret_path.chmod(0o600)
-        logger.info("Stored credential for %s/%s", tenant_id, capability_name)
+        logger.info("Stored credential for %s/%s", instance_id, capability_name)
 
     async def _connect_after_credential(
-        self, tenant_id: str, capability_name: str
+        self, instance_id: str, capability_name: str
     ) -> bool:
         """Connect an MCP server after credentials have been stored."""
         from mcp import StdioServerParameters
@@ -882,7 +882,7 @@ class MessageHandler:
 
         resolved_env = resolve_mcp_credentials(
             {"credentials_key": cap.credentials_key, "env_template": cap.env_template},
-            tenant_id,
+            instance_id,
             self._secrets_dir,
         )
         params = StdioServerParameters(
@@ -912,15 +912,15 @@ class MessageHandler:
             cap.status = CapabilityStatus.CONNECTED
             cap.tools = [t["name"] for t in tools]
 
-            await self._persist_mcp_config(tenant_id)
+            await self._persist_mcp_config(instance_id)
 
-            system_space = await self._get_system_space(tenant_id)
+            system_space = await self._get_system_space(instance_id)
             if system_space:
-                await self._write_capabilities_overview(tenant_id, system_space.id)
+                await self._write_capabilities_overview(instance_id, system_space.id)
 
             try:
                 await emit_event(
-                    self.events, EventType.TOOL_INSTALLED, tenant_id, "mcp_installer",
+                    self.events, EventType.TOOL_INSTALLED, instance_id, "mcp_installer",
                     payload={
                         "capability_name": capability_name,
                         "tool_count": len(cap.tools),
@@ -932,11 +932,11 @@ class MessageHandler:
 
         return success
 
-    async def _persist_mcp_config(self, tenant_id: str) -> None:
+    async def _persist_mcp_config(self, instance_id: str) -> None:
         """Write current MCP config to mcp-servers.json in the system space."""
         from kernos.capability.registry import CapabilityStatus
 
-        system_space = await self._get_system_space(tenant_id)
+        system_space = await self._get_system_space(instance_id)
         if not system_space or not getattr(self, "_files", None):
             return
 
@@ -960,16 +960,16 @@ class MessageHandler:
 
         try:
             await self._files.write_file(
-                tenant_id, system_space.id,
+                instance_id, system_space.id,
                 "mcp-servers.json",
                 json.dumps(config, indent=2),
                 "MCP server configurations — managed by the system",
             )
         except Exception as exc:
-            logger.warning("Failed to persist mcp config for %s: %s", tenant_id, exc)
+            logger.warning("Failed to persist mcp config for %s: %s", instance_id, exc)
 
     async def _disconnect_capability(
-        self, tenant_id: str, capability_name: str
+        self, instance_id: str, capability_name: str
     ) -> bool:
         """Disconnect an MCP server and update all state."""
         from kernos.capability.registry import CapabilityStatus
@@ -981,15 +981,15 @@ class MessageHandler:
                 cap.status = CapabilityStatus.SUPPRESSED
                 cap.tools = []
 
-            await self._persist_mcp_config(tenant_id)
+            await self._persist_mcp_config(instance_id)
 
-            system_space = await self._get_system_space(tenant_id)
+            system_space = await self._get_system_space(instance_id)
             if system_space:
-                await self._write_capabilities_overview(tenant_id, system_space.id)
+                await self._write_capabilities_overview(instance_id, system_space.id)
 
             try:
                 await emit_event(
-                    self.events, EventType.TOOL_UNINSTALLED, tenant_id, "mcp_installer",
+                    self.events, EventType.TOOL_UNINSTALLED, instance_id, "mcp_installer",
                     payload={"capability_name": capability_name},
                 )
             except Exception as exc:
@@ -997,14 +997,14 @@ class MessageHandler:
 
         return success
 
-    async def _maybe_start_evaluator(self, tenant_id: str) -> None:
-        """Start an AwarenessEvaluator for this tenant (once per process per tenant).
+    async def _maybe_start_evaluator(self, instance_id: str) -> None:
+        """Start an AwarenessEvaluator for this instance (once per process per-instance).
 
         The evaluator runs two phases:
         - Awareness pass (whispers from foresight signals) — every 1800s
         - Trigger evaluation (scheduled actions) — every 60s
         """
-        if tenant_id in self._evaluators:
+        if instance_id in self._evaluators:
             return
         try:
             from kernos.kernel.awareness import AwarenessEvaluator
@@ -1016,10 +1016,10 @@ class MessageHandler:
                 trigger_store=self._trigger_store,
                 handler=self,
             )
-            await evaluator.start(tenant_id)
-            self._evaluators[tenant_id] = evaluator
+            await evaluator.start(instance_id)
+            self._evaluators[instance_id] = evaluator
         except Exception as exc:
-            logger.warning("Failed to start AwarenessEvaluator for %s: %s", tenant_id, exc)
+            logger.warning("Failed to start AwarenessEvaluator for %s: %s", instance_id, exc)
 
     def register_adapter(self, platform: str, adapter: "BaseAdapter") -> None:
         """Register a platform adapter for outbound messaging."""
@@ -1043,31 +1043,31 @@ class MessageHandler:
             platform=platform,
         ))
 
-    def _resolve_member(self, tenant_id: str, platform: str, sender: str) -> str:
+    def _resolve_member(self, instance_id: str, platform: str, sender: str) -> str:
         """Resolve a sender identity signal to a member_id.
 
         For now: single member per instance = owner.
         Future: lookup in members table by identity signal.
         """
         from kernos.kernel.scheduler import resolve_owner_member_id
-        return resolve_owner_member_id(tenant_id)
+        return resolve_owner_member_id(instance_id)
 
-    async def read_log_text(self, tenant_id: str, space_id: str, log_number: int) -> str:
+    async def read_log_text(self, instance_id: str, space_id: str, log_number: int) -> str:
         """Read conversation log text — satisfies HandlerProtocol."""
-        result = await self.conv_logger.read_log_text(tenant_id, space_id, log_number)
+        result = await self.conv_logger.read_log_text(instance_id, space_id, log_number)
         return result or ""
 
-    def queue_system_event(self, tenant_id: str, event: str) -> None:
+    def queue_system_event(self, instance_id: str, event: str) -> None:
         """Queue a system event for injection into the next system prompt."""
-        self._pending_system_events.setdefault(tenant_id, []).append(event)
-        logger.info("SYSTEM_EVENT_QUEUED: tenant=%s event=%s", tenant_id, event[:100])
+        self._pending_system_events.setdefault(instance_id, []).append(event)
+        logger.info("SYSTEM_EVENT_QUEUED: instance=%s event=%s", instance_id, event[:100])
 
-    def drain_system_events(self, tenant_id: str) -> list[str]:
-        """Drain and return all pending system events for a tenant."""
-        return self._pending_system_events.pop(tenant_id, [])
+    def drain_system_events(self, instance_id: str) -> list[str]:
+        """Drain and return all pending system events for an instance."""
+        return self._pending_system_events.pop(instance_id, [])
 
     async def send_outbound(
-        self, tenant_id: str, member_id: str,
+        self, instance_id: str, member_id: str,
         channel_name: str | None, message: str,
     ) -> int:
         """Send an unprompted message to the user on a specific or default channel.
@@ -1085,8 +1085,8 @@ class MessageHandler:
 
         if not ch:
             logger.warning(
-                "OUTBOUND: no channel available tenant=%s member=%s channel=%s",
-                tenant_id, member_id, channel_name,
+                "OUTBOUND: no channel available instance=%s member=%s channel=%s",
+                instance_id, member_id, channel_name,
             )
             return 0
 
@@ -1102,10 +1102,10 @@ class MessageHandler:
             logger.warning("OUTBOUND: no adapter for platform=%s", ch.platform)
             return 0
 
-        msg_id = await adapter.send_outbound(tenant_id, ch.channel_target, message)
+        msg_id = await adapter.send_outbound(instance_id, ch.channel_target, message)
         logger.info(
-            "OUTBOUND: channel=%s target=%s tenant=%s member=%s length=%d msg_id=%s",
-            ch.name, ch.channel_target, tenant_id, member_id, len(message), msg_id,
+            "OUTBOUND: channel=%s target=%s instance=%s member=%s length=%d msg_id=%s",
+            ch.name, ch.channel_target, instance_id, member_id, len(message), msg_id,
         )
         return msg_id
 
@@ -1134,11 +1134,11 @@ class MessageHandler:
         except Exception as exc:
             logger.debug("PLAN_MSG_DELETE: failed msg_id=%d error=%s", msg_id, exc)
 
-    async def _maybe_run_covenant_cleanup(self, tenant_id: str) -> None:
-        """Run one-time covenant dedup/contradiction cleanup per tenant per process."""
-        if tenant_id in self._covenant_cleanup_done:
+    async def _maybe_run_covenant_cleanup(self, instance_id: str) -> None:
+        """Run one-time covenant dedup/contradiction cleanup per-instance per process."""
+        if instance_id in self._covenant_cleanup_done:
             return
-        self._covenant_cleanup_done.add(tenant_id)
+        self._covenant_cleanup_done.add(instance_id)
 
         try:
             from kernos.kernel.covenant_manager import run_covenant_cleanup
@@ -1146,19 +1146,19 @@ class MessageHandler:
             if self._retrieval:
                 embedding_service = getattr(self._retrieval, '_embedding_service', None)
             stats = await run_covenant_cleanup(
-                self.state, tenant_id,
+                self.state, instance_id,
                 embedding_service=embedding_service,
             )
             if stats["deduped"] or stats["contradictions_resolved"]:
                 logger.info(
-                    "COVENANT_CLEANUP: tenant=%s deduped=%d contradictions=%d",
-                    tenant_id, stats["deduped"], stats["contradictions_resolved"],
+                    "COVENANT_CLEANUP: instance=%s deduped=%d contradictions=%d",
+                    instance_id, stats["deduped"], stats["contradictions_resolved"],
                 )
         except Exception as exc:
-            logger.warning("Covenant cleanup failed for %s: %s", tenant_id, exc)
+            logger.warning("Covenant cleanup failed for %s: %s", instance_id, exc)
 
-    async def _maybe_load_mcp_config(self, tenant_id: str) -> None:
-        """Load persisted MCP config for this tenant (once per process lifetime per tenant).
+    async def _maybe_load_mcp_config(self, instance_id: str) -> None:
+        """Load persisted MCP config for this instance (once per process lifetime per-instance).
 
         Called after soul/space init so the system space is guaranteed to exist.
         Suppresses uninstalled entries and connects any persisted servers.
@@ -1166,23 +1166,23 @@ class MessageHandler:
         from kernos.capability.registry import CapabilityStatus
         from mcp import StdioServerParameters
 
-        if tenant_id in self._mcp_config_loaded:
+        if instance_id in self._mcp_config_loaded:
             return
-        self._mcp_config_loaded.add(tenant_id)
+        self._mcp_config_loaded.add(instance_id)
 
-        system_space = await self._get_system_space(tenant_id)
+        system_space = await self._get_system_space(instance_id)
         if not system_space or not getattr(self, "_files", None):
             return
 
         try:
             config_raw = await self._files.read_file(
-                tenant_id, system_space.id, "mcp-servers.json"
+                instance_id, system_space.id, "mcp-servers.json"
             )
             if not config_raw or config_raw.startswith("Error:"):
                 return
             config = json.loads(config_raw)
         except Exception as exc:
-            logger.warning("Failed to load mcp-servers.json for %s: %s", tenant_id, exc)
+            logger.warning("Failed to load mcp-servers.json for %s: %s", instance_id, exc)
             return
 
         # Suppress uninstalled entries
@@ -1203,8 +1203,8 @@ class MessageHandler:
         for cap in self.registry.get_all():
             if cap.source == "default" and cap.name not in known_in_config:
                 logger.info(
-                    "New default capability '%s' available for tenant %s",
-                    cap.name, tenant_id,
+                    "New default capability '%s' available for instance %s",
+                    cap.name, instance_id,
                 )
 
         # Connect persisted servers not already connected
@@ -1213,7 +1213,7 @@ class MessageHandler:
             if cap and cap.status == CapabilityStatus.CONNECTED:
                 continue  # Already connected at startup
             resolved_env = resolve_mcp_credentials(
-                server_config, tenant_id, self._secrets_dir
+                server_config, instance_id, self._secrets_dir
             )
             self.mcp.register_server(
                 name,
@@ -1247,26 +1247,26 @@ class MessageHandler:
                         cap.source = server_config["source"]
                 logger.info("Loaded and connected %s from persisted config", name)
 
-    async def _ensure_tenant_state(
-        self, tenant_id: str, message: NormalizedMessage
+    async def _ensureinstance_state(
+        self, instance_id: str, message: NormalizedMessage
     ) -> None:
-        """Create or update StateStore profile for this tenant.
+        """Create or update StateStore profile for this instance.
 
         New tenants: create full profile, seed default contract rules.
         Existing tenants: update capabilities field to reflect current registry state.
         """
-        profile = await self.state.get_tenant_profile(tenant_id)
+        profile = await self.state.get_instance_profile(instance_id)
         cap_map = {cap.name: cap.status.value for cap in self.registry.get_all()}
 
         if profile is not None:
             # Always sync capabilities so the profile reflects current registry state
             profile.capabilities = cap_map
-            await self.state.save_tenant_profile(tenant_id, profile)
+            await self.state.save_instance_profile(instance_id, profile)
             return
 
         now = utc_now()
-        new_profile = TenantProfile(
-            tenant_id=tenant_id,
+        new_profile = InstanceProfile(
+            instance_id=instance_id,
             status="active",
             created_at=now,
             platforms={
@@ -1276,26 +1276,26 @@ class MessageHandler:
             capabilities=cap_map,
             model_config={"default_provider": _PROVIDER, "quality_tier": 3},
         )
-        await self.state.save_tenant_profile(tenant_id, new_profile)
+        await self.state.save_instance_profile(instance_id, new_profile)
 
-        for rule in default_contract_rules(tenant_id, now):
+        for rule in default_contract_rules(instance_id, now):
             await self.state.add_contract_rule(rule)
 
         try:
             await emit_event(
                 self.events,
                 EventType.TENANT_PROVISIONED,
-                tenant_id,
+                instance_id,
                 "handler",
                 payload={"platform": message.platform, "sender": message.sender},
             )
         except Exception as exc:
             logger.warning("Failed to emit tenant.provisioned: %s", exc)
 
-        logger.info("Provisioned state for new tenant: %s", tenant_id)
+        logger.info("Provisioned state for new tenant: %s", instance_id)
 
     async def _write_system_docs(
-        self, tenant_id: str, system_space_id: str
+        self, instance_id: str, system_space_id: str
     ) -> None:
         """Write capabilities-overview.md to the system space.
 
@@ -1309,21 +1309,21 @@ class MessageHandler:
         if not registry:
             return
 
-        await self._write_capabilities_overview(tenant_id, system_space_id)
+        await self._write_capabilities_overview(instance_id, system_space_id)
 
-    async def _get_or_init_soul(self, tenant_id: str) -> Soul:
-        """Load the soul for this tenant, or initialize a new unhatched one.
+    async def _get_or_init_soul(self, instance_id: str) -> Soul:
+        """Load the soul for this instance, or initialize a new unhatched one.
 
         The soul is saved immediately on creation so it persists even if
         the subsequent reasoning call fails. Also ensures a default daily
-        context space exists for the tenant.
+        context space exists for the instance.
         """
         import uuid
-        soul = await self.state.get_soul(tenant_id)
+        soul = await self.state.get_soul(instance_id)
         if soul is None:
-            soul = Soul(tenant_id=tenant_id)
-            await self.state.save_soul(soul, source="soul_init", trigger="new_tenant")
-            logger.info("Initialized new soul for tenant: %s", tenant_id)
+            soul = Soul(instance_id=instance_id)
+            await self.state.save_soul(soul, source="soul_init", trigger="new_instance")
+            logger.info("Initialized new soul for instance: %s", instance_id)
 
         # Timezone discovery: infer from system local if not yet set
         if not soul.timezone:
@@ -1335,25 +1335,25 @@ class MessageHandler:
                         soul, source="handler_process", trigger="timezone_discovery",
                     )
                     logger.info(
-                        "TIMEZONE_DISCOVERED: tenant=%s tz=%s source=system_local",
-                        tenant_id, _sys_tz,
+                        "TIMEZONE_DISCOVERED: instance=%s tz=%s source=system_local",
+                        instance_id, _sys_tz,
                     )
             except Exception:
                 pass
 
         # Ensure default context space exists — idempotent
-        spaces = await self.state.list_context_spaces(tenant_id)
+        spaces = await self.state.list_context_spaces(instance_id)
         # Migrate existing "Daily" spaces to "General"
         for s in spaces:
             if s.is_default and s.name == "Daily":
-                await self.state.update_context_space(tenant_id, s.id, {"name": "General"})
+                await self.state.update_context_space(instance_id, s.id, {"name": "General"})
                 s.name = "General"
-                logger.info("SPACE_MIGRATE: renamed Daily→General for tenant=%s space=%s", tenant_id, s.id)
+                logger.info("SPACE_MIGRATE: renamed Daily→General for instance=%s space=%s", instance_id, s.id)
         if not any(s.is_default for s in spaces):
             now = utc_now()
             daily_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 name="General",
                 description="General conversation and daily life",
                 space_type="general",
@@ -1363,7 +1363,7 @@ class MessageHandler:
                 last_active_at=now,
             )
             await self.state.save_context_space(daily_space)
-            logger.info("Created default General context space for tenant: %s", tenant_id)
+            logger.info("Created default General context space for instance: %s", instance_id)
 
             # Initialize compaction state for daily space with default headroom
             try:
@@ -1395,17 +1395,17 @@ class MessageHandler:
                     _context_def_tokens=context_def_tokens,
                     _system_overhead=system_overhead,
                 )
-                await self.compaction.save_state(tenant_id, daily_space.id, daily_comp)
+                await self.compaction.save_state(instance_id, daily_space.id, daily_comp)
             except Exception as exc:
                 logger.warning("Failed to init compaction state for daily space: %s", exc)
 
         # Ensure a system context space exists — idempotent
-        spaces_now = await self.state.list_context_spaces(tenant_id)
+        spaces_now = await self.state.list_context_spaces(instance_id)
         if not any(s.space_type == "system" for s in spaces_now):
             now = utc_now()
             system_space = ContextSpace(
                 id=f"space_{uuid.uuid4().hex[:8]}",
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 name="System",
                 description=(
                     "System configuration and management. Install and manage tools, "
@@ -1436,9 +1436,9 @@ class MessageHandler:
                 last_active_at=now,
             )
             await self.state.save_context_space(system_space)
-            logger.info("Created system context space for tenant: %s", tenant_id)
+            logger.info("Created system context space for instance: %s", instance_id)
             # Write documentation files to the system space
-            await self._write_system_docs(tenant_id, system_space.id)
+            await self._write_system_docs(instance_id, system_space.id)
 
         return soul
 
@@ -1452,7 +1452,7 @@ class MessageHandler:
 
         # Query user knowledge from KnowledgeEntries
         user_ke = await self.state.query_knowledge(
-            soul.tenant_id, subject="user", active_only=True, limit=20,
+            soul.instance_id, subject="user", active_only=True, limit=20,
         )
         user_facts = [e.content for e in user_ke
                       if e.lifecycle_archetype in ("structural", "identity", "habitual")]
@@ -1484,7 +1484,7 @@ class MessageHandler:
         except Exception as exc:
             logger.warning(
                 "Bootstrap consolidation failed for %s: %s — graduating without consolidation",
-                soul.tenant_id,
+                soul.instance_id,
                 exc,
             )
 
@@ -1505,22 +1505,22 @@ class MessageHandler:
                 await emit_event(
                     self.events,
                     EventType.AGENT_HATCHED,
-                    soul.tenant_id,
+                    soul.instance_id,
                     "handler",
                     payload={
-                        "tenant_id": soul.tenant_id,
+                        "instance_id": soul.instance_id,
                         "hatched_at": now,
                     },
                 )
             except Exception as exc:
                 logger.warning("Failed to emit agent.hatched: %s", exc)
-            logger.info("Soul hatched for tenant: %s", soul.tenant_id)
+            logger.info("Soul hatched for instance: %s", soul.instance_id)
 
         soul.interaction_count += 1
 
         # Check bootstrap graduation: consolidate, then graduate
         user_ke = await self.state.query_knowledge(
-            soul.tenant_id, subject="user", active_only=True, limit=1,
+            soul.instance_id, subject="user", active_only=True, limit=1,
         )
         has_user_knowledge = len(user_ke) > 0
         if not soul.bootstrap_graduated and _is_soul_mature(soul, has_user_knowledge=has_user_knowledge):
@@ -1531,10 +1531,10 @@ class MessageHandler:
                 await emit_event(
                     self.events,
                     EventType.AGENT_BOOTSTRAP_GRADUATED,
-                    soul.tenant_id,
+                    soul.instance_id,
                     "handler",
                     payload={
-                        "tenant_id": soul.tenant_id,
+                        "instance_id": soul.instance_id,
                         "interaction_count": soul.interaction_count,
                         "graduated_at": now,
                     },
@@ -1542,8 +1542,8 @@ class MessageHandler:
             except Exception as exc:
                 logger.warning("Failed to emit agent.bootstrap_graduated: %s", exc)
             logger.info(
-                "Soul bootstrap graduated for tenant: %s (interactions: %d)",
-                soul.tenant_id,
+                "Soul bootstrap graduated for instance: %s (interactions: %d)",
+                soul.instance_id,
                 soul.interaction_count,
             )
 
@@ -1560,7 +1560,7 @@ class MessageHandler:
 
     async def _assemble_space_context(
         self,
-        tenant_id: str,
+        instance_id: str,
         conversation_id: str,
         active_space_id: str,
         active_space: ContextSpace | None,
@@ -1576,9 +1576,9 @@ class MessageHandler:
         memory_parts: list[str] = []
 
         # 1. Compaction index → MEMORY
-        comp_state = await self.compaction.load_state(tenant_id, active_space_id)
+        comp_state = await self.compaction.load_state(instance_id, active_space_id)
         if comp_state and comp_state.index_tokens > 0:
-            index_text = await self.compaction.load_index(tenant_id, active_space_id)
+            index_text = await self.compaction.load_index(instance_id, active_space_id)
             if index_text:
                 memory_parts.append(
                     f"Archived history (summaries — full archives available on request):\n"
@@ -1586,13 +1586,13 @@ class MessageHandler:
                 )
 
         # 2. Proactive awareness → RESULTS
-        awareness_block = await self._get_pending_awareness(tenant_id, active_space_id)
+        awareness_block = await self._get_pending_awareness(instance_id, active_space_id)
         if awareness_block:
             results_parts.append(awareness_block)
 
         # 2b. Cross-domain notices → RESULTS (one-time delivery)
         try:
-            notices = await self.state.drain_space_notices(tenant_id, active_space_id)
+            notices = await self.state.drain_space_notices(instance_id, active_space_id)
             if notices:
                 notice_lines = [n["text"] for n in notices if n.get("text")]
                 if notice_lines:
@@ -1604,18 +1604,18 @@ class MessageHandler:
             logger.warning("CROSS_DOMAIN_DELIVER: failed: %s", exc)
 
         # 2c. System events → RESULTS
-        system_events = self.drain_system_events(tenant_id)
+        system_events = self.drain_system_events(instance_id)
         if system_events:
             events_block = "RECENT SYSTEM EVENTS:\n" + "\n".join(system_events)
             results_parts.append(events_block)
             logger.info(
-                "SYSTEM_EVENTS_INJECTED: tenant=%s count=%d",
-                tenant_id, len(system_events),
+                "SYSTEM_EVENTS_INJECTED: instance=%s count=%d",
+                instance_id, len(system_events),
             )
             for evt in system_events:
                 try:
                     await self.conv_logger.append(
-                        tenant_id=tenant_id,
+                        instance_id=instance_id,
                         space_id=active_space_id,
                         speaker="system",
                         channel="internal",
@@ -1625,7 +1625,7 @@ class MessageHandler:
                     pass
 
         # 3. Compaction document → MEMORY
-        active_doc = await self.compaction.load_context_document(tenant_id, active_space_id)
+        active_doc = await self.compaction.load_context_document(instance_id, active_space_id)
         if active_doc:
             memory_parts.append(
                 f"Context history for this space:\n{active_doc}"
@@ -1635,9 +1635,9 @@ class MessageHandler:
         if active_space and active_space.parent_id:
             try:
                 briefing = await self._load_parent_briefing(
-                    tenant_id, active_space.parent_id, active_space_id)
+                    instance_id, active_space.parent_id, active_space_id)
                 if briefing:
-                    parent = await self.state.get_context_space(tenant_id, active_space.parent_id)
+                    parent = await self.state.get_context_space(instance_id, active_space.parent_id)
                     parent_name = parent.name if parent else "parent"
                     memory_parts.append(
                         f"Briefing from {parent_name} (may be stale — use remember() for current data):\n{briefing}"
@@ -1647,7 +1647,7 @@ class MessageHandler:
 
         # 4b. File manifest → RESULTS (so agent knows what files exist)
         try:
-            _files_dir = self._files._space_files_dir(tenant_id, active_space_id)
+            _files_dir = self._files._space_files_dir(instance_id, active_space_id)
             if _files_dir.exists():
                 _visible = [
                     f.name for f in sorted(_files_dir.iterdir())
@@ -1677,14 +1677,14 @@ class MessageHandler:
                 _cur_space = active_space
                 while _cur_space and _cur_space.parent_id:
                     _proc_chain.append(_cur_space.parent_id)
-                    _cur_space = await self.state.get_context_space(tenant_id, _cur_space.parent_id)
+                    _cur_space = await self.state.get_context_space(instance_id, _cur_space.parent_id)
                 for sid in _proc_chain:
-                    content = await self._files.read_file(tenant_id, sid, "_procedures.md")
+                    content = await self._files.read_file(instance_id, sid, "_procedures.md")
                     if content and not content.startswith("Error:"):
                         if sid == active_space_id:
                             proc_parts.append(content)
                         else:
-                            _pspace = await self.state.get_context_space(tenant_id, sid)
+                            _pspace = await self.state.get_context_space(instance_id, sid)
                             _pname = _pspace.name if _pspace else sid
                             proc_parts.append(f"[From {_pname}]\n{content}")
                 if proc_parts:
@@ -1697,7 +1697,7 @@ class MessageHandler:
         _context_source = "none"
         try:
             log_entries = await self.conv_logger.read_recent(
-                tenant_id, active_space_id,
+                instance_id, active_space_id,
                 token_budget=SPACE_THREAD_TOKEN_BUDGET,
                 max_messages=50,
             )
@@ -1714,7 +1714,7 @@ class MessageHandler:
             # Fallback: no usable log entries — use legacy channel-specific store
             is_daily = active_space.is_default if active_space else False
             thread = await self.conversations.get_space_thread(
-                tenant_id, conversation_id, active_space_id,
+                instance_id, conversation_id, active_space_id,
                 max_messages=50,
                 include_untagged=is_daily,
                 include_timestamp=True,
@@ -1773,11 +1773,11 @@ class MessageHandler:
 
         return recent_messages, results_prefix, memory_prefix, procedures_prefix
 
-    async def _get_pending_awareness(self, tenant_id: str, active_space_id: str) -> str:
+    async def _get_pending_awareness(self, instance_id: str, active_space_id: str) -> str:
         """Get pending whispers formatted for the agent's context."""
         from kernos.kernel.awareness import SuppressionEntry
 
-        whispers = await self.state.get_pending_whispers(tenant_id)
+        whispers = await self.state.get_pending_whispers(instance_id)
 
         if not whispers:
             return ""
@@ -1797,7 +1797,7 @@ class MessageHandler:
         try:
             from kernos.kernel.execution import load_plan
             data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-            _plan = await load_plan(data_dir, tenant_id, active_space_id)
+            _plan = await load_plan(data_dir, instance_id, active_space_id)
             if _plan and _plan.get("status") == "active":
                 _deferred = [w for w in relevant if w.delivery_class != "interrupt"]
                 if _deferred:
@@ -1835,7 +1835,7 @@ class MessageHandler:
         # Mark as surfaced and create suppression entries
         for w in relevant:
             w.surfaced_at = datetime.now(timezone.utc).isoformat()
-            await self.state.mark_whisper_surfaced(tenant_id, w.whisper_id)
+            await self.state.mark_whisper_surfaced(instance_id, w.whisper_id)
 
             suppression = SuppressionEntry(
                 whisper_id=w.whisper_id,
@@ -1844,7 +1844,7 @@ class MessageHandler:
                 created_at=w.created_at,
                 resolution_state="surfaced",
             )
-            await self.state.save_suppression(tenant_id, suppression)
+            await self.state.save_suppression(instance_id, suppression)
 
         logger.info("AWARENESS: injected whispers=%d for space=%s",
                      len(relevant), active_space_id)
@@ -1853,7 +1853,7 @@ class MessageHandler:
 
     async def _handle_file_upload(
         self,
-        tenant_id: str,
+        instance_id: str,
         active_space_id: str,
         filename: str,
         content: str,
@@ -1870,21 +1870,21 @@ class MessageHandler:
 
         description = f"Uploaded by user on {utc_now()[:10]}"
         await self._files.write_file(
-            tenant_id, active_space_id, filename, content, description
+            instance_id, active_space_id, filename, content, description
         )
         return f"[File uploaded: {filename}. You can read it with read_file if needed.]"
 
     async def _run_session_exit(
-        self, tenant_id: str, space_id: str, conversation_id: str
+        self, instance_id: str, space_id: str, conversation_id: str
     ) -> None:
         """Update space name/description based on what happened in this session."""
-        space = await self.state.get_context_space(tenant_id, space_id)
+        space = await self.state.get_context_space(instance_id, space_id)
         if not space or space.is_default:
             return
 
         # Get messages tagged to this space from the conversation
         session_messages = await self.conversations.get_space_thread(
-            tenant_id, conversation_id, space_id, max_messages=30
+            instance_id, conversation_id, space_id, max_messages=30
         )
         if len(session_messages) < 3:
             return  # Too short to update description
@@ -1928,30 +1928,30 @@ class MessageHandler:
             if parsed.get("description") and parsed["description"] != space.description:
                 updates["description"] = parsed["description"]
             if updates:
-                await self.state.update_context_space(tenant_id, space_id, updates)
+                await self.state.update_context_space(instance_id, space_id, updates)
                 logger.info("Session exit updated space %s: %s", space_id, updates)
         except Exception as exc:
             logger.warning("Session exit maintenance failed for %s: %s", space_id, exc)
 
-    async def _enforce_space_cap(self, tenant_id: str) -> None:
+    async def _enforce_space_cap(self, instance_id: str) -> None:
         """Archive the least recently used space if at the active cap."""
-        spaces = await self.state.list_context_spaces(tenant_id)
+        spaces = await self.state.list_context_spaces(instance_id)
         active = [s for s in spaces if s.status == "active" and not s.is_default and s.space_type != "system"]
         if len(active) < ACTIVE_SPACE_CAP:
             return
         lru = sorted(active, key=lambda s: s.last_active_at)[0]
-        await self.state.update_context_space(tenant_id, lru.id, {"status": "archived"})
+        await self.state.update_context_space(instance_id, lru.id, {"status": "archived"})
         try:
             await emit_event(
                 self.events,
                 EventType.CONTEXT_SPACE_SUSPENDED,
-                tenant_id,
+                instance_id,
                 "space_cap",
                 payload={"space_id": lru.id, "name": lru.name, "reason": "lru_sunset"},
             )
         except Exception as exc:
             logger.warning("Failed to emit context.space.suspended: %s", exc)
-        logger.info("Archived LRU space %s (%s) for tenant %s", lru.id, lru.name, tenant_id)
+        logger.info("Archived LRU space %s (%s) for instance %s", lru.id, lru.name, instance_id)
 
 
     # --- Domain assessment (CS-2) ---
@@ -1996,7 +1996,7 @@ class MessageHandler:
     }
 
     async def _process_compaction_follow_ups(
-        self, tenant_id: str, space_id: str, commitments: list[dict],
+        self, instance_id: str, space_id: str, commitments: list[dict],
     ) -> None:
         """Process follow-ups extracted from compaction → create triggers.
 
@@ -2009,7 +2009,7 @@ class MessageHandler:
         now = utc_now_dt()
 
         # Load existing triggers for dedup
-        existing = await self._trigger_store.list_all(tenant_id)
+        existing = await self._trigger_store.list_all(instance_id)
         existing_descs = [(t.action_description.lower(), t.next_fire_at) for t in existing if t.status == "active"]
 
         _type_messages = {
@@ -2092,7 +2092,7 @@ class MessageHandler:
             # Create trigger
             trigger = Trigger(
                 trigger_id=_trigger_id(),
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 space_id=space_id,
                 condition_type="time",
                 condition=due_iso,
@@ -2115,7 +2115,7 @@ class MessageHandler:
             logger.info("FOLLOW_UP_TOTAL: created=%d from_compaction=%d", created, len(commitments))
 
     async def _assess_domain_creation(
-        self, tenant_id: str, space_id: str, space: ContextSpace, comp_state: "CompactionState",
+        self, instance_id: str, space_id: str, space: ContextSpace, comp_state: "CompactionState",
     ) -> None:
         """Assess whether compacted conversation constitutes a new domain.
 
@@ -2131,12 +2131,12 @@ class MessageHandler:
             return
 
         # Load the freshly compacted document
-        doc = await self.compaction.load_document(tenant_id, space_id)
+        doc = await self.compaction.load_document(instance_id, space_id)
         if not doc:
             return
 
         # Build existing space list for context
-        all_spaces = await self.state.list_context_spaces(tenant_id)
+        all_spaces = await self.state.list_context_spaces(instance_id)
         existing = [
             f"- {s.name} ({s.space_type}, depth={s.depth})"
             for s in all_spaces if s.status == "active" and s.space_type != "system"
@@ -2146,15 +2146,15 @@ class MessageHandler:
         _inv_parts: list[str] = []
         try:
             _parent_rules = await self.state.query_covenant_rules(
-                tenant_id, context_space_scope=[space_id], active_only=True)
+                instance_id, context_space_scope=[space_id], active_only=True)
             if _parent_rules:
                 _inv_parts.append("Covenants:\n" + "\n".join(
                     f"  [{r.id}] {r.rule_type}: {r.description}" for r in _parent_rules))
-            _parent_manifest = await self._files.load_manifest(tenant_id, space_id)
+            _parent_manifest = await self._files.load_manifest(instance_id, space_id)
             if _parent_manifest:
                 _inv_parts.append("Files:\n" + "\n".join(
                     f"  {fname}: {desc}" for fname, desc in _parent_manifest.items() if not fname.startswith(".")))
-            _parent_procs = await self._files.read_file(tenant_id, space_id, "_procedures.md")
+            _parent_procs = await self._files.read_file(instance_id, space_id, "_procedures.md")
             if _parent_procs and not _parent_procs.startswith("Error:"):
                 _sections = [line.strip() for line in _parent_procs.split("\n") if line.startswith("## ")]
                 if _sections:
@@ -2210,7 +2210,7 @@ class MessageHandler:
                 aliases = list(space.aliases)
                 if old_name and old_name not in aliases:
                     aliases.append(old_name)
-                await self.state.update_context_space(tenant_id, space_id, {
+                await self.state.update_context_space(instance_id, space_id, {
                     "name": new_name_rename,
                     "aliases": aliases,
                     "renamed_from": old_name,
@@ -2249,12 +2249,12 @@ class MessageHandler:
                     return
 
             # Enforce space cap
-            await self._enforce_space_cap(tenant_id)
+            await self._enforce_space_cap(instance_id)
 
             now = utc_now()
             new_space = ContextSpace(
                 id=f"space_{_uuid.uuid4().hex[:8]}",
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 name=new_name,
                 description=parsed.get("description", ""),
                 posture=parsed.get("posture", ""),
@@ -2300,7 +2300,7 @@ class MessageHandler:
                     _context_def_tokens=context_def_tokens,
                     _system_overhead=system_overhead,
                 )
-                await self.compaction.save_state(tenant_id, new_space.id, new_comp)
+                await self.compaction.save_state(instance_id, new_space.id, new_comp)
 
                 # Write reference-based origin document
                 origin_doc = (
@@ -2309,7 +2309,7 @@ class MessageHandler:
                     f"compaction #{comp_state.global_compaction_number}.\n"
                     f"Use remember() to retrieve historical context from the parent.\n"
                 )
-                origin_path = self.compaction._space_dir(tenant_id, new_space.id) / "active_document.md"
+                origin_path = self.compaction._space_dir(instance_id, new_space.id) / "active_document.md"
                 origin_path.parent.mkdir(parents=True, exist_ok=True)
                 origin_path.write_text(origin_doc, encoding="utf-8")
             except Exception as exc:
@@ -2317,7 +2317,7 @@ class MessageHandler:
 
             try:
                 from kernos.kernel.event_types import EventType as _ET
-                await emit_event(self.events, _ET.CONTEXT_SPACE_CREATED, tenant_id, "domain_assessment",
+                await emit_event(self.events, _ET.CONTEXT_SPACE_CREATED, instance_id, "domain_assessment",
                     payload={"space_id": new_space.id, "name": new_space.name,
                              "description": new_space.description, "parent_id": space_id,
                              "depth": new_space.depth})
@@ -2332,7 +2332,7 @@ class MessageHandler:
             # Content migration: move LLM-identified domain-specific content
             try:
                 await self._migrate_domain_content(
-                    tenant_id, space_id, new_space.id, parsed)
+                    instance_id, space_id, new_space.id, parsed)
             except Exception as mig_exc:
                 logger.warning("DOMAIN_MIGRATE: failed for %s: %s", new_space.id, mig_exc)
 
@@ -2340,7 +2340,7 @@ class MessageHandler:
             logger.warning("DOMAIN_ASSESS: failed for space=%s: %s", space_id, exc)
 
     async def _migrate_domain_content(
-        self, tenant_id: str, parent_id: str, child_id: str,
+        self, instance_id: str, parent_id: str, child_id: str,
         migrate_lists: dict,
     ) -> None:
         """Migrate domain-specific content from parent to child using LLM-selected lists.
@@ -2354,7 +2354,7 @@ class MessageHandler:
         cov_ids = migrate_lists.get("migrate_covenants", [])
         for cov_id in cov_ids:
             try:
-                await self.state.update_contract_rule(tenant_id, cov_id, {"context_space": child_id})
+                await self.state.update_contract_rule(instance_id, cov_id, {"context_space": child_id})
                 migrated["covenants"].append(cov_id)
             except Exception as exc:
                 logger.warning("DOMAIN_MIGRATE: covenant %s failed: %s", cov_id, exc)
@@ -2363,7 +2363,7 @@ class MessageHandler:
         section_titles = set(migrate_lists.get("migrate_procedure_sections", []))
         if section_titles:
             try:
-                parent_procs = await self._files.read_file(tenant_id, parent_id, "_procedures.md")
+                parent_procs = await self._files.read_file(instance_id, parent_id, "_procedures.md")
                 if parent_procs and not parent_procs.startswith("Error:"):
                     sections = parent_procs.split("\n## ")
                     keep: list[str] = []
@@ -2378,15 +2378,15 @@ class MessageHandler:
                             keep.append(full)
                     if move:
                         await self._files.write_file(
-                            tenant_id, child_id, "_procedures.md",
+                            instance_id, child_id, "_procedures.md",
                             "\n\n".join(move), "Domain procedures migrated from parent")
                         remaining = "\n\n".join(s for s in keep if s.strip())
                         if remaining.strip():
                             await self._files.write_file(
-                                tenant_id, parent_id, "_procedures.md", remaining,
+                                instance_id, parent_id, "_procedures.md", remaining,
                                 "Procedures (domain-specific sections migrated)")
                         else:
-                            await self._files.delete_file(tenant_id, parent_id, "_procedures.md")
+                            await self._files.delete_file(instance_id, parent_id, "_procedures.md")
             except Exception as exc:
                 logger.warning("DOMAIN_MIGRATE: procedure migration failed: %s", exc)
 
@@ -2396,12 +2396,12 @@ class MessageHandler:
             try:
                 if fname.startswith("_") or fname.startswith("."):
                     continue
-                content = await self._files.read_file(tenant_id, parent_id, fname)
+                content = await self._files.read_file(instance_id, parent_id, fname)
                 if content and not content.startswith("Error:"):
-                    manifest = await self._files.load_manifest(tenant_id, parent_id)
+                    manifest = await self._files.load_manifest(instance_id, parent_id)
                     desc = manifest.get(fname, "Migrated from parent")
-                    await self._files.write_file(tenant_id, child_id, fname, content, desc)
-                    await self._files.delete_file(tenant_id, parent_id, fname)
+                    await self._files.write_file(instance_id, child_id, fname, content, desc)
+                    await self._files.delete_file(instance_id, parent_id, fname)
                     migrated["files"].append(fname)
             except Exception as exc:
                 logger.warning("DOMAIN_MIGRATE: file %s failed: %s", fname, exc)
@@ -2416,15 +2416,15 @@ class MessageHandler:
                     logger.info("DOMAIN_MIGRATE_ITEM: type=%s item=%s action=moved", cat, item)
 
     async def _produce_child_briefings(
-        self, tenant_id: str, space_id: str, space: ContextSpace,
+        self, instance_id: str, space_id: str, space: ContextSpace,
     ) -> None:
         """Produce context briefings for all child domains after parent compaction."""
-        children = await self.state.list_child_spaces(tenant_id, space_id)
+        children = await self.state.list_child_spaces(instance_id, space_id)
         if not children:
             return
 
         # Load the freshly compacted document (Living State)
-        doc = await self.compaction.load_document(tenant_id, space_id)
+        doc = await self.compaction.load_document(instance_id, space_id)
         if not doc:
             return
 
@@ -2447,7 +2447,7 @@ class MessageHandler:
                 )
                 if briefing and briefing.strip():
                     briefing_path = (
-                        self.compaction._space_dir(tenant_id, space_id)
+                        self.compaction._space_dir(instance_id, space_id)
                         / f"briefing_{child.id}.md"
                     )
                     briefing_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2458,11 +2458,11 @@ class MessageHandler:
                 logger.warning("BRIEFING_FAILED: parent=%s child=%s error=%s", space_id, child.id, exc)
 
     async def _load_parent_briefing(
-        self, tenant_id: str, parent_id: str, child_id: str,
+        self, instance_id: str, parent_id: str, child_id: str,
     ) -> str | None:
         """Load a parent's briefing for a specific child. Returns None if not found."""
         briefing_path = (
-            self.compaction._space_dir(tenant_id, parent_id)
+            self.compaction._space_dir(instance_id, parent_id)
             / f"briefing_{child_id}.md"
         )
         if not briefing_path.exists():
@@ -2472,14 +2472,14 @@ class MessageHandler:
     # --- Downward search (CS-5) ---
 
     async def _downward_search(
-        self, tenant_id: str, query: str, target_space_ids: list[str],
+        self, instance_id: str, query: str, target_space_ids: list[str],
     ) -> str | None:
         """Search DOWN into child domains for an answer to a quick question."""
         import json as _json
 
         # Collect knowledge from target spaces and their children
         all_knowledge = await self.state.query_knowledge(
-            tenant_id, active_only=True, limit=500)
+            instance_id, active_only=True, limit=500)
 
         results_by_space: dict[str, list[str]] = {}
         for space_id in target_space_ids:
@@ -2488,7 +2488,7 @@ class MessageHandler:
                 if k.context_space == space_id
             ]
             # Also check children of this target
-            children = await self.state.list_child_spaces(tenant_id, space_id)
+            children = await self.state.list_child_spaces(instance_id, space_id)
             for child in children:
                 space_ke.extend([k for k in all_knowledge if k.context_space == child.id])
 
@@ -2503,7 +2503,7 @@ class MessageHandler:
         # Use cheap model to resolve the answer
         space_names = {}
         for sid in results_by_space:
-            s = await self.state.get_context_space(tenant_id, sid)
+            s = await self.state.get_context_space(instance_id, sid)
             space_names[sid] = s.name if s else sid
 
         context_parts = []
@@ -2554,7 +2554,7 @@ class MessageHandler:
     }
 
     async def _check_cross_domain_signals(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
         user_message: str, agent_response: str,
     ) -> None:
         """Post-turn check for cross-domain entity mentions with meaningful updates."""
@@ -2565,13 +2565,13 @@ class MessageHandler:
 
         # Get all knowledge entries
         all_knowledge = await self.state.query_knowledge(
-            tenant_id, active_only=True, limit=500)
+            instance_id, active_only=True, limit=500)
 
         # Build scope chain for current space
         from kernos.kernel.retrieval import RetrievalService
         _rs = RetrievalService.__new__(RetrievalService)
         _rs.state = self.state
-        current_chain = set(await _rs._build_scope_chain(tenant_id, space_id))
+        current_chain = set(await _rs._build_scope_chain(instance_id, space_id))
 
         # Find knowledge entries in OTHER domains that mention entities from this turn
         combined = f"{user_message} {agent_response}".lower()
@@ -2623,13 +2623,13 @@ class MessageHandler:
                 return
 
             # Get current space name for attribution
-            current_space = await self.state.get_context_space(tenant_id, space_id)
+            current_space = await self.state.get_context_space(instance_id, space_id)
             source_name = current_space.name if current_space else space_id
 
             for entity_name, ke in cross_matches:
                 notice_text = f"[From {source_name}] {signal_text}"
                 await self.state.append_space_notice(
-                    tenant_id, ke.context_space, notice_text,
+                    instance_id, ke.context_space, notice_text,
                     source=space_id, notice_type="cross_domain",
                 )
                 logger.info("CROSS_DOMAIN_SIGNAL: target=%s source=%s signal=%s",
@@ -2639,16 +2639,16 @@ class MessageHandler:
             logger.warning("CROSS_DOMAIN_CHECK: assessment failed: %s", exc)
 
     async def _update_conversation_summary(
-        self, tenant_id: str, conversation_id: str, platform: str
+        self, instance_id: str, conversation_id: str, platform: str
     ) -> None:
         now = utc_now()
         try:
             summary = await self.state.get_conversation_summary(
-                tenant_id, conversation_id
+                instance_id, conversation_id
             )
             if summary is None:
                 summary = ConversationSummary(
-                    tenant_id=tenant_id,
+                    instance_id=instance_id,
                     conversation_id=conversation_id,
                     platform=platform,
                     message_count=1,
@@ -2666,12 +2666,12 @@ class MessageHandler:
     # Turn Serialization — Per-Space Mailbox/Runner
     # -----------------------------------------------------------------------
 
-    def _get_runner(self, tenant_id: str, space_id: str) -> SpaceRunner:
+    def _get_runner(self, instance_id: str, space_id: str) -> SpaceRunner:
         """Get or create the runner for a (tenant, space) pair."""
-        key = f"{tenant_id}:{space_id}"
+        key = f"{instance_id}:{space_id}"
         if key not in self._runners:
             runner = SpaceRunner(
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 space_id=space_id,
                 mailbox=asyncio.Queue(),
             )
@@ -2724,7 +2724,7 @@ class MessageHandler:
                 for extra_msg, extra_ctx, extra_future in merged_messages[1:]:
                     try:
                         await self.conv_logger.append(
-                            runner.tenant_id, runner.space_id,
+                            runner.instance_id, runner.space_id,
                             speaker="user",
                             channel=extra_msg.platform,
                             content=extra_msg.content,
@@ -2828,7 +2828,7 @@ class MessageHandler:
                         # Tier 3: Promote successfully used tools into local affordance set
                         if primary_ctx.active_space and primary_ctx.tool_calls_trace:
                             asyncio.ensure_future(self._promote_used_tools(
-                                primary_ctx.tenant_id, primary_ctx.active_space_id,
+                                primary_ctx.instance_id, primary_ctx.active_space_id,
                                 primary_ctx.active_space, primary_ctx.tool_calls_trace))
                 except Exception as exc:
                     logger.error(
@@ -2861,7 +2861,7 @@ class MessageHandler:
                     )
                     try:
                         await self._runtime_trace.append_turn(
-                            runner.tenant_id, primary_ctx.trace.events)
+                            runner.instance_id, primary_ctx.trace.events)
                     except Exception as _te:
                         logger.debug("TRACE_FLUSH: failed: %s", _te)
 
@@ -2932,14 +2932,14 @@ class MessageHandler:
         ctx.phase_timings["route"] = int((time.monotonic() - _t0) * 1000)
 
         # Submit to the space runner's mailbox
-        runner = self._get_runner(ctx.tenant_id, ctx.active_space_id)
+        runner = self._get_runner(ctx.instance_id, ctx.active_space_id)
 
         response_future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
         await runner.mailbox.put((message, ctx, response_future))
 
         logger.info(
-            "TURN_SUBMITTED: tenant=%s space=%s queue_depth=%d",
-            ctx.tenant_id, ctx.active_space_id,
+            "TURN_SUBMITTED: instance=%s space=%s queue_depth=%d",
+            ctx.instance_id, ctx.active_space_id,
             runner.mailbox.qsize(),
         )
 
@@ -2949,23 +2949,23 @@ class MessageHandler:
     async def _check_early_return(self, ctx: TurnContext) -> str | None:
         """Secure input intercepts — return early without LLM."""
         message = ctx.message
-        tenant_id = derive_tenant_id(message)
+        instance_id = derive_instance_id(message)
         conversation_id = message.conversation_id
-        ctx.tenant_id = tenant_id
+        ctx.instance_id = instance_id
         ctx.conversation_id = conversation_id
 
         # Housekeeping
         self.reasoning.reset_conflict_raised()
-        self.reasoning.cleanup_expired_authorizations(tenant_id)
-        self._error_buffer.set_tenant(tenant_id)
-        message.member_id = self._resolve_member(tenant_id, message.platform, message.sender)
+        self.reasoning.cleanup_expired_authorizations(instance_id)
+        self._error_buffer.set_tenant(instance_id)
+        message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
         if message.platform == "discord":
             self._channel_registry.update_target("discord", message.conversation_id)
 
-        if tenant_id in self._secure_input_state:
-            state = self._secure_input_state[tenant_id]
+        if instance_id in self._secure_input_state:
+            state = self._secure_input_state[instance_id]
             if datetime.now(timezone.utc) > state.expires_at:
-                del self._secure_input_state[tenant_id]
+                del self._secure_input_state[instance_id]
                 return (
                     "The secure input session timed out after 10 minutes. "
                     "Your message was processed normally (not stored as a credential). "
@@ -2973,18 +2973,18 @@ class MessageHandler:
                 )
             credential_value = message.content.strip()
             cap_name = state.capability_name
-            del self._secure_input_state[tenant_id]
-            await self._store_credential(tenant_id, cap_name, credential_value)
-            success = await self._connect_after_credential(tenant_id, cap_name)
+            del self._secure_input_state[instance_id]
+            await self._store_credential(instance_id, cap_name, credential_value)
+            success = await self._connect_after_credential(instance_id, cap_name)
             if success:
                 return f"Key stored securely. {cap_name} is now connected! You can start using it right away."
             return f"Key stored, but I couldn't connect to {cap_name}. The key might be invalid, or the service might be down."
 
         if message.content.strip().lower() == _SECURE_API_TRIGGER:
-            cap_name = await self._infer_pending_capability(tenant_id, conversation_id)
+            cap_name = await self._infer_pending_capability(instance_id, conversation_id)
             if not cap_name:
                 return "I'm not sure which tool you're setting up. Head to system settings and start the connection process first."
-            self._secure_input_state[tenant_id] = SecureInputState(
+            self._secure_input_state[instance_id] = SecureInputState(
                 capability_name=cap_name,
                 expires_at=datetime.now(timezone.utc) + timedelta(minutes=_SECURE_INPUT_TIMEOUT_MINUTES),
             )
@@ -3024,7 +3024,7 @@ class MessageHandler:
             msg_chars = sum(len(str(m.get('content', ''))) for m in ctx.messages)
             tool_chars = sum(len(json.dumps(t)) for t in ctx.tools)
             _char_est = (_sys_chars + msg_chars + tool_chars) // 4
-            _real_baseline = self.reasoning.get_last_real_input_tokens(ctx.tenant_id)
+            _real_baseline = self.reasoning.get_last_real_input_tokens(ctx.instance_id)
             _static_chars = len(ctx.system_prompt_static)
             _dynamic_chars = len(ctx.system_prompt_dynamic)
             f.write(f"System prompt: ~{_sys_chars // 4} tokens ({_sys_chars} chars)\n")
@@ -3060,7 +3060,7 @@ class MessageHandler:
         )
 
     async def _handle_manage_plan(
-        self, tenant_id: str, space_id: str, tool_input: dict,
+        self, instance_id: str, space_id: str, tool_input: dict,
     ) -> str:
         """Handle manage_plan tool call — create, continue, status, pause."""
         from kernos.kernel.execution import (
@@ -3107,7 +3107,7 @@ class MessageHandler:
                 "show_progress": _show_progress_override if _show_progress_override is not None else True,
                 "created_at": utc_now(),
             }
-            await save_plan(data_dir, tenant_id, space_id, plan)
+            await save_plan(data_dir, instance_id, space_id, plan)
             # Find the first step and kick it off
             first_step = phases[0]["steps"][0] if phases and phases[0].get("steps") else None
             if first_step:
@@ -3119,16 +3119,16 @@ class MessageHandler:
                 plan["current_step"] = step_id
                 plan["usage"]["steps_used"] = 1
                 first_step["status"] = "in_progress"
-                await save_plan(data_dir, tenant_id, space_id, plan)
+                await save_plan(data_dir, instance_id, space_id, plan)
                 import asyncio
-                asyncio.create_task(self._execute_self_directed_step(tenant_id, space_id, envelope))
+                asyncio.create_task(self._execute_self_directed_step(instance_id, space_id, envelope))
                 logger.info("PLAN_CREATE: plan=%s title=%r steps=%d first_step=%s",
                     plan_id, title, _total_steps, step_id)
                 # Ephemeral progress notification (deleted when step completes)
                 if plan.get("show_progress", True):
                     try:
                         _pmid = await self.send_outbound(
-                            tenant_id, tenant_id, None,
+                            instance_id, instance_id, None,
                             f"📋 **{title}** — step 1/{_total_steps}: {step_desc}",
                         )
                         if _pmid:
@@ -3143,7 +3143,7 @@ class MessageHandler:
         # --- STATUS ---
         if action == "status":
             plan_id = tool_input.get("plan_id", "")
-            plan = await load_plan(data_dir, tenant_id, space_id)
+            plan = await load_plan(data_dir, instance_id, space_id)
             if not plan:
                 return "No plan found in this space."
             from kernos.kernel.execution import _plan_to_markdown
@@ -3152,12 +3152,12 @@ class MessageHandler:
         # --- PAUSE ---
         if action == "pause":
             plan_id = tool_input.get("plan_id", "")
-            plan = await load_plan(data_dir, tenant_id, space_id)
+            plan = await load_plan(data_dir, instance_id, space_id)
             if not plan:
                 return "No plan found in this space."
             plan["status"] = "paused"
             plan["paused_reason"] = "user_requested"
-            await save_plan(data_dir, tenant_id, space_id, plan)
+            await save_plan(data_dir, instance_id, space_id, plan)
             logger.info("PLAN_PAUSE: plan=%s", plan.get("plan_id", "?"))
             return f"Plan '{plan.get('title', '?')}' paused."
 
@@ -3169,7 +3169,7 @@ class MessageHandler:
             notify_user = tool_input.get("notify_user", "")
             budget_override = tool_input.get("budget_override")
 
-            plan = await load_plan(data_dir, tenant_id, space_id)
+            plan = await load_plan(data_dir, instance_id, space_id)
             if not plan:
                 return f"No plan found in this space."
             plan_id = plan.get("plan_id", plan_id)
@@ -3191,7 +3191,7 @@ class MessageHandler:
             if not step_id:
                 # All steps done — mark plan complete
                 plan["status"] = "complete"
-                await save_plan(data_dir, tenant_id, space_id, plan)
+                await save_plan(data_dir, instance_id, space_id, plan)
                 logger.info("PLAN_COMPLETE: plan=%s (no pending steps on continue call)",
                     plan.get("plan_id", "?"))
                 return "No pending steps remain. Plan is complete."
@@ -3248,7 +3248,7 @@ class MessageHandler:
                 plan["paused_reason"] = budget_hit
                 plan["paused_at_step"] = step_id
                 plan["paused_next_description"] = step_desc
-                await save_plan(data_dir, tenant_id, space_id, plan)
+                await save_plan(data_dir, instance_id, space_id, plan)
                 logger.info("PLAN_BUDGET_HIT: plan=%s ceiling=%s step=%s", plan_id, budget_hit, step_id)
                 _reason_display = {"step_limit": "step limit", "token_budget": "token budget", "time_limit": "time limit"}.get(budget_hit, budget_hit)
                 _usage = plan.get("usage", {})
@@ -3258,7 +3258,7 @@ class MessageHandler:
                 _time_info = f"{_usage.get('elapsed_s', 0)}s/{_bgt.get('max_time_s', '?')}s"
                 try:
                     await self.send_outbound(
-                        tenant_id, tenant_id, None,
+                        instance_id, instance_id, None,
                         f"Plan paused — hit {_reason_display} at step {step_id}.\n"
                         f"Budget used: {_steps_info} | {_tokens_info} | {_time_info}\n"
                         f"Say \"continue\" to resume, or tell me new limits "
@@ -3271,7 +3271,7 @@ class MessageHandler:
             # Send user notification if provided
             if notify_user and notify_user.strip():
                 try:
-                    await self.send_outbound(tenant_id, tenant_id, None, notify_user)
+                    await self.send_outbound(instance_id, instance_id, None, notify_user)
                 except Exception:
                     pass
 
@@ -3293,10 +3293,10 @@ class MessageHandler:
             ]
             envelope.is_final_step = len(_remaining_pending) == 0
 
-            await save_plan(data_dir, tenant_id, space_id, plan)
+            await save_plan(data_dir, instance_id, space_id, plan)
 
             import asyncio
-            asyncio.create_task(self._execute_self_directed_step(tenant_id, space_id, envelope))
+            asyncio.create_task(self._execute_self_directed_step(instance_id, space_id, envelope))
 
             logger.info("PLAN_STEP: plan=%s step=%s description=%r budget_remaining=%d/%d",
                 plan_id, step_id, step_desc[:60],
@@ -3316,7 +3316,7 @@ class MessageHandler:
                 _current = plan["usage"].get("steps_used", 0)
                 try:
                     _pmid = await self.send_outbound(
-                        tenant_id, tenant_id, None,
+                        instance_id, instance_id, None,
                         f"📋 step {_current}/{_total}: {step_desc}",
                     )
                     if _pmid:
@@ -3330,7 +3330,7 @@ class MessageHandler:
         return f"Unknown action: {action}. Use create, continue, status, or pause."
 
     async def _execute_self_directed_step(
-        self, tenant_id: str, space_id: str, envelope: ExecutionEnvelope,
+        self, instance_id: str, space_id: str, envelope: ExecutionEnvelope,
     ) -> None:
         """Execute a self-directed step through the pipeline."""
         from kernos.kernel.execution import load_plan
@@ -3338,7 +3338,7 @@ class MessageHandler:
 
         # Guard: check plan is still active and step is still executable
         data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-        plan = await load_plan(data_dir, tenant_id, space_id)
+        plan = await load_plan(data_dir, instance_id, space_id)
         if not plan:
             logger.info("PLAN_STEP_SKIP: plan=%s — plan not found, skipping", envelope.plan_id)
             return
@@ -3363,7 +3363,7 @@ class MessageHandler:
             platform_capabilities=["text"],
             conversation_id=f"plan_{envelope.plan_id}",
             timestamp=datetime.now(timezone.utc),
-            tenant_id=tenant_id,
+            instance_id=instance_id,
             context={"execution_envelope": {
                 "plan_id": envelope.plan_id,
                 "step_id": envelope.step_id,
@@ -3397,7 +3397,7 @@ class MessageHandler:
                 # Mark the step complete in the plan
                 from kernos.kernel.execution import load_plan, save_plan
                 data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-                plan = await load_plan(data_dir, tenant_id, space_id)
+                plan = await load_plan(data_dir, instance_id, space_id)
                 if plan:
                     for phase in plan.get("phases", []):
                         for step in phase.get("steps", []):
@@ -3420,12 +3420,12 @@ class MessageHandler:
                             if response and response.strip():
                                 _title = plan.get("title", "Plan")
                                 await self.send_outbound(
-                                    tenant_id, tenant_id, None,
+                                    instance_id, instance_id, None,
                                     f"**{_title}** — complete\n\n{response}",
                                 )
                         except Exception:
                             pass
-                    await save_plan(data_dir, tenant_id, space_id, plan)
+                    await save_plan(data_dir, instance_id, space_id, plan)
                 return  # Step succeeded — exit retry loop
 
             except Exception as exc:
@@ -3438,7 +3438,7 @@ class MessageHandler:
                     # First failure — notify user
                     try:
                         await self.send_outbound(
-                            tenant_id, tenant_id, None,
+                            instance_id, instance_id, None,
                             f"Plan step hit an API error — automatically retrying in {_delay}s.",
                         )
                     except Exception:
@@ -3455,7 +3455,7 @@ class MessageHandler:
                         platform_capabilities=["text"],
                         conversation_id=msg.conversation_id,
                         timestamp=datetime.now(timezone.utc),
-                        tenant_id=tenant_id,
+                        instance_id=instance_id,
                         context=msg.context,
                     )
                     continue
@@ -3464,7 +3464,7 @@ class MessageHandler:
                 _slow_interval = int(os.getenv("KERNOS_PLAN_SLOW_RETRY_S", "3600"))
                 try:
                     await self.send_outbound(
-                        tenant_id, tenant_id, None,
+                        instance_id, instance_id, None,
                         f"The API has been down for ~{sum(_step_backoffs[:_max_step_retries]) // 60} minutes. "
                         f"I'll keep retrying every hour until it's back.",
                     )
@@ -3480,7 +3480,7 @@ class MessageHandler:
 
                     # Check if plan was cancelled/paused by user while we waited
                     from kernos.kernel.execution import load_plan as _lp
-                    _check = await _lp(os.getenv("KERNOS_DATA_DIR", "./data"), tenant_id, space_id)
+                    _check = await _lp(os.getenv("KERNOS_DATA_DIR", "./data"), instance_id, space_id)
                     if _check and _check.get("status") in ("paused", "complete", "cancelled"):
                         logger.info("PLAN_STEP_SLOW_POLL: plan=%s aborted — status=%s",
                             envelope.plan_id, _check.get("status"))
@@ -3495,7 +3495,7 @@ class MessageHandler:
                             platform_capabilities=["text"],
                             conversation_id=msg.conversation_id,
                             timestamp=datetime.now(timezone.utc),
-                            tenant_id=tenant_id,
+                            instance_id=instance_id,
                             context=msg.context,
                         )
                         response = await self.process(msg)
@@ -3503,7 +3503,7 @@ class MessageHandler:
                             envelope.plan_id, envelope.step_id, _slow_attempt)
                         try:
                             await self.send_outbound(
-                                tenant_id, tenant_id, None,
+                                instance_id, instance_id, None,
                                 f"API is back — plan resuming.",
                             )
                         except Exception:
@@ -3511,7 +3511,7 @@ class MessageHandler:
                         # Mark complete and check plan status (same as success path above)
                         from kernos.kernel.execution import load_plan, save_plan
                         data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-                        plan = await load_plan(data_dir, tenant_id, space_id)
+                        plan = await load_plan(data_dir, instance_id, space_id)
                         if plan:
                             for phase in plan.get("phases", []):
                                 for step in phase.get("steps", []):
@@ -3530,12 +3530,12 @@ class MessageHandler:
                                     if response and response.strip():
                                         _title = plan.get("title", "Plan")
                                         await self.send_outbound(
-                                            tenant_id, tenant_id, None,
+                                            instance_id, instance_id, None,
                                             f"**{_title}** — complete\n\n{response}",
                                         )
                                 except Exception:
                                     pass
-                            await save_plan(data_dir, tenant_id, space_id, plan)
+                            await save_plan(data_dir, instance_id, space_id, plan)
                         return  # Recovered — exit
                     except Exception as slow_exc:
                         logger.warning("PLAN_STEP_SLOW_POLL: plan=%s attempt=%d still failing: %s",
@@ -3543,7 +3543,7 @@ class MessageHandler:
                         if _slow_attempt % 3 == 0:  # Notify user every 3 hours
                             try:
                                 await self.send_outbound(
-                                    tenant_id, tenant_id, None,
+                                    instance_id, instance_id, None,
                                     f"Still can't reach the API ({_slow_attempt}h). "
                                     f"I'll keep trying. Say \"pause plan\" to stop.",
                                 )
@@ -3555,7 +3555,7 @@ class MessageHandler:
         import uuid as _uuid
         import shlex
 
-        tenant_id = ctx.tenant_id
+        instance_id = ctx.instance_id
         parts = raw_cmd.strip().split(None, 1)
         sub = parts[1].strip() if len(parts) > 1 else ""
 
@@ -3574,7 +3574,7 @@ class MessageHandler:
             now = utc_now()
             new_space = ContextSpace(
                 id=f"space_{_uuid.uuid4().hex[:8]}",
-                tenant_id=tenant_id,
+                instance_id=instance_id,
                 name=name,
                 description=description,
                 space_type="domain",
@@ -3605,7 +3605,7 @@ class MessageHandler:
                     _context_def_tokens=0,
                     _system_overhead=4000,
                 )
-                await self.compaction.save_state(tenant_id, new_space.id, comp)
+                await self.compaction.save_state(instance_id, new_space.id, comp)
             except Exception as exc:
                 logger.warning("Failed to init compaction for manual space: %s", exc)
 
@@ -3614,7 +3614,7 @@ class MessageHandler:
 
         # Default: list all spaces (user-facing — no internal fields)
         from datetime import datetime, timezone
-        spaces = await self.state.list_context_spaces(tenant_id)
+        spaces = await self.state.list_context_spaces(instance_id)
         active = [s for s in spaces if s.status == "active"]
         if not active:
             return "No context spaces found."
@@ -3664,12 +3664,12 @@ class MessageHandler:
 
         trigger_store = getattr(self.reasoning, '_trigger_store', None)
         operator_view = await build_operator_state_view(
-            ctx.tenant_id, self.state, trigger_store, self.registry,
+            ctx.instance_id, self.state, trigger_store, self.registry,
         )
 
         with open(status_path, "w") as f:
             f.write(f"=== OPERATOR STATE VIEW ===\n")
-            f.write(f"Tenant: {ctx.tenant_id}\n")
+            f.write(f"Tenant: {ctx.instance_id}\n")
             f.write(f"Generated: {utc_now()}\n\n")
             f.write(operator_view)
 
@@ -3698,7 +3698,7 @@ class MessageHandler:
 
         # read_recent returns [{role, content, timestamp, channel}, ...]
         recent = await self.conv_logger.read_recent(
-            ctx.tenant_id, prev_space_id, token_budget=1200, max_messages=6,
+            ctx.instance_id, prev_space_id, token_budget=1200, max_messages=6,
         )
         if not recent:
             return None
@@ -3706,7 +3706,7 @@ class MessageHandler:
         DEPARTURE_CHAR_BUDGET = 1200
         PER_MSG_CAP = 300
 
-        prev_space = await self.state.get_context_space(ctx.tenant_id, prev_space_id)
+        prev_space = await self.state.get_context_space(ctx.instance_id, prev_space_id)
         prev_name = prev_space.name if prev_space else prev_space_id
 
         # Walk backward, stop when budget exhausted
@@ -3736,30 +3736,30 @@ class MessageHandler:
 
     async def _phase_provision(self, ctx: TurnContext) -> None:
         """Phase 1: Ensure tenant, soul, MCP config, covenants, evaluator ready."""
-        tenant_id = ctx.tenant_id
+        instance_id = ctx.instance_id
         message = ctx.message
-        await self.tenants.get_or_create(tenant_id)
-        await self._ensure_tenant_state(tenant_id, message)
-        ctx.soul = await self._get_or_init_soul(tenant_id)
-        await self._maybe_load_mcp_config(tenant_id)
-        await self._maybe_run_covenant_cleanup(tenant_id)
-        await self._maybe_start_evaluator(tenant_id)
+        await self.tenants.get_or_create(instance_id)
+        await self._ensureinstance_state(instance_id, message)
+        ctx.soul = await self._get_or_init_soul(instance_id)
+        await self._maybe_load_mcp_config(instance_id)
+        await self._maybe_run_covenant_cleanup(instance_id)
+        await self._maybe_start_evaluator(instance_id)
 
     async def _phase_route(self, ctx: TurnContext) -> None:
         """Phase 2: Determine context space, handle space switching, file uploads."""
-        tenant_id = ctx.tenant_id
+        instance_id = ctx.instance_id
         message = ctx.message
         conversation_id = ctx.conversation_id
 
-        recent_full = await self.conversations.get_recent_full(tenant_id, conversation_id, limit=20)
-        tenant_profile = await self.state.get_tenant_profile(tenant_id)
-        current_focus_id = tenant_profile.last_active_space_id if tenant_profile else ""
+        recent_full = await self.conversations.get_recent_full(instance_id, conversation_id, limit=20)
+        instance_profile = await self.state.get_instance_profile(instance_id)
+        current_focus_id = instance_profile.last_active_space_id if instance_profile else ""
 
         logger.info(
             "ROUTE_INPUT: message=%s recent=%d current_focus=%s",
             (message.content or "")[:80], len(recent_full), current_focus_id or "none",
         )
-        ctx.router_result = await self._router.route(tenant_id, message.content, recent_full, current_focus_id)
+        ctx.router_result = await self._router.route(instance_id, message.content, recent_full, current_focus_id)
 
         # Query mode: quick question about another domain — stay in current space
         if ctx.router_result.query_mode and current_focus_id and ctx.router_result.focus != current_focus_id:
@@ -3771,7 +3771,7 @@ class MessageHandler:
                 logger.info("DOWNWARD_SEARCH: query=%r target_domains=%s",
                     (message.content or "")[:60], target_space_ids)
                 answer = await self._downward_search(
-                    tenant_id, message.content or "", target_space_ids)
+                    instance_id, message.content or "", target_space_ids)
                 if answer:
                     if ctx.results_prefix:
                         ctx.results_prefix += f"\n\n{answer}"
@@ -3801,7 +3801,7 @@ class MessageHandler:
         logger.info("USER_MSG: sender=%s full_text=%r", message.sender, message.content)
         _route_space_name = ""
         if ctx.active_space_id:
-            _route_space = await self.state.get_context_space(tenant_id, ctx.active_space_id)
+            _route_space = await self.state.get_context_space(instance_id, ctx.active_space_id)
             _route_space_name = _route_space.name if _route_space else ""
         logger.info(
             "ROUTE: space=%s (%s) tags=%s confident=%s prev=%s switched=%s router=llm",
@@ -3812,35 +3812,35 @@ class MessageHandler:
 
         if ctx.space_switched:
             import asyncio
-            _prev_space = await self.state.get_context_space(tenant_id, ctx.previous_space_id)
+            _prev_space = await self.state.get_context_space(instance_id, ctx.previous_space_id)
             _prev_name = _prev_space.name if _prev_space else "unknown"
             logger.info(
                 "SPACE_SWITCH: from=%s (%s) to=%s (%s)",
                 ctx.previous_space_id, _prev_name,
                 ctx.active_space_id, _route_space_name or "unknown",
             )
-            asyncio.create_task(self._run_session_exit(tenant_id, ctx.previous_space_id, conversation_id))
+            asyncio.create_task(self._run_session_exit(instance_id, ctx.previous_space_id, conversation_id))
             # Harvest facts from departing space
             try:
                 from kernos.kernel.fact_harvest import harvest_facts
-                log_text = await self.conv_logger.read_current_log_text(tenant_id, ctx.previous_space_id)
+                log_text = await self.conv_logger.read_current_log_text(instance_id, ctx.previous_space_id)
                 if isinstance(log_text, tuple):
                     log_text = log_text[0]
                 asyncio.create_task(harvest_facts(
                     self.reasoning, self.state, self.events,
-                    tenant_id, ctx.previous_space_id, log_text or "",
+                    instance_id, ctx.previous_space_id, log_text or "",
                     data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
                 ))
             except Exception:
                 pass
 
-        if tenant_profile and ctx.active_space_id and ctx.active_space_id != ctx.previous_space_id:
-            tenant_profile.last_active_space_id = ctx.active_space_id
-            await self.state.save_tenant_profile(tenant_id, tenant_profile)
+        if instance_profile and ctx.active_space_id and ctx.active_space_id != ctx.previous_space_id:
+            instance_profile.last_active_space_id = ctx.active_space_id
+            await self.state.save_instance_profile(instance_id, instance_profile)
 
         if ctx.space_switched:
             try:
-                await emit_event(self.events, EventType.CONTEXT_SPACE_SWITCHED, tenant_id, "router",
+                await emit_event(self.events, EventType.CONTEXT_SPACE_SWITCHED, instance_id, "router",
                     payload={"from_space": ctx.previous_space_id, "to_space": ctx.active_space_id,
                              "router_tags": ctx.router_result.tags, "continuation": ctx.router_result.continuation})
             except Exception as exc:
@@ -3848,33 +3848,33 @@ class MessageHandler:
 
 
         ctx.active_space = (
-            await self.state.get_context_space(tenant_id, ctx.active_space_id)
+            await self.state.get_context_space(instance_id, ctx.active_space_id)
             if ctx.active_space_id else None
         )
         if ctx.active_space and ctx.active_space_id:
-            await self.state.update_context_space(tenant_id, ctx.active_space_id,
+            await self.state.update_context_space(instance_id, ctx.active_space_id,
                 {"last_active_at": utc_now(), "status": "active"})
             # Lazy workspace registration — ensure built tools are in the catalog
             try:
-                await self._workspace.ensure_registered(tenant_id, ctx.active_space_id)
+                await self._workspace.ensure_registered(instance_id, ctx.active_space_id)
             except Exception as exc:
                 logger.warning("WORKSPACE: lazy registration failed for %s: %s", ctx.active_space_id, exc)
 
             # Lazy catalog version promotion — scan for new tools relevant to this space
             try:
-                await self._check_catalog_version(tenant_id, ctx.active_space_id, ctx.active_space)
+                await self._check_catalog_version(instance_id, ctx.active_space_id, ctx.active_space)
             except Exception as exc:
                 logger.warning("CATALOG_VERSION: check failed for %s: %s", ctx.active_space_id, exc)
 
         if message.context and ctx.active_space_id:
             for att in message.context.get("attachments", []):
-                note = await self._handle_file_upload(tenant_id, ctx.active_space_id,
+                note = await self._handle_file_upload(instance_id, ctx.active_space_id,
                     att.get("filename", "upload.txt"), att.get("content", ""))
                 ctx.upload_notifications.append(note)
 
     async def _phase_assemble(self, ctx: TurnContext) -> None:
         """Phase 3: Build Cognitive UI blocks — system prompt, tools, messages."""
-        tenant_id = ctx.tenant_id
+        instance_id = ctx.instance_id
         message = ctx.message
         soul = ctx.soul
         active_space = ctx.active_space
@@ -3882,12 +3882,12 @@ class MessageHandler:
 
         # Space context (compaction, cross-domain, system events, receipts)
         space_messages, ctx.results_prefix, ctx.memory_prefix, _procedures_prefix = await self._assemble_space_context(
-            tenant_id, ctx.conversation_id, active_space_id, active_space
+            instance_id, ctx.conversation_id, active_space_id, active_space
         )
 
         # Emit message.received
         try:
-            await emit_event(self.events, EventType.MESSAGE_RECEIVED, tenant_id, "handler",
+            await emit_event(self.events, EventType.MESSAGE_RECEIVED, instance_id, "handler",
                 payload={"content": message.content, "sender": message.sender,
                          "sender_auth_level": message.sender_auth_level.value,
                          "platform": message.platform, "conversation_id": ctx.conversation_id})
@@ -3910,11 +3910,11 @@ class MessageHandler:
             user_entry = {
                 "role": "user", "content": user_content,
                 "timestamp": message.timestamp.isoformat(), "platform": message.platform,
-                "tenant_id": tenant_id, "conversation_id": ctx.conversation_id,
+                "instance_id": instance_id, "conversation_id": ctx.conversation_id,
                 "space_tags": ctx.router_result.tags,
             }
-            await self.conversations.append(tenant_id, ctx.conversation_id, user_entry)
-            await self.conv_logger.append(tenant_id=tenant_id, space_id=active_space_id,
+            await self.conversations.append(instance_id, ctx.conversation_id, user_entry)
+            await self.conv_logger.append(instance_id=instance_id, space_id=active_space_id,
                 speaker="user", channel=message.platform, content=user_content,
                 timestamp=message.timestamp.isoformat())
 
@@ -3974,7 +3974,7 @@ class MessageHandler:
 
             # Build knowledge candidates with Bjork dual-strength ranking
             from kernos.kernel.state import compute_retrieval_strength
-            all_ke = await self.state.query_knowledge(tenant_id, subject="user", active_only=True, limit=200)
+            all_ke = await self.state.query_knowledge(instance_id, subject="user", active_only=True, limit=200)
             always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
             _never_archetypes = {"ephemeral"}
             _now_iso = utc_now()
@@ -4071,13 +4071,13 @@ class MessageHandler:
             while _cur and _cur not in _seen:
                 _scope_chain.append(_cur)
                 _seen.add(_cur)
-                _p = await self.state.get_context_space(tenant_id, _cur)
+                _p = await self.state.get_context_space(instance_id, _cur)
                 _cur = _p.parent_id if _p and _p.parent_id else None
         space_scope = _scope_chain + [None] if _scope_chain else None
 
         # Query covenants first (fast JSON read), partition by tier
         all_covenants = await self.state.query_covenant_rules(
-            tenant_id, context_space_scope=space_scope, active_only=True)
+            instance_id, context_space_scope=space_scope, active_only=True)
         _pinned_covenants = [r for r in all_covenants if r.tier != "situational"]
         _situational_covenants = [r for r in all_covenants if r.tier == "situational"]
 
@@ -4106,7 +4106,7 @@ class MessageHandler:
             try:
                 from kernos.kernel.preference_parser import commit_from_analysis
                 pref_note = await commit_from_analysis(
-                    _pref, user_content, tenant_id, active_space_id,
+                    _pref, user_content, instance_id, active_space_id,
                     self.state, self.reasoning,
                     getattr(self.reasoning, '_trigger_store', None),
                 )
@@ -4129,7 +4129,7 @@ class MessageHandler:
         # This feeds the Bjork decay model: used entries stay accessible longer
         for _ke in shaped:
             try:
-                await self.state.update_knowledge(tenant_id, _ke.id, {
+                await self.state.update_knowledge(instance_id, _ke.id, {
                     "last_reinforced_at": utc_now(),
                     "reinforcement_count": getattr(_ke, 'reinforcement_count', 1) + 1,
                 })
@@ -4229,7 +4229,7 @@ class MessageHandler:
                 continue
             schema = (_kernel_tool_map.get(name)
                       or self.registry.get_tool_schema(name)
-                      or self._load_workspace_tool_schema(tenant_id, name))
+                      or self._load_workspace_tool_schema(instance_id, name))
             if schema and _add_tool(schema):
                 tokens = _schema_tokens(schema)
                 turns_unused = max(1, _turn - meta.get("last_turn", 0))
@@ -4286,7 +4286,7 @@ class MessageHandler:
                             # Try kernel → MCP → workspace descriptor
                             schema = _kernel_tool_map.get(tool_name) or self.registry.get_tool_schema(tool_name)
                             if not schema:
-                                schema = self._load_workspace_tool_schema(tenant_id, tool_name)
+                                schema = self._load_workspace_tool_schema(instance_id, tool_name)
                             if schema and _add_tool(schema):
                                 tokens = _schema_tokens(schema)
                                 candidates.append((schema, 0))  # scan-selected = highest priority
@@ -4348,7 +4348,7 @@ class MessageHandler:
             _space_names[active_space_id] = active_space.name
         for sid in _scope_chain:
             if sid not in _space_names:
-                _s = await self.state.get_context_space(tenant_id, sid)
+                _s = await self.state.get_context_space(instance_id, sid)
                 if _s:
                     _space_names[sid] = _s.name
 
@@ -4362,7 +4362,7 @@ class MessageHandler:
             try:
                 from kernos.kernel.execution import load_plan
                 _paused_plan = await load_plan(
-                    os.getenv("KERNOS_DATA_DIR", "./data"), tenant_id, active_space_id)
+                    os.getenv("KERNOS_DATA_DIR", "./data"), instance_id, active_space_id)
                 if _paused_plan and _paused_plan.get("status") == "paused":
                     _exec_envelope = {
                         "plan_id": _paused_plan.get("plan_id", "?"),
@@ -4389,15 +4389,15 @@ class MessageHandler:
         ctx.system_prompt = _compose_blocks(ctx.system_prompt_static, ctx.system_prompt_dynamic)
 
         # Developer mode: inject pending errors
-        tenant_profile = await self.state.get_tenant_profile(tenant_id)
-        if tenant_profile and getattr(tenant_profile, 'developer_mode', False):
-            error_block = self._error_buffer.drain(tenant_id)
+        instance_profile = await self.state.get_instance_profile(instance_id)
+        if instance_profile and getattr(instance_profile, 'developer_mode', False):
+            error_block = self._error_buffer.drain(instance_id)
             if error_block:
                 ctx.system_prompt += "\n\n" + error_block
 
         # Pending trigger deliveries
         try:
-            pending_triggers = await self._trigger_store.list_all(tenant_id)
+            pending_triggers = await self._trigger_store.list_all(instance_id)
             for trig in pending_triggers:
                 if trig.pending_delivery:
                     ctx.upload_notifications.append(
@@ -4430,7 +4430,7 @@ class MessageHandler:
             try:
                 _preview = final_user_content[:_USER_MSG_CHAR_BUDGET - 200]
                 _fname = f"user_input_{utc_now().replace(':', '').replace('+', '_')[:19]}.txt"
-                await self._files.write_file(tenant_id, active_space_id, _fname, final_user_content,
+                await self._files.write_file(instance_id, active_space_id, _fname, final_user_content,
                     description="User input (auto-persisted, oversized)")
                 final_user_content = (
                     f"{_preview}\n\n"
@@ -4451,11 +4451,11 @@ class MessageHandler:
         """Phase 4: Build ReasoningRequest, execute via task engine."""
         ctx.task = Task(
             id=generate_task_id(), type=TaskType.REACTIVE_SIMPLE,
-            tenant_id=ctx.tenant_id, conversation_id=ctx.conversation_id,
+            instance_id=ctx.instance_id, conversation_id=ctx.conversation_id,
             source="user_message", input_text=ctx.message.content, created_at=utc_now(),
         )
         request = ReasoningRequest(
-            tenant_id=ctx.tenant_id, conversation_id=ctx.conversation_id,
+            instance_id=ctx.instance_id, conversation_id=ctx.conversation_id,
             system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
             system_prompt_static=ctx.system_prompt_static,
             system_prompt_dynamic=ctx.system_prompt_dynamic,
@@ -4470,9 +4470,9 @@ class MessageHandler:
 
     async def _phase_consequence(self, ctx: TurnContext) -> None:
         """Phase 5: Confirmation replay, tool config, projectors, soul update."""
-        tenant_id = ctx.tenant_id
+        instance_id = ctx.instance_id
         request = ReasoningRequest(
-            tenant_id=tenant_id, conversation_id=ctx.conversation_id,
+            instance_id=instance_id, conversation_id=ctx.conversation_id,
             system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
             system_prompt_static=ctx.system_prompt_static,
             system_prompt_dynamic=ctx.system_prompt_dynamic,
@@ -4481,12 +4481,12 @@ class MessageHandler:
         )
 
         # Confirmation replay
-        pending = self.reasoning.get_pending_actions(tenant_id)
+        pending = self.reasoning.get_pending_actions(instance_id)
         conflict_this_turn = self.reasoning.get_conflict_raised()
         if pending and conflict_this_turn:
             confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
             ctx.response_text = confirm_pattern.sub("", ctx.response_text).strip()
-            logger.info("CONFIRM_BLOCKED: tenant=%s reason=same_turn_as_conflict", tenant_id)
+            logger.info("CONFIRM_BLOCKED: instance=%s reason=same_turn_as_conflict", instance_id)
         elif pending:
             confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
             matches = confirm_pattern.findall(ctx.response_text)
@@ -4514,33 +4514,33 @@ class MessageHandler:
                     else:
                         execution_results.append(f"Expired: {action.proposed_action}")
                         logger.warning("CONFIRM_EXPIRED: tool=%s idx=%d", action.tool_name, idx)
-                self.reasoning.clear_pending_actions(tenant_id)
+                self.reasoning.clear_pending_actions(instance_id)
                 ctx.response_text = confirm_pattern.sub("", ctx.response_text).strip()
                 if execution_results:
                     ctx.response_text += "\n\n" + "\n".join(execution_results)
             else:
                 all_expired = all(datetime.now(timezone.utc) >= a.expires_at for a in pending)
                 if all_expired:
-                    self.reasoning.clear_pending_actions(tenant_id)
-                    logger.info("PENDING_CLEARED: tenant=%s reason=all_expired", tenant_id)
+                    self.reasoning.clear_pending_actions(instance_id)
+                    logger.info("PENDING_CLEARED: instance=%s reason=all_expired", instance_id)
 
         # Tool config persistence
         if self.reasoning.get_tools_changed():
             self.reasoning.reset_tools_changed()
             try:
-                await self._persist_mcp_config(tenant_id)
-                system_space = await self._get_system_space(tenant_id)
+                await self._persist_mcp_config(instance_id)
+                system_space = await self._get_system_space(instance_id)
                 if system_space:
-                    await self._write_capabilities_overview(tenant_id, system_space.id)
+                    await self._write_capabilities_overview(instance_id, system_space.id)
             except Exception as exc:
                 logger.warning("Failed to persist tools config: %s", exc)
 
         # Projectors
-        history = await self.conversations.get_recent(tenant_id, ctx.conversation_id, limit=20)
+        history = await self.conversations.get_recent(instance_id, ctx.conversation_id, limit=20)
         await run_projectors(
             user_message=ctx.message.content, recent_turns=history[-4:],
             soul=ctx.soul, state=self.state, events=self.events,
-            reasoning_service=self.reasoning, tenant_id=tenant_id,
+            reasoning_service=self.reasoning, instance_id=instance_id,
             active_space_id=ctx.active_space_id, active_space=ctx.active_space,
         )
 
@@ -4552,24 +4552,24 @@ class MessageHandler:
             try:
                 import asyncio as _aio
                 _aio.create_task(self._check_cross_domain_signals(
-                    ctx.tenant_id, ctx.active_space_id,
+                    ctx.instance_id, ctx.active_space_id,
                     ctx.message.content or "", ctx.response_text))
             except Exception:
                 pass
 
     async def _phase_persist(self, ctx: TurnContext) -> None:
         """Phase 6: Store messages, write to conv log, compaction, events."""
-        tenant_id = ctx.tenant_id
+        instance_id = ctx.instance_id
         message = ctx.message
 
         assistant_entry = {
             "role": "assistant", "content": ctx.response_text,
             "timestamp": utc_now(), "platform": message.platform,
-            "tenant_id": tenant_id, "conversation_id": ctx.conversation_id,
+            "instance_id": instance_id, "conversation_id": ctx.conversation_id,
             "space_tags": ctx.router_result.tags,
         }
-        await self.conversations.append(tenant_id, ctx.conversation_id, assistant_entry)
-        await self.conv_logger.append(tenant_id=tenant_id, space_id=ctx.active_space_id,
+        await self.conversations.append(instance_id, ctx.conversation_id, assistant_entry)
+        await self.conv_logger.append(instance_id=instance_id, space_id=ctx.active_space_id,
             speaker="assistant", channel=message.platform, content=ctx.response_text)
 
         # Compaction (with concurrency guard + backoff)
@@ -4577,7 +4577,7 @@ class MessageHandler:
             logger.info("COMPACTION: already in progress for space=%s, skipping", ctx.active_space_id)
         else:
             try:
-                comp_state = await self.compaction.load_state(tenant_id, ctx.active_space_id)
+                comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id)
                 if comp_state:
                     _skip = False
                     if comp_state.consecutive_failures > 0 and comp_state.last_compaction_failure_at:
@@ -4589,22 +4589,22 @@ class MessageHandler:
                         except (ValueError, TypeError):
                             pass
                     if not _skip:
-                        log_info = await self.conv_logger.get_current_log_info(tenant_id, ctx.active_space_id)
+                        log_info = await self.conv_logger.get_current_log_info(instance_id, ctx.active_space_id)
                         new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
-                        _real_ctx = self.reasoning.get_last_real_input_tokens(tenant_id)
+                        _real_ctx = self.reasoning.get_last_real_input_tokens(instance_id)
                         logger.info(
                             "COMPACTION_INPUT: space=%s tokens_est=%d threshold=%d real_ctx=%d",
                             ctx.active_space_id, new_tokens, comp_state.compaction_threshold, _real_ctx,
                         )
                         if new_tokens >= comp_state.compaction_threshold:
-                            log_text, log_num = await self.conv_logger.read_current_log_text(tenant_id, ctx.active_space_id)
+                            log_text, log_num = await self.conv_logger.read_current_log_text(instance_id, ctx.active_space_id)
                             if log_text.strip() and ctx.active_space:
                                 self._compacting.add(ctx.active_space_id)
                                 # UX signal: notify user on Discord (not SMS)
                                 if message.platform == "discord":
                                     try:
                                         await self.send_outbound(
-                                            tenant_id, ctx.member_id, "discord",
+                                            instance_id, ctx.member_id, "discord",
                                             "(Compacting...)",
                                         )
                                     except Exception:
@@ -4612,11 +4612,11 @@ class MessageHandler:
                                 try:
                                     # Fact harvest is now integrated into the compaction call
                                     comp_state = await self.compaction.compact_from_log(
-                                        tenant_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)
-                                    old_num, new_num = await self.conv_logger.roll_log(tenant_id, ctx.active_space_id)
+                                        instance_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)
+                                    old_num, new_num = await self.conv_logger.roll_log(instance_id, ctx.active_space_id)
                                     _seed = comp_state.last_seed_depth
                                     _seed_source = "adaptive" if _seed != 10 else "default"
-                                    await self.conv_logger.seed_from_previous(tenant_id, ctx.active_space_id, old_num, tail_entries=_seed)
+                                    await self.conv_logger.seed_from_previous(instance_id, ctx.active_space_id, old_num, tail_entries=_seed)
                                     logger.info("COMPACTION_SEED: space=%s depth=%d (%s)",
                                         ctx.active_space_id, _seed, _seed_source)
                                     self.reasoning.clear_loaded_tools(ctx.active_space_id)
@@ -4631,7 +4631,7 @@ class MessageHandler:
                                         try:
                                             from kernos.kernel.fact_harvest import process_harvest_results
                                             await process_harvest_results(
-                                                _harvest, tenant_id, ctx.active_space_id,
+                                                _harvest, instance_id, ctx.active_space_id,
                                                 self.state, self.events)
                                         except Exception as _hx:
                                             logger.warning("COMPACTION_HARVEST: processing failed: %s", _hx)
@@ -4663,7 +4663,7 @@ class MessageHandler:
                                                         foresight_signal=f"recurring_workflow:{_desc[:40]}",
                                                         created_at=utc_now(),
                                                     )
-                                                    await self.state.save_whisper(tenant_id, whisper)
+                                                    await self.state.save_whisper(instance_id, whisper)
                                                     logger.info("RECURRING_WORKFLOW: desc=%r count=%d space=%s proposed=true",
                                                         _desc, wf.get("count", 0), ctx.active_space_id)
                                         except Exception as _rwx:
@@ -4674,7 +4674,7 @@ class MessageHandler:
                                     if _commitments:
                                         try:
                                             await self._process_compaction_follow_ups(
-                                                tenant_id, ctx.active_space_id, _follow_ups)
+                                                instance_id, ctx.active_space_id, _follow_ups)
                                         except Exception as _cx:
                                             logger.warning("FOLLOW_UP: processing failed: %s", _cx)
 
@@ -4682,35 +4682,35 @@ class MessageHandler:
                                     try:
                                         import asyncio as _aio
                                         _aio.create_task(self._assess_domain_creation(
-                                            tenant_id, ctx.active_space_id, ctx.active_space, comp_state))
+                                            instance_id, ctx.active_space_id, ctx.active_space, comp_state))
                                         _aio.create_task(self._produce_child_briefings(
-                                            tenant_id, ctx.active_space_id, ctx.active_space))
+                                            instance_id, ctx.active_space_id, ctx.active_space))
                                     except Exception as _dax:
                                         logger.warning("DOMAIN_ASSESS/BRIEFING: launch failed: %s", _dax)
                                 finally:
                                     self._compacting.discard(ctx.active_space_id)
                         else:
-                            await self.compaction.save_state(tenant_id, ctx.active_space_id, comp_state)
+                            await self.compaction.save_state(instance_id, ctx.active_space_id, comp_state)
             except Exception as exc:
                 logger.warning("COMPACTION: failed for space=%s: %s", ctx.active_space_id, exc)
                 try:
-                    comp_state = await self.compaction.load_state(tenant_id, ctx.active_space_id)
+                    comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id)
                     if comp_state:
                         comp_state.consecutive_failures += 1
                         comp_state.last_compaction_failure_at = utc_now()
-                        await self.compaction.save_state(tenant_id, ctx.active_space_id, comp_state)
+                        await self.compaction.save_state(instance_id, ctx.active_space_id, comp_state)
                 except Exception:
                     pass
                 self._compacting.discard(ctx.active_space_id)
 
         # Emit message.sent
         try:
-            await emit_event(self.events, EventType.MESSAGE_SENT, tenant_id, "handler",
+            await emit_event(self.events, EventType.MESSAGE_SENT, instance_id, "handler",
                 payload={"content": ctx.response_text, "conversation_id": ctx.conversation_id, "platform": message.platform})
         except Exception as exc:
             logger.warning("Failed to emit message.sent: %s", exc)
 
-        await self._update_conversation_summary(tenant_id, ctx.conversation_id, message.platform)
+        await self._update_conversation_summary(instance_id, ctx.conversation_id, message.platform)
 
     def _record_phase_timings(self, timings: dict[str, int], total_ms: int) -> None:
         """Record phase timings for session averages. Keep last 50 turns."""
@@ -4732,7 +4732,7 @@ class MessageHandler:
                 avgs[phase] = sum(values) // len(values)
         return avgs
 
-    def _load_workspace_tool_schema(self, tenant_id: str, tool_name: str) -> dict | None:
+    def _load_workspace_tool_schema(self, instance_id: str, tool_name: str) -> dict | None:
         """Load a workspace tool's schema from its .tool.json descriptor."""
         catalog_entry = self._tool_catalog.get(tool_name)
         if not catalog_entry or catalog_entry.source != "workspace":
@@ -4746,7 +4746,7 @@ class MessageHandler:
             from kernos.utils import _safe_name
             desc_path = (
                 Path(os.getenv("KERNOS_DATA_DIR", "./data"))
-                / _safe_name(tenant_id) / "spaces" / home_space / "files" / desc_file
+                / _safe_name(instance_id) / "spaces" / home_space / "files" / desc_file
             )
             if desc_path.exists():
                 descriptor = json.loads(desc_path.read_text(encoding="utf-8"))
@@ -4760,7 +4760,7 @@ class MessageHandler:
         return None
 
     async def _check_catalog_version(
-        self, tenant_id: str, space_id: str, space: ContextSpace,
+        self, instance_id: str, space_id: str, space: ContextSpace,
     ) -> None:
         """Lazy version promotion: scan new tools for relevance to this space.
 
@@ -4786,7 +4786,7 @@ class MessageHandler:
 
         if not new_tools:
             # No new workspace tools — just update the version marker
-            await self.state.update_context_space(tenant_id, space_id, {
+            await self.state.update_context_space(instance_id, space_id, {
                 "last_catalog_version": catalog.version,
             })
             return
@@ -4824,14 +4824,14 @@ class MessageHandler:
                 new_aff = dict(aff)
                 for name in to_promote:
                     new_aff[name] = {"last_turn": 0, "tokens": 0}
-                await self.state.update_context_space(tenant_id, space_id, {
+                await self.state.update_context_space(instance_id, space_id, {
                     "local_affordance_set": new_aff,
                     "last_catalog_version": catalog.version,
                 })
                 logger.info("TOOL_CATALOG_SCAN: space=%s new_tools=%d promoted=%d tools=%s",
                     space_id, len(new_tools), len(to_promote), to_promote)
             else:
-                await self.state.update_context_space(tenant_id, space_id, {
+                await self.state.update_context_space(instance_id, space_id, {
                     "last_catalog_version": catalog.version,
                 })
                 logger.info("TOOL_CATALOG_SCAN: space=%s new_tools=%d promoted=0",
@@ -4839,12 +4839,12 @@ class MessageHandler:
         except Exception as exc:
             # On failure, still update version to avoid re-scanning every turn
             logger.warning("TOOL_CATALOG_SCAN: failed for %s: %s", space_id, exc)
-            await self.state.update_context_space(tenant_id, space_id, {
+            await self.state.update_context_space(instance_id, space_id, {
                 "last_catalog_version": catalog.version,
             })
 
     async def _promote_used_tools(
-        self, tenant_id: str, space_id: str, space: ContextSpace, tool_trace: list[dict],
+        self, instance_id: str, space_id: str, space: ContextSpace, tool_trace: list[dict],
     ) -> None:
         """Tier 3: Promote successfully used tools into the space's local affordance set.
 
@@ -4887,7 +4887,7 @@ class MessageHandler:
                     changed = True
                     logger.info("TOOL_PROMOTED: tool=%s space=%s reason=successful_use", name, space_id)
             if changed:
-                await self.state.update_context_space(tenant_id, space_id, {
+                await self.state.update_context_space(instance_id, space_id, {
                     "local_affordance_set": aff,
                 })
         except Exception as exc:
@@ -4908,7 +4908,7 @@ class MessageHandler:
         try:
             surfaced_names = {t.get("name", "") for t in ctx.tools if t.get("name")}
             signals = await self._friction.observe(
-                tenant_id=ctx.tenant_id,
+                instance_id=ctx.instance_id,
                 user_message=ctx.message.content or "",
                 response_text=ctx.response_text,
                 tool_trace=ctx.tool_calls_trace,
@@ -4943,7 +4943,7 @@ class MessageHandler:
                         foresight_signal=f"system_malfunction:{sig.signal_type}",
                         created_at=utc_now(),
                     )
-                    await self.state.save_whisper(ctx.tenant_id, whisper)
+                    await self.state.save_whisper(ctx.instance_id, whisper)
                     logger.info("FRICTION_WHISPER: class=SYSTEM_MALFUNCTION signal=%s whisper_id=%s",
                         sig.signal_type, whisper.whisper_id)
                 except Exception as exc:
@@ -4956,7 +4956,7 @@ class MessageHandler:
             turn_number = ctx.soul.interaction_count if ctx.soul else 0
             pattern = record_correction(
                 data_dir=data_dir,
-                tenant_id=ctx.tenant_id,
+                instance_id=ctx.instance_id,
                 user_message=ctx.message.content or "",
                 response_text=ctx.response_text,
                 space_id=ctx.active_space_id,
@@ -4979,20 +4979,20 @@ class MessageHandler:
                     # Still create a whisper but framed as system issue
                     from kernos.kernel.awareness import Whisper
                     whisper = Whisper(**proposal)
-                    await self.state.save_whisper(ctx.tenant_id, whisper)
+                    await self.state.save_whisper(ctx.instance_id, whisper)
                 else:
                     # behavioral or uncertain — propose covenant/procedure
                     from kernos.kernel.awareness import Whisper
                     whisper = Whisper(**proposal)
-                    await self.state.save_whisper(ctx.tenant_id, whisper)
+                    await self.state.save_whisper(ctx.instance_id, whisper)
                     # Mark pattern as proposal surfaced
                     from kernos.kernel.behavioral_patterns import load_patterns, save_patterns
-                    patterns = load_patterns(data_dir, ctx.tenant_id)
+                    patterns = load_patterns(data_dir, ctx.instance_id)
                     for p in patterns:
                         if p.pattern_id == pattern_id:
                             p.proposal_surfaced = True
                             break
-                    save_patterns(data_dir, ctx.tenant_id, patterns)
+                    save_patterns(data_dir, ctx.instance_id, patterns)
                     logger.info(
                         "BEHAVIORAL_PROPOSAL: type=%s desc=%r space=%s "
                         "classification=%s confidence=%s whisper_id=%s",
@@ -5071,7 +5071,7 @@ class MessageHandler:
             stage = "api_call" if not isinstance(exc, Exception) or isinstance(exc, (
                 ReasoningTimeoutError, ReasoningConnectionError, ReasoningRateLimitError, ReasoningProviderError
             )) else "general"
-            await emit_event(self.events, EventType.HANDLER_ERROR, ctx.tenant_id, "handler",
+            await emit_event(self.events, EventType.HANDLER_ERROR, ctx.instance_id, "handler",
                 payload={"error_type": type(exc).__name__, "error_message": str(exc),
                          "conversation_id": ctx.conversation_id, "stage": stage})
         except Exception:

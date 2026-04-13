@@ -31,11 +31,11 @@ The `ChannelRegistry` (`kernos/kernel/channels.py`) tracks all available channel
 
 ## Outbound Messaging
 
-`handler.send_outbound(tenant_id, member_id, channel_name, message)` sends an unprompted message:
+`handler.send_outbound(instance_id, member_id, channel_name, message)` sends an unprompted message:
 
 1. Looks up the channel in the registry
 2. Finds the adapter for the channel's platform
-3. Calls `adapter.send_outbound(tenant_id, channel_target, message)`
+3. Calls `adapter.send_outbound(instance_id, channel_target, message)`
 4. Returns True/False
 
 If no channel_name is specified, picks the first outbound-capable connected channel.
@@ -47,7 +47,7 @@ OUTBOUND: channel=discord target=123456 tenant=... member=... length=150 success
 
 ## Instance Identity
 
-All channels resolve to the same instance via `KERNOS_INSTANCE_ID`. When set, every adapter uses it as the tenant_id — same soul, same knowledge, same spaces regardless of channel.
+All channels resolve to the same instance via `KERNOS_INSTANCE_ID`. When set, every adapter uses it as the instance_id — same soul, same knowledge, same spaces regardless of channel.
 
 ## Code Locations
 

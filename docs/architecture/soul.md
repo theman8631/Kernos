@@ -8,7 +8,7 @@ Identity comes from two sources:
 
 1. **Template** (`kernos/kernel/template.py`) — universal operating principles, default personality, bootstrap prompt, expected capabilities. The template is the same for all tenants. It defines the floor — what every Kernos instance starts with.
 
-2. **Soul** (`kernos/kernel/soul.py`) — per-tenant identity that evolves through interaction. The soul is what makes each instance unique.
+2. **Soul** (`kernos/kernel/soul.py`) — per-instance identity that evolves through interaction. The soul is what makes each instance unique.
 
 ## Soul Fields
 
@@ -35,7 +35,7 @@ Identity comes from two sources:
 
 ## Key Design Points
 
-- Soul is per-tenant, consistent across all spaces. The agent is the same person whether in the daily space or a project space.
+- Soul is per-instance, consistent across all spaces. The agent is the same person whether in the daily space or a project space.
 - Soul is NOT memory. Soul is identity (who am I, how do I communicate). Memory is knowledge (what do I know about the world).
 - The user can change the agent's name and personality through conversation — the soul evolves.
 

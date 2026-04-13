@@ -33,7 +33,7 @@ The agent thinks freely. The kernel enforces safety. Tool calls go through a dis
 - **Memory as the moat** — persistent, structured, evolving knowledge is the core differentiator
 - **Ambient, not demanding** — works without requiring user presence
 - **No destructive deletions** — shadow archive architecture
-- **Multi-tenancy from day one** — every state piece keyed to `tenant_id`
+- **Multi-instance from day one** — every state piece keyed to `instance_id`
 - **Provider-flexible** — supports Anthropic (Claude) and OpenAI Codex (ChatGPT OAuth)
 
 ## Current State
@@ -124,14 +124,14 @@ The `./kernos-cli` wrapper runs CLI commands without needing to activate the ven
 
 ```bash
 ./kernos-cli tenants                          # List all known tenants
-./kernos-cli events <tenant_id>               # View recent events
-./kernos-cli profile <tenant_id>              # View tenant profile
-./kernos-cli soul <tenant_id>                 # Inspect agent soul
-./kernos-cli knowledge <tenant_id>            # View knowledge entries
-./kernos-cli contracts <tenant_id>            # View behavioral contract rules
+./kernos-cli events <instance_id>               # View recent events
+./kernos-cli profile <instance_id>              # View tenant profile
+./kernos-cli soul <instance_id>                 # Inspect agent soul
+./kernos-cli knowledge <instance_id>            # View knowledge entries
+./kernos-cli contracts <instance_id>            # View behavioral contract rules
 ./kernos-cli capabilities                     # View capability registry
-./kernos-cli costs <tenant_id>                # View cost/token summary
-./kernos-cli tasks <tenant_id>                # View task lifecycle
+./kernos-cli costs <instance_id>                # View cost/token summary
+./kernos-cli tasks <instance_id>                # View task lifecycle
 ```
 
 Each subcommand supports `--help` for full options.

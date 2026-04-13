@@ -5,7 +5,7 @@ from kernos.kernel.state import (
     ContractRule,
     ConversationSummary,
     KnowledgeEntry,
-    TenantProfile,
+    InstanceProfile,
     default_contract_rules,
 )
 from kernos.kernel.state_json import JsonStateStore
@@ -15,49 +15,49 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# --- TenantProfile CRUD ---
+# --- InstanceProfile CRUD ---
 
 
-async def test_get_tenant_profile_none_for_new(tmp_path):
+async def test_get_instance_profile_none_for_new(tmp_path):
     store = JsonStateStore(tmp_path)
-    profile = await store.get_tenant_profile("new_tenant")
+    profile = await store.get_instance_profile("new_instance")
     assert profile is None
 
 
-async def test_save_and_get_tenant_profile(tmp_path):
+async def test_save_and_get_instance_profile(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
-    profile = TenantProfile(
-        tenant_id="sms:+15555550100",
+    profile = InstanceProfile(
+        instance_id="sms:+15555550100",
         status="active",
         created_at=now,
     )
-    await store.save_tenant_profile("sms:+15555550100", profile)
-    fetched = await store.get_tenant_profile("sms:+15555550100")
+    await store.save_instance_profile("sms:+15555550100", profile)
+    fetched = await store.get_instance_profile("sms:+15555550100")
     assert fetched is not None
-    assert fetched.tenant_id == "sms:+15555550100"
+    assert fetched.instance_id == "sms:+15555550100"
     assert fetched.status == "active"
 
 
-async def test_save_tenant_profile_overwrites(tmp_path):
+async def test_save_instance_profile_overwrites(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
-    profile = TenantProfile(tenant_id="t1", status="active", created_at=now)
-    await store.save_tenant_profile("t1", profile)
+    profile = InstanceProfile(instance_id="t1", status="active", created_at=now)
+    await store.save_instance_profile("t1", profile)
 
-    profile2 = TenantProfile(tenant_id="t1", status="suspended", created_at=now)
-    await store.save_tenant_profile("t1", profile2)
+    profile2 = InstanceProfile(instance_id="t1", status="suspended", created_at=now)
+    await store.save_instance_profile("t1", profile2)
 
-    fetched = await store.get_tenant_profile("t1")
+    fetched = await store.get_instance_profile("t1")
     assert fetched.status == "suspended"
 
 
-async def test_tenant_profile_default_dicts(tmp_path):
+async def test_instance_profile_default_dicts(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
-    profile = TenantProfile(tenant_id="t1", status="active", created_at=now)
-    await store.save_tenant_profile("t1", profile)
-    fetched = await store.get_tenant_profile("t1")
+    profile = InstanceProfile(instance_id="t1", status="active", created_at=now)
+    await store.save_instance_profile("t1", profile)
+    fetched = await store.get_instance_profile("t1")
     assert fetched.platforms == {}
     assert fetched.preferences == {}
     assert fetched.capabilities == {}
@@ -68,7 +68,7 @@ async def test_tenant_profile_default_dicts(tmp_path):
 
 
 def _make_knowledge(
-    tenant_id: str = "t1",
+    instance_id: str = "t1",
     subject: str = "Alice",
     category: str = "entity",
     kid: str | None = None,
@@ -77,7 +77,7 @@ def _make_knowledge(
     now = _now()
     return KnowledgeEntry(
         id=kid or f"know_test_{subject}",
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         category=category,
         subject=subject,
         content=f"{subject} is a person",
@@ -144,7 +144,7 @@ async def test_query_knowledge_by_tags(tmp_path):
     now = _now()
     e1 = KnowledgeEntry(
         id="k1",
-        tenant_id="t1",
+        instance_id="t1",
         category="entity",
         subject="Alice",
         content="Alice info",
@@ -157,7 +157,7 @@ async def test_query_knowledge_by_tags(tmp_path):
     )
     e2 = KnowledgeEntry(
         id="k2",
-        tenant_id="t1",
+        instance_id="t1",
         category="entity",
         subject="Bob",
         content="Bob info",
@@ -233,7 +233,7 @@ def test_default_contract_rules_has_must_nots():
 def test_default_contract_rules_correct_tenant():
     now = _now()
     rules = default_contract_rules("sms:+15555550100", now)
-    assert all(r.tenant_id == "sms:+15555550100" for r in rules)
+    assert all(r.instance_id == "sms:+15555550100" for r in rules)
 
 
 async def test_add_and_get_contract_rules(tmp_path):
@@ -277,7 +277,7 @@ async def test_update_contract_rule(tmp_path):
     now = _now()
     rule = ContractRule(
         id="rule_test",
-        tenant_id="t1",
+        instance_id="t1",
         capability="general",
         rule_type="must_not",
         description="Original description",
@@ -313,7 +313,7 @@ async def test_save_and_get_conversation_summary(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     summary = ConversationSummary(
-        tenant_id="t1",
+        instance_id="t1",
         conversation_id="conv1",
         platform="sms",
         message_count=1,
@@ -331,7 +331,7 @@ async def test_conversation_summary_upsert(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     summary = ConversationSummary(
-        tenant_id="t1",
+        instance_id="t1",
         conversation_id="conv1",
         platform="sms",
         message_count=1,
@@ -356,7 +356,7 @@ async def test_conversation_summary_upsert(tmp_path):
 async def test_list_conversations_sorted_by_last_message(tmp_path):
     store = JsonStateStore(tmp_path)
     s1 = ConversationSummary(
-        tenant_id="t1",
+        instance_id="t1",
         conversation_id="conv_old",
         platform="sms",
         message_count=1,
@@ -364,7 +364,7 @@ async def test_list_conversations_sorted_by_last_message(tmp_path):
         last_message_at="2026-03-01T00:00:00+00:00",
     )
     s2 = ConversationSummary(
-        tenant_id="t1",
+        instance_id="t1",
         conversation_id="conv_new",
         platform="sms",
         message_count=3,
@@ -383,7 +383,7 @@ async def test_list_conversations_active_only(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     s1 = ConversationSummary(
-        tenant_id="t1",
+        instance_id="t1",
         conversation_id="conv1",
         platform="sms",
         message_count=1,
@@ -392,7 +392,7 @@ async def test_list_conversations_active_only(tmp_path):
         active=True,
     )
     s2 = ConversationSummary(
-        tenant_id="t1",
+        instance_id="t1",
         conversation_id="conv2",
         platform="sms",
         message_count=1,

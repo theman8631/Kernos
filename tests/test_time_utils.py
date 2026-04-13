@@ -97,12 +97,12 @@ class TestInterpretLocalIsoAsUtc:
 class TestSoulTimezoneField:
     def test_default_empty(self):
         from kernos.kernel.soul import Soul
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         assert soul.timezone == ""
 
     def test_set_timezone(self):
         from kernos.kernel.soul import Soul
-        soul = Soul(tenant_id="t1", timezone="America/Los_Angeles")
+        soul = Soul(instance_id="t1", timezone="America/Los_Angeles")
         assert soul.timezone == "America/Los_Angeles"
 
 

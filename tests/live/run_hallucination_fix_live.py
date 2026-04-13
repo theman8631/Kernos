@@ -65,7 +65,7 @@ from kernos.kernel.engine import TaskEngine
 from kernos.kernel.events import JsonEventStream
 from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
 from kernos.kernel.state_json import JsonStateStore
-from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonTenantStore
+from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
 
 DATA_DIR = os.getenv("KERNOS_DATA_DIR", "/home/k/Kernos/data")
@@ -82,7 +82,7 @@ def make_msg(content: str) -> NormalizedMessage:
         conversation_id=CONVERSATION_ID,
         sender_auth_level=AuthLevel.owner_verified,
         timestamp=datetime.now(timezone.utc),
-        tenant_id=TENANT,
+        instance_id=TENANT,
     )
 
 
@@ -91,7 +91,7 @@ def make_live_handler() -> MessageHandler:
     events = JsonEventStream(DATA_DIR)
     state = JsonStateStore(DATA_DIR)
     conversations = JsonConversationStore(DATA_DIR)
-    tenants = JsonTenantStore(DATA_DIR)
+    tenants = JsonInstanceStore(DATA_DIR)
     audit = JsonAuditStore(DATA_DIR)
     mcp = MCPClientManager()
     registry = CapabilityRegistry(mcp=mcp)

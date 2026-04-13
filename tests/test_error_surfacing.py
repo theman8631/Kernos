@@ -31,7 +31,7 @@ class TestErrorBufferCollection:
         buf.drain("t1")
         assert buf.drain("t1") == ""
 
-    def test_tenant_isolation(self):
+    def testinstance_isolation(self):
         buf = ErrorBuffer()
         buf.collect("t1", "WARNING kernos.a: t1 error")
         buf.collect("t2", "WARNING kernos.b: t2 error")

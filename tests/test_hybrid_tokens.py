@@ -15,7 +15,7 @@ class TestTokenStorage:
         svc = ReasoningService(provider, MagicMock(), MagicMock(), MagicMock())
         assert svc.get_last_real_input_tokens("tenant_1") == 0
 
-    def test_stores_per_tenant(self):
+    def test_stores_per_instance(self):
         from kernos.kernel.reasoning import ReasoningService
         provider = MagicMock()
         provider.main_model = "test"
@@ -32,7 +32,7 @@ class TestTokenStorage:
         provider.main_model = "test"
         svc = ReasoningService(provider, MagicMock(), MagicMock(), MagicMock())
         # No prior reasoning calls — should be zero
-        assert svc.get_last_real_input_tokens("new_tenant") == 0
+        assert svc.get_last_real_input_tokens("new_instance") == 0
 
 
 # ===========================

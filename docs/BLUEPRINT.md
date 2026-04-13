@@ -133,7 +133,7 @@ KERNOS security is built around behavioral contracts as the primary safety mecha
 **Our threat surface:**
 
 - **Prompt injection** — malicious content in user messages, emails, or retrieved documents that attempts to override agent instructions
-- **Credential exposure** — API keys, OAuth tokens, and user secrets must be isolated per tenant and never leaked through agent responses
+- **Credential exposure** — API keys, OAuth tokens, and user secrets must be isolated per instance and never leaked through agent responses
 - **Unauthorized MCP tool calls** — agents calling tools they shouldn’t, or calling tools with parameters that violate behavioral contracts
 - **Channel spoofing** — SMS/caller ID is trivially spoofable (see Sender Authentication section); unauthenticated channels get restricted capabilities
 - **Cross-tenant data leakage** — one tenant’s data appearing in another tenant’s context (the most critical multi-tenancy concern)
@@ -190,7 +190,7 @@ For the cloud photos example: the user says “delete all the photos from last s
 - Shadow archive is a first-class storage concept from Phase 1A — even the earliest persistence layer has an archive path
 - Archive entries are queryable by agents (with appropriate context about why they were archived)
 - Archive storage counts toward the user’s total but is visually separated in any storage dashboard
-- The `tenant_id` scoping applies to archives identically — archived data is as isolated as active data
+- The `instance_id` scoping applies to archives identically — archived data is as isolated as active data
 - Memory archives (sealed MemCubes) are excluded from normal agent queries but can be unsealed by the user through the trust dashboard
 
 ### The Trust Model: Access vs. Contract
@@ -338,14 +338,14 @@ The system communicates through a **unified message ingress/egress layer** that 
 
 Every user gets an isolated **personal kernel instance** — their own scheduler, memory space (MemCubes), agent processes, permission configuration, and encryption keys. The architecture does not distinguish between “one user on a laptop” and “one user among ten thousand on a cloud server.” The isolation boundaries are identical.
 
-**What is isolated per tenant (always):**
+**What is isolated per instance (always):**
 
 - All MemCubes and persistent context (encrypted with user-held keys)
 - All agent instances and their state
 - All permission and autonomy configurations
 - All audit logs and action history
 - All conversation context across platforms
-- All API keys and credentials (in per-tenant encrypted vault)
+- All API keys and credentials (in per-instance encrypted vault)
 - All shadow archive data (archived items are as isolated as active items)
 
 **What is shared infrastructure in cloud deployment (never user data):**
@@ -353,9 +353,9 @@ Every user gets an isolated **personal kernel instance** — their own scheduler
 - Messaging gateway (routes messages to correct tenant’s kernel)
 - Compute resources (CPU/GPU/memory allocated across tenants)
 - Platform adapters (one Twilio number, one Discord bot, routing to appropriate tenants)
-- Base model access (shared LLM endpoints, but conversations are per-tenant)
+- Base model access (shared LLM endpoints, but conversations are per-instance)
 
-**Implementation rule:** Every piece of state is keyed to a `tenant_id` from day one. Every MemCube, every agent process, every message, every audit entry, every archive entry. No code ever assumes a single user. This costs almost nothing to do now and is nearly impossible to retrofit later.
+**Implementation rule:** Every piece of state is keyed to a `instance_id` from day one. Every MemCube, every agent process, every message, every audit entry, every archive entry. No code ever assumes a single user. This costs almost nothing to do now and is nearly impossible to retrofit later.
 
 **Deployment modes:**
 
@@ -403,7 +403,7 @@ The tenant workspace is the fundamental unit of account management, whether the 
 
 1. Sign up: name, email, phone number, one question about what they need help with
 1. Phone verification (SMS code)
-1. System provisions workspace (`tenant_id` created, status → `provisioning`)
+1. System provisions workspace (`instance_id` created, status → `provisioning`)
 1. User receives first text from their agent (status → `active`)
 1. Agent starts learning from conversation — no further configuration required
 
@@ -423,7 +423,7 @@ The first text is the product moment. It should feel like meeting someone, not c
 
 **Workspace administration:**
 
-- `set_workspace_status(tenant_id, status)` — the core control command
+- `set_workspace_status(instance_id, status)` — the core control command
 - Triggerable by: billing system, admin dashboard, API call, org administrator
 - On suspension: all agents pause, inbound messages get friendly status response, no data lost
 - On cancellation: grace period with data export option, then full deletion (the one case where permanent deletion applies — account termination after explicit user action and grace period)
@@ -453,7 +453,7 @@ The first text is the product moment. It should feel like meeting someone, not c
   - Connect Google Calendar via MCP
   - “What’s on my schedule today?” works via SMS
   - System responds with actual calendar data
-- [ ] **1A.4** Basic persistence (even just a JSON file per user — `tenant_id` and `status` field keyed from day one, shadow archive path exists from day one)
+- [ ] **1A.4** Basic persistence (even just a JSON file per user — `instance_id` and `status` field keyed from day one, shadow archive path exists from day one)
 
 #### Phase 1A Completion Criteria:
 
@@ -496,10 +496,10 @@ You text the number, ask about your schedule, and get a real answer. You use it 
   - Query memory
   - View audit log
 - [ ] **1B.6** Tenant isolation
-  - `tenant_id` on all data models from day one (MemCubes, agents, messages, audit logs, archives)
+  - `instance_id` on all data models from day one (MemCubes, agents, messages, audit logs, archives)
   - All queries filter by tenant context
   - Tenant configuration (API keys, preferences, autonomy settings) isolated
-  - Works identically in local mode (single tenant) and cloud mode (multi-tenant)
+  - Works identically in local mode (single tenant) and cloud mode (multi-instance)
   - Verify: two tenants on same instance cannot access each other’s data
 - [ ] **1B.7** Test suite
   - Kernel boot and stability

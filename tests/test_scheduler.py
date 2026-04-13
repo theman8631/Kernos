@@ -48,7 +48,7 @@ def _past_iso(hours: float = 1) -> str:
 
 class TestTriggerDataclass:
     def test_defaults(self):
-        t = Trigger(trigger_id="trig_test", tenant_id="t1")
+        t = Trigger(trigger_id="trig_test", instance_id="t1")
         assert t.status == "active"
         assert t.action_type == "notify"
         assert t.fire_count == 0
@@ -63,7 +63,7 @@ class TestTriggerDataclass:
 class TestTriggerStore:
     async def test_save_and_get(self, tmp_path):
         store = TriggerStore(tmp_path)
-        t = Trigger(trigger_id="trig_1", tenant_id="t1", action_description="test")
+        t = Trigger(trigger_id="trig_1", instance_id="t1", action_description="test")
         await store.save(t)
         loaded = await store.get("t1", "trig_1")
         assert loaded is not None
@@ -71,27 +71,27 @@ class TestTriggerStore:
 
     async def test_list_active(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await store.save(Trigger(trigger_id="t1", tenant_id="t", status="active"))
-        await store.save(Trigger(trigger_id="t2", tenant_id="t", status="completed"))
+        await store.save(Trigger(trigger_id="t1", instance_id="t", status="active"))
+        await store.save(Trigger(trigger_id="t2", instance_id="t", status="completed"))
         active = await store.list_active("t")
         assert len(active) == 1
         assert active[0].trigger_id == "t1"
 
     async def test_list_all(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await store.save(Trigger(trigger_id="t1", tenant_id="t", status="active"))
-        await store.save(Trigger(trigger_id="t2", tenant_id="t", status="completed"))
+        await store.save(Trigger(trigger_id="t1", instance_id="t", status="active"))
+        await store.save(Trigger(trigger_id="t2", instance_id="t", status="completed"))
         all_triggers = await store.list_all("t")
         assert len(all_triggers) == 2
 
     async def test_get_due(self, tmp_path):
         store = TriggerStore(tmp_path)
         await store.save(Trigger(
-            trigger_id="due", tenant_id="t", status="active",
+            trigger_id="due", instance_id="t", status="active",
             next_fire_at=_past_iso(1),
         ))
         await store.save(Trigger(
-            trigger_id="future", tenant_id="t", status="active",
+            trigger_id="future", instance_id="t", status="active",
             next_fire_at=_future_iso(1),
         ))
         due = await store.get_due("t", _now_iso())
@@ -100,7 +100,7 @@ class TestTriggerStore:
 
     async def test_remove(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await store.save(Trigger(trigger_id="t1", tenant_id="t"))
+        await store.save(Trigger(trigger_id="t1", instance_id="t"))
         assert await store.remove("t", "t1")
         assert await store.get("t", "t1") is None
 
@@ -110,7 +110,7 @@ class TestTriggerStore:
 
     async def test_upsert(self, tmp_path):
         store = TriggerStore(tmp_path)
-        t = Trigger(trigger_id="t1", tenant_id="t", action_description="v1")
+        t = Trigger(trigger_id="t1", instance_id="t", action_description="v1")
         await store.save(t)
         t.action_description = "v2"
         await store.save(t)
@@ -206,7 +206,7 @@ class TestManageScheduleHandler:
 
     async def test_pause_and_resume(self, tmp_path):
         store = TriggerStore(tmp_path)
-        t = Trigger(trigger_id="trig_pr", tenant_id="t1", status="active",
+        t = Trigger(trigger_id="trig_pr", instance_id="t1", status="active",
                     action_description="test", next_fire_at=_future_iso(1))
         await store.save(t)
 
@@ -220,7 +220,7 @@ class TestManageScheduleHandler:
 
     async def test_remove(self, tmp_path):
         store = TriggerStore(tmp_path)
-        t = Trigger(trigger_id="trig_rm", tenant_id="t1", action_description="test")
+        t = Trigger(trigger_id="trig_rm", instance_id="t1", action_description="test")
         await store.save(t)
 
         result = await handle_manage_schedule(store, "t1", "", "", "remove", trigger_id="trig_rm")
@@ -255,7 +255,7 @@ class TestManageScheduleHandler:
 
     async def test_list_shows_triggers(self, tmp_path):
         store = TriggerStore(tmp_path)
-        t = Trigger(trigger_id="trig_ls", tenant_id="t1", action_description="Check email",
+        t = Trigger(trigger_id="trig_ls", instance_id="t1", action_description="Check email",
                     next_fire_at=_future_iso(1), action_type="notify")
         await store.save(t)
         result = await handle_manage_schedule(store, "t1", "", "", "list")
@@ -289,7 +289,7 @@ class TestTriggerEvaluation:
     async def test_fires_due_notify(self, tmp_path):
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_due", tenant_id="t1", status="active",
+            trigger_id="trig_due", instance_id="t1", status="active",
             next_fire_at=_past_iso(0.01),
             action_type="notify",
             action_description="Check email",
@@ -311,7 +311,7 @@ class TestTriggerEvaluation:
     async def test_skips_future_triggers(self, tmp_path):
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_future", tenant_id="t1", status="active",
+            trigger_id="trig_future", instance_id="t1", status="active",
             next_fire_at=_future_iso(1),
         )
         await store.save(t)
@@ -323,7 +323,7 @@ class TestTriggerEvaluation:
     async def test_recurring_recomputes(self, tmp_path):
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_recur", tenant_id="t1", status="active",
+            trigger_id="trig_recur", instance_id="t1", status="active",
             next_fire_at=_past_iso(0.01),
             recurrence="0 9 * * *",  # Daily at 9am
             action_type="notify",
@@ -346,7 +346,7 @@ class TestTriggerEvaluation:
         """Successful notify injects [SCHEDULED] message into conversation history."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_hist", tenant_id="t1", status="active",
+            trigger_id="trig_hist", instance_id="t1", status="active",
             next_fire_at=_past_iso(0.01),
             action_type="notify",
             action_description="Check email",
@@ -378,7 +378,7 @@ class TestTriggerEvaluation:
         """No conversation history injection when trigger has no conversation_id."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_noid", tenant_id="t1", status="active",
+            trigger_id="trig_noid", instance_id="t1", status="active",
             next_fire_at=_past_iso(0.01),
             action_type="notify",
             action_description="Test",
@@ -398,7 +398,7 @@ class TestTriggerEvaluation:
         """Failed outbound does NOT inject into conversation history."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_fh", tenant_id="t1", status="active",
+            trigger_id="trig_fh", instance_id="t1", status="active",
             next_fire_at=_past_iso(0.01),
             action_type="notify",
             action_params={"message": "Hello"},
@@ -417,7 +417,7 @@ class TestTriggerEvaluation:
     async def test_outbound_failure_sets_pending(self, tmp_path):
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_fail", tenant_id="t1", status="active",
+            trigger_id="trig_fail", instance_id="t1", status="active",
             next_fire_at=_past_iso(0.01),
             action_type="notify",
             action_description="Test",
@@ -524,10 +524,10 @@ class TestCalendarEventParsing:
 class TestGetByConditionType:
     async def test_returns_only_event_triggers(self, tmp_path):
         store = TriggerStore(tmp_path)
-        time_trigger = Trigger(trigger_id="trig_1", tenant_id="t1",
+        time_trigger = Trigger(trigger_id="trig_1", instance_id="t1",
                                condition_type="time", status="active",
                                next_fire_at=_future_iso())
-        event_trigger = Trigger(trigger_id="trig_2", tenant_id="t1",
+        event_trigger = Trigger(trigger_id="trig_2", instance_id="t1",
                                 condition_type="event", status="active",
                                 event_source="calendar")
         await store.save(time_trigger)
@@ -539,10 +539,10 @@ class TestGetByConditionType:
 
     async def test_filters_by_status(self, tmp_path):
         store = TriggerStore(tmp_path)
-        await store.save(Trigger(trigger_id="trig_1", tenant_id="t1",
+        await store.save(Trigger(trigger_id="trig_1", instance_id="t1",
                                  condition_type="event", status="active",
                                  event_source="calendar"))
-        await store.save(Trigger(trigger_id="trig_2", tenant_id="t1",
+        await store.save(Trigger(trigger_id="trig_2", instance_id="t1",
                                  condition_type="event", status="completed",
                                  event_source="calendar"))
 
@@ -559,7 +559,7 @@ class TestGetByConditionType:
 class TestEvaluateEventTriggers:
     def _make_trigger(self, **kwargs) -> Trigger:
         defaults = dict(
-            trigger_id="trig_ev1", tenant_id="t1",
+            trigger_id="trig_ev1", instance_id="t1",
             condition_type="event", event_source="calendar",
             event_lead_minutes=30, status="active",
             action_type="notify", action_description="Calendar alert",
@@ -816,7 +816,7 @@ class TestEvaluateEventTriggers:
         """AC13: member_id resolved via resolve_owner_member_id()."""
         now = datetime.now(timezone.utc)
         store = TriggerStore(tmp_path)
-        trigger = self._make_trigger(tenant_id="discord:456")
+        trigger = self._make_trigger(instance_id="discord:456")
         await store.save(trigger)
 
         raw = self._calendar_json([
@@ -845,7 +845,7 @@ class TestTimeTriggerNoRegression:
         """AC16: time-based triggers are unaffected by event trigger additions."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_time1", tenant_id="t1", condition_type="time",
+            trigger_id="trig_time1", instance_id="t1", condition_type="time",
             next_fire_at=_past_iso(), status="active",
             action_type="notify", action_params={"message": "Hello"},
         )
@@ -868,7 +868,7 @@ class TestTimeTriggerNoRegression:
 
 class TestTriggerEventFields:
     def test_defaults(self):
-        t = Trigger(trigger_id="t1", tenant_id="t1")
+        t = Trigger(trigger_id="t1", instance_id="t1")
         assert t.condition_type == "time"
         assert t.event_source == ""
         assert t.event_filter == ""
@@ -879,7 +879,7 @@ class TestTriggerEventFields:
 
     def test_event_trigger_fields(self):
         t = Trigger(
-            trigger_id="t1", tenant_id="t1",
+            trigger_id="t1", instance_id="t1",
             condition_type="event", event_source="calendar",
             event_filter="dentist", event_lead_minutes=15,
         )
@@ -924,7 +924,7 @@ class TestBugRegressions:
         """BUG 3: tool_call trigger with nonexistent tool should fail, not retry forever."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_stale", tenant_id="t1",
+            trigger_id="trig_stale", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="tool_call",
             action_params={"tool_name": "nonexistent_tool", "tool_args": {}},
@@ -1133,7 +1133,7 @@ class TestSystemEventQueue:
     async def test_retirement_queues_system_event(self, tmp_path):
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_ret", tenant_id="t1",
+            trigger_id="trig_ret", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="tool_call",
             action_params={"tool_name": "gone_tool", "tool_args": {}},
@@ -1278,7 +1278,7 @@ class TestSkipPastEvents:
         now = datetime.now(timezone.utc)
         store = TriggerStore(tmp_path)
         trigger = Trigger(
-            trigger_id="trig_past", tenant_id="t1",
+            trigger_id="trig_past", instance_id="t1",
             condition_type="event", event_source="calendar",
             event_lead_minutes=30, status="active", recurrence="standing",
         )
@@ -1308,7 +1308,7 @@ class TestFarFutureEventSkip:
         now = datetime.now(timezone.utc)
         store = TriggerStore(tmp_path)
         trigger = Trigger(
-            trigger_id="trig_ff", tenant_id="t1",
+            trigger_id="trig_ff", instance_id="t1",
             condition_type="event", event_source="calendar",
             event_lead_minutes=5, status="active", recurrence="standing",
         )
@@ -1346,7 +1346,7 @@ class TestAdaptiveCadence:
         from kernos.kernel.scheduler import _compute_adaptive_cadence
         now = datetime.now(timezone.utc)
         events = [CalendarEvent("e1", "Meeting", now + timedelta(hours=5), None)]
-        triggers = [Trigger(trigger_id="t1", tenant_id="t1", event_lead_minutes=15)]
+        triggers = [Trigger(trigger_id="t1", instance_id="t1", event_lead_minutes=15)]
         result = _compute_adaptive_cadence(events, triggers)
         assert result <= 5 * 60  # capped at 5 min
         assert result >= 30  # floor
@@ -1355,7 +1355,7 @@ class TestAdaptiveCadence:
         from kernos.kernel.scheduler import _compute_adaptive_cadence
         now = datetime.now(timezone.utc)
         events = [CalendarEvent("e1", "Meeting", now + timedelta(minutes=1), None)]
-        triggers = [Trigger(trigger_id="t1", tenant_id="t1", event_lead_minutes=15)]
+        triggers = [Trigger(trigger_id="t1", instance_id="t1", event_lead_minutes=15)]
         result = _compute_adaptive_cadence(events, triggers)
         assert result == 30  # floor
 
@@ -1368,7 +1368,7 @@ class TestExecutionReceipts:
         now = datetime.now(timezone.utc)
         store = TriggerStore(tmp_path)
         trigger = Trigger(
-            trigger_id="trig_rcpt", tenant_id="t1",
+            trigger_id="trig_rcpt", instance_id="t1",
             condition_type="event", event_source="calendar",
             event_lead_minutes=10, status="active", recurrence="standing",
             action_description="SMS 5 min before events",
@@ -1407,7 +1407,7 @@ class TestExecutionReceipts:
         now = datetime.now(timezone.utc)
         store = TriggerStore(tmp_path)
         trigger = Trigger(
-            trigger_id="trig_fail", tenant_id="t1",
+            trigger_id="trig_fail", instance_id="t1",
             condition_type="event", event_source="calendar",
             event_lead_minutes=10, status="active", recurrence="standing",
             action_description="Notify before events",
@@ -1439,7 +1439,7 @@ class TestExecutionReceipts:
         """Time trigger fire produces a [RECEIPT] log entry."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_time_rcpt", tenant_id="t1",
+            trigger_id="trig_time_rcpt", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="notify",
             action_params={"message": "Hello"},
@@ -1520,7 +1520,7 @@ class TestClassifyTriggerFailure:
 
 class TestTriggerLifecycleFields:
     def test_defaults(self):
-        t = Trigger(trigger_id="t1", tenant_id="t1")
+        t = Trigger(trigger_id="t1", instance_id="t1")
         assert t.failure_class == ""
         assert t.transient_failure_count == 0
         assert t.last_failure_at == ""
@@ -1528,7 +1528,7 @@ class TestTriggerLifecycleFields:
         assert t.retired_at == ""
 
     def test_retired_status(self):
-        t = Trigger(trigger_id="t1", tenant_id="t1", status="retired",
+        t = Trigger(trigger_id="t1", instance_id="t1", status="retired",
                     failure_class="structural", retired_at="2026-01-01T00:00:00")
         assert t.status == "retired"
 
@@ -1543,7 +1543,7 @@ class TestDegradedLifecycle:
         """AC1-3: Structural failure retires trigger permanently."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_struct", tenant_id="t1",
+            trigger_id="trig_struct", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="tool_call",
             action_params={"tool_name": "missing_tool", "tool_args": {}},
@@ -1569,7 +1569,7 @@ class TestDegradedLifecycle:
         """AC4: Transient failures keep trigger active."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_trans", tenant_id="t1",
+            trigger_id="trig_trans", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="tool_call",
             action_params={"tool_name": "some_tool", "tool_args": {}},
@@ -1597,7 +1597,7 @@ class TestDegradedLifecycle:
         """AC5-6: degraded=True on first failure, log only on transition."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_d", tenant_id="t1",
+            trigger_id="trig_d", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="notify",
             action_params={"message": "Hello"},
@@ -1621,7 +1621,7 @@ class TestDegradedLifecycle:
         """AC8-9: Successful fire after degraded clears flag, keeps failure_reason."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_recov", tenant_id="t1",
+            trigger_id="trig_recov", instance_id="t1",
             condition_type="time", next_fire_at=_past_iso(),
             status="active", action_type="notify",
             action_params={"message": "Hello"},
@@ -1656,7 +1656,7 @@ class TestRetireStaleTriggers:
         """AC1-2: Stale trigger with missing tool is retired and notified."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_stale2", tenant_id="t1",
+            trigger_id="trig_stale2", instance_id="t1",
             status="active", action_type="tool_call",
             action_params={"tool_name": "calendar_event_reminder"},
             action_description="Old broken reminder",
@@ -1684,7 +1684,7 @@ class TestRetireStaleTriggers:
         """Tools that still exist are not retired."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_ok", tenant_id="t1",
+            trigger_id="trig_ok", instance_id="t1",
             status="active", action_type="tool_call",
             action_params={"tool_name": "list-events"},
         )
@@ -1702,7 +1702,7 @@ class TestRetireStaleTriggers:
         """Notify triggers are not scanned for tool existence."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_notify", tenant_id="t1",
+            trigger_id="trig_notify", instance_id="t1",
             status="active", action_type="notify",
             action_params={"message": "Hello"},
         )
@@ -1718,7 +1718,7 @@ class TestRetireStaleTriggers:
         """AC11: Already retired triggers are not re-processed."""
         store = TriggerStore(tmp_path)
         t = Trigger(
-            trigger_id="trig_ret", tenant_id="t1",
+            trigger_id="trig_ret", instance_id="t1",
             status="retired", action_type="tool_call",
             action_params={"tool_name": "gone"},
         )

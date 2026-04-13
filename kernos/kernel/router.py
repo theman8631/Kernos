@@ -124,7 +124,7 @@ class LLMRouter:
 
     async def route(
         self,
-        tenant_id: str,
+        instance_id: str,
         message_content: str,
         recent_history: list[dict],
         current_focus_id: str = "",
@@ -132,9 +132,9 @@ class LLMRouter:
         """Route a message. Returns RouterResult(tags, focus, continuation).
 
         recent_history: full metadata entries from get_recent_full().
-        current_focus_id: the tenant's last_active_space_id (for continuation logic).
+        current_focus_id: the instance's last_active_space_id (for continuation logic).
         """
-        spaces = await self._state.list_context_spaces(tenant_id)
+        spaces = await self._state.list_context_spaces(instance_id)
         active_spaces = [s for s in spaces if s.status == "active"]
 
         # No spaces at all — nothing to route to

@@ -24,7 +24,7 @@ def make_cap(name="google-calendar", universal=False, status=CapabilityStatus.CO
 def make_space(space_type="domain", active_tools=None):
     return ContextSpace(
         id="space_test01",
-        tenant_id="tenant_test",
+        instance_id="tenant_test",
         name="Test Space",
         space_type=space_type,
         active_tools=active_tools if active_tools is not None else [],
@@ -228,15 +228,15 @@ class TestBuildCapabilityPrompt:
 
 class TestContextSpaceActiveTools:
     def test_active_tools_defaults_empty(self):
-        space = ContextSpace(id="s1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="s1", instance_id="t1", name="Test")
         assert space.active_tools == []
 
     def test_active_tools_can_be_set(self):
-        space = ContextSpace(id="s1", tenant_id="t1", name="Test", active_tools=["google-calendar"])
+        space = ContextSpace(id="s1", instance_id="t1", name="Test", active_tools=["google-calendar"])
         assert "google-calendar" in space.active_tools
 
     def test_space_type_system(self):
-        space = ContextSpace(id="s1", tenant_id="t1", name="System", space_type="system")
+        space = ContextSpace(id="s1", instance_id="t1", name="System", space_type="system")
         assert space.space_type == "system"
 
 
@@ -250,7 +250,7 @@ class TestActiveToolsPersistence:
         state = JsonStateStore(str(tmp_path))
         space = ContextSpace(
             id="space_abc123",
-            tenant_id="t1",
+            instance_id="t1",
             name="Test",
             space_type="domain",
             active_tools=["google-calendar"],
@@ -271,7 +271,7 @@ class TestActiveToolsPersistence:
         spaces_file = state_dir / "spaces.json"
         spaces_file.write_text(json.dumps([{
             "id": "space_old",
-            "tenant_id": "t1",
+            "instance_id": "t1",
             "name": "Old Space",
             "space_type": "domain",
             "status": "active",
@@ -291,7 +291,7 @@ class TestActiveToolsPersistence:
         state = JsonStateStore(str(tmp_path))
         space = ContextSpace(
             id="space_upd",
-            tenant_id="t1",
+            instance_id="t1",
             name="Test",
         )
         await state.save_context_space(space)
@@ -316,7 +316,7 @@ class TestRequestTool:
         svc.set_registry(registry)
         state = AsyncMock()
         state.get_context_space = AsyncMock(return_value=ContextSpace(
-            id="space_test", tenant_id="t1", name="Test", active_tools=[]
+            id="space_test", instance_id="t1", name="Test", active_tools=[]
         ))
         state.update_context_space = AsyncMock()
         svc.set_state(state)
@@ -385,12 +385,12 @@ class TestLRUExemption:
         """_enforce_space_cap should not archive system or daily spaces."""
         from kernos.kernel.spaces import ContextSpace
         spaces = [
-            ContextSpace(id=f"space_{i:04d}", tenant_id="t1", name=f"Domain {i}",
+            ContextSpace(id=f"space_{i:04d}", instance_id="t1", name=f"Domain {i}",
                         space_type="domain", status="active", is_default=False,
                         last_active_at=f"2026-03-0{i}T00:00:00Z")
             for i in range(1, 5)
         ] + [
-            ContextSpace(id="space_sys", tenant_id="t1", name="System",
+            ContextSpace(id="space_sys", instance_id="t1", name="System",
                         space_type="system", status="active", is_default=False,
                         last_active_at="2026-01-01T00:00:00Z"),  # oldest, should NOT be archived
         ]
@@ -400,9 +400,9 @@ class TestLRUExemption:
 
     def test_system_space_not_in_lru_filter(self):
         from kernos.kernel.spaces import ContextSpace
-        system = ContextSpace(id="sys", tenant_id="t1", name="System", space_type="system", status="active", is_default=False)
-        daily = ContextSpace(id="daily", tenant_id="t1", name="General", space_type="general", status="active", is_default=True)
-        domain = ContextSpace(id="dom", tenant_id="t1", name="D&D", space_type="domain", status="active", is_default=False)
+        system = ContextSpace(id="sys", instance_id="t1", name="System", space_type="system", status="active", is_default=False)
+        daily = ContextSpace(id="daily", instance_id="t1", name="General", space_type="general", status="active", is_default=True)
+        domain = ContextSpace(id="dom", instance_id="t1", name="D&D", space_type="domain", status="active", is_default=False)
         spaces = [system, daily, domain]
         active = [s for s in spaces if s.status == "active" and not s.is_default and s.space_type != "system"]
         assert len(active) == 1

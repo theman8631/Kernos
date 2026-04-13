@@ -73,7 +73,7 @@ from kernos.kernel.gate import DispatchGate, GateResult, ApprovalToken  # re-exp
 class ReasoningRequest:
     """Everything the ReasoningService needs to run a reasoning turn."""
 
-    tenant_id: str
+    instance_id: str
     conversation_id: str
     system_prompt: str
     messages: list[dict]
@@ -97,7 +97,7 @@ class ReasoningRequest:
 class PendingAction:
     """A tool call blocked by the dispatch gate, awaiting user confirmation.
 
-    Stored on the ReasoningService keyed by tenant_id. The handler executes
+    Stored on the ReasoningService keyed by instance_id. The handler executes
     confirmed actions after the agent signals [CONFIRM:N] in its response.
     """
 
@@ -182,15 +182,15 @@ class ReasoningService:
         self._trigger_store = None     # Set by handler after construction
         self._handler = None           # Set by handler after construction (for schedule tool)
         self._gate: DispatchGate | None = None  # Created lazily after registry/state are set
-        self._pending_actions: dict[str, list[PendingAction]] = {}  # tenant_id → list
+        self._pending_actions: dict[str, list[PendingAction]] = {}  # instance_id → list
         self._conflict_raised_this_turn: bool = False  # Set when gate blocks; cleared at turn start
         self._tools_changed: bool = False  # Set by manage_capabilities; handler checks post-reasoning
         # Lazy tool loading: tracks which MCP tools have been loaded per-space session
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
         # Turn-level tool call trace — accumulated during reasoning, read+cleared by handler
         self._turn_tool_trace: list[dict] = []
-        # Hybrid token counting: real input_tokens from last principal reasoning call per tenant
-        self._last_real_input_tokens: dict[str, int] = {}  # tenant_id → tokens
+        # Hybrid token counting: real input_tokens from last principal reasoning call per-instance
+        self._last_real_input_tokens: dict[str, int] = {}  # instance_id → tokens
 
     @staticmethod
     def _trace(request: "ReasoningRequest", level: str, source: str, event: str, detail: str, **kw: Any) -> None:
@@ -210,17 +210,17 @@ class ReasoningService:
             )
         return self._gate
 
-    def cleanup_expired_authorizations(self, tenant_id: str) -> None:
+    def cleanup_expired_authorizations(self, instance_id: str) -> None:
         """Remove expired PendingActions and used/expired ApprovalTokens."""
         now = datetime.now(timezone.utc)
 
-        if tenant_id in self._pending_actions:
-            self._pending_actions[tenant_id] = [
-                a for a in self._pending_actions[tenant_id]
+        if instance_id in self._pending_actions:
+            self._pending_actions[instance_id] = [
+                a for a in self._pending_actions[instance_id]
                 if now < a.expires_at
             ]
-            if not self._pending_actions[tenant_id]:
-                del self._pending_actions[tenant_id]
+            if not self._pending_actions[instance_id]:
+                del self._pending_actions[instance_id]
 
         self._get_gate().cleanup_expired_tokens()
 
@@ -264,16 +264,16 @@ class ReasoningService:
 
     # --- Public state accessors (replace private attribute access from handler) ---
 
-    def get_pending_actions(self, tenant_id: str) -> list[PendingAction] | None:
-        """Return a copy of pending actions for a tenant, or None."""
-        actions = self._pending_actions.get(tenant_id)
+    def get_pending_actions(self, instance_id: str) -> list[PendingAction] | None:
+        """Return a copy of pending actions for an instance, or None."""
+        actions = self._pending_actions.get(instance_id)
         if actions is None:
             return None
         return list(actions)  # copy — caller cannot mutate internal list
 
-    def clear_pending_actions(self, tenant_id: str) -> None:
-        """Remove all pending actions for a tenant."""
-        self._pending_actions.pop(tenant_id, None)
+    def clear_pending_actions(self, instance_id: str) -> None:
+        """Remove all pending actions for an instance."""
+        self._pending_actions.pop(instance_id, None)
 
     def get_conflict_raised(self) -> bool:
         """Whether a gate conflict was raised this turn."""
@@ -308,9 +308,9 @@ class ReasoningService:
             self._loaded_tools[space_id] = set()
         self._loaded_tools[space_id].add(tool_name)
 
-    def get_last_real_input_tokens(self, tenant_id: str) -> int:
+    def get_last_real_input_tokens(self, instance_id: str) -> int:
         """Return the real input_tokens from the last principal reasoning call, or 0."""
-        return self._last_real_input_tokens.get(tenant_id, 0)
+        return self._last_real_input_tokens.get(instance_id, 0)
 
     def drain_tool_trace(self) -> list[dict]:
         """Return and clear the accumulated tool call trace for the current turn."""
@@ -423,7 +423,7 @@ class ReasoningService:
             if tool_name == "write_file":
                 if self._files:
                     return await self._files.write_file(
-                        request.tenant_id,
+                        request.instance_id,
                         request.active_space_id,
                         tool_input.get("name", ""),
                         tool_input.get("content", ""),
@@ -434,7 +434,7 @@ class ReasoningService:
             elif tool_name == "read_file":
                 if self._files:
                     return await self._files.read_file(
-                        request.tenant_id,
+                        request.instance_id,
                         request.active_space_id,
                         tool_input.get("name", ""),
                     )
@@ -442,14 +442,14 @@ class ReasoningService:
             elif tool_name == "list_files":
                 if self._files:
                     return await self._files.list_files(
-                        request.tenant_id,
+                        request.instance_id,
                         request.active_space_id,
                     )
                 return "File system is not available."
             elif tool_name == "delete_file":
                 if self._files:
                     return await self._files.delete_file(
-                        request.tenant_id,
+                        request.instance_id,
                         request.active_space_id,
                         tool_input.get("name", ""),
                     )
@@ -459,7 +459,7 @@ class ReasoningService:
                 from kernos.kernel.code_exec import execute_code as _exec_code
                 data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                 result = await _exec_code(
-                    tenant_id=request.tenant_id,
+                    instance_id=request.instance_id,
                     space_id=request.active_space_id,
                     code=tool_input.get("code", ""),
                     timeout_seconds=tool_input.get("timeout_seconds", 30),
@@ -471,25 +471,25 @@ class ReasoningService:
                 if self._workspace:
                     action = tool_input.get("action", "list")
                     if action == "list":
-                        return await self._workspace.list_artifacts(request.tenant_id, request.active_space_id)
+                        return await self._workspace.list_artifacts(request.instance_id, request.active_space_id)
                     elif action == "add":
-                        msg, _ = await self._workspace.add_artifact(request.tenant_id, request.active_space_id, tool_input.get("artifact", {}))
+                        msg, _ = await self._workspace.add_artifact(request.instance_id, request.active_space_id, tool_input.get("artifact", {}))
                         return msg
                     elif action == "update":
-                        return await self._workspace.update_artifact(request.tenant_id, request.active_space_id, tool_input.get("artifact_id", ""), tool_input.get("artifact", {}))
+                        return await self._workspace.update_artifact(request.instance_id, request.active_space_id, tool_input.get("artifact_id", ""), tool_input.get("artifact", {}))
                     elif action == "archive":
-                        return await self._workspace.archive_artifact(request.tenant_id, request.active_space_id, tool_input.get("artifact_id", ""))
+                        return await self._workspace.archive_artifact(request.instance_id, request.active_space_id, tool_input.get("artifact_id", ""))
                     return f"Unknown action: {action}"
                 return "Workspace manager is not available."
             elif tool_name == "register_tool":
                 if self._workspace:
                     _desc_file = tool_input.get("descriptor_file", "") or tool_input
-                    return await self._workspace.register_tool(request.tenant_id, request.active_space_id, _desc_file)
+                    return await self._workspace.register_tool(request.instance_id, request.active_space_id, _desc_file)
                 return "Workspace manager is not available."
             elif tool_name == "manage_plan":
                 if hasattr(self, '_handler') and self._handler:
                     return await self._handler._handle_manage_plan(
-                        request.tenant_id, request.active_space_id, tool_input)
+                        request.instance_id, request.active_space_id, tool_input)
                 return "Self-directed execution is not available."
             elif tool_name == "read_runtime_trace":
                 if hasattr(self, '_handler') and self._handler:
@@ -497,7 +497,7 @@ class ReasoningService:
                     _filter = tool_input.get("filter", None)
                     _turn_id = tool_input.get("turn_id", None)
                     events = await self._handler._runtime_trace.read(
-                        request.tenant_id, turns=_turns,
+                        request.instance_id, turns=_turns,
                         filter_level=_filter, turn_id=_turn_id)
                     if not events:
                         return "No trace events found."
@@ -514,22 +514,22 @@ class ReasoningService:
                 _rt = getattr(self._handler, '_runtime_trace', None) if self._handler else None
                 if tool_name == "diagnose_issue":
                     return await handle_diagnose_issue(
-                        request.tenant_id, request.active_space_id, tool_input, _rt, self)
+                        request.instance_id, request.active_space_id, tool_input, _rt, self)
                 elif tool_name == "propose_fix":
-                    return await handle_propose_fix(request.tenant_id, tool_input, _rt)
+                    return await handle_propose_fix(request.instance_id, tool_input, _rt)
                 else:
-                    return await handle_submit_spec(request.tenant_id, tool_input, self._handler)
+                    return await handle_submit_spec(request.instance_id, tool_input, self._handler)
             elif tool_name == "remember":
                 if self._retrieval:
                     return await self._retrieval.search(
-                        request.tenant_id,
+                        request.instance_id,
                         tool_input.get("query", ""),
                         request.active_space_id,
                     )
                 return "Memory search is not available."
             elif tool_name == "dismiss_whisper":
                 return await self._handle_dismiss_whisper(
-                    request.tenant_id,
+                    request.instance_id,
                     tool_input.get("whisper_id", ""),
                     tool_input.get("reason", "user_dismissed"),
                 )
@@ -542,11 +542,11 @@ class ReasoningService:
                 return _read_doc(tool_input.get("path", ""))
             elif tool_name == "read_soul":
                 if self._state:
-                    soul = await self._state.get_soul(request.tenant_id)
+                    soul = await self._state.get_soul(request.instance_id)
                     if soul:
                         from dataclasses import asdict
                         return json.dumps(asdict(soul), indent=2)
-                    return "No soul found for this tenant."
+                    return "No soul found for this instance."
                 return "State store is not available."
             elif tool_name == "update_soul":
                 if self._state:
@@ -557,9 +557,9 @@ class ReasoningService:
                             f"Cannot update '{field}'. Only these fields can be updated: "
                             f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
                         )
-                    soul = await self._state.get_soul(request.tenant_id)
+                    soul = await self._state.get_soul(request.instance_id)
                     if not soul:
-                        return "No soul found for this tenant."
+                        return "No soul found for this instance."
                     setattr(soul, field, value)
                     await self._state.save_soul(soul, source="update_soul", trigger=f"{field}={value}")
                     return f"Updated {field} to: {value}"
@@ -569,7 +569,7 @@ class ReasoningService:
                 cov_action = tool_input.get("action", "list")
                 cov_result = await handle_manage_covenants(
                     self._state,
-                    request.tenant_id,
+                    request.instance_id,
                     action=cov_action,
                     rule_id=tool_input.get("rule_id", ""),
                     new_description=tool_input.get("new_description", ""),
@@ -586,14 +586,14 @@ class ReasoningService:
                                 state=self._state,
                                 events=self._events,
                                 reasoning_service=self,
-                                tenant_id=request.tenant_id,
+                                instance_id=request.instance_id,
                                 new_rule_id=new_id,
                             )
                         )
                 return cov_result
             elif tool_name == "manage_capabilities":
                 return await self._handle_manage_capabilities(
-                    request.tenant_id,
+                    request.instance_id,
                     tool_input.get("action", "list"),
                     tool_input.get("capability", ""),
                 )
@@ -630,9 +630,9 @@ class ReasoningService:
                 if not self._handler:
                     return "Handler not available for outbound delivery."
                 try:
-                    member_id = resolve_owner_member_id(request.tenant_id)
+                    member_id = resolve_owner_member_id(request.instance_id)
                     await self._handler.send_outbound(
-                        request.tenant_id, member_id, resolved, message_text,
+                        request.instance_id, member_id, resolved, message_text,
                     )
                     logger.info(
                         "CROSS_CHANNEL_SEND: channel=%s resolved_from=%s len=%d",
@@ -646,7 +646,7 @@ class ReasoningService:
                 if self._trigger_store:
                     return await handle_manage_schedule(
                         self._trigger_store,
-                        request.tenant_id,
+                        request.instance_id,
                         member_id=request.active_space_id,
                         space_id=request.active_space_id,
                         action=tool_input.get("action", "list"),
@@ -659,7 +659,7 @@ class ReasoningService:
                 return "Scheduler is not available."
             elif tool_name == "request_tool":
                 return await self._handle_request_tool(
-                    request.tenant_id,
+                    request.instance_id,
                     request.active_space_id,
                     tool_input.get("capability_name", "unknown"),
                     tool_input.get("description", ""),
@@ -720,7 +720,7 @@ class ReasoningService:
                 )
                 gate_result = await self._get_gate().evaluate(
                     block.name, tool_input, tool_effect,
-                    request.input_text, request.tenant_id,
+                    request.input_text, request.instance_id,
                     request.active_space_id,
                     messages=request.messages,
                     approval_token_id=approval_token_id,
@@ -732,7 +732,7 @@ class ReasoningService:
                 await emit_event(
                     self._events,
                     EventType.DISPATCH_GATE,
-                    request.tenant_id,
+                    request.instance_id,
                     "dispatch_interceptor",
                     payload={
                         "tool_name": block.name,
@@ -758,11 +758,11 @@ class ReasoningService:
 
             if not gate_result.allowed:
                 self._get_gate().issue_approval_token(block.name, tool_input)
-                tenant_id = request.tenant_id
-                if tenant_id not in self._pending_actions:
-                    self._pending_actions[tenant_id] = []
-                pending_idx = len(self._pending_actions[tenant_id])
-                self._pending_actions[tenant_id].append(PendingAction(
+                instance_id = request.instance_id
+                if instance_id not in self._pending_actions:
+                    self._pending_actions[instance_id] = []
+                pending_idx = len(self._pending_actions[instance_id])
+                self._pending_actions[instance_id].append(PendingAction(
                     tool_name=block.name,
                     tool_input=dict(tool_input),
                     proposed_action=gate_result.proposed_action,
@@ -811,7 +811,7 @@ class ReasoningService:
             await emit_event(
                 self._events,
                 EventType.TOOL_CALLED,
-                request.tenant_id,
+                request.instance_id,
                 "reasoning_service",
                 payload={
                     "tool_name": block.name,
@@ -824,11 +824,11 @@ class ReasoningService:
             logger.warning("Failed to emit tool.called: %s", exc)
 
         await self._audit.log(
-            request.tenant_id,
+            request.instance_id,
             {
                 "type": "tool_call",
                 "timestamp": utc_now(),
-                "tenant_id": request.tenant_id,
+                "instance_id": request.instance_id,
                 "conversation_id": request.conversation_id,
                 "tool_name": block.name,
                 "tool_input": tool_input,
@@ -849,7 +849,7 @@ class ReasoningService:
                 if self._retrieval:
                     try:
                         result = await self._retrieval.search(
-                            request.tenant_id,
+                            request.instance_id,
                             tool_args.get("query", ""),
                             request.active_space_id,
                         )
@@ -860,7 +860,7 @@ class ReasoningService:
                     result = "Memory search is not available right now."
             elif block.name == "remember_details":
                 result = await self._handle_remember_details(
-                    request.tenant_id,
+                    request.instance_id,
                     request.active_space_id,
                     tool_args,
                 )
@@ -868,7 +868,7 @@ class ReasoningService:
                 if self._files:
                     try:
                         result = await self._files.write_file(
-                            request.tenant_id,
+                            request.instance_id,
                             request.active_space_id,
                             tool_args.get("name", ""),
                             tool_args.get("content", ""),
@@ -884,7 +884,7 @@ class ReasoningService:
                 if self._files:
                     try:
                         result = await self._files.read_file(
-                            request.tenant_id,
+                            request.instance_id,
                             request.active_space_id,
                             tool_args.get("name", ""),
                         )
@@ -897,7 +897,7 @@ class ReasoningService:
                 if self._files:
                     try:
                         result = await self._files.list_files(
-                            request.tenant_id,
+                            request.instance_id,
                             request.active_space_id,
                         )
                     except Exception as exc:
@@ -909,7 +909,7 @@ class ReasoningService:
                 if self._files:
                     try:
                         result = await self._files.delete_file(
-                            request.tenant_id,
+                            request.instance_id,
                             request.active_space_id,
                             tool_args.get("name", ""),
                         )
@@ -924,7 +924,7 @@ class ReasoningService:
                     from kernos.kernel.code_exec import execute_code as _exec_code
                     _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                     _exec_result = await _exec_code(
-                        tenant_id=request.tenant_id,
+                        instance_id=request.instance_id,
                         space_id=request.active_space_id,
                         code=tool_args.get("code", ""),
                         timeout_seconds=tool_args.get("timeout_seconds", 30),
@@ -940,14 +940,14 @@ class ReasoningService:
                     try:
                         action = tool_args.get("action", "list")
                         if action == "list":
-                            result = await self._workspace.list_artifacts(request.tenant_id, request.active_space_id)
+                            result = await self._workspace.list_artifacts(request.instance_id, request.active_space_id)
                         elif action == "add":
-                            msg, _ = await self._workspace.add_artifact(request.tenant_id, request.active_space_id, tool_args.get("artifact", {}))
+                            msg, _ = await self._workspace.add_artifact(request.instance_id, request.active_space_id, tool_args.get("artifact", {}))
                             result = msg
                         elif action == "update":
-                            result = await self._workspace.update_artifact(request.tenant_id, request.active_space_id, tool_args.get("artifact_id", ""), tool_args.get("artifact", {}))
+                            result = await self._workspace.update_artifact(request.instance_id, request.active_space_id, tool_args.get("artifact_id", ""), tool_args.get("artifact", {}))
                         elif action == "archive":
-                            result = await self._workspace.archive_artifact(request.tenant_id, request.active_space_id, tool_args.get("artifact_id", ""))
+                            result = await self._workspace.archive_artifact(request.instance_id, request.active_space_id, tool_args.get("artifact_id", ""))
                         else:
                             result = f"Unknown action: {action}"
                     except Exception as exc:
@@ -959,7 +959,7 @@ class ReasoningService:
                 if hasattr(self, '_workspace') and self._workspace:
                     try:
                         _desc_file = tool_args.get("descriptor_file", "") or tool_args
-                        result = await self._workspace.register_tool(request.tenant_id, request.active_space_id, _desc_file)
+                        result = await self._workspace.register_tool(request.instance_id, request.active_space_id, _desc_file)
                     except Exception as exc:
                         logger.warning("Kernel tool 'register_tool' failed: %s", exc)
                         result = f"Registration failed: {exc}"
@@ -969,7 +969,7 @@ class ReasoningService:
                 if hasattr(self, '_handler') and self._handler:
                     try:
                         result = await self._handler._handle_manage_plan(
-                            request.tenant_id, request.active_space_id, tool_args)
+                            request.instance_id, request.active_space_id, tool_args)
                     except Exception as exc:
                         logger.warning("Kernel tool 'manage_plan' failed: %s", exc)
                         result = f"Plan operation failed: {exc}"
@@ -981,7 +981,7 @@ class ReasoningService:
                     _filter = tool_args.get("filter", None)
                     _turn_id = tool_args.get("turn_id", None)
                     events = await self._handler._runtime_trace.read(
-                        request.tenant_id, turns=_turns,
+                        request.instance_id, turns=_turns,
                         filter_level=_filter, turn_id=_turn_id)
                     if not events:
                         result = "No trace events found."
@@ -1001,18 +1001,18 @@ class ReasoningService:
                 try:
                     if block.name == "diagnose_issue":
                         result = await handle_diagnose_issue(
-                            request.tenant_id, request.active_space_id, tool_args, _rt, self)
+                            request.instance_id, request.active_space_id, tool_args, _rt, self)
                     elif block.name == "propose_fix":
-                        result = await handle_propose_fix(request.tenant_id, tool_args, _rt)
+                        result = await handle_propose_fix(request.instance_id, tool_args, _rt)
                     else:
-                        result = await handle_submit_spec(request.tenant_id, tool_args, self._handler)
+                        result = await handle_submit_spec(request.instance_id, tool_args, self._handler)
                 except Exception as exc:
                     logger.warning("Kernel tool '%s' failed: %s", block.name, exc)
                     result = f"Diagnostic tool failed: {exc}"
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(
-                        request.tenant_id,
+                        request.instance_id,
                         tool_args.get("whisper_id", ""),
                         tool_args.get("reason", "user_dismissed"),
                     )
@@ -1028,12 +1028,12 @@ class ReasoningService:
                 result = _read_doc(tool_args.get("path", ""))
             elif block.name == "read_soul":
                 if self._state:
-                    soul = await self._state.get_soul(request.tenant_id)
+                    soul = await self._state.get_soul(request.instance_id)
                     if soul:
                         from dataclasses import asdict
                         result = json.dumps(asdict(soul), indent=2)
                     else:
-                        result = "No soul found for this tenant."
+                        result = "No soul found for this instance."
                 else:
                     result = "State store is not available."
             elif block.name == "update_soul":
@@ -1046,9 +1046,9 @@ class ReasoningService:
                             f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
                         )
                     else:
-                        soul = await self._state.get_soul(request.tenant_id)
+                        soul = await self._state.get_soul(request.instance_id)
                         if not soul:
-                            result = "No soul found for this tenant."
+                            result = "No soul found for this instance."
                         else:
                             setattr(soul, field_name, value)
                             await self._state.save_soul(soul, source="update_soul", trigger=f"{field_name}={value}")
@@ -1061,7 +1061,7 @@ class ReasoningService:
                     cov_action = tool_args.get("action", "list")
                     result = await handle_manage_covenants(
                         self._state,
-                        request.tenant_id,
+                        request.instance_id,
                         action=cov_action,
                         rule_id=tool_args.get("rule_id", ""),
                         new_description=tool_args.get("new_description", ""),
@@ -1077,7 +1077,7 @@ class ReasoningService:
                                     state=self._state,
                                     events=self._events,
                                     reasoning_service=self,
-                                    tenant_id=request.tenant_id,
+                                    instance_id=request.instance_id,
                                     new_rule_id=new_id,
                                 )
                             )
@@ -1087,7 +1087,7 @@ class ReasoningService:
             elif block.name == "manage_capabilities":
                 try:
                     result = await self._handle_manage_capabilities(
-                        request.tenant_id,
+                        request.instance_id,
                         tool_args.get("action", "list"),
                         tool_args.get("capability", ""),
                     )
@@ -1130,9 +1130,9 @@ class ReasoningService:
                     else:
                         try:
                             from kernos.kernel.scheduler import resolve_owner_member_id as _resolve_mid
-                            _member_id = _resolve_mid(request.tenant_id)
+                            _member_id = _resolve_mid(request.instance_id)
                             await self._handler.send_outbound(
-                                request.tenant_id, _member_id, _resolved, _ch_msg,
+                                request.instance_id, _member_id, _resolved, _ch_msg,
                             )
                             logger.info(
                                 "CROSS_CHANNEL_SEND: channel=%s resolved_from=%s len=%d",
@@ -1146,7 +1146,7 @@ class ReasoningService:
                 if self._trigger_store:
                     result = await handle_manage_schedule(
                         self._trigger_store,
-                        request.tenant_id,
+                        request.instance_id,
                         member_id=request.active_space_id,
                         space_id=request.active_space_id,
                         action=tool_args.get("action", "list"),
@@ -1162,7 +1162,7 @@ class ReasoningService:
                 try:
                     from kernos.kernel.introspection import build_user_truth_view
                     result = await build_user_truth_view(
-                        request.tenant_id,
+                        request.instance_id,
                         self._state,
                         self._trigger_store,
                         self._registry,
@@ -1172,7 +1172,7 @@ class ReasoningService:
                     result = "State inspection failed — try again."
             elif block.name == "request_tool":
                 result = await self._handle_request_tool(
-                    request.tenant_id,
+                    request.instance_id,
                     request.active_space_id,
                     tool_args.get("capability_name", "unknown"),
                     tool_args.get("description", ""),
@@ -1226,7 +1226,7 @@ class ReasoningService:
                     # Workspace tool — dispatch via workspace manager
                     _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                     result = await self._workspace.execute_workspace_tool(
-                        request.tenant_id, block.name, tool_input, _data_dir)
+                        request.instance_id, block.name, tool_input, _data_dir)
                     logger.info("TOOL_DISPATCH: name=%s type=workspace", block.name)
                     tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
                     logger.info("AGENT_RESULT: tool=%s success=%s preview=%s",
@@ -1254,7 +1254,7 @@ class ReasoningService:
                     and self._workspace._catalog.has_workspace_tool(block.name)):
                 _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                 result = await self._workspace.execute_workspace_tool(
-                    request.tenant_id, block.name, tool_input, _data_dir)
+                    request.instance_id, block.name, tool_input, _data_dir)
                 logger.info("TOOL_DISPATCH: name=%s type=workspace", block.name)
             else:
                 result = await self._mcp.call_tool(block.name, tool_input)
@@ -1277,7 +1277,7 @@ class ReasoningService:
             await emit_event(
                 self._events,
                 EventType.TOOL_RESULT,
-                request.tenant_id,
+                request.instance_id,
                 "reasoning_service",
                 payload={
                     "tool_name": block.name,
@@ -1292,11 +1292,11 @@ class ReasoningService:
             logger.warning("Failed to emit tool.result: %s", exc)
 
         await self._audit.log(
-            request.tenant_id,
+            request.instance_id,
             {
                 "type": "tool_result",
                 "timestamp": utc_now(),
-                "tenant_id": request.tenant_id,
+                "instance_id": request.instance_id,
                 "conversation_id": request.conversation_id,
                 "tool_name": block.name,
                 "tool_output": str(result)[:2000],
@@ -1318,7 +1318,7 @@ class ReasoningService:
             filename = f"tr_{safe_name}_{ts}_{slug}.txt"
             try:
                 write_msg = await self._files.write_file(
-                    request.tenant_id,
+                    request.instance_id,
                     request.active_space_id,
                     filename,
                     result,
@@ -1361,7 +1361,7 @@ class ReasoningService:
 
     async def _handle_request_tool(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         capability_name: str,
         description: str,
@@ -1381,7 +1381,7 @@ class ReasoningService:
         if capability_name and capability_name != "unknown":
             cap = self._registry.get(capability_name)
             if cap and cap.status == CapabilityStatus.CONNECTED:
-                await self._activate_tool_for_space(tenant_id, space_id, capability_name)
+                await self._activate_tool_for_space(instance_id, space_id, capability_name)
                 tools = cap.tools
                 return (
                     f"Activated '{cap.name}' for this space. "
@@ -1404,7 +1404,7 @@ class ReasoningService:
                 break
 
         if best_match:
-            await self._activate_tool_for_space(tenant_id, space_id, best_match.name)
+            await self._activate_tool_for_space(instance_id, space_id, best_match.name)
             tools = best_match.tools
             return (
                 f"Found and activated '{best_match.name}' for this space. "
@@ -1420,20 +1420,20 @@ class ReasoningService:
         )
 
     async def _activate_tool_for_space(
-        self, tenant_id: str, space_id: str, capability_name: str
+        self, instance_id: str, space_id: str, capability_name: str
     ) -> None:
         """Add a capability to a space's active_tools list and persist."""
         if not self._state:
             return
-        space = await self._state.get_context_space(tenant_id, space_id)
+        space = await self._state.get_context_space(instance_id, space_id)
         if space and capability_name not in space.active_tools:
             space.active_tools.append(capability_name)
             await self._state.update_context_space(
-                tenant_id, space_id, {"active_tools": space.active_tools}
+                instance_id, space_id, {"active_tools": space.active_tools}
             )
 
     async def _handle_manage_capabilities(
-        self, tenant_id: str, action: str, capability: str
+        self, instance_id: str, action: str, capability: str
     ) -> str:
         """Handle the manage_capabilities kernel tool."""
         from kernos.capability.registry import CapabilityStatus
@@ -1499,7 +1499,7 @@ class ReasoningService:
                 return "Error: 'capability' is required for install."
             # Route through request_tool for existing flow
             return await self._handle_request_tool(
-                tenant_id, "", capability, f"Install {capability}"
+                instance_id, "", capability, f"Install {capability}"
             )
 
         if action == "remove":
@@ -1526,20 +1526,20 @@ class ReasoningService:
         return f"Unknown action: '{action}'. Use list, enable, disable, install, or remove."
 
     async def _handle_dismiss_whisper(
-        self, tenant_id: str, whisper_id: str, reason: str = "user_dismissed"
+        self, instance_id: str, whisper_id: str, reason: str = "user_dismissed"
     ) -> str:
         """Dismiss a whisper — update suppression to prevent re-surfacing."""
         if not self._state:
             return "State store is not available."
         suppressions = await self._state.get_suppressions(
-            tenant_id, whisper_id=whisper_id
+            instance_id, whisper_id=whisper_id
         )
         if suppressions:
             s = suppressions[0]
             s.resolution_state = "dismissed"
             s.resolved_by = reason
             s.resolved_at = datetime.now(timezone.utc).isoformat()
-            await self._state.save_suppression(tenant_id, s)
+            await self._state.save_suppression(instance_id, s)
 
             # If this was a behavioral pattern whisper, mark pattern as declined
             if s.foresight_signal.startswith("behavioral_pattern:"):
@@ -1547,13 +1547,13 @@ class ReasoningService:
                     _bp_id = s.foresight_signal.split(":", 1)[1]
                     data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                     from kernos.kernel.behavioral_patterns import load_patterns, save_patterns
-                    patterns = load_patterns(data_dir, tenant_id)
+                    patterns = load_patterns(data_dir, instance_id)
                     for p in patterns:
                         if p.pattern_id == _bp_id:
                             p.proposal_declined = True
                             p.proposal_surfaced = False  # Allow re-proposal after reset
                             p.threshold_met = False
-                            save_patterns(data_dir, tenant_id, patterns)
+                            save_patterns(data_dir, instance_id, patterns)
                             logger.info("BEHAVIORAL_RESOLVED: fingerprint=%s action=declined", p.fingerprint[:40])
                             break
                 except Exception as exc:
@@ -1563,7 +1563,7 @@ class ReasoningService:
         return f"Whisper {whisper_id} not found in suppression registry."
 
     async def _handle_remember_details(
-        self, tenant_id: str, space_id: str, input_data: dict,
+        self, instance_id: str, space_id: str, input_data: dict,
     ) -> str:
         """Retrieve conversation text from a specific archived log file.
 
@@ -1592,7 +1592,7 @@ class ReasoningService:
             return "Conversation logger is not available."
 
         log_text = await self._handler.read_log_text(
-            tenant_id, space_id, log_number,
+            instance_id, space_id, log_number,
         )
 
         if log_text is None:
@@ -1701,7 +1701,7 @@ class ReasoningService:
             await emit_event(
                 self._events,
                 EventType.REASONING_REQUEST,
-                request.tenant_id,
+                request.instance_id,
                 "reasoning_service",
                 payload={
                     "model": request.model,
@@ -1724,7 +1724,7 @@ class ReasoningService:
             for m in messages
         )
         _char_est = (_ctx_chars + _tool_chars) // 4
-        _last_real = self._last_real_input_tokens.get(request.tenant_id, 0)
+        _last_real = self._last_real_input_tokens.get(request.instance_id, 0)
         if _last_real > 0:
             # Hybrid: real baseline + estimated delta from new content
             # The last real count covers the full context window at that point.
@@ -1824,7 +1824,7 @@ class ReasoningService:
         # Store real input_tokens for hybrid estimation on next turn
         # This is the initial API call (full context window), not tool-loop iterations
         if response.input_tokens > 0:
-            self._last_real_input_tokens[request.tenant_id] = response.input_tokens
+            self._last_real_input_tokens[request.instance_id] = response.input_tokens
 
         logger.info(
             "LLM_RESPONSE: stop_reason=%s tokens_in=%d tokens_out=%d content_types=%s",
@@ -1855,7 +1855,7 @@ class ReasoningService:
             rr_event = await emit_event(
                 self._events,
                 EventType.REASONING_RESPONSE,
-                request.tenant_id,
+                request.instance_id,
                 "reasoning_service",
                 payload={
                     "model": request.model,
@@ -2046,7 +2046,7 @@ class ReasoningService:
                 await emit_event(
                     self._events,
                     EventType.REASONING_REQUEST,
-                    request.tenant_id,
+                    request.instance_id,
                     "reasoning_service",
                     payload={
                         "model": request.model,
@@ -2138,7 +2138,7 @@ class ReasoningService:
                 rr_event = await emit_event(
                     self._events,
                     EventType.REASONING_RESPONSE,
-                    request.tenant_id,
+                    request.instance_id,
                     "reasoning_service",
                     payload={
                         "model": request.model,

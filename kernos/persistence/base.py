@@ -10,13 +10,13 @@ class ConversationStore(ABC):
     """Append-only store for conversation history (user and assistant messages only)."""
 
     @abstractmethod
-    async def append(self, tenant_id: str, conversation_id: str, entry: dict) -> None:
+    async def append(self, instance_id: str, conversation_id: str, entry: dict) -> None:
         """Append a message to conversation history. Append-only — never modify existing entries."""
         ...
 
     @abstractmethod
     async def get_recent(
-        self, tenant_id: str, conversation_id: str, limit: int = 20
+        self, instance_id: str, conversation_id: str, limit: int = 20
     ) -> list[dict]:
         """Return the most recent messages, oldest first.
 
@@ -28,7 +28,7 @@ class ConversationStore(ABC):
 
     @abstractmethod
     async def get_recent_full(
-        self, tenant_id: str, conversation_id: str, limit: int = 20
+        self, instance_id: str, conversation_id: str, limit: int = 20
     ) -> list[dict]:
         """Return the most recent messages with full metadata (timestamp, space_tags, etc.).
 
@@ -40,7 +40,7 @@ class ConversationStore(ABC):
 
     @abstractmethod
     async def get_space_thread(
-        self, tenant_id: str, conversation_id: str,
+        self, instance_id: str, conversation_id: str,
         space_id: str, max_messages: int = 50,
         include_untagged: bool = False,
         include_timestamp: bool = False,
@@ -57,7 +57,7 @@ class ConversationStore(ABC):
 
     @abstractmethod
     async def get_cross_domain_messages(
-        self, tenant_id: str, conversation_id: str,
+        self, instance_id: str, conversation_id: str,
         active_space_id: str, last_n_turns: int = 5,
     ) -> list[dict]:
         """Return recent messages from OTHER spaces for ephemeral cross-domain injection.
@@ -69,21 +69,21 @@ class ConversationStore(ABC):
         ...
 
     @abstractmethod
-    async def archive(self, tenant_id: str, conversation_id: str) -> None:
+    async def archive(self, instance_id: str, conversation_id: str) -> None:
         """Move a conversation to the shadow archive. Non-destructive.
 
-        Moves the conversation file to {tenant_id}/archive/conversations/{timestamp}/
+        Moves the conversation file to {instance_id}/archive/conversations/{timestamp}/
         with metadata recording when it was archived.
         """
         ...
 
 
-class TenantStore(ABC):
-    """Store for tenant records — who this user is and what they've connected."""
+class InstanceStore(ABC):
+    """Store for instance records — who this user is and what they've connected."""
 
     @abstractmethod
-    async def get_or_create(self, tenant_id: str) -> dict:
-        """Return the tenant record, creating with defaults if it doesn't exist.
+    async def get_or_create(self, instance_id: str) -> dict:
+        """Return the instance record, creating with defaults if it doesn't exist.
 
         Auto-provisioning: unknown tenants are created silently.
         The user never "signs up" — they send a message and the system provisions.
@@ -91,7 +91,7 @@ class TenantStore(ABC):
         ...
 
     @abstractmethod
-    async def save(self, tenant_id: str, record: dict) -> None:
+    async def save(self, instance_id: str, record: dict) -> None:
         """Persist an updated tenant record."""
         ...
 
@@ -104,6 +104,6 @@ class AuditStore(ABC):
     """
 
     @abstractmethod
-    async def log(self, tenant_id: str, entry: dict) -> None:
+    async def log(self, instance_id: str, entry: dict) -> None:
         """Append an audit entry. Stored by date for natural partitioning."""
         ...

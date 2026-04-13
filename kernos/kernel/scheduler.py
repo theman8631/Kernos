@@ -30,7 +30,7 @@ class Trigger:
     """A persistent scheduled action."""
 
     trigger_id: str
-    tenant_id: str
+    instance_id: str
     member_id: str = ""
     space_id: str = ""
     conversation_id: str = ""             # Platform conversation (e.g. Discord channel ID)
@@ -126,13 +126,13 @@ def classify_trigger_failure(error: str | Exception) -> str:
     return "transient"
 
 
-def resolve_owner_member_id(tenant_id: str) -> str:
-    """Canonical owner member ID for a tenant.
+def resolve_owner_member_id(instance_id: str) -> str:
+    """Canonical owner member ID for an instance.
 
     Centralized resolver — do not construct member IDs by
-    splitting tenant_id strings elsewhere.
+    splitting instance_id strings elsewhere.
     """
-    return f"member:{tenant_id}:owner"
+    return f"member:{instance_id}:owner"
 
 
 # ---------------------------------------------------------------------------
@@ -148,19 +148,19 @@ class TriggerStore:
         self._data_dir = Path(data_dir)
         self._safe_name = _safe_name
 
-    def _path(self, tenant_id: str) -> Path:
-        return self._data_dir / self._safe_name(tenant_id) / "state" / "triggers.json"
+    def _path(self, instance_id: str) -> Path:
+        return self._data_dir / self._safe_name(instance_id) / "state" / "triggers.json"
 
-    def _read(self, tenant_id: str) -> list[dict]:
-        path = self._path(tenant_id)
+    def _read(self, instance_id: str) -> list[dict]:
+        path = self._path(instance_id)
         if not path.exists():
             return []
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def _write(self, tenant_id: str, data: list[dict]) -> None:
+    def _write(self, instance_id: str, data: list[dict]) -> None:
         import tempfile
-        path = self._path(tenant_id)
+        path = self._path(instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
@@ -177,34 +177,34 @@ class TriggerStore:
             raise
 
     async def save(self, trigger: Trigger) -> None:
-        raw = self._read(trigger.tenant_id)
+        raw = self._read(trigger.instance_id)
         for i, d in enumerate(raw):
             if d.get("trigger_id") == trigger.trigger_id:
                 raw[i] = asdict(trigger)
-                self._write(trigger.tenant_id, raw)
+                self._write(trigger.instance_id, raw)
                 return
         raw.append(asdict(trigger))
-        self._write(trigger.tenant_id, raw)
+        self._write(trigger.instance_id, raw)
 
-    async def get(self, tenant_id: str, trigger_id: str) -> Trigger | None:
-        for d in self._read(tenant_id):
+    async def get(self, instance_id: str, trigger_id: str) -> Trigger | None:
+        for d in self._read(instance_id):
             if d.get("trigger_id") == trigger_id:
                 return Trigger(**d)
         return None
 
-    async def list_active(self, tenant_id: str) -> list[Trigger]:
-        return [Trigger(**d) for d in self._read(tenant_id) if d.get("status") == "active"]
+    async def list_active(self, instance_id: str) -> list[Trigger]:
+        return [Trigger(**d) for d in self._read(instance_id) if d.get("status") == "active"]
 
-    async def list_all(self, tenant_id: str) -> list[Trigger]:
-        return [Trigger(**d) for d in self._read(tenant_id)]
+    async def list_all(self, instance_id: str) -> list[Trigger]:
+        return [Trigger(**d) for d in self._read(instance_id)]
 
-    async def get_due(self, tenant_id: str, now_iso: str) -> list[Trigger]:
+    async def get_due(self, instance_id: str, now_iso: str) -> list[Trigger]:
         """Get active triggers where next_fire_at <= now.
 
         Defensive: skip one-shot triggers that already fired (fire_count > 0, no recurrence).
         """
         results = []
-        for d in self._read(tenant_id):
+        for d in self._read(instance_id):
             if d.get("status") != "active":
                 continue
             # Defensive: skip one-shot triggers that already fired but weren't marked completed
@@ -224,21 +224,21 @@ class TriggerStore:
         return results
 
     async def get_by_condition_type(
-        self, tenant_id: str, condition_type: str, status: str = "active"
+        self, instance_id: str, condition_type: str, status: str = "active"
     ) -> list[Trigger]:
         """Get all triggers of a specific condition type."""
-        all_triggers = await self.list_all(tenant_id)
+        all_triggers = await self.list_all(instance_id)
         return [
             t for t in all_triggers
             if t.condition_type == condition_type and t.status == status
         ]
 
-    async def remove(self, tenant_id: str, trigger_id: str) -> bool:
-        raw = self._read(tenant_id)
+    async def remove(self, instance_id: str, trigger_id: str) -> bool:
+        raw = self._read(instance_id)
         new = [d for d in raw if d.get("trigger_id") != trigger_id]
         if len(new) == len(raw):
             return False
-        self._write(tenant_id, new)
+        self._write(instance_id, new)
         return True
 
 
@@ -470,7 +470,7 @@ async def _extract_schedule_params(
 
 async def handle_manage_schedule(
     trigger_store: TriggerStore,
-    tenant_id: str,
+    instance_id: str,
     member_id: str,
     space_id: str,
     action: str,
@@ -487,7 +487,7 @@ async def handle_manage_schedule(
     """
     if action == "list":
         include_inactive = "retired" in description.lower() or "inactive" in description.lower() or "all" in description.lower()
-        return await _list_triggers(trigger_store, tenant_id, include_inactive=include_inactive)
+        return await _list_triggers(trigger_store, instance_id, include_inactive=include_inactive)
 
     if action == "create":
         if not description:
@@ -505,7 +505,7 @@ async def handle_manage_schedule(
             extracted["action_type"] = "notify"
 
         return await _create_trigger(
-            trigger_store, tenant_id, member_id, space_id,
+            trigger_store, instance_id, member_id, space_id,
             description,
             extracted.get("when", ""),
             extracted.get("action_type", "notify"),
@@ -523,17 +523,17 @@ async def handle_manage_schedule(
         )
 
     if action == "pause":
-        return await _set_trigger_status(trigger_store, tenant_id, trigger_id, "paused")
+        return await _set_trigger_status(trigger_store, instance_id, trigger_id, "paused")
 
     if action == "resume":
-        return await _set_trigger_status(trigger_store, tenant_id, trigger_id, "active")
+        return await _set_trigger_status(trigger_store, instance_id, trigger_id, "active")
 
     if action == "remove":
         if not trigger_id:
             return "Error: trigger_id is required for remove."
-        removed = await trigger_store.remove(tenant_id, trigger_id)
+        removed = await trigger_store.remove(instance_id, trigger_id)
         if removed:
-            logger.info("TRIGGER_REMOVE: id=%s tenant=%s", trigger_id, tenant_id)
+            logger.info("TRIGGER_REMOVE: id=%s instance=%s", trigger_id, instance_id)
             return f"Removed trigger {trigger_id}."
         return f"Error: Trigger '{trigger_id}' not found."
 
@@ -546,7 +546,7 @@ async def handle_manage_schedule(
         if isinstance(extracted, str):
             return extracted
         return await _update_trigger(
-            trigger_store, tenant_id, trigger_id,
+            trigger_store, instance_id, trigger_id,
             description,
             extracted.get("when", ""),
             extracted.get("message", ""),
@@ -556,8 +556,8 @@ async def handle_manage_schedule(
     return f"Error: Unknown action '{action}'. Use list, create, update, pause, resume, or remove."
 
 
-async def _list_triggers(store: TriggerStore, tenant_id: str, include_inactive: bool = False) -> str:
-    all_triggers = await store.list_all(tenant_id)
+async def _list_triggers(store: TriggerStore, instance_id: str, include_inactive: bool = False) -> str:
+    all_triggers = await store.list_all(instance_id)
     if include_inactive:
         triggers = all_triggers
     else:
@@ -595,7 +595,7 @@ async def _list_triggers(store: TriggerStore, tenant_id: str, include_inactive: 
 
 async def _create_trigger(
     store: TriggerStore,
-    tenant_id: str, member_id: str, space_id: str,
+    instance_id: str, member_id: str, space_id: str,
     description: str, when: str, action_type: str, message: str,
     tool_name: str, tool_args: dict, notify_via: str,
     delivery_class: str, recurrence: str,
@@ -635,7 +635,7 @@ async def _create_trigger(
 
     trigger = Trigger(
         trigger_id=tid,
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         member_id=member_id,
         space_id=space_id,
         conversation_id=conversation_id,
@@ -659,7 +659,7 @@ async def _create_trigger(
     # Ignore notify_via — latest preference wins regardless of channel.
     replaced_descriptions: list[str] = []
     if condition_type == "event" and recurrence == "standing":
-        existing = await store.list_active(tenant_id)
+        existing = await store.list_active(instance_id)
         for old in existing:
             if (old.condition_type == "event"
                     and old.event_source == event_source
@@ -708,11 +708,11 @@ async def _create_trigger(
 
 
 async def _set_trigger_status(
-    store: TriggerStore, tenant_id: str, trigger_id: str, new_status: str,
+    store: TriggerStore, instance_id: str, trigger_id: str, new_status: str,
 ) -> str:
     if not trigger_id:
         return f"Error: trigger_id is required for {new_status}."
-    trigger = await store.get(tenant_id, trigger_id)
+    trigger = await store.get(instance_id, trigger_id)
     if not trigger:
         return f"Error: Trigger '{trigger_id}' not found."
     trigger.status = new_status
@@ -722,12 +722,12 @@ async def _set_trigger_status(
 
 
 async def _update_trigger(
-    store: TriggerStore, tenant_id: str, trigger_id: str,
+    store: TriggerStore, instance_id: str, trigger_id: str,
     description: str, when: str, message: str, recurrence: str,
 ) -> str:
     if not trigger_id:
         return "Error: trigger_id is required for update."
-    trigger = await store.get(tenant_id, trigger_id)
+    trigger = await store.get(instance_id, trigger_id)
     if not trigger:
         return f"Error: Trigger '{trigger_id}' not found."
 
@@ -758,13 +758,13 @@ async def _update_trigger(
 
 async def evaluate_triggers(
     trigger_store: TriggerStore,
-    tenant_id: str,
+    instance_id: str,
     handler,  # MessageHandler — for send_outbound and tool execution
     proactive_budget_check=None,  # Optional: () -> bool, gates outbound delivery
 ) -> int:
     """Evaluate and fire all due triggers. Returns count of triggers fired."""
     now = utc_now()
-    due = await trigger_store.get_due(tenant_id, now)
+    due = await trigger_store.get_due(instance_id, now)
     fired = 0
 
     for trigger in due:
@@ -850,12 +850,12 @@ async def _store_scheduled_message(handler, trigger: Trigger, content: str) -> N
             "content": content,
             "timestamp": utc_now(),
             "platform": "scheduler",
-            "tenant_id": trigger.tenant_id,
+            "instance_id": trigger.instance_id,
             "conversation_id": trigger.conversation_id,
             "space_tags": [trigger.space_id] if trigger.space_id else None,
         }
         await handler.conversations.append(
-            trigger.tenant_id, trigger.conversation_id, entry,
+            trigger.instance_id, trigger.conversation_id, entry,
         )
         logger.info(
             "TRIGGER_HISTORY: stored [SCHEDULED] message for trigger=%s in conv=%s",
@@ -866,7 +866,7 @@ async def _store_scheduled_message(handler, trigger: Trigger, content: str) -> N
             # Strip [SCHEDULED] prefix for cleaner log
             log_content = content.removeprefix("[SCHEDULED] ")
             await handler.conv_logger.append(
-                tenant_id=trigger.tenant_id,
+                instance_id=trigger.instance_id,
                 space_id=trigger.space_id,
                 speaker="assistant",
                 channel="scheduled",
@@ -902,7 +902,7 @@ async def _write_receipt(
         receipt_content = " ".join(parts)
 
         await handler.conv_logger.append(
-            tenant_id=trigger.tenant_id,
+            instance_id=trigger.instance_id,
             space_id=trigger.space_id,
             speaker="system",
             channel="receipt",
@@ -916,10 +916,10 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
     """Execute a trigger's action. Returns True on success."""
     if trigger.action_type == "notify":
         message = trigger.action_params.get("message", trigger.action_description)
-        member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
+        member_id = trigger.member_id or resolve_owner_member_id(trigger.instance_id)
         channel = trigger.notify_via or None
         success = await handler.send_outbound(
-            trigger.tenant_id, member_id, channel, message,
+            trigger.instance_id, member_id, channel, message,
         )
         if success:
             # Inject into conversation history so the agent knows what it sent
@@ -956,7 +956,7 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
         try:
             from kernos.kernel.reasoning import ReasoningRequest
             request = ReasoningRequest(
-                tenant_id=trigger.tenant_id,
+                instance_id=trigger.instance_id,
                 conversation_id=f"trigger_{trigger.trigger_id}",
                 system_prompt="",
                 messages=[],
@@ -983,11 +983,11 @@ async def _fire_trigger(trigger: Trigger, handler) -> bool:
                 return False
 
             # Deliver result to user
-            member_id = trigger.member_id or resolve_owner_member_id(trigger.tenant_id)
+            member_id = trigger.member_id or resolve_owner_member_id(trigger.instance_id)
             delivery_msg = f"Scheduled action completed: {trigger.action_description}\n\nResult: {result}"
             channel = trigger.notify_via or None
             success = await handler.send_outbound(
-                trigger.tenant_id, member_id, channel, delivery_msg,
+                trigger.instance_id, member_id, channel, delivery_msg,
             )
             if success:
                 await _store_scheduled_message(
@@ -1026,7 +1026,7 @@ def _notify_retirement(handler, trigger: Trigger) -> None:
     """Queue a system event for trigger retirement."""
     try:
         handler.queue_system_event(
-            trigger.tenant_id,
+            trigger.instance_id,
             f'[SYSTEM] trigger_retired: "{trigger.action_description}" — '
             f'{trigger.failure_reason}. Recreate under event triggers if needed.',
         )
@@ -1054,7 +1054,7 @@ def _apply_transient_failure(trigger: Trigger, handler) -> None:
         )
         try:
             handler.queue_system_event(
-                trigger.tenant_id,
+                trigger.instance_id,
                 f'[SYSTEM] trigger_degraded: "{trigger.action_description}" — '
                 f'{trigger.failure_reason}. Service may need reconnection.',
             )
@@ -1069,12 +1069,12 @@ def _apply_transient_failure(trigger: Trigger, handler) -> None:
 
 async def retire_stale_triggers(
     trigger_store: TriggerStore,
-    tenant_id: str,
+    instance_id: str,
     registry,  # CapabilityRegistry — public API
     handler,
 ) -> int:
     """Retire active triggers whose tools no longer exist."""
-    all_triggers = await trigger_store.list_all(tenant_id)
+    all_triggers = await trigger_store.list_all(instance_id)
     retired = 0
 
     for trigger in all_triggers:
@@ -1096,7 +1096,7 @@ async def retire_stale_triggers(
                 # Queue system event (agent sees on next message)
                 try:
                     handler.queue_system_event(
-                        trigger.tenant_id,
+                        trigger.instance_id,
                         f'[SYSTEM] trigger_retired: "{trigger.action_description}" — '
                         f'{trigger.failure_reason}. Recreate if needed.',
                     )
@@ -1108,7 +1108,7 @@ async def retire_stale_triggers(
                 )
 
     if retired:
-        logger.info("STALE_TRIGGERS_RETIRED: tenant=%s count=%d", tenant_id, retired)
+        logger.info("STALE_TRIGGERS_RETIRED: instance=%s count=%d", instance_id, retired)
     return retired
 
 
@@ -1216,7 +1216,7 @@ async def _poll_calendar_events(mcp_client, user_timezone: str = "") -> list[Cal
 
 async def evaluate_event_triggers(
     trigger_store: TriggerStore,
-    tenant_id: str,
+    instance_id: str,
     handler,
     mcp_client,   # MCPClientManager — explicit contract
     user_timezone: str = "",
@@ -1227,7 +1227,7 @@ async def evaluate_event_triggers(
     Returns (count_fired, next_poll_seconds) for adaptive cadence.
     """
     event_triggers = await trigger_store.get_by_condition_type(
-        tenant_id, "event", status="active"
+        instance_id, "event", status="active"
     )
     if not event_triggers:
         return 0, 15 * 60  # no triggers, 15 min ceiling
@@ -1235,8 +1235,8 @@ async def evaluate_event_triggers(
     # Group by event_source — poll each source ONCE, share across triggers
     calendar_triggers = [t for t in event_triggers if t.event_source == "calendar"]
     logger.info(
-        "EVENT_TICK: tenant=%s triggers_found=%d calendar=%d",
-        tenant_id, len(event_triggers), len(calendar_triggers),
+        "EVENT_TICK: instance=%s triggers_found=%d calendar=%d",
+        instance_id, len(event_triggers), len(calendar_triggers),
     )
 
     fired = 0
@@ -1399,7 +1399,7 @@ async def _evaluate_calendar_trigger(
 
             # Deliver via send_outbound — canonical member ID
             channel = trigger.notify_via or None
-            member_id = resolve_owner_member_id(trigger.tenant_id)
+            member_id = resolve_owner_member_id(trigger.instance_id)
 
             # Proactive budget check
             if proactive_budget_check and not proactive_budget_check("event_trigger"):
@@ -1407,13 +1407,13 @@ async def _evaluate_calendar_trigger(
 
             try:
                 await handler.send_outbound(
-                    trigger.tenant_id, member_id, channel, message,
+                    trigger.instance_id, member_id, channel, message,
                 )
 
                 # Write to conversation log
                 if hasattr(handler, "conv_logger") and trigger.space_id:
                     await handler.conv_logger.append(
-                        tenant_id=trigger.tenant_id,
+                        instance_id=trigger.instance_id,
                         space_id=trigger.space_id,
                         speaker="assistant",
                         channel="scheduled",

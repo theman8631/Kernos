@@ -105,13 +105,13 @@ class TestConstants:
 
 class TestContextSpaceToolFields:
     def test_defaults(self):
-        space = ContextSpace(id="s1", tenant_id="t1", name="Test")
+        space = ContextSpace(id="s1", instance_id="t1", name="Test")
         assert space.local_affordance_set == {}
         assert space.last_catalog_version == 0
 
     def test_with_promoted_tools(self):
         space = ContextSpace(
-            id="s1", tenant_id="t1", name="D&D",
+            id="s1", instance_id="t1", name="D&D",
             local_affordance_set={"dice_roller": {"last_turn": 0, "tokens": 100}},
             last_catalog_version=5,
         )
@@ -159,7 +159,7 @@ class TestToolPromotion:
 
     async def test_successful_use_promotes(self, tmp_path):
         handler, store = self._handler(tmp_path)
-        space = ContextSpace(id="sp_dnd", tenant_id="t1", name="D&D",
+        space = ContextSpace(id="sp_dnd", instance_id="t1", name="D&D",
             space_type="domain", created_at="2026-01-01")
         await store.save_context_space(space)
 
@@ -173,7 +173,7 @@ class TestToolPromotion:
 
     async def test_uncommon_tool_promoted(self, tmp_path):
         handler, store = self._handler(tmp_path)
-        space = ContextSpace(id="sp_dnd", tenant_id="t1", name="D&D",
+        space = ContextSpace(id="sp_dnd", instance_id="t1", name="D&D",
             space_type="domain", created_at="2026-01-01")
         await store.save_context_space(space)
 
@@ -185,7 +185,7 @@ class TestToolPromotion:
 
     async def test_failed_use_not_promoted(self, tmp_path):
         handler, store = self._handler(tmp_path)
-        space = ContextSpace(id="sp_dnd", tenant_id="t1", name="D&D",
+        space = ContextSpace(id="sp_dnd", instance_id="t1", name="D&D",
             space_type="domain", created_at="2026-01-01")
         await store.save_context_space(space)
 

@@ -50,7 +50,7 @@ async def build_handler():
 
     from kernos.kernel.state_json import JsonStateStore
     from kernos.kernel.events import JsonEventStream
-    from kernos.persistence.json_file import JsonConversationStore, JsonTenantStore, JsonAuditStore
+    from kernos.persistence.json_file import JsonConversationStore, JsonInstanceStore, JsonAuditStore
     from kernos.capability.client import MCPClientManager
     from kernos.capability.registry import CapabilityRegistry
     from kernos.capability.known import KNOWN_CAPABILITIES
@@ -63,7 +63,7 @@ async def build_handler():
     state = JsonStateStore(data_dir)
     events = JsonEventStream(data_dir)
     conversations = JsonConversationStore(data_dir)
-    tenants = JsonTenantStore(data_dir)
+    tenants = JsonInstanceStore(data_dir)
     audit = JsonAuditStore(data_dir)
     mcp = MCPClientManager(events)
 
@@ -87,7 +87,7 @@ async def build_handler():
     return handler
 
 
-def make_message(content: str, tenant_id: str = TENANT_ID):
+def make_message(content: str, instance_id: str = TENANT_ID):
     from kernos.messages.models import NormalizedMessage, AuthLevel
     return NormalizedMessage(
         content=content,
@@ -97,7 +97,7 @@ def make_message(content: str, tenant_id: str = TENANT_ID):
         platform_capabilities=["text"],
         conversation_id="smoke_conv",
         timestamp=datetime.now(timezone.utc),
-        tenant_id=tenant_id,
+        instance_id=instance_id,
     )
 
 

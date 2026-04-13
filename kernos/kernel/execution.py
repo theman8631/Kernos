@@ -127,18 +127,18 @@ CONTINUE_PLAN_TOOL = MANAGE_PLAN_TOOL
 
 
 def scan_active_plans(data_dir: str) -> list[tuple[str, str, dict]]:
-    """Scan all tenants/spaces for active plans with in-progress steps.
+    """Scan all instances/spaces for active plans with in-progress steps.
 
-    Returns list of (tenant_id, space_id, plan) tuples.
+    Returns list of (instance_id, space_id, plan) tuples.
     """
     results = []
     data_path = Path(data_dir)
     if not data_path.exists():
         return results
-    for tenant_dir in data_path.iterdir():
-        if not tenant_dir.is_dir() or tenant_dir.name.startswith("."):
+    for instance_dir in data_path.iterdir():
+        if not instance_dir.is_dir() or instance_dir.name.startswith("."):
             continue
-        spaces_dir = tenant_dir / "spaces"
+        spaces_dir = instance_dir / "spaces"
         if not spaces_dir.exists():
             continue
         for space_dir in spaces_dir.iterdir():
@@ -158,18 +158,18 @@ def scan_active_plans(data_dir: str) -> list[tuple[str, str, dict]]:
                 for step in phase.get("steps", [])
             )
             if has_in_progress:
-                # Reconstruct tenant_id from directory name
+                # Reconstruct instance_id from directory name
                 # tenant dirs are safe_name encoded (colons → underscores etc.)
-                # but we store tenant_id in the plan or can derive from convention
+                # but we store instance_id in the plan or can derive from convention
                 # Discord tenants: discord_364303223047323649 → discord:364303223047323649
-                raw_name = tenant_dir.name
+                raw_name = instance_dir.name
                 if raw_name.startswith("discord_"):
-                    tenant_id = "discord:" + raw_name[len("discord_"):]
+                    instance_id = "discord:" + raw_name[len("discord_"):]
                 elif raw_name.startswith("sms_"):
-                    tenant_id = "sms:" + raw_name[len("sms_"):]
+                    instance_id = "sms:" + raw_name[len("sms_"):]
                 else:
-                    tenant_id = raw_name
-                results.append((tenant_id, space_dir.name, plan))
+                    instance_id = raw_name
+                results.append((instance_id, space_dir.name, plan))
     return results
 
 
@@ -177,15 +177,15 @@ def generate_plan_id() -> str:
     return f"plan_{uuid.uuid4().hex[:12]}"
 
 
-def _plan_path(data_dir: str, tenant_id: str, space_id: str) -> Path:
+def _plan_path(data_dir: str, instance_id: str, space_id: str) -> Path:
     return (
-        Path(data_dir) / _safe_name(tenant_id) / "spaces" / space_id / "files" / "_plan.json"
+        Path(data_dir) / _safe_name(instance_id) / "spaces" / space_id / "files" / "_plan.json"
     )
 
 
-async def load_plan(data_dir: str, tenant_id: str, space_id: str) -> dict | None:
+async def load_plan(data_dir: str, instance_id: str, space_id: str) -> dict | None:
     """Load _plan.json from a space. Returns None if not found."""
-    path = _plan_path(data_dir, tenant_id, space_id)
+    path = _plan_path(data_dir, instance_id, space_id)
     if not path.exists():
         return None
     try:
@@ -194,9 +194,9 @@ async def load_plan(data_dir: str, tenant_id: str, space_id: str) -> dict | None
         return None
 
 
-async def save_plan(data_dir: str, tenant_id: str, space_id: str, plan: dict) -> None:
+async def save_plan(data_dir: str, instance_id: str, space_id: str, plan: dict) -> None:
     """Save _plan.json to a space."""
-    path = _plan_path(data_dir, tenant_id, space_id)
+    path = _plan_path(data_dir, instance_id, space_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
 

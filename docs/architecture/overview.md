@@ -46,7 +46,7 @@ The kernel (`kernos/kernel/`) owns all state and intelligence infrastructure:
 
 - **Event emission is best-effort.** Every `emit()` is wrapped in try/except. Event logging failures never break the user's message flow.
 - **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.
-- **tenant_id from day one.** Every piece of state is keyed to a `tenant_id`. No code assumes a single user.
+- **instance_id from day one.** Every piece of state is keyed to a `instance_id`. No code assumes a single user.
 - **No destructive deletions.** Every "delete" relocates to a shadow archive. No operation permanently destroys data.
 - **Graceful errors.** Every failure mode produces a friendly user-facing response.
 - **Prompt caching.** The Anthropic provider applies `cache_control: ephemeral` to the system prompt and tool definitions. After the first turn, these are served from cache at 1/10th token cost, dramatically reducing rate limit pressure.
@@ -56,7 +56,7 @@ The kernel (`kernos/kernel/`) owns all state and intelligence infrastructure:
 
 ## Instance Identity
 
-All adapters resolve to the same instance via `KERNOS_INSTANCE_ID` env var. When set, every adapter (Discord, SMS, CLI) uses it as the `tenant_id` — same soul, same knowledge, same spaces regardless of which channel the message arrives on. Without it, each adapter derives its own tenant_id (backward compatible but creates separate instances per channel).
+All adapters resolve to the same instance via `KERNOS_INSTANCE_ID` env var. When set, every adapter (Discord, SMS, CLI) uses it as the `instance_id` — same soul, same knowledge, same spaces regardless of which channel the message arrives on. Without it, each adapter derives its own instance_id (backward compatible but creates separate instances per channel).
 
 ## Code Locations
 

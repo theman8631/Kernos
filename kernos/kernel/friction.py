@@ -57,7 +57,7 @@ class FrictionObserver:
     async def observe(
         self,
         *,
-        tenant_id: str,
+        instance_id: str,
         user_message: str,
         response_text: str,
         tool_trace: list[dict],
@@ -149,7 +149,7 @@ class FrictionObserver:
                 signal.signal_type, signal.description[:120],
             )
             try:
-                await self._write_report(signal, tenant_id)
+                await self._write_report(signal, instance_id)
             except Exception as exc:
                 logger.warning("FRICTION: failed to write report: %s", exc)
 
@@ -396,7 +396,7 @@ class FrictionObserver:
     # Report writing
     # ------------------------------------------------------------------
 
-    async def _write_report(self, signal: FrictionSignal, tenant_id: str) -> None:
+    async def _write_report(self, signal: FrictionSignal, instance_id: str) -> None:
         """Write a friction report file with LLM-generated description."""
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_type = signal.signal_type.replace(" ", "_")[:40]

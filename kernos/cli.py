@@ -2,17 +2,17 @@
 
 Run via the wrapper (recommended — no venv activation needed):
   ./kernos-cli tenants
-  ./kernos-cli costs <tenant_id>
-  ./kernos-cli events <tenant_id> [--type message.received] [--limit 10] [--after 2026-03-01]
-  ./kernos-cli profile <tenant_id>
-  ./kernos-cli knowledge <tenant_id> [--subject "John"] [--category entity]
-  ./kernos-cli contract <tenant_id> [--capability calendar]
-  ./kernos-cli contracts <tenant_id>
-  ./kernos-cli soul <tenant_id>
-  ./kernos-cli spaces <tenant_id>
-  ./kernos-cli entities <tenant_id> [--include-inactive]
-  ./kernos-cli capabilities [--tenant <tenant_id>]
-  ./kernos-cli files <tenant_id> <space_id>
+  ./kernos-cli costs <instance_id>
+  ./kernos-cli events <instance_id> [--type message.received] [--limit 10] [--after 2026-03-01]
+  ./kernos-cli profile <instance_id>
+  ./kernos-cli knowledge <instance_id> [--subject "John"] [--category entity]
+  ./kernos-cli contract <instance_id> [--capability calendar]
+  ./kernos-cli contracts <instance_id>
+  ./kernos-cli soul <instance_id>
+  ./kernos-cli spaces <instance_id>
+  ./kernos-cli entities <instance_id> [--include-inactive]
+  ./kernos-cli capabilities [--tenant <instance_id>]
+  ./kernos-cli files <instance_id> <space_id>
 
 Or manually with the venv active:
   source .venv/bin/activate
@@ -48,16 +48,16 @@ async def cmd_events(args) -> None:
     stream = JsonEventStream(_data_dir())
     event_types = [args.event_type] if args.event_type else None
     events = await stream.query(
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         event_types=event_types,
         after=args.after,
         limit=args.limit,
     )
     if not events:
-        print(f"No events found for tenant '{args.tenant_id}'.")
+        print(f"No events found for instance '{args.instance_id}'.")
         return
     print(f"{'─' * 60}")
-    print(f"  Events for {args.tenant_id}  ({len(events)} shown)")
+    print(f"  Events for {args.instance_id}  ({len(events)} shown)")
     print(f"{'─' * 60}")
     for e in events:
         print(f"\n[{e.timestamp}] {e.type}  ({e.id})")
@@ -78,13 +78,13 @@ async def cmd_profile(args) -> None:
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
-    profile = await state.get_tenant_profile(args.tenant_id)
+    profile = await state.get_instance_profile(args.instance_id)
     if profile is None:
-        print(f"No profile found for tenant '{args.tenant_id}'.")
+        print(f"No profile found for instance '{args.instance_id}'.")
         return
     from dataclasses import asdict
     print(f"{'─' * 60}")
-    print(f"  Tenant Profile: {args.tenant_id}")
+    print(f"  Tenant Profile: {args.instance_id}")
     print(f"{'─' * 60}")
     print(_fmt(asdict(profile)))
 
@@ -101,7 +101,7 @@ async def cmd_knowledge(args) -> None:
 
     state = JsonStateStore(_data_dir())
     entries = await state.query_knowledge(
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         subject=args.subject,
         category=args.category,
         active_only=not args.include_archived,
@@ -110,10 +110,10 @@ async def cmd_knowledge(args) -> None:
     # Newest first
     entries = sorted(entries, key=lambda e: e.created_at, reverse=True)
     if not entries:
-        print(f"No knowledge entries found for '{args.tenant_id}'.")
+        print(f"No knowledge entries found for '{args.instance_id}'.")
         return
     print(f"{'─' * 60}")
-    print(f"  Knowledge: {args.tenant_id}  ({len(entries)} entries)")
+    print(f"  Knowledge: {args.instance_id}  ({len(entries)} entries)")
     print(f"{'─' * 60}")
     now_iso = datetime.now(timezone.utc).isoformat()
     for e in entries:
@@ -147,15 +147,15 @@ async def cmd_contract(args) -> None:
 
     state = JsonStateStore(_data_dir())
     rules = await state.get_contract_rules(
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         capability=args.capability,
         active_only=not args.include_inactive,
     )
     if not rules:
-        print(f"No contract rules found for '{args.tenant_id}'.")
+        print(f"No contract rules found for '{args.instance_id}'.")
         return
     print(f"{'─' * 60}")
-    print(f"  Behavioral Contract: {args.tenant_id}  ({len(rules)} rules)")
+    print(f"  Behavioral Contract: {args.instance_id}  ({len(rules)} rules)")
     print(f"{'─' * 60}")
     for r in rules:
         status = "✓" if r.active else "✗"
@@ -169,13 +169,13 @@ async def cmd_contracts(args) -> None:
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
-    rules = await state.get_contract_rules(tenant_id=args.tenant_id, active_only=True)
+    rules = await state.get_contract_rules(instance_id=args.instance_id, active_only=True)
     if not rules:
-        print(f"No contract rules found for '{args.tenant_id}'.")
+        print(f"No contract rules found for '{args.instance_id}'.")
         return
 
     print(f"{'─' * 60}")
-    print(f"  Covenant Rules for {args.tenant_id}")
+    print(f"  Covenant Rules for {args.instance_id}")
     print(f"{'─' * 60}")
 
     order = ["must", "must_not", "preference", "escalation"]
@@ -210,17 +210,17 @@ async def cmd_contracts(args) -> None:
 
 
 async def cmd_soul(args) -> None:
-    """Display the hatched soul for a tenant."""
+    """Display the hatched soul for an instance."""
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
-    soul = await state.get_soul(args.tenant_id)
+    soul = await state.get_soul(args.instance_id)
     if soul is None:
-        print(f"No soul found for tenant '{args.tenant_id}'. (Not yet hatched.)")
+        print(f"No soul found for instance '{args.instance_id}'. (Not yet hatched.)")
         return
 
     print(f"{'─' * 60}")
-    print(f"  Soul for {args.tenant_id}")
+    print(f"  Soul for {args.instance_id}")
     print(f"{'─' * 60}")
     print(f"  Hatched:          {soul.hatched_at if soul.hatched else 'not yet'}")
     print(f"  Bootstrap:        {'graduated' if soul.bootstrap_graduated else 'active'}")
@@ -242,17 +242,17 @@ async def cmd_soul(args) -> None:
 
 
 async def cmd_spaces(args) -> None:
-    """Display context spaces for a tenant."""
+    """Display context spaces for an instance."""
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
-    spaces = await state.list_context_spaces(args.tenant_id)
+    spaces = await state.list_context_spaces(args.instance_id)
     if not spaces:
-        print(f"No context spaces found for '{args.tenant_id}'.")
+        print(f"No context spaces found for '{args.instance_id}'.")
         return
 
     print(f"{'─' * 60}")
-    print(f"  Context Spaces: {args.tenant_id}  ({len(spaces)} spaces)")
+    print(f"  Context Spaces: {args.instance_id}  ({len(spaces)} spaces)")
     print(f"{'─' * 60}")
     for s in spaces:
         default_label = " [default]" if s.is_default else ""
@@ -272,17 +272,17 @@ async def cmd_spaces(args) -> None:
 
 
 async def cmd_entities(args) -> None:
-    """Display entity nodes for a tenant."""
+    """Display entity nodes for an instance."""
     from kernos.kernel.state_json import JsonStateStore
 
     state = JsonStateStore(_data_dir())
-    entities = await state.query_entity_nodes(args.tenant_id, active_only=not args.include_inactive)
+    entities = await state.query_entity_nodes(args.instance_id, active_only=not args.include_inactive)
     if not entities:
-        print(f"No entities found for '{args.tenant_id}'.")
+        print(f"No entities found for '{args.instance_id}'.")
         return
 
     print(f"{'─' * 60}")
-    print(f"  Entities: {args.tenant_id}  ({len(entities)} entities)")
+    print(f"  Entities: {args.instance_id}  ({len(entities)} entities)")
     print(f"{'─' * 60}")
     for e in entities:
         status = "" if e.active else "[inactive] "
@@ -315,17 +315,17 @@ async def cmd_entities(args) -> None:
 
 
 async def cmd_files(args) -> None:
-    """Display files for a tenant's context space."""
+    """Display files for an instance's context space."""
     from kernos.kernel.files import FileService
 
     service = FileService(_data_dir())
-    tenant_id = args.tenant_id
+    instance_id = args.instance_id
     space_id = args.space_id
 
-    manifest = await service.load_manifest(tenant_id, space_id)
+    manifest = await service.load_manifest(instance_id, space_id)
 
     print(f"{'─' * 60}")
-    print(f"  Files: {tenant_id} / {space_id}")
+    print(f"  Files: {instance_id} / {space_id}")
     print(f"{'─' * 60}")
 
     if not manifest:
@@ -334,7 +334,7 @@ async def cmd_files(args) -> None:
         from kernos.utils import _safe_name
         files_dir = (
             Path(_data_dir())
-            / _safe_name(tenant_id)
+            / _safe_name(instance_id)
             / "spaces"
             / space_id
             / "files"
@@ -350,7 +350,7 @@ async def cmd_files(args) -> None:
     from kernos.utils import _safe_name as _sn
     deleted_dir = (
         Path(_data_dir())
-        / _sn(tenant_id)
+        / _sn(instance_id)
         / "spaces"
         / space_id
         / "files"
@@ -371,7 +371,7 @@ async def cmd_files(args) -> None:
 
 
 async def cmd_compaction(args) -> None:
-    """Display compaction state for a tenant's context spaces."""
+    """Display compaction state for an instance's context spaces."""
     from kernos.kernel.compaction import CompactionService
     from kernos.kernel.tokens import EstimateTokenAdapter
     from kernos.kernel.state_json import JsonStateStore
@@ -386,14 +386,14 @@ async def cmd_compaction(args) -> None:
 
     if args.space_id:
         # Show specific space
-        comp_state = await service.load_state(args.tenant_id, args.space_id)
+        comp_state = await service.load_state(args.instance_id, args.space_id)
         if comp_state is None:
             print(f"No compaction state found for space '{args.space_id}'.")
             return
         _print_compaction_state(comp_state)
 
         # Show first/last 10 lines of active document
-        doc = await service.load_document(args.tenant_id, args.space_id)
+        doc = await service.load_document(args.instance_id, args.space_id)
         if doc:
             lines = doc.splitlines()
             print(f"\n  Active document ({len(lines)} lines):")
@@ -408,17 +408,17 @@ async def cmd_compaction(args) -> None:
                     print(f"    {line}")
     else:
         # Show all spaces
-        spaces = await state.list_context_spaces(args.tenant_id)
+        spaces = await state.list_context_spaces(args.instance_id)
         if not spaces:
-            print(f"No context spaces found for '{args.tenant_id}'.")
+            print(f"No context spaces found for '{args.instance_id}'.")
             return
 
         print(f"{'─' * 60}")
-        print(f"  Compaction State: {args.tenant_id}")
+        print(f"  Compaction State: {args.instance_id}")
         print(f"{'─' * 60}")
 
         for space in spaces:
-            comp_state = await service.load_state(args.tenant_id, space.id)
+            comp_state = await service.load_state(args.instance_id, space.id)
             status_label = "[no compaction state]" if comp_state is None else ""
             default_label = " [default]" if space.is_default else ""
             print(f"\n  {space.name}{default_label} ({space.id}) {status_label}")
@@ -459,7 +459,7 @@ def _print_compaction_state(cs) -> None:
 
 
 async def cmd_create_space(args) -> None:
-    """Create a new context space for a tenant."""
+    """Create a new context space for an instance."""
     import uuid
     from kernos.kernel.spaces import ContextSpace
     from kernos.kernel.state_json import JsonStateStore
@@ -471,7 +471,7 @@ async def cmd_create_space(args) -> None:
 
     space = ContextSpace(
         id=space_id,
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         name=args.name,
         description=args.description or "",
         space_type=args.type or "project",
@@ -498,14 +498,14 @@ async def cmd_costs(args) -> None:
 
     stream = JsonEventStream(_data_dir())
     events = await stream.query(
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         event_types=["reasoning.response"],
         after=args.after,
         before=args.before,
         limit=100_000,
     )
     if not events:
-        print(f"No reasoning events found for '{args.tenant_id}'.")
+        print(f"No reasoning events found for '{args.instance_id}'.")
         return
 
     total_input = sum(e.payload.get("input_tokens", 0) for e in events)
@@ -514,7 +514,7 @@ async def cmd_costs(args) -> None:
     total_tokens = total_input + total_output
 
     print(f"{'─' * 60}")
-    print(f"  Cost Summary: {args.tenant_id}")
+    print(f"  Cost Summary: {args.instance_id}")
     if args.after:
         print(f"  After: {args.after}")
     if args.before:
@@ -549,12 +549,12 @@ async def cmd_tasks(args) -> None:
 
     stream = JsonEventStream(_data_dir())
     completed = await stream.query(
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         event_types=["task.completed"],
         limit=args.limit,
     )
     failed = await stream.query(
-        tenant_id=args.tenant_id,
+        instance_id=args.instance_id,
         event_types=["task.failed"],
         limit=args.limit,
     )
@@ -564,11 +564,11 @@ async def cmd_tasks(args) -> None:
     all_events = all_events[: args.limit]
 
     if not all_events:
-        print(f"No task events found for tenant '{args.tenant_id}'.")
+        print(f"No task events found for instance '{args.instance_id}'.")
         return
 
     print(f"{'─' * 60}")
-    print(f"  Tasks for {args.tenant_id}  ({len(all_events)} shown)")
+    print(f"  Tasks for {args.instance_id}  ({len(all_events)} shown)")
     print(f"{'─' * 60}")
     for e in all_events:
         p = e.payload
@@ -592,7 +592,7 @@ async def cmd_tasks(args) -> None:
 async def cmd_capabilities(args) -> None:
     """Display capability registry.
 
-    If --tenant is provided, reads from the tenant's persisted profile for
+    If --tenant is provided, reads from the instance's persisted profile for
     accurate runtime status. Otherwise shows the static catalog with honest
     status values — no env-var inference, no invented labels.
     """
@@ -604,7 +604,7 @@ async def cmd_capabilities(args) -> None:
     if args.tenant:
         from kernos.kernel.state_json import JsonStateStore
         state = JsonStateStore(_data_dir())
-        profile = await state.get_tenant_profile(args.tenant)
+        profile = await state.get_instance_profile(args.tenant)
         if profile and profile.capabilities:
             tenant_cap_map = profile.capabilities
 
@@ -655,7 +655,7 @@ async def cmd_tenants(args) -> None:
         if profile_path.exists():
             import json as _json
             p = _json.loads(profile_path.read_text())
-            tid = p.get("tenant_id", d.name)
+            tid = p.get("instance_id", d.name)
             status = p.get("status", "?")
             platforms = list(p.get("platforms", {}).keys())
             plat_str = f"  [{', '.join(platforms)}]" if platforms else ""
@@ -663,7 +663,7 @@ async def cmd_tenants(args) -> None:
         elif tenant_path.exists():
             import json as _json
             t = _json.loads(tenant_path.read_text())
-            print(f"  {d.name}  →  {t.get('tenant_id', '?')}  ({t.get('status', '?')})  [legacy]")
+            print(f"  {d.name}  →  {t.get('instance_id', '?')}  ({t.get('status', '?')})  [legacy]")
         else:
             print(f"  {d.name}  [no profile]")
 
@@ -693,12 +693,12 @@ async def cmd_backfill_embeddings(args) -> None:
     embed_store = JsonEmbeddingStore(data_dir)
     embed_service = EmbeddingService(api_key)
 
-    tenant_id = args.tenant_id
-    all_entries = await state.query_knowledge(tenant_id, active_only=True, limit=500)
+    instance_id = args.instance_id
+    all_entries = await state.query_knowledge(instance_id, active_only=True, limit=500)
 
     missing = []
     for entry in all_entries:
-        existing = await embed_store.get(tenant_id, entry.id)
+        existing = await embed_store.get(instance_id, entry.id)
         if existing is None:
             missing.append(entry)
 
@@ -715,7 +715,7 @@ async def cmd_backfill_embeddings(args) -> None:
         text = f"{entry.subject} {entry.content}"
         try:
             embedding = await embed_service.embed(text)
-            await embed_store.save(tenant_id, entry.id, embedding)
+            await embed_store.save(instance_id, entry.id, embedding)
             success += 1
             print(f"  ✓ {entry.id}: {entry.content[:60]}")
         except Exception as exc:
@@ -775,19 +775,19 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     # events
-    p = subparsers.add_parser("events", help="View recent events for a tenant")
-    p.add_argument("tenant_id")
+    p = subparsers.add_parser("events", help="View recent events for an instance")
+    p.add_argument("instance_id")
     p.add_argument("--type", dest="event_type", help="Filter by event type (e.g. message.received)")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--after", help="ISO date/timestamp — show events after this time")
 
     # profile
     p = subparsers.add_parser("profile", help="View tenant profile")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
 
     # knowledge
     p = subparsers.add_parser("knowledge", help="View knowledge entries")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
     p.add_argument("--subject", help="Filter by subject (substring match)")
     p.add_argument("--category", help="Filter by category (entity/fact/preference/pattern)")
     p.add_argument("--include-archived", action="store_true")
@@ -795,62 +795,62 @@ def main() -> None:
 
     # contract (backwards-compatible)
     p = subparsers.add_parser("contract", help="View behavioral contract rules")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
     p.add_argument("--capability", help="Filter by capability (calendar/email/general)")
     p.add_argument("--include-inactive", action="store_true")
 
     # contracts (new — grouped by type)
     p = subparsers.add_parser("contracts", help="View behavioral contracts grouped by type")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
 
     # soul
-    p = subparsers.add_parser("soul", help="View hatched soul for a tenant")
-    p.add_argument("tenant_id")
+    p = subparsers.add_parser("soul", help="View hatched soul for an instance")
+    p.add_argument("instance_id")
 
     # spaces
-    p = subparsers.add_parser("spaces", help="View context spaces for a tenant")
-    p.add_argument("tenant_id")
+    p = subparsers.add_parser("spaces", help="View context spaces for an instance")
+    p.add_argument("instance_id")
 
     # entities
-    p = subparsers.add_parser("entities", help="View entity nodes for a tenant")
-    p.add_argument("tenant_id")
+    p = subparsers.add_parser("entities", help="View entity nodes for an instance")
+    p.add_argument("instance_id")
     p.add_argument("--include-inactive", action="store_true")
 
     # costs
     p = subparsers.add_parser("costs", help="View cost summary from reasoning events")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
     p.add_argument("--after", help="ISO date — costs after this date")
     p.add_argument("--before", help="ISO date — costs before this date")
 
     # tenants
-    subparsers.add_parser("tenants", help="List all tenants")
+    subparsers.add_parser("tenants", help="List all instances")
 
     # tasks
-    p = subparsers.add_parser("tasks", help="View recent task lifecycle events for a tenant")
-    p.add_argument("tenant_id")
+    p = subparsers.add_parser("tasks", help="View recent task lifecycle events for an instance")
+    p.add_argument("instance_id")
     p.add_argument("--limit", type=int, default=20)
 
     # capabilities
     p = subparsers.add_parser("capabilities", help="Show capability registry")
-    p.add_argument("--tenant", dest="tenant", help="Tenant ID for persisted runtime status")
+    p.add_argument("--tenant", dest="instance", help="Tenant ID for persisted runtime status")
 
     # files
     p = subparsers.add_parser("files", help="View files for a context space")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
     p.add_argument("space_id")
 
     # compaction
-    p = subparsers.add_parser("compaction", help="View compaction state for a tenant")
-    p.add_argument("tenant_id")
+    p = subparsers.add_parser("compaction", help="View compaction state for an instance")
+    p.add_argument("instance_id")
     p.add_argument("space_id", nargs="?", default=None, help="Optional space ID for detailed view")
 
     # backfill-embeddings
     p = subparsers.add_parser("backfill-embeddings", help="Generate embeddings for entries that lack them")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
 
     # create-space
     p = subparsers.add_parser("create-space", help="Create a new context space")
-    p.add_argument("tenant_id")
+    p.add_argument("instance_id")
     p.add_argument("--name", required=True, help="Space name")
     p.add_argument("--type", default="project", help="Space type (project/domain/managed_resource)")
     p.add_argument("--posture", help="Working style posture text")

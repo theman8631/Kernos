@@ -71,4 +71,4 @@ Foresight signals come from Tier 2 knowledge extraction. When the extractor dete
 | AwarenessEvaluator, Whisper, SuppressionEntry | `kernos/kernel/awareness.py` |
 | DISMISS_WHISPER_TOOL | `kernos/kernel/awareness.py` |
 | Whisper injection (session-start) | `kernos/messages/handler.py` (_get_pending_awareness) |
-| Evaluator lifecycle | `kernos/messages/handler.py` (_maybe_start_evaluator, per-tenant lazy start) |
+| Evaluator lifecycle | `kernos/messages/handler.py` (_maybe_start_evaluator, per-instance lazy start) |

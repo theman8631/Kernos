@@ -56,7 +56,7 @@ class TestPhaseTimingAverages:
 
                 reasoning = ReasoningService(mock_provider, events, mcp, audit)
                 state = AsyncMock()
-                state.get_tenant_profile = AsyncMock(return_value=None)
+                state.get_instance_profile = AsyncMock(return_value=None)
                 state.get_soul = AsyncMock(return_value=None)
 
                 from kernos.capability.registry import CapabilityRegistry

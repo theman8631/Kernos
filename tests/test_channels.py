@@ -174,7 +174,7 @@ class TestMemberIdField:
             content="hi", sender="123", sender_auth_level=AuthLevel.owner_verified,
             platform="discord", platform_capabilities=["text"],
             conversation_id="c1", timestamp=datetime.now(timezone.utc),
-            tenant_id="t1",
+            instance_id="t1",
         )
         assert msg.member_id == ""
 
@@ -184,7 +184,7 @@ class TestMemberIdField:
             content="hi", sender="123", sender_auth_level=AuthLevel.owner_verified,
             platform="discord", platform_capabilities=["text"],
             conversation_id="c1", timestamp=datetime.now(timezone.utc),
-            tenant_id="t1", member_id="member:t1:owner",
+            instance_id="t1", member_id="member:t1:owner",
         )
         assert msg.member_id == "member:t1:owner"
 
@@ -347,7 +347,7 @@ class TestSendToChannelDispatch:
 
     async def test_send_to_sms(self):
         svc, handler = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "sms", "message": "hello"},
             request,
@@ -356,9 +356,9 @@ class TestSendToChannelDispatch:
         handler.send_outbound.assert_called_once_with("t1", "member:t1:owner", "sms", "hello")
 
     async def test_send_to_sms_via_alias_member_id(self):
-        """Verify member_id is derived from tenant_id."""
+        """Verify member_id is derived from instance_id."""
         svc, handler = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="discord:999", active_space_id="space1")
+        request = MagicMock(instance_id="discord:999", active_space_id="space1")
         await svc.execute_tool(
             "send_to_channel", {"channel": "sms", "message": "hi"},
             request,
@@ -368,7 +368,7 @@ class TestSendToChannelDispatch:
     async def test_send_resolves_alias(self):
         """AC4: 'text' resolves to 'sms'."""
         svc, handler = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "text", "message": "hi"},
             request,
@@ -379,7 +379,7 @@ class TestSendToChannelDispatch:
     async def test_send_to_discord(self):
         """AC5."""
         svc, handler = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "discord", "message": "report"},
             request,
@@ -389,7 +389,7 @@ class TestSendToChannelDispatch:
     async def test_invalid_channel_error(self):
         """AC6: clear error for unregistered channel."""
         svc, _ = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "email", "message": "test"},
             request,
@@ -400,7 +400,7 @@ class TestSendToChannelDispatch:
     async def test_non_outbound_channel_error(self):
         """AC6: clear error for receive-only channel."""
         svc, _ = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "cli", "message": "test"},
             request,
@@ -411,7 +411,7 @@ class TestSendToChannelDispatch:
         """AC6: clear error for disconnected channel."""
         svc, _ = self._make_reasoning_svc()
         svc._channel_registry.disable("sms")
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "sms", "message": "test"},
             request,
@@ -420,7 +420,7 @@ class TestSendToChannelDispatch:
 
     async def test_missing_params_error(self):
         svc, _ = self._make_reasoning_svc()
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "", "message": ""},
             request,
@@ -430,7 +430,7 @@ class TestSendToChannelDispatch:
     async def test_send_failure_returns_error(self):
         svc, handler = self._make_reasoning_svc()
         handler.send_outbound = AsyncMock(side_effect=RuntimeError("network down"))
-        request = MagicMock(tenant_id="t1", active_space_id="space1")
+        request = MagicMock(instance_id="t1", active_space_id="space1")
         result = await svc.execute_tool(
             "send_to_channel", {"channel": "sms", "message": "test"},
             request,
@@ -451,9 +451,9 @@ class TestSystemPromptChannelBlock:
             content="hi", sender="123", sender_auth_level=AuthLevel.owner_verified,
             platform=platform, platform_capabilities=["text"],
             conversation_id="c1", timestamp=datetime.now(timezone.utc),
-            tenant_id="t1",
+            instance_id="t1",
         )
-        soul = Soul(tenant_id="t1")
+        soul = Soul(instance_id="t1")
         return _build_system_prompt(
             msg, "CAPABILITIES", soul, PRIMARY_TEMPLATE, [],
             channel_registry=registry,

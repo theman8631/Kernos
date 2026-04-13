@@ -126,19 +126,19 @@ class FileService:
         """Set the state store for scope chain resolution."""
         self._state = state
 
-    def _space_files_dir(self, tenant_id: str, space_id: str) -> Path:
+    def _space_files_dir(self, instance_id: str, space_id: str) -> Path:
         return (
             self.data_dir
-            / self._safe_name(tenant_id)
+            / self._safe_name(instance_id)
             / "spaces"
             / space_id
             / "files"
         )
 
-    def _deleted_dir(self, tenant_id: str, space_id: str) -> Path:
-        return self._space_files_dir(tenant_id, space_id) / ".deleted"
+    def _deleted_dir(self, instance_id: str, space_id: str) -> Path:
+        return self._space_files_dir(instance_id, space_id) / ".deleted"
 
-    async def _build_scope_chain(self, tenant_id: str, space_id: str) -> list[str]:
+    async def _build_scope_chain(self, instance_id: str, space_id: str) -> list[str]:
         """Walk up the parent chain for scope chain resolution."""
         if not self._state:
             return [space_id]
@@ -146,7 +146,7 @@ class FileService:
         current = space_id
         seen: set[str] = set()
         while current and current not in seen:
-            space = await self._state.get_context_space(tenant_id, current)
+            space = await self._state.get_context_space(instance_id, current)
             if not space:
                 break
             chain.append(current)
@@ -156,12 +156,12 @@ class FileService:
             current = space.parent_id
         return chain if chain else [space_id]
 
-    def _manifest_path(self, tenant_id: str, space_id: str) -> Path:
-        return self._space_files_dir(tenant_id, space_id) / ".manifest.json"
+    def _manifest_path(self, instance_id: str, space_id: str) -> Path:
+        return self._space_files_dir(instance_id, space_id) / ".manifest.json"
 
     async def write_file(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         name: str,
         content: str,
@@ -189,19 +189,19 @@ class FileService:
         # Determine write target
         write_to = space_id
         if target_space_id and target_space_id != space_id:
-            chain = await self._build_scope_chain(tenant_id, space_id)
+            chain = await self._build_scope_chain(instance_id, space_id)
             if target_space_id not in chain:
                 return f"Error: Can only write to ancestor spaces in the scope chain."
             write_to = target_space_id
 
-        files_dir = self._space_files_dir(tenant_id, write_to)
+        files_dir = self._space_files_dir(instance_id, write_to)
         files_dir.mkdir(parents=True, exist_ok=True)
 
         file_path = files_dir / name
         is_update = file_path.exists()
         file_path.write_text(content, encoding="utf-8")
 
-        await self._update_manifest(tenant_id, write_to, name, description)
+        await self._update_manifest(instance_id, write_to, name, description)
 
         action = "Updated" if is_update else "Created"
 
@@ -210,9 +210,9 @@ class FileService:
             return f"{action} '{name}' ({len(content)} chars) in parent space {write_to}. Description: {description}"
 
         # Check if this shadows a parent file
-        chain = await self._build_scope_chain(tenant_id, space_id)
+        chain = await self._build_scope_chain(instance_id, space_id)
         for ancestor_id in chain[1:]:
-            anc_path = self._space_files_dir(tenant_id, ancestor_id) / name
+            anc_path = self._space_files_dir(instance_id, ancestor_id) / name
             if anc_path.exists():
                 logger.info("FILE_WRITE_OVERRIDE: file=%s shadows=%s", name, ancestor_id)
                 return f"{action} '{name}' ({len(content)} chars) as local override (parent has original in {ancestor_id}). Description: {description}"
@@ -223,7 +223,7 @@ class FileService:
 
     async def read_file(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         name: str,
     ) -> str:
@@ -232,15 +232,15 @@ class FileService:
             return f"Error: Invalid filename '{name}'."
 
         # Try current space first
-        file_path = self._space_files_dir(tenant_id, space_id) / name
+        file_path = self._space_files_dir(instance_id, space_id) / name
         if file_path.exists():
             logger.info("FILE_READ space=%s name=%s exists=True", space_id, name)
             return file_path.read_text(encoding="utf-8")
 
         # Walk scope chain
-        chain = await self._build_scope_chain(tenant_id, space_id)
+        chain = await self._build_scope_chain(instance_id, space_id)
         for ancestor_id in chain[1:]:
-            ancestor_path = self._space_files_dir(tenant_id, ancestor_id) / name
+            ancestor_path = self._space_files_dir(instance_id, ancestor_id) / name
             if ancestor_path.exists():
                 logger.info("FILE_SCOPE_CHAIN: file=%s found_in=%s (ancestor)", name, ancestor_id)
                 return ancestor_path.read_text(encoding="utf-8")
@@ -250,17 +250,17 @@ class FileService:
 
     async def list_files(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
     ) -> str:
         """List all files with descriptions. Includes inherited files from ancestors."""
-        local_manifest = await self._load_manifest(tenant_id, space_id)
+        local_manifest = await self._load_manifest(instance_id, space_id)
 
         # Collect inherited files from ancestor spaces
-        chain = await self._build_scope_chain(tenant_id, space_id)
+        chain = await self._build_scope_chain(instance_id, space_id)
         inherited: dict[str, tuple[str, str]] = {}  # name → (description, source_space_id)
         for ancestor_id in chain[1:]:
-            ancestor_manifest = await self._load_manifest(tenant_id, ancestor_id)
+            ancestor_manifest = await self._load_manifest(instance_id, ancestor_id)
             for fname, desc in ancestor_manifest.items():
                 if fname not in local_manifest and fname not in inherited:
                     inherited[fname] = (desc, ancestor_id)
@@ -272,19 +272,19 @@ class FileService:
 
         lines = []
         for name, desc in sorted(local_manifest.items()):
-            file_path = self._space_files_dir(tenant_id, space_id) / name
+            file_path = self._space_files_dir(instance_id, space_id) / name
             size = file_path.stat().st_size if file_path.exists() else 0
             # Check if this shadows a parent file
             shadow = ""
             for ancestor_id in chain[1:]:
-                anc_path = self._space_files_dir(tenant_id, ancestor_id) / name
+                anc_path = self._space_files_dir(instance_id, ancestor_id) / name
                 if anc_path.exists():
                     shadow = " (local override)"
                     break
             lines.append(f"  {name} ({size} bytes){shadow} — {desc}")
 
         for name, (desc, source_id) in sorted(inherited.items()):
-            file_path = self._space_files_dir(tenant_id, source_id) / name
+            file_path = self._space_files_dir(instance_id, source_id) / name
             size = file_path.stat().st_size if file_path.exists() else 0
             lines.append(f"  {name} ({size} bytes) (inherited from {source_id}) — {desc}")
 
@@ -292,7 +292,7 @@ class FileService:
 
     async def delete_file(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         name: str,
     ) -> str:
@@ -300,13 +300,13 @@ class FileService:
         if not self._valid_filename(name):
             return f"Error: Invalid filename '{name}'."
 
-        file_path = self._space_files_dir(tenant_id, space_id) / name
+        file_path = self._space_files_dir(instance_id, space_id) / name
         if not file_path.exists():
             logger.info("FILE_DELETE space=%s name=%s exists=False", space_id, name)
             return f"Error: File '{name}' not found."
 
         logger.info("FILE_DELETE space=%s name=%s exists=True", space_id, name)
-        deleted_dir = self._deleted_dir(tenant_id, space_id)
+        deleted_dir = self._deleted_dir(instance_id, space_id)
         deleted_dir.mkdir(parents=True, exist_ok=True)
 
         # Timestamp in filename — replace colons for filesystem compatibility
@@ -314,7 +314,7 @@ class FileService:
         dest = deleted_dir / f"{name}_{ts}"
         file_path.rename(dest)
 
-        await self._remove_from_manifest(tenant_id, space_id, name)
+        await self._remove_from_manifest(instance_id, space_id, name)
 
         return f"Deleted '{name}'. File preserved for recovery."
 
@@ -328,14 +328,14 @@ class FileService:
 
     # --- Manifest CRUD ---
 
-    async def _load_manifest(self, tenant_id: str, space_id: str) -> dict[str, str]:
+    async def _load_manifest(self, instance_id: str, space_id: str) -> dict[str, str]:
         """Load the file manifest for a space.
 
         On JSON parse failure: rebuilds the manifest from actual files on disk
         (descriptions are lost but files are preserved). Logs a WARNING so the
         corruption event is visible in logs.
         """
-        manifest_path = self._manifest_path(tenant_id, space_id)
+        manifest_path = self._manifest_path(instance_id, space_id)
         if not manifest_path.exists():
             return {}
         try:
@@ -344,19 +344,19 @@ class FileService:
             logger.warning(
                 "MANIFEST_CORRUPT: Failed to parse manifest for %s/%s: %s — "
                 "rebuilding from disk. Descriptions will be empty.",
-                tenant_id, space_id, exc,
+                instance_id, space_id, exc,
             )
-            return await self._rebuild_manifest(tenant_id, space_id)
+            return await self._rebuild_manifest(instance_id, space_id)
 
     async def _rebuild_manifest(
-        self, tenant_id: str, space_id: str
+        self, instance_id: str, space_id: str
     ) -> dict[str, str]:
         """Rebuild manifest by scanning the files directory.
 
         Called when the manifest JSON is corrupt. Descriptions are lost.
         Writes the recovered manifest back to disk atomically.
         """
-        files_dir = self._space_files_dir(tenant_id, space_id)
+        files_dir = self._space_files_dir(instance_id, space_id)
         if not files_dir.exists():
             return {}
         manifest: dict[str, str] = {}
@@ -365,9 +365,9 @@ class FileService:
                 manifest[p.name] = "(description unavailable — rebuilt after corruption)"
         logger.warning(
             "MANIFEST_REBUILD: recovered %d file(s) for %s/%s",
-            len(manifest), tenant_id, space_id,
+            len(manifest), instance_id, space_id,
         )
-        manifest_path = self._manifest_path(tenant_id, space_id)
+        manifest_path = self._manifest_path(instance_id, space_id)
         await self._write_manifest_atomic(manifest_path, manifest)
         return manifest
 
@@ -392,22 +392,22 @@ class FileService:
                 pass
             raise
 
-    async def load_manifest(self, tenant_id: str, space_id: str) -> dict[str, str]:
+    async def load_manifest(self, instance_id: str, space_id: str) -> dict[str, str]:
         """Public alias for _load_manifest (used by CompactionService)."""
-        return await self._load_manifest(tenant_id, space_id)
+        return await self._load_manifest(instance_id, space_id)
 
     async def _update_manifest(
-        self, tenant_id: str, space_id: str, name: str, description: str
+        self, instance_id: str, space_id: str, name: str, description: str
     ) -> None:
-        manifest = await self._load_manifest(tenant_id, space_id)
+        manifest = await self._load_manifest(instance_id, space_id)
         manifest[name] = description
-        manifest_path = self._manifest_path(tenant_id, space_id)
+        manifest_path = self._manifest_path(instance_id, space_id)
         self._write_manifest_atomic(manifest_path, manifest)
 
     async def _remove_from_manifest(
-        self, tenant_id: str, space_id: str, name: str
+        self, instance_id: str, space_id: str, name: str
     ) -> None:
-        manifest = await self._load_manifest(tenant_id, space_id)
+        manifest = await self._load_manifest(instance_id, space_id)
         manifest.pop(name, None)
-        manifest_path = self._manifest_path(tenant_id, space_id)
+        manifest_path = self._manifest_path(instance_id, space_id)
         self._write_manifest_atomic(manifest_path, manifest)

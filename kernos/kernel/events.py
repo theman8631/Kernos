@@ -69,7 +69,7 @@ class Event:
 
     id: str              # Unique, sortable: "evt_{ts_us}_{rand4}"
     type: str            # Hierarchical: "message.received", "tool.called", etc.
-    tenant_id: str       # Isolation — always present
+    instance_id: str       # Isolation — always present
     timestamp: str       # ISO 8601 UTC
     source: str          # Emitting component: "handler", "capability_manager", "app"
     payload: dict        # Type-specific data
@@ -92,13 +92,13 @@ class EventStream(ABC):
     @abstractmethod
     async def query(
         self,
-        tenant_id: str,
+        instance_id: str,
         event_types: list[str] | None = None,
         after: str | None = None,
         before: str | None = None,
         limit: int = 50,
     ) -> list[Event]:
-        """Query events for a tenant, filtered by type and time range.
+        """Query events for an instance, filtered by type and time range.
 
         Returns events in chronological order.
         NOT used for runtime context assembly — that's the State Store's job.
@@ -108,7 +108,7 @@ class EventStream(ABC):
     @abstractmethod
     async def count(
         self,
-        tenant_id: str,
+        instance_id: str,
         event_types: list[str] | None = None,
         after: str | None = None,
         before: str | None = None,
@@ -123,29 +123,29 @@ class EventStream(ABC):
 
 
 class JsonEventStream(EventStream):
-    """JSON-on-disk event stream, partitioned by tenant and date.
+    """JSON-on-disk event stream, partitioned by instance and date.
 
-    Path: {data_dir}/{tenant_id}/events/{date}.json
+    Path: {data_dir}/{instance_id}/events/{date}.json
     Each file is a JSON array of event dicts, append-only.
     """
 
     def __init__(self, data_dir: str | Path) -> None:
         self._data_dir = Path(data_dir)
 
-    def _event_path(self, tenant_id: str) -> Path:
+    def _event_path(self, instance_id: str) -> Path:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return (
-            self._data_dir / _safe_name(tenant_id) / "events" / f"{date_str}.json"
+            self._data_dir / _safe_name(instance_id) / "events" / f"{date_str}.json"
         )
 
-    def _all_event_paths(self, tenant_id: str) -> list[Path]:
-        events_dir = self._data_dir / _safe_name(tenant_id) / "events"
+    def _all_event_paths(self, instance_id: str) -> list[Path]:
+        events_dir = self._data_dir / _safe_name(instance_id) / "events"
         if not events_dir.exists():
             return []
         return sorted(events_dir.glob("*.json"))
 
     async def emit(self, event: Event) -> None:
-        path = self._event_path(event.tenant_id)
+        path = self._event_path(event.instance_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = str(path) + ".lock"
         with FileLock(lock_path):
@@ -160,14 +160,14 @@ class JsonEventStream(EventStream):
 
     async def query(
         self,
-        tenant_id: str,
+        instance_id: str,
         event_types: list[str] | None = None,
         after: str | None = None,
         before: str | None = None,
         limit: int = 50,
     ) -> list[Event]:
         all_events: list[Event] = []
-        for path in self._all_event_paths(tenant_id):
+        for path in self._all_event_paths(instance_id):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     raw_events = json.load(f)
@@ -187,13 +187,13 @@ class JsonEventStream(EventStream):
 
     async def count(
         self,
-        tenant_id: str,
+        instance_id: str,
         event_types: list[str] | None = None,
         after: str | None = None,
         before: str | None = None,
     ) -> int:
         results = await self.query(
-            tenant_id, event_types=event_types, after=after, before=before, limit=100_000
+            instance_id, event_types=event_types, after=after, before=before, limit=100_000
         )
         return len(results)
 
@@ -206,7 +206,7 @@ class JsonEventStream(EventStream):
 async def emit_event(
     stream: EventStream,
     event_type: str,
-    tenant_id: str,
+    instance_id: str,
     source: str,
     payload: dict,
     metadata: dict | None = None,
@@ -215,7 +215,7 @@ async def emit_event(
     event = Event(
         id=generate_event_id(),
         type=event_type,
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         timestamp=utc_now(),
         source=source,
         payload=payload,

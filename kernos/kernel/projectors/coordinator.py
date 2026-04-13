@@ -6,7 +6,7 @@ Tier 2 fires as an async background task (does not block the response).
 When VOYAGE_API_KEY is set, the enhanced path is used:
   - EntityResolver resolves entity mentions to EntityNodes (3-tier cascade)
   - FactDeduplicator classifies facts as ADD/UPDATE/NOOP (embedding similarity)
-  - Embeddings stored in {data_dir}/{tenant_id}/state/embeddings.json
+  - Embeddings stored in {data_dir}/{instance_id}/state/embeddings.json
 
 When VOYAGE_API_KEY is absent, falls back to hash-only dedup (Phase 1B behavior).
 """
@@ -33,7 +33,7 @@ async def run_projectors(
     state: StateStore,
     events: EventStream,
     reasoning_service,
-    tenant_id: str,
+    instance_id: str,
     active_space_id: str = "",
     active_space: "ContextSpace | None" = None,
 ) -> None:
@@ -64,7 +64,7 @@ async def run_projectors(
             await emit_event(
                 events,
                 EventType.KNOWLEDGE_EXTRACTED,
-                tenant_id,
+                instance_id,
                 "tier1_rules",
                 payload={
                     "fields_updated": updated_fields,
@@ -109,7 +109,7 @@ async def run_projectors(
             state=state,
             events=events,
             reasoning_service=reasoning_service,
-            tenant_id=tenant_id,
+            instance_id=instance_id,
             entity_resolver=entity_resolver,
             fact_deduplicator=fact_deduplicator,
             embedding_service=embedding_service,
@@ -127,7 +127,7 @@ async def _run_tier2_with_behavioral_detection(
     state: StateStore,
     events: EventStream,
     reasoning_service,
-    tenant_id: str,
+    instance_id: str,
     entity_resolver=None,
     fact_deduplicator=None,
     embedding_service=None,
@@ -143,7 +143,7 @@ async def _run_tier2_with_behavioral_detection(
         state=state,
         events=events,
         reasoning_service=reasoning_service,
-        tenant_id=tenant_id,
+        instance_id=instance_id,
         entity_resolver=entity_resolver,
         fact_deduplicator=fact_deduplicator,
         embedding_service=embedding_service,
@@ -154,7 +154,7 @@ async def _run_tier2_with_behavioral_detection(
     # Detect behavioral instructions from recently created entries
     try:
         recent_entries = await state.query_knowledge(
-            tenant_id, subject="behavioral_instruction", active_only=True, limit=10,
+            instance_id, subject="behavioral_instruction", active_only=True, limit=10,
         )
         if not recent_entries:
             return
@@ -182,7 +182,7 @@ async def _run_tier2_with_behavioral_detection(
                 from kernos.kernel.state import KnowledgeEntry, _knowledge_id
                 standing_order = KnowledgeEntry(
                     id=_knowledge_id(),
-                    tenant_id=tenant_id,
+                    instance_id=instance_id,
                     category="standing_order",
                     subject="automation",
                     content=parse_result.standing_order or entry.content,
@@ -205,7 +205,7 @@ async def _run_tier2_with_behavioral_detection(
 
             rule = parse_result.rule
             if rule:
-                rule.tenant_id = tenant_id
+                rule.instance_id = instance_id
 
                 # Write the rule
                 await state.add_contract_rule(rule)
@@ -213,7 +213,7 @@ async def _run_tier2_with_behavioral_detection(
                     await emit_event(
                         events,
                         EventType.COVENANT_RULE_CREATED,
-                        tenant_id,
+                        instance_id,
                         "nl_contract_parser",
                         payload={
                             "rule_id": rule.id,
@@ -231,7 +231,7 @@ async def _run_tier2_with_behavioral_detection(
                         state=state,
                         events=events,
                         reasoning_service=reasoning_service,
-                        tenant_id=tenant_id,
+                        instance_id=instance_id,
                         new_rule_id=rule.id,
                     )
                 )

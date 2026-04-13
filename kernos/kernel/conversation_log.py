@@ -72,21 +72,21 @@ class ConversationLogger:
         self._data_dir = Path(data_dir)
         self._meta_locks: dict[str, asyncio.Lock] = {}
 
-    def _get_lock(self, tenant_id: str, space_id: str) -> asyncio.Lock:
+    def _get_lock(self, instance_id: str, space_id: str) -> asyncio.Lock:
         """Per-space asyncio lock for serializing meta read-modify-write."""
-        key = f"{tenant_id}:{space_id}"
+        key = f"{instance_id}:{space_id}"
         if key not in self._meta_locks:
             self._meta_locks[key] = asyncio.Lock()
         return self._meta_locks[key]
 
-    def _logs_dir(self, tenant_id: str, space_id: str) -> Path:
-        return self._data_dir / "tenants" / tenant_id / "spaces" / space_id / "logs"
+    def _logs_dir(self, instance_id: str, space_id: str) -> Path:
+        return self._data_dir / "tenants" / instance_id / "spaces" / space_id / "logs"
 
-    def _meta_path(self, tenant_id: str, space_id: str) -> Path:
-        return self._logs_dir(tenant_id, space_id) / "meta.json"
+    def _meta_path(self, instance_id: str, space_id: str) -> Path:
+        return self._logs_dir(instance_id, space_id) / "meta.json"
 
-    def _load_meta(self, tenant_id: str, space_id: str) -> dict:
-        path = self._meta_path(tenant_id, space_id)
+    def _load_meta(self, instance_id: str, space_id: str) -> dict:
+        path = self._meta_path(instance_id, space_id)
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -96,9 +96,9 @@ class ConversationLogger:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def _save_meta(self, tenant_id: str, space_id: str, meta: dict) -> None:
+    def _save_meta(self, instance_id: str, space_id: str, meta: dict) -> None:
         """Atomic write: tempfile + os.replace (POSIX atomic)."""
-        path = self._meta_path(tenant_id, space_id)
+        path = self._meta_path(instance_id, space_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
@@ -112,14 +112,14 @@ class ConversationLogger:
                 pass
             raise
 
-    def _current_log_path(self, tenant_id: str, space_id: str) -> Path:
-        meta = self._load_meta(tenant_id, space_id)
+    def _current_log_path(self, instance_id: str, space_id: str) -> Path:
+        meta = self._load_meta(instance_id, space_id)
         num = meta["current_log"]
-        return self._logs_dir(tenant_id, space_id) / f"log_{num:03d}.txt"
+        return self._logs_dir(instance_id, space_id) / f"log_{num:03d}.txt"
 
     async def append(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         speaker: str,       # "user" or "assistant"
         channel: str,        # "discord", "sms", "scheduled", "whisper", "system"
@@ -135,21 +135,21 @@ class ConversationLogger:
             return
 
         try:
-            async with self._get_lock(tenant_id, space_id):
-                logs_dir = self._logs_dir(tenant_id, space_id)
+            async with self._get_lock(instance_id, space_id):
+                logs_dir = self._logs_dir(instance_id, space_id)
                 logs_dir.mkdir(parents=True, exist_ok=True)
 
                 ts = timestamp or datetime.now(timezone.utc).isoformat()
                 line = f"[{ts}] [{speaker}] [{channel}] {content}\n"
 
-                log_path = self._current_log_path(tenant_id, space_id)
+                log_path = self._current_log_path(instance_id, space_id)
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(line)
 
                 # Update estimated token count (rough: 1 token ≈ 4 chars)
-                meta = self._load_meta(tenant_id, space_id)
+                meta = self._load_meta(instance_id, space_id)
                 meta["current_log_tokens_est"] += len(line) // 4
-                self._save_meta(tenant_id, space_id, meta)
+                self._save_meta(instance_id, space_id, meta)
 
                 logger.info(
                     "CONV_LOG: space=%s log=%03d speaker=%s channel=%s len=%d",
@@ -163,7 +163,7 @@ class ConversationLogger:
 
     async def read_recent(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         token_budget: int = 4000,
         max_messages: int = 50,
@@ -179,7 +179,7 @@ class ConversationLogger:
         if not space_id:
             return []
 
-        log_path = self._current_log_path(tenant_id, space_id)
+        log_path = self._current_log_path(instance_id, space_id)
         if not log_path.exists():
             return []
 
@@ -204,14 +204,14 @@ class ConversationLogger:
     # --- P3: Compaction support ---
 
     async def get_current_log_info(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
     ) -> dict:
         """Get metadata about the current log.
 
         Returns: {"log_number": N, "tokens_est": N, "path": Path, "exists": bool}
         """
-        meta = self._load_meta(tenant_id, space_id)
-        log_path = self._logs_dir(tenant_id, space_id) / f"log_{meta['current_log']:03d}.txt"
+        meta = self._load_meta(instance_id, space_id)
+        log_path = self._logs_dir(instance_id, space_id) / f"log_{meta['current_log']:03d}.txt"
         return {
             "log_number": meta["current_log"],
             "tokens_est": meta.get("current_log_tokens_est", 0),
@@ -221,30 +221,30 @@ class ConversationLogger:
         }
 
     async def read_current_log_text(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
     ) -> tuple[str, int]:
         """Read the full text of the current log file.
 
         Returns: (log_text, log_number)
         Raises FileNotFoundError if no log exists.
         """
-        meta = self._load_meta(tenant_id, space_id)
+        meta = self._load_meta(instance_id, space_id)
         log_num = meta["current_log"]
-        log_path = self._logs_dir(tenant_id, space_id) / f"log_{log_num:03d}.txt"
+        log_path = self._logs_dir(instance_id, space_id) / f"log_{log_num:03d}.txt"
         if not log_path.exists():
             raise FileNotFoundError(f"No log file at {log_path}")
         text = log_path.read_text(encoding="utf-8")
         return text, log_num
 
     async def roll_log(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
     ) -> tuple[int, int]:
         """Close current log for appends and start a new one.
 
         Returns: (old_log_number, new_log_number)
         """
-        async with self._get_lock(tenant_id, space_id):
-            meta = self._load_meta(tenant_id, space_id)
+        async with self._get_lock(instance_id, space_id):
+            meta = self._load_meta(instance_id, space_id)
             old_num = meta["current_log"]
             new_num = old_num + 1
 
@@ -252,7 +252,7 @@ class ConversationLogger:
             meta["current_log_tokens_est"] = 0
             meta["seeded_tokens_est"] = 0
             meta["created_at"] = datetime.now(timezone.utc).isoformat()
-            self._save_meta(tenant_id, space_id, meta)
+            self._save_meta(instance_id, space_id, meta)
 
             logger.info(
                 "LOG_ROLL: space=%s closed=log_%03d starting=log_%03d",
@@ -261,7 +261,7 @@ class ConversationLogger:
             return old_num, new_num
 
     async def seed_from_previous(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
         previous_log_number: int, tail_entries: int = 10,
     ) -> int:
         """Copy last N entries from archived log into new current log.
@@ -271,17 +271,17 @@ class ConversationLogger:
 
         Returns number of entries seeded. Updates meta.json token estimate.
         """
-        async with self._get_lock(tenant_id, space_id):
+        async with self._get_lock(instance_id, space_id):
             return await self._seed_from_previous_locked(
-                tenant_id, space_id, previous_log_number, tail_entries,
+                instance_id, space_id, previous_log_number, tail_entries,
             )
 
     async def _seed_from_previous_locked(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
         previous_log_number: int, tail_entries: int,
     ) -> int:
         """Internal seed implementation — must be called under lock."""
-        prev_path = self._logs_dir(tenant_id, space_id) / f"log_{previous_log_number:03d}.txt"
+        prev_path = self._logs_dir(instance_id, space_id) / f"log_{previous_log_number:03d}.txt"
         if not prev_path.exists():
             return 0
 
@@ -293,7 +293,7 @@ class ConversationLogger:
         seed_entries = all_entries[-tail_entries:]
 
         # Reconstruct log lines for seeded entries
-        current_path = self._current_log_path(tenant_id, space_id)
+        current_path = self._current_log_path(instance_id, space_id)
         current_path.parent.mkdir(parents=True, exist_ok=True)
         seed_text = ""
         for entry in seed_entries:
@@ -306,10 +306,10 @@ class ConversationLogger:
 
         # Update token estimate — track seeded tokens separately
         seed_tokens = len(seed_text) // 4
-        meta = self._load_meta(tenant_id, space_id)
+        meta = self._load_meta(instance_id, space_id)
         meta["current_log_tokens_est"] += seed_tokens
         meta["seeded_tokens_est"] = meta.get("seeded_tokens_est", 0) + seed_tokens
-        self._save_meta(tenant_id, space_id, meta)
+        self._save_meta(instance_id, space_id, meta)
 
         logger.info(
             "LOG_SEED: space=%s from=log_%03d entries=%d tokens_est=%d",
@@ -318,14 +318,14 @@ class ConversationLogger:
         return len(seed_entries)
 
     async def read_log_text(
-        self, tenant_id: str, space_id: str, log_number: int,
+        self, instance_id: str, space_id: str, log_number: int,
     ) -> str | None:
         """Read the full text of an archived or current log file.
 
         Returns the log text, or None if the file doesn't exist.
         Public API — used by remember_details handler.
         """
-        log_path = self._logs_dir(tenant_id, space_id) / f"log_{log_number:03d}.txt"
+        log_path = self._logs_dir(instance_id, space_id) / f"log_{log_number:03d}.txt"
         if not log_path.exists():
             return None
         return log_path.read_text(encoding="utf-8")

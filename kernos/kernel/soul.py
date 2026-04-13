@@ -1,7 +1,7 @@
 """Soul — the agent's identity for a specific user.
 
 Set at hatch (first conversation). Refined through interactions.
-Persists in the State Store at {data_dir}/{tenant_id}/state/soul.json.
+Persists in the State Store at {data_dir}/{instance_id}/state/soul.json.
 """
 from dataclasses import dataclass
 
@@ -16,7 +16,7 @@ class Soul:
     govern WHAT the agent does (that's behavioral contracts).
     """
 
-    tenant_id: str
+    instance_id: str
 
     # Identity
     agent_name: str = "Kernos"    # Default name; may evolve through conversation
@@ -43,7 +43,7 @@ class Soul:
     bootstrap_graduated_at: str = ""   # ISO timestamp of graduation
 
     # Workspace scoping (reserved for Phase 2)
-    # When implemented: soul belongs to a workspace, not a tenant.
+    # When implemented: soul belongs to a workspace, not an instance.
     # Multiple tenants (e.g., household members, plumber + clients) share
     # the same soul/personality but have individual behavioral contracts.
     # workspace_id: str = ""

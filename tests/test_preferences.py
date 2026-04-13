@@ -14,7 +14,7 @@ def store(tmp_path):
 def _make_pref(**kwargs) -> Preference:
     defaults = dict(
         id=generate_preference_id(),
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         intent="Notify me 10 minutes before appointments",
         category="notification",
         subject="calendar_events",
@@ -37,7 +37,7 @@ async def test_add_and_get_preference(store):
     pref = _make_pref()
     await store.add_preference(pref)
 
-    loaded = await store.get_preference(pref.tenant_id, pref.id)
+    loaded = await store.get_preference(pref.instance_id, pref.id)
     assert loaded is not None
     assert loaded.id == pref.id
     assert loaded.intent == pref.intent
@@ -55,9 +55,9 @@ async def test_get_nonexistent_preference(store):
 
 async def test_query_active_preferences(store):
     t = "sms:+15555550100"
-    await store.add_preference(_make_pref(tenant_id=t, subject="calendar_events"))
-    await store.add_preference(_make_pref(tenant_id=t, subject="email"))
-    await store.add_preference(_make_pref(tenant_id=t, subject="responses", status="revoked"))
+    await store.add_preference(_make_pref(instance_id=t, subject="calendar_events"))
+    await store.add_preference(_make_pref(instance_id=t, subject="email"))
+    await store.add_preference(_make_pref(instance_id=t, subject="responses", status="revoked"))
 
     active = await store.query_preferences(t, active_only=True)
     assert len(active) == 2
@@ -73,11 +73,11 @@ async def test_query_active_preferences(store):
 
 async def test_supersession(store):
     t = "sms:+15555550100"
-    old_pref = _make_pref(tenant_id=t, parameters={"lead_time_minutes": 10})
+    old_pref = _make_pref(instance_id=t, parameters={"lead_time_minutes": 10})
     await store.add_preference(old_pref)
 
     new_pref = _make_pref(
-        tenant_id=t,
+        instance_id=t,
         intent="Change my notification to 15 minutes",
         parameters={"lead_time_minutes": 15},
         supersedes=old_pref.id,
@@ -111,8 +111,8 @@ async def test_supersession(store):
 
 async def test_query_by_scope(store):
     t = "sms:+15555550100"
-    await store.add_preference(_make_pref(tenant_id=t, scope="global"))
-    await store.add_preference(_make_pref(tenant_id=t, scope="space_music"))
+    await store.add_preference(_make_pref(instance_id=t, scope="global"))
+    await store.add_preference(_make_pref(instance_id=t, scope="space_music"))
 
     global_prefs = await store.query_preferences(t, scope="global")
     assert len(global_prefs) == 1
@@ -123,8 +123,8 @@ async def test_query_by_scope(store):
 
 async def test_query_by_subject(store):
     t = "sms:+15555550100"
-    await store.add_preference(_make_pref(tenant_id=t, subject="calendar"))
-    await store.add_preference(_make_pref(tenant_id=t, subject="email"))
+    await store.add_preference(_make_pref(instance_id=t, subject="calendar"))
+    await store.add_preference(_make_pref(instance_id=t, subject="email"))
 
     cal = await store.query_preferences(t, subject="calendar")
     assert len(cal) == 1
@@ -133,8 +133,8 @@ async def test_query_by_subject(store):
 
 async def test_query_by_category(store):
     t = "sms:+15555550100"
-    await store.add_preference(_make_pref(tenant_id=t, category="notification"))
-    await store.add_preference(_make_pref(tenant_id=t, category="behavior"))
+    await store.add_preference(_make_pref(instance_id=t, category="notification"))
+    await store.add_preference(_make_pref(instance_id=t, category="behavior"))
 
     notif = await store.query_preferences(t, category="notification")
     assert len(notif) == 1
@@ -147,7 +147,7 @@ async def test_query_by_category(store):
 
 async def test_revoke_preference(store):
     t = "sms:+15555550100"
-    pref = _make_pref(tenant_id=t)
+    pref = _make_pref(instance_id=t)
     await store.add_preference(pref)
 
     pref.status = "revoked"
@@ -174,7 +174,7 @@ async def test_revoke_preference(store):
 async def test_derived_artifact_tracking(store):
     t = "sms:+15555550100"
     pref = _make_pref(
-        tenant_id=t,
+        instance_id=t,
         derived_trigger_ids=["trig_abc", "trig_def"],
         derived_covenant_ids=["rule_xyz"],
     )
@@ -199,7 +199,7 @@ async def test_migration_from_knowledge_entries(store):
     # Create a category="preference" KnowledgeEntry
     ke = KnowledgeEntry(
         id="know_pref01",
-        tenant_id=t,
+        instance_id=t,
         category="preference",
         subject="calendar_events",
         content="Notify me 4 minutes before appointments",
@@ -225,13 +225,13 @@ async def test_migration_from_knowledge_entries(store):
 
 
 async def test_migration_idempotent(store):
-    """Migration only runs once per tenant — second access doesn't duplicate."""
+    """Migration only runs once per_instance — second access doesn't duplicate."""
     from kernos.kernel.state import KnowledgeEntry
 
     t = "sms:+15555550100"
     ke = KnowledgeEntry(
         id="know_pref02",
-        tenant_id=t,
+        instance_id=t,
         category="preference",
         subject="email",
         content="Summarize emails daily",
@@ -278,7 +278,7 @@ async def test_persistence_survives_reload(tmp_path):
     await store1.add_preference(pref)
 
     store2 = JsonStateStore(str(tmp_path))
-    loaded = await store2.get_preference(pref.tenant_id, pref.id)
+    loaded = await store2.get_preference(pref.instance_id, pref.id)
     assert loaded is not None
     assert loaded.id == pref.id
     assert loaded.intent == pref.intent
@@ -300,7 +300,7 @@ async def test_source_preference_id_on_trigger(tmp_path):
     trigger_store = TriggerStore(str(tmp_path))
     t = Trigger(
         trigger_id="trig_test01",
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         condition_type="time",
         condition="every day at 9am",
         action_type="notify",
@@ -318,7 +318,7 @@ async def test_source_preference_id_on_covenant(tmp_path):
     store = JsonStateStore(str(tmp_path))
     rule = CovenantRule(
         id="rule_test01",
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         capability="general",
         rule_type="preference",
         description="Keep responses short",
@@ -339,7 +339,7 @@ async def test_legacy_trigger_has_empty_source_preference_id(tmp_path):
     trigger_store = TriggerStore(str(tmp_path))
     t = Trigger(
         trigger_id="trig_legacy",
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         condition_type="time",
         condition="once",
         action_type="notify",
@@ -358,7 +358,7 @@ async def test_revocation_cascade_deactivates_trigger(tmp_path):
 
     trigger = Trigger(
         trigger_id="trig_linked",
-        tenant_id=t,
+        instance_id=t,
         condition_type="time",
         condition="daily",
         action_type="notify",
@@ -370,7 +370,7 @@ async def test_revocation_cascade_deactivates_trigger(tmp_path):
 
     pref = _make_pref(
         id="pref_revoke01",
-        tenant_id=t,
+        instance_id=t,
         status="revoked",
         derived_trigger_ids=["trig_linked"],
     )
@@ -392,7 +392,7 @@ async def test_revocation_cascade_deactivates_covenant(tmp_path):
 
     rule = CovenantRule(
         id="rule_linked01",
-        tenant_id=t,
+        instance_id=t,
         capability="general",
         rule_type="preference",
         description="Allowed to send proactive SMS",
@@ -405,7 +405,7 @@ async def test_revocation_cascade_deactivates_covenant(tmp_path):
 
     pref = _make_pref(
         id="pref_revoke02",
-        tenant_id=t,
+        instance_id=t,
         status="revoked",
         derived_covenant_ids=["rule_linked01"],
     )
@@ -429,7 +429,7 @@ async def test_parameter_update_modifies_trigger_in_place(tmp_path):
 
     trigger = Trigger(
         trigger_id="trig_param01",
-        tenant_id=t,
+        instance_id=t,
         condition_type="time",
         condition="before event",
         action_type="notify",
@@ -442,7 +442,7 @@ async def test_parameter_update_modifies_trigger_in_place(tmp_path):
 
     pref = _make_pref(
         id="pref_param01",
-        tenant_id=t,
+        instance_id=t,
         intent="Notify me 10 minutes before appointments",
         parameters={"lead_time_minutes": 10},
         derived_trigger_ids=["trig_param01"],
@@ -466,7 +466,7 @@ async def test_supersession_cascade(tmp_path):
 
     old_trigger = Trigger(
         trigger_id="trig_old",
-        tenant_id=t,
+        instance_id=t,
         condition_type="time",
         condition="daily",
         action_type="notify",
@@ -478,13 +478,13 @@ async def test_supersession_cascade(tmp_path):
 
     old_pref = _make_pref(
         id="pref_old",
-        tenant_id=t,
+        instance_id=t,
         status="superseded",
         derived_trigger_ids=["trig_old"],
     )
     new_pref = _make_pref(
         id="pref_new",
-        tenant_id=t,
+        instance_id=t,
         supersedes="pref_old",
     )
 

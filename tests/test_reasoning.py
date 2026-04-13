@@ -34,7 +34,7 @@ from kernos.persistence import AuditStore
 
 def _make_request(**kwargs) -> ReasoningRequest:
     defaults = dict(
-        tenant_id="sms:+15555550100",
+        instance_id="sms:+15555550100",
         conversation_id="+15555550100",
         system_prompt="You are Kernos.",
         messages=[{"role": "user", "content": "Hello"}],

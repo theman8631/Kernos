@@ -53,7 +53,7 @@ def _days_ago(n: float) -> str:
 def test_knowledge_entry_new_fields_have_defaults():
     entry = KnowledgeEntry(
         id="know_abc123",
-        tenant_id="t1",
+        instance_id="t1",
         category="fact",
         subject="user",
         content="Works as a carpenter",
@@ -82,7 +82,7 @@ def test_knowledge_entry_new_fields_have_defaults():
 def test_knowledge_entry_all_archetypes_accepted():
     for archetype in ("identity", "structural", "habitual", "contextual", "ephemeral"):
         entry = KnowledgeEntry(
-            id="know_x", tenant_id="t", category="fact", subject="user",
+            id="know_x", instance_id="t", category="fact", subject="user",
             content="test", confidence="stated", source_event_id="",
             source_description="", created_at=_now(), last_referenced=_now(),
             tags=[], lifecycle_archetype=archetype,
@@ -113,7 +113,7 @@ def test_durability_to_archetype_expires_at():
 
 def test_load_knowledge_entry_migrates_permanent():
     d = {
-        "id": "know_x", "tenant_id": "t", "category": "fact", "subject": "user",
+        "id": "know_x", "instance_id": "t", "category": "fact", "subject": "user",
         "content": "test", "confidence": "stated", "source_event_id": "",
         "source_description": "", "created_at": _now(), "last_referenced": _now(),
         "tags": [], "active": True, "durability": "permanent",
@@ -125,7 +125,7 @@ def test_load_knowledge_entry_migrates_permanent():
 
 def test_load_knowledge_entry_migrates_session():
     d = {
-        "id": "know_x", "tenant_id": "t", "category": "fact", "subject": "user",
+        "id": "know_x", "instance_id": "t", "category": "fact", "subject": "user",
         "content": "test", "confidence": "stated", "source_event_id": "",
         "source_description": "", "created_at": _now(), "last_referenced": _now(),
         "tags": [], "active": True, "durability": "session",
@@ -136,7 +136,7 @@ def test_load_knowledge_entry_migrates_session():
 
 def test_load_knowledge_entry_migrates_expires_at():
     d = {
-        "id": "know_x", "tenant_id": "t", "category": "fact", "subject": "user",
+        "id": "know_x", "instance_id": "t", "category": "fact", "subject": "user",
         "content": "test", "confidence": "stated", "source_event_id": "",
         "source_description": "", "created_at": _now(), "last_referenced": _now(),
         "tags": [], "active": True, "durability": "expires_at:2026-04-01T00:00:00+00:00",
@@ -148,7 +148,7 @@ def test_load_knowledge_entry_migrates_expires_at():
 
 def test_load_knowledge_entry_respects_existing_lifecycle_archetype():
     d = {
-        "id": "know_x", "tenant_id": "t", "category": "fact", "subject": "user",
+        "id": "know_x", "instance_id": "t", "category": "fact", "subject": "user",
         "content": "test", "confidence": "stated", "source_event_id": "",
         "source_description": "", "created_at": _now(), "last_referenced": _now(),
         "tags": [], "active": True, "durability": "permanent",
@@ -164,7 +164,7 @@ async def test_json_state_store_knowledge_migration_on_load(tmp_path):
     state_dir = tmp_path / "t1" / "state"
     state_dir.mkdir(parents=True)
     old_entry = {
-        "id": "know_old1", "tenant_id": "t1", "category": "fact", "subject": "user",
+        "id": "know_old1", "instance_id": "t1", "category": "fact", "subject": "user",
         "content": "Likes tea", "confidence": "stated", "source_event_id": "",
         "source_description": "old", "created_at": _now(), "last_referenced": _now(),
         "tags": [], "active": True, "durability": "permanent", "content_hash": "abc123",
@@ -185,7 +185,7 @@ async def test_json_state_store_knowledge_migration_on_load(tmp_path):
 def test_retrieval_strength_fresh_entry_no_reinforcement():
     """Entry with no last_reinforced_at returns 1.0."""
     entry = KnowledgeEntry(
-        id="know_x", tenant_id="t", category="fact", subject="user",
+        id="know_x", instance_id="t", category="fact", subject="user",
         content="test", confidence="stated", source_event_id="",
         source_description="", created_at=_now(), last_referenced=_now(),
         tags=[], lifecycle_archetype="structural",
@@ -197,7 +197,7 @@ def test_retrieval_strength_just_reinforced():
     """Entry reinforced just now returns 1.0."""
     now = _now()
     entry = KnowledgeEntry(
-        id="know_x", tenant_id="t", category="fact", subject="user",
+        id="know_x", instance_id="t", category="fact", subject="user",
         content="test", confidence="stated", source_event_id="",
         source_description="", created_at=now, last_referenced=now,
         tags=[], lifecycle_archetype="structural", last_reinforced_at=now,
@@ -209,7 +209,7 @@ def test_retrieval_strength_decays_over_time():
     """Strength < 1.0 when some time has passed."""
     reinforced = _days_ago(30)
     entry = KnowledgeEntry(
-        id="know_x", tenant_id="t", category="fact", subject="user",
+        id="know_x", instance_id="t", category="fact", subject="user",
         content="test", confidence="stated", source_event_id="",
         source_description="", created_at=reinforced, last_referenced=reinforced,
         tags=[], lifecycle_archetype="structural", last_reinforced_at=reinforced,
@@ -222,7 +222,7 @@ def test_retrieval_strength_ephemeral_decays_faster_than_identity():
     """Ephemeral archetype decays much faster than identity."""
     reinforced = _days_ago(3)
     base_fields = dict(
-        id="know_x", tenant_id="t", category="fact", subject="user",
+        id="know_x", instance_id="t", category="fact", subject="user",
         content="test", confidence="stated", source_event_id="",
         source_description="", created_at=reinforced, last_referenced=reinforced,
         tags=[], last_reinforced_at=reinforced,
@@ -247,7 +247,7 @@ def test_retrieval_strength_higher_storage_strength_slows_decay():
     """Higher storage_strength means slower decay."""
     reinforced = _days_ago(60)
     base_fields = dict(
-        id="know_x", tenant_id="t", category="fact", subject="user",
+        id="know_x", instance_id="t", category="fact", subject="user",
         content="test", confidence="stated", source_event_id="",
         source_description="", created_at=reinforced, last_referenced=reinforced,
         tags=[], lifecycle_archetype="structural", last_reinforced_at=reinforced,
@@ -265,7 +265,7 @@ def test_retrieval_strength_higher_storage_strength_slows_decay():
 
 def test_covenant_rule_has_new_fields():
     rule = CovenantRule(
-        id="rule_abc", tenant_id="t", capability="general", rule_type="must_not",
+        id="rule_abc", instance_id="t", capability="general", rule_type="must_not",
         description="Never delete data", active=True, source="default",
     )
     assert rule.layer == "principle"
@@ -286,7 +286,7 @@ def test_contract_rule_alias_is_covenant_rule():
 def test_contract_rule_can_be_constructed():
     """Code using the old name still works."""
     rule = ContractRule(
-        id="rule_x", tenant_id="t", capability="general", rule_type="preference",
+        id="rule_x", instance_id="t", capability="general", rule_type="preference",
         description="Be concise", active=True, source="default",
     )
     assert isinstance(rule, CovenantRule)
@@ -316,13 +316,13 @@ def test_covenant_rule_loads_from_old_json(tmp_path):
     state_dir.mkdir(parents=True)
     old_rules = [
         {
-            "id": "rule_a", "tenant_id": "t1", "capability": "general",
+            "id": "rule_a", "instance_id": "t1", "capability": "general",
             "rule_type": "must_not", "description": "Never delete data",
             "active": True, "source": "default", "source_event_id": None,
             "created_at": _now(), "updated_at": _now(), "context_space": None,
         },
         {
-            "id": "rule_b", "tenant_id": "t1", "capability": "general",
+            "id": "rule_b", "instance_id": "t1", "capability": "general",
             "rule_type": "preference", "description": "Be concise",
             "active": True, "source": "default", "source_event_id": None,
             "created_at": _now(), "updated_at": _now(), "context_space": None,
@@ -366,14 +366,14 @@ def test_covenant_migration_updates_old_wording(tmp_path):
     state_dir.mkdir(parents=True)
     old_rules = [
         {
-            "id": "rule_a", "tenant_id": "t1", "capability": "general",
+            "id": "rule_a", "instance_id": "t1", "capability": "general",
             "rule_type": "must_not",
             "description": "Never send messages to external contacts without owner approval",
             "active": True, "source": "default", "source_event_id": None,
             "created_at": _now(), "updated_at": _now(), "context_space": None,
         },
         {
-            "id": "rule_b", "tenant_id": "t1", "capability": "general",
+            "id": "rule_b", "instance_id": "t1", "capability": "general",
             "rule_type": "must",
             "description": "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized.",
             "active": True, "source": "default", "source_event_id": None,
@@ -407,7 +407,7 @@ def test_covenant_migration_skips_user_modified_rules(tmp_path):
     state_dir = tmp_path / "t1" / "state"
     state_dir.mkdir(parents=True)
     user_rule = [{
-        "id": "rule_u", "tenant_id": "t1", "capability": "general",
+        "id": "rule_u", "instance_id": "t1", "capability": "general",
         "rule_type": "must_not",
         "description": "Never send messages to external contacts without owner approval",
         "active": True, "source": "user", "source_event_id": None,
@@ -434,7 +434,7 @@ def test_covenant_migration_skips_user_modified_rules(tmp_path):
 def test_entity_node_fields():
     node = EntityNode(
         id="ent_abc123",
-        tenant_id="t1",
+        instance_id="t1",
         canonical_name="Alice Smith",
         entity_type="person",
     )
@@ -462,7 +462,7 @@ def test_causal_edge_fields():
 async def test_state_store_entity_node_crud(tmp_path):
     store = JsonStateStore(tmp_path)
     node = EntityNode(
-        id="ent_abc123", tenant_id="t1", canonical_name="Alice Smith",
+        id="ent_abc123", instance_id="t1", canonical_name="Alice Smith",
         entity_type="person", first_seen=_now(),
     )
     await store.save_entity_node(node)
@@ -475,8 +475,8 @@ async def test_state_store_entity_node_crud(tmp_path):
 
 async def test_state_store_query_entity_nodes_by_name(tmp_path):
     store = JsonStateStore(tmp_path)
-    alice = EntityNode(id="ent_a", tenant_id="t1", canonical_name="Alice Smith", entity_type="person")
-    bob = EntityNode(id="ent_b", tenant_id="t1", canonical_name="Bob Jones", entity_type="person")
+    alice = EntityNode(id="ent_a", instance_id="t1", canonical_name="Alice Smith", entity_type="person")
+    bob = EntityNode(id="ent_b", instance_id="t1", canonical_name="Bob Jones", entity_type="person")
     await store.save_entity_node(alice)
     await store.save_entity_node(bob)
 
@@ -487,8 +487,8 @@ async def test_state_store_query_entity_nodes_by_name(tmp_path):
 
 async def test_state_store_query_entity_nodes_by_type(tmp_path):
     store = JsonStateStore(tmp_path)
-    person = EntityNode(id="ent_a", tenant_id="t1", canonical_name="Alice", entity_type="person")
-    org = EntityNode(id="ent_b", tenant_id="t1", canonical_name="Acme Corp", entity_type="organization")
+    person = EntityNode(id="ent_a", instance_id="t1", canonical_name="Alice", entity_type="person")
+    org = EntityNode(id="ent_b", instance_id="t1", canonical_name="Acme Corp", entity_type="organization")
     await store.save_entity_node(person)
     await store.save_entity_node(org)
 
@@ -500,10 +500,10 @@ async def test_state_store_query_entity_nodes_by_type(tmp_path):
 async def test_state_store_entity_upsert(tmp_path):
     """Saving entity with same ID updates, doesn't duplicate."""
     store = JsonStateStore(tmp_path)
-    node = EntityNode(id="ent_a", tenant_id="t1", canonical_name="Alice")
+    node = EntityNode(id="ent_a", instance_id="t1", canonical_name="Alice")
     await store.save_entity_node(node)
 
-    updated = EntityNode(id="ent_a", tenant_id="t1", canonical_name="Alice Smith", entity_type="person")
+    updated = EntityNode(id="ent_a", instance_id="t1", canonical_name="Alice Smith", entity_type="person")
     await store.save_entity_node(updated)
 
     all_nodes = await store.query_entity_nodes("t1")
@@ -518,7 +518,7 @@ async def test_state_store_entity_upsert(tmp_path):
 
 def test_pending_action_fields():
     action = PendingAction(
-        id="pending_abc", tenant_id="t1", rule_id="rule_x", tool_name="send_email",
+        id="pending_abc", instance_id="t1", rule_id="rule_x", tool_name="send_email",
         created_at=_now(),
     )
     assert action.status == "pending"
@@ -531,7 +531,7 @@ async def test_state_store_pending_action_crud(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     action = PendingAction(
-        id="pending_abc", tenant_id="t1", rule_id="rule_x", tool_name="send_email",
+        id="pending_abc", instance_id="t1", rule_id="rule_x", tool_name="send_email",
         tool_arguments={"to": "bob@example.com", "subject": "Hello"},
         created_at=now, status="pending",
     )
@@ -546,7 +546,7 @@ async def test_state_store_pending_action_crud(tmp_path):
 async def test_state_store_update_pending_action(tmp_path):
     store = JsonStateStore(tmp_path)
     action = PendingAction(
-        id="pending_abc", tenant_id="t1", rule_id="rule_x", tool_name="delete_event",
+        id="pending_abc", instance_id="t1", rule_id="rule_x", tool_name="delete_event",
         created_at=_now(), status="pending",
     )
     await store.save_pending_action(action)
@@ -561,7 +561,7 @@ async def test_state_store_pending_actions_filtered_by_status(tmp_path):
     store = JsonStateStore(tmp_path)
     for i, status in enumerate(["pending", "approved", "rejected"]):
         action = PendingAction(
-            id=f"pending_{i}", tenant_id="t1", rule_id="rule_x",
+            id=f"pending_{i}", instance_id="t1", rule_id="rule_x",
             tool_name="tool", created_at=_now(), status=status,
         )
         await store.save_pending_action(action)
@@ -804,13 +804,13 @@ async def test_tier2_extraction_populates_lifecycle_archetype(tmp_path):
     mock_rs.complete_simple = AsyncMock(return_value=extracted_json)
 
     store = JsonStateStore(tmp_path)
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     events = JsonEventStream(tmp_path)
 
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "I'm a carpenter"}],
         soul=soul, state=store, events=events,
-        reasoning_service=mock_rs, tenant_id="t1",
+        reasoning_service=mock_rs, instance_id="t1",
     )
 
     # SPEC-CHECKPOINTED-FACT-HARVEST: facts no longer extracted per-turn
@@ -824,7 +824,7 @@ async def test_tier2_extraction_populates_lifecycle_archetype(tmp_path):
 
 
 def test_context_space_defaults():
-    space = ContextSpace(id="space_abc123", tenant_id="t1", name="General")
+    space = ContextSpace(id="space_abc123", instance_id="t1", name="General")
     assert space.space_type == "general"
     assert space.status == "active"
     assert space.is_default is False
@@ -837,7 +837,7 @@ def test_context_space_defaults():
 
 def test_context_space_general_default():
     space = ContextSpace(
-        id="space_abc123", tenant_id="t1", name="General",
+        id="space_abc123", instance_id="t1", name="General",
         space_type="general", is_default=True,
     )
     assert space.is_default is True
@@ -846,7 +846,7 @@ def test_context_space_general_default():
 
 def test_context_space_all_types_accepted():
     for space_type in ("general", "domain", "subdomain", "system"):
-        s = ContextSpace(id="space_x", tenant_id="t", name="Test", space_type=space_type)
+        s = ContextSpace(id="space_x", instance_id="t", name="Test", space_type=space_type)
         assert s.space_type == space_type
 
 
@@ -854,7 +854,7 @@ async def test_state_store_context_space_crud(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
     space = ContextSpace(
-        id="space_abc123", tenant_id="t1", name="TTRPG — Aethoria Campaign",
+        id="space_abc123", instance_id="t1", name="TTRPG — Aethoria Campaign",
         description="Fantasy RPG campaign",
         space_type="project", status="active",
         created_at=now, last_active_at=now,
@@ -871,8 +871,8 @@ async def test_state_store_context_space_crud(tmp_path):
 async def test_state_store_list_context_spaces(tmp_path):
     store = JsonStateStore(tmp_path)
     now = _now()
-    daily = ContextSpace(id="space_d", tenant_id="t1", name="General", is_default=True, created_at=now)
-    project = ContextSpace(id="space_p", tenant_id="t1", name="Side Project", space_type="project", created_at=now)
+    daily = ContextSpace(id="space_d", instance_id="t1", name="General", is_default=True, created_at=now)
+    project = ContextSpace(id="space_p", instance_id="t1", name="Side Project", space_type="project", created_at=now)
     await store.save_context_space(daily)
     await store.save_context_space(project)
 
@@ -886,10 +886,10 @@ async def test_state_store_list_context_spaces(tmp_path):
 async def test_state_store_context_space_upsert(tmp_path):
     """Saving space with same ID updates, doesn't duplicate."""
     store = JsonStateStore(tmp_path)
-    space = ContextSpace(id="space_x", tenant_id="t1", name="Old Name")
+    space = ContextSpace(id="space_x", instance_id="t1", name="Old Name")
     await store.save_context_space(space)
 
-    updated = ContextSpace(id="space_x", tenant_id="t1", name="New Name", status="dormant")
+    updated = ContextSpace(id="space_x", instance_id="t1", name="New Name", status="dormant")
     await store.save_context_space(updated)
 
     spaces = await store.list_context_spaces("t1")
@@ -900,7 +900,7 @@ async def test_state_store_context_space_upsert(tmp_path):
 
 async def test_state_store_update_context_space(tmp_path):
     store = JsonStateStore(tmp_path)
-    space = ContextSpace(id="space_x", tenant_id="t1", name="General", is_default=True)
+    space = ContextSpace(id="space_x", instance_id="t1", name="General", is_default=True)
     await store.save_context_space(space)
 
     await store.update_context_space("t1", "space_x", {"status": "dormant", "last_active_at": _now()})
@@ -910,11 +910,11 @@ async def test_state_store_update_context_space(tmp_path):
     assert fetched.status == "dormant"
 
 
-async def test_state_store_context_space_tenant_isolation(tmp_path):
-    """Spaces are stored per-tenant."""
+async def test_state_store_context_spaceinstance_isolation(tmp_path):
+    """Spaces are stored per_instance."""
     store = JsonStateStore(tmp_path)
-    s1 = ContextSpace(id="space_a", tenant_id="t1", name="T1 Space")
-    s2 = ContextSpace(id="space_b", tenant_id="t2", name="T2 Space")
+    s1 = ContextSpace(id="space_a", instance_id="t1", name="T1 Space")
+    s2 = ContextSpace(id="space_b", instance_id="t2", name="T2 Space")
     await store.save_context_space(s1)
     await store.save_context_space(s2)
 
@@ -932,9 +932,9 @@ async def test_state_store_get_nonexistent_space_returns_none(tmp_path):
     assert result is None
 
 
-async def test_state_store_list_spaces_empty_for_new_tenant(tmp_path):
+async def test_state_store_list_spaces_empty_for_new_instance(tmp_path):
     store = JsonStateStore(tmp_path)
-    spaces = await store.list_context_spaces("brand_new_tenant")
+    spaces = await store.list_context_spaces("brand_new_instance")
     assert spaces == []
 
 
@@ -943,7 +943,7 @@ async def test_state_store_list_spaces_empty_for_new_tenant(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-async def test_handler_creates_daily_space_for_new_tenant(tmp_path):
+async def test_handler_creates_daily_space_for_new_instance(tmp_path):
     """_get_or_init_soul() auto-creates a daily space for new tenants."""
     from kernos.kernel.state_json import JsonStateStore
     from kernos.messages.handler import MessageHandler
@@ -963,7 +963,7 @@ async def test_handler_creates_daily_space_for_new_tenant(tmp_path):
     assert daily.is_default is True
     assert daily.space_type == "general"
     assert daily.name == "General"
-    assert daily.tenant_id == "t1"
+    assert daily.instance_id == "t1"
     system_spaces = [s for s in spaces if s.space_type == "system"]
     assert len(system_spaces) == 1
 
@@ -1005,14 +1005,14 @@ async def test_tier2_extraction_handles_empty_json_gracefully(tmp_path):
     mock_rs.complete_simple = AsyncMock(return_value="{}")
 
     store = JsonStateStore(tmp_path)
-    soul = Soul(tenant_id="t1")
+    soul = Soul(instance_id="t1")
     events = JsonEventStream(tmp_path)
 
     # Should not raise
     await run_tier2_extraction(
         recent_turns=[{"role": "user", "content": "hi"}],
         soul=soul, state=store, events=events,
-        reasoning_service=mock_rs, tenant_id="t1",
+        reasoning_service=mock_rs, instance_id="t1",
     )
     entries = await store.query_knowledge("t1")
     assert entries == []

@@ -402,11 +402,11 @@ class CompactionService:
         """Wire up the file service for manifest injection during compaction."""
         self._files = files
 
-    def _space_dir(self, tenant_id: str, space_id: str) -> Path:
+    def _space_dir(self, instance_id: str, space_id: str) -> Path:
         from kernos.utils import _safe_name
         return (
             self.data_dir
-            / _safe_name(tenant_id)
+            / _safe_name(instance_id)
             / "state"
             / "compaction"
             / _safe_name(space_id)
@@ -415,10 +415,10 @@ class CompactionService:
     # --- Persistence ---
 
     async def load_state(
-        self, tenant_id: str, space_id: str
+        self, instance_id: str, space_id: str
     ) -> CompactionState | None:
         """Load CompactionState from disk. Returns None if not found."""
-        state_path = self._space_dir(tenant_id, space_id) / "state.json"
+        state_path = self._space_dir(instance_id, space_id) / "state.json"
         if not state_path.exists():
             return None
         try:
@@ -444,14 +444,14 @@ class CompactionService:
                 last_compaction_failure_at=data.get("last_compaction_failure_at", ""),
             )
         except Exception as exc:
-            logger.warning("Failed to load compaction state for %s/%s: %s", tenant_id, space_id, exc)
+            logger.warning("Failed to load compaction state for %s/%s: %s", instance_id, space_id, exc)
             return None
 
     async def save_state(
-        self, tenant_id: str, space_id: str, comp_state: CompactionState
+        self, instance_id: str, space_id: str, comp_state: CompactionState
     ) -> None:
         """Persist CompactionState to disk."""
-        space_dir = self._space_dir(tenant_id, space_id)
+        space_dir = self._space_dir(instance_id, space_id)
         space_dir.mkdir(parents=True, exist_ok=True)
         state_path = space_dir / "state.json"
         data = {
@@ -477,10 +477,10 @@ class CompactionService:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     async def load_document(
-        self, tenant_id: str, space_id: str
+        self, instance_id: str, space_id: str
     ) -> str | None:
         """Load the active compaction document. Returns None if not found."""
-        doc_path = self._space_dir(tenant_id, space_id) / "active_document.md"
+        doc_path = self._space_dir(instance_id, space_id) / "active_document.md"
         if not doc_path.exists():
             return None
         return doc_path.read_text(encoding="utf-8")
@@ -490,7 +490,7 @@ class CompactionService:
     HOT_TAIL_BUDGET = 2000  # tokens
 
     async def load_context_document(
-        self, tenant_id: str, space_id: str,
+        self, instance_id: str, space_id: str,
         hot_tail_budget: int = 0,
     ) -> str:
         """Load a context-ready version: archive story + hot tail + Living State.
@@ -501,7 +501,7 @@ class CompactionService:
         if hot_tail_budget <= 0:
             hot_tail_budget = self.HOT_TAIL_BUDGET
 
-        document = await self.load_document(tenant_id, space_id)
+        document = await self.load_document(instance_id, space_id)
         if not document:
             return ""
 
@@ -516,7 +516,7 @@ class CompactionService:
 
         # Archive story (if we have archived entries)
         if archived_count > 0:
-            story = self._load_archive_story(tenant_id, space_id)
+            story = self._load_archive_story(instance_id, space_id)
             if story:
                 parts.append(
                     f"Archive: [{story.get('date_range_start', '?')} → "
@@ -527,7 +527,7 @@ class CompactionService:
                 # First load — generate archive story
                 archived_entries = entries[:archived_count]
                 story = await self._generate_initial_archive_story(
-                    tenant_id, space_id, archived_entries,
+                    instance_id, space_id, archived_entries,
                 )
                 if story:
                     parts.append(
@@ -558,9 +558,9 @@ class CompactionService:
             selected = [entries[-1]]
         return selected
 
-    def _load_archive_story(self, tenant_id: str, space_id: str) -> dict | None:
+    def _load_archive_story(self, instance_id: str, space_id: str) -> dict | None:
         """Load the archive story from disk."""
-        path = self._space_dir(tenant_id, space_id) / "archive_story.json"
+        path = self._space_dir(instance_id, space_id) / "archive_story.json"
         if not path.exists():
             return None
         try:
@@ -569,15 +569,15 @@ class CompactionService:
         except Exception:
             return None
 
-    def _save_archive_story(self, tenant_id: str, space_id: str, story: dict) -> None:
+    def _save_archive_story(self, instance_id: str, space_id: str, story: dict) -> None:
         """Save archive story to disk."""
         import json as _json
-        path = self._space_dir(tenant_id, space_id) / "archive_story.json"
+        path = self._space_dir(instance_id, space_id) / "archive_story.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_json.dumps(story, indent=2, ensure_ascii=False), encoding="utf-8")
 
     async def _generate_initial_archive_story(
-        self, tenant_id: str, space_id: str, archived_entries: list[str],
+        self, instance_id: str, space_id: str, archived_entries: list[str],
     ) -> dict | None:
         """One-time generation of archive story from all archived entries."""
         if not self.reasoning or not archived_entries:
@@ -610,7 +610,7 @@ class CompactionService:
                 "last_updated_at": utc_now(),
                 "last_archived_compaction": len(archived_entries),
             }
-            self._save_archive_story(tenant_id, space_id, story)
+            self._save_archive_story(instance_id, space_id, story)
             logger.info(
                 "ARCHIVE_STORY_CREATED: space=%s entries=%d",
                 space_id, len(archived_entries),
@@ -621,10 +621,10 @@ class CompactionService:
             return None
 
     async def update_archive_story(
-        self, tenant_id: str, space_id: str, newly_archived_entry: str,
+        self, instance_id: str, space_id: str, newly_archived_entry: str,
     ) -> None:
         """Incrementally update archive story when an entry falls off hot tail."""
-        existing = self._load_archive_story(tenant_id, space_id)
+        existing = self._load_archive_story(instance_id, space_id)
         if not existing or not self.reasoning:
             return
         try:
@@ -653,22 +653,22 @@ class CompactionService:
                 existing["story"] = result.strip()
                 existing["archived_entry_count"] = existing.get("archived_entry_count", 0) + 1
                 existing["last_updated_at"] = utc_now()
-                self._save_archive_story(tenant_id, space_id, existing)
+                self._save_archive_story(instance_id, space_id, existing)
                 logger.info("ARCHIVE_STORY_UPDATED: space=%s", space_id)
         except Exception as exc:
             logger.warning("ARCHIVE_STORY_UPDATE_FAILED: %s", exc)
 
     async def load_index(
-        self, tenant_id: str, space_id: str
+        self, instance_id: str, space_id: str
     ) -> str | None:
         """Load the compaction index. Returns None if not found."""
-        index_path = self._space_dir(tenant_id, space_id) / "index.md"
+        index_path = self._space_dir(instance_id, space_id) / "index.md"
         if not index_path.exists():
             return None
         return index_path.read_text(encoding="utf-8")
 
     async def load_archive(
-        self, tenant_id: str, space_id: str, archive_number: str
+        self, instance_id: str, space_id: str, archive_number: str
     ) -> str | None:
         """Load a specific compaction archive by number. Returns None if not found."""
         # Normalize archive number — handle "1", "001", "#1", "Archive #1", etc.
@@ -676,7 +676,7 @@ class CompactionService:
         if not num_str:
             return None
         archive_name = f"compaction_archive_{int(num_str):03d}.md"
-        archive_path = self._space_dir(tenant_id, space_id) / "archives" / archive_name
+        archive_path = self._space_dir(instance_id, space_id) / "archives" / archive_name
         if not archive_path.exists():
             return None
         return archive_path.read_text(encoding="utf-8")
@@ -748,14 +748,14 @@ class CompactionService:
 
     async def compact(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         space: ContextSpace,
         new_messages: list[dict],
         comp_state: CompactionState,
     ) -> CompactionState:
         """Run one compaction cycle."""
-        space_dir = self._space_dir(tenant_id, space_id)
+        space_dir = self._space_dir(instance_id, space_id)
         space_dir.mkdir(parents=True, exist_ok=True)
 
         # Emit compaction.triggered
@@ -764,7 +764,7 @@ class CompactionService:
                 await emit_event(
                     self.events,
                     EventType.COMPACTION_TRIGGERED,
-                    tenant_id,
+                    instance_id,
                     "compaction",
                     payload={
                         "space_id": space_id,
@@ -794,7 +794,7 @@ class CompactionService:
         # Manifest injection — tell the compaction model what files exist
         if self._files:
             try:
-                manifest = await self._files.load_manifest(tenant_id, space_id)
+                manifest = await self._files.load_manifest(instance_id, space_id)
                 if manifest:
                     manifest_text = "Current files in this space:\n"
                     for fname, desc in manifest.items():
@@ -837,10 +837,10 @@ class CompactionService:
 
         # Check rotation
         if new_history_tokens > comp_state.document_budget:
-            await self._rotate(tenant_id, space_id, space, comp_state)
+            await self._rotate(instance_id, space_id, space, comp_state)
 
         # Save state
-        await self.save_state(tenant_id, space_id, comp_state)
+        await self.save_state(instance_id, space_id, comp_state)
 
         # Emit compaction.completed
         try:
@@ -848,7 +848,7 @@ class CompactionService:
                 await emit_event(
                     self.events,
                     EventType.COMPACTION_COMPLETED,
-                    tenant_id,
+                    instance_id,
                     "compaction",
                     payload={
                         "space_id": space_id,
@@ -1076,7 +1076,7 @@ class CompactionService:
 
     async def compact_from_log(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         space: ContextSpace,
         log_text: str,
@@ -1092,7 +1092,7 @@ class CompactionService:
 
         Returns: Updated CompactionState after successful compaction.
         """
-        space_dir = self._space_dir(tenant_id, space_id)
+        space_dir = self._space_dir(instance_id, space_id)
         space_dir.mkdir(parents=True, exist_ok=True)
 
         # Load existing compaction document
@@ -1113,7 +1113,7 @@ class CompactionService:
         # Manifest injection
         if self._files:
             try:
-                manifest = await self._files.load_manifest(tenant_id, space_id)
+                manifest = await self._files.load_manifest(instance_id, space_id)
                 if manifest:
                     manifest_text = "Current files in this space:\n"
                     for fname, desc in manifest.items():
@@ -1125,7 +1125,7 @@ class CompactionService:
         # Build existing knowledge list for fact harvest
         _knowledge_section = ""
         try:
-            _ke = await self.state.query_knowledge(tenant_id, active_only=True, limit=100)
+            _ke = await self.state.query_knowledge(instance_id, active_only=True, limit=100)
             if _ke:
                 _ke_lines = [f"  [{e.id}] {e.subject}: {e.content[:100]}" for e in _ke[:50]]
                 _knowledge_section = f"\n\nExisting knowledge (for FACT_HARVEST UPDATE/REINFORCE):\n" + "\n".join(_ke_lines)
@@ -1196,9 +1196,9 @@ class CompactionService:
 
         # Check rotation
         if new_history_tokens > comp_state.document_budget:
-            await self._rotate(tenant_id, space_id, space, comp_state)
+            await self._rotate(instance_id, space_id, space, comp_state)
 
-        await self.save_state(tenant_id, space_id, comp_state)
+        await self.save_state(instance_id, space_id, comp_state)
 
         logger.info(
             "COMPACTION: space=%s source=log_%03d compaction_number=%d",
@@ -1211,13 +1211,13 @@ class CompactionService:
 
     async def _rotate(
         self,
-        tenant_id: str,
+        instance_id: str,
         space_id: str,
         space: ContextSpace,
         comp_state: CompactionState,
     ) -> None:
         """Seal active document as archive, create fresh document."""
-        space_dir = self._space_dir(tenant_id, space_id)
+        space_dir = self._space_dir(instance_id, space_id)
         archive_dir = space_dir / "archives"
         archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1266,9 +1266,9 @@ class CompactionService:
 
         # 4b. Personality evolution — rewrite soul.personality_notes
         try:
-            await self._evolve_personality(tenant_id)
+            await self._evolve_personality(instance_id)
         except Exception as exc:
-            logger.warning("Personality evolution failed for %s: %s", tenant_id, exc)
+            logger.warning("Personality evolution failed for %s: %s", instance_id, exc)
 
         # 5. Create new active document
         living_state = self._extract_living_state(active_doc)
@@ -1318,7 +1318,7 @@ class CompactionService:
                 await emit_event(
                     self.events,
                     EventType.COMPACTION_ROTATION,
-                    tenant_id,
+                    instance_id,
                     "compaction",
                     payload={
                         "space_id": space_id,
@@ -1332,10 +1332,10 @@ class CompactionService:
 
         logger.info(
             "Rotated compaction document for %s/%s — archive #%d",
-            tenant_id, space_id, comp_state.archive_count,
+            instance_id, space_id, comp_state.archive_count,
         )
 
-    async def _evolve_personality(self, tenant_id: str) -> None:
+    async def _evolve_personality(self, instance_id: str) -> None:
         """Rewrite soul.personality_notes based on accumulated knowledge.
 
         Fires only on compaction rotation — infrequent, cheap, deliberate.
@@ -1343,13 +1343,13 @@ class CompactionService:
         """
         from kernos.kernel.soul import Soul
 
-        soul = await self.state.get_soul(tenant_id)
+        soul = await self.state.get_soul(instance_id)
         if not soul:
             return
 
         # Load recent user knowledge entries (last 30 days or all if fewer)
         user_ke = await self.state.query_knowledge(
-            tenant_id, subject="user", active_only=True, limit=30,
+            instance_id, subject="user", active_only=True, limit=30,
         )
         user_facts = [e.content for e in user_ke
                       if e.lifecycle_archetype in ("structural", "identity", "habitual")]
@@ -1380,4 +1380,4 @@ class CompactionService:
 
         soul.personality_notes = result.strip()
         await self.state.save_soul(soul, source="compaction_rotation", trigger="personality_evolution")
-        logger.info("Personality evolved for tenant %s on rotation", tenant_id)
+        logger.info("Personality evolved for instance %s on rotation", instance_id)

@@ -174,7 +174,7 @@ class RetrievalService:
         self.compaction = compaction
         self.reasoning = reasoning
 
-    async def _build_scope_chain(self, tenant_id: str, space_id: str) -> list[str]:
+    async def _build_scope_chain(self, instance_id: str, space_id: str) -> list[str]:
         """Walk up the parent chain. Returns [space_id, parent_id, grandparent_id, ...].
 
         Only includes IDs of spaces that actually exist. Stops at root or cycle.
@@ -183,7 +183,7 @@ class RetrievalService:
         current = space_id
         seen: set[str] = set()
         while current and current not in seen:
-            space = await self.state.get_context_space(tenant_id, current)
+            space = await self.state.get_context_space(instance_id, current)
             if not space:
                 break
             chain.append(current)
@@ -195,7 +195,7 @@ class RetrievalService:
 
     async def search(
         self,
-        tenant_id: str,
+        instance_id: str,
         query: str,
         active_space_id: str,
     ) -> str:
@@ -215,7 +215,7 @@ class RetrievalService:
             try:
                 from kernos.kernel.introspection import build_user_truth_view
                 state_view = await build_user_truth_view(
-                    tenant_id, self.state,
+                    instance_id, self.state,
                     getattr(self.reasoning, '_trigger_store', None),
                     getattr(self.reasoning, '_registry', None),
                 )
@@ -226,7 +226,7 @@ class RetrievalService:
                 logger.warning("REMEMBER_STATE_AUGMENT: failed: %s", exc)
 
         # Build scope chain for hierarchical search
-        scope_chain = await self._build_scope_chain(tenant_id, active_space_id)
+        scope_chain = await self._build_scope_chain(instance_id, active_space_id)
         if len(scope_chain) > 1:
             logger.info("SCOPE_CHAIN: space=%s depth=%d chain=%s",
                 active_space_id, len(scope_chain) - 1, scope_chain)
@@ -244,13 +244,13 @@ class RetrievalService:
 
         if query_embedding is not None:
             knowledge_task = self._search_knowledge(
-                tenant_id, query, query_embedding, active_space_id, scope_chain
+                instance_id, query, query_embedding, active_space_id, scope_chain
             )
         else:
             knowledge_task = _empty_knowledge()
 
-        entity_task = self._search_entities(tenant_id, query, active_space_id, scope_chain)
-        archive_task = self._search_archives(tenant_id, query, active_space_id, scope_chain)
+        entity_task = self._search_entities(instance_id, query, active_space_id, scope_chain)
+        archive_task = self._search_archives(instance_id, query, active_space_id, scope_chain)
 
         knowledge_candidates, entity_results, archive_result = await asyncio.gather(
             knowledge_task, entity_task, archive_task,
@@ -269,7 +269,7 @@ class RetrievalService:
             archive_result = None
 
         # Collect MAYBE_SAME_AS for uncertainty notes
-        maybe_same_as = await self._collect_maybe_same_as(tenant_id, entity_results)
+        maybe_same_as = await self._collect_maybe_same_as(instance_id, entity_results)
 
         # Stage 2: Rank by quality
         for c in knowledge_candidates:
@@ -291,7 +291,7 @@ class RetrievalService:
 
     async def _search_knowledge(
         self,
-        tenant_id: str,
+        instance_id: str,
         query: str,
         query_embedding: list[float],
         active_space_id: str,
@@ -301,7 +301,7 @@ class RetrievalService:
         from kernos.kernel.embeddings import cosine_similarity  # noqa: F811
 
         all_entries = await self.state.query_knowledge(
-            tenant_id, active_only=True, limit=500
+            instance_id, active_only=True, limit=500
         )
 
         # Space scoping — include all ancestor spaces + global entries
@@ -314,7 +314,7 @@ class RetrievalService:
 
         candidates = []
         for entry in entries:
-            entry_embedding = await self.embedding_store.get(tenant_id, entry.id)
+            entry_embedding = await self.embedding_store.get(instance_id, entry.id)
             if entry_embedding is None:
                 continue
             similarity = cosine_similarity(query_embedding, entry_embedding)
@@ -327,14 +327,14 @@ class RetrievalService:
 
     async def _search_entities(
         self,
-        tenant_id: str,
+        instance_id: str,
         query: str,
         active_space_id: str,
         scope_chain: list[str] | None = None,
     ) -> list[EntityResult]:
         """Search entities by name/alias match. Walks scope chain."""
         entities = await self.state.query_entity_nodes(
-            tenant_id, active_only=True
+            instance_id, active_only=True
         )
 
         # Space scoping — include all ancestor spaces + global entries
@@ -356,7 +356,7 @@ class RetrievalService:
             ):
                 # Resolve SAME_AS edges — merge linked entities
                 merged_knowledge = await self._resolve_entity_knowledge(
-                    tenant_id, entity
+                    instance_id, entity
                 )
                 matched.append(
                     EntityResult(entity=entity, knowledge=merged_knowledge)
@@ -366,7 +366,7 @@ class RetrievalService:
 
     async def _resolve_entity_knowledge(
         self,
-        tenant_id: str,
+        instance_id: str,
         entity: EntityNode,
     ) -> list[KnowledgeEntry]:
         """Gather all knowledge linked to this entity, resolving SAME_AS edges."""
@@ -374,12 +374,12 @@ class RetrievalService:
 
         # Direct knowledge links
         for entry_id in entity.knowledge_entry_ids:
-            entry = await self.state.get_knowledge_entry(tenant_id, entry_id)
+            entry = await self.state.get_knowledge_entry(instance_id, entry_id)
             if entry and entry.active:
                 knowledge.append(entry)
 
         # Traverse identity edges
-        edges = await self.state.query_identity_edges(tenant_id, entity.id)
+        edges = await self.state.query_identity_edges(instance_id, entity.id)
         for edge in edges:
             other_id = (
                 edge.target_id
@@ -389,12 +389,12 @@ class RetrievalService:
             if edge.edge_type == "SAME_AS" and edge.confidence >= 0.8:
                 # Merge: pull knowledge from the linked node
                 other_node = await self.state.get_entity_node(
-                    tenant_id, other_id
+                    instance_id, other_id
                 )
                 if other_node and other_node.active:
                     for entry_id in other_node.knowledge_entry_ids:
                         entry = await self.state.get_knowledge_entry(
-                            tenant_id, entry_id
+                            instance_id, entry_id
                         )
                         if (
                             entry
@@ -407,7 +407,7 @@ class RetrievalService:
 
     async def _search_archives(
         self,
-        tenant_id: str,
+        instance_id: str,
         query: str,
         active_space_id: str,
         scope_chain: list[str] | None = None,
@@ -416,7 +416,7 @@ class RetrievalService:
         _chain = scope_chain or [active_space_id]
 
         for ancestor_id in _chain:
-            index_text = await self.compaction.load_index(tenant_id, ancestor_id)
+            index_text = await self.compaction.load_index(instance_id, ancestor_id)
             if not index_text:
                 continue
 
@@ -438,7 +438,7 @@ class RetrievalService:
 
             # Load the matching archive
             archive_text = await self.compaction.load_archive(
-                tenant_id, ancestor_id, result
+                instance_id, ancestor_id, result
             )
             if not archive_text:
                 continue
@@ -464,14 +464,14 @@ class RetrievalService:
 
     async def _collect_maybe_same_as(
         self,
-        tenant_id: str,
+        instance_id: str,
         entity_results: list[EntityResult],
     ) -> list[tuple[EntityNode, EntityNode]]:
         """Collect MAYBE_SAME_AS edges for matched entities."""
         maybe_pairs: list[tuple[EntityNode, EntityNode]] = []
         for er in entity_results:
             edges = await self.state.query_identity_edges(
-                tenant_id, er.entity.id
+                instance_id, er.entity.id
             )
             for edge in edges:
                 if edge.edge_type == "MAYBE_SAME_AS":
@@ -481,7 +481,7 @@ class RetrievalService:
                         else edge.source_id
                     )
                     other_node = await self.state.get_entity_node(
-                        tenant_id, other_id
+                        instance_id, other_id
                     )
                     if other_node and other_node.active:
                         maybe_pairs.append((er.entity, other_node))

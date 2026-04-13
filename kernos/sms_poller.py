@@ -122,7 +122,7 @@ class SMSPoller:
 
             # Send reply via REST API
             await self._adapter.send_outbound(
-                tenant_id=normalized.tenant_id,
+                instance_id=normalized.instance_id,
                 channel_target=msg.from_,
                 message=response_text,
             )

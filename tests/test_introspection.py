@@ -26,7 +26,7 @@ T = "sms:+15555550100"
 def _pref(**kwargs) -> Preference:
     defaults = dict(
         id=generate_preference_id(),
-        tenant_id=T,
+        instance_id=T,
         intent="Notify me 10 minutes before appointments",
         category="notification",
         subject="calendar_events",
@@ -55,7 +55,7 @@ async def test_user_view_shows_active_preferences(store):
 async def test_user_view_shows_preference_with_linked_trigger(store, trigger_store):
     trigger = Trigger(
         trigger_id="trig_linked01",
-        tenant_id=T,
+        instance_id=T,
         condition_type="time",
         condition="before event",
         action_type="notify",
@@ -76,7 +76,7 @@ async def test_user_view_shows_preference_with_linked_trigger(store, trigger_sto
 async def test_user_view_shows_standalone_triggers(store, trigger_store):
     trigger = Trigger(
         trigger_id="trig_standalone",
-        tenant_id=T,
+        instance_id=T,
         condition_type="time",
         condition="daily",
         action_type="notify",
@@ -92,7 +92,7 @@ async def test_user_view_shows_standalone_triggers(store, trigger_store):
 async def test_user_view_shows_active_covenants(store):
     rule = CovenantRule(
         id="rule_view01",
-        tenant_id=T,
+        instance_id=T,
         capability="general",
         rule_type="preference",
         description="Keep responses short",
@@ -111,7 +111,7 @@ async def test_user_view_shows_key_facts(store):
     from kernos.kernel.state import KnowledgeEntry
     ke = KnowledgeEntry(
         id="know_view01",
-        tenant_id=T,
+        instance_id=T,
         category="fact",
         subject="guitar",
         content="User plays classical guitar",
@@ -179,7 +179,7 @@ async def test_operator_view_includes_user_view(store):
 async def test_operator_view_shows_legacy_artifacts(store, trigger_store):
     trigger = Trigger(
         trigger_id="trig_legacy01",
-        tenant_id=T,
+        instance_id=T,
         condition_type="time",
         condition="daily",
         action_type="notify",
@@ -197,7 +197,7 @@ async def test_operator_view_shows_legacy_artifacts(store, trigger_store):
 async def test_operator_view_shows_stale_reconciliation(store, trigger_store):
     trigger = Trigger(
         trigger_id="trig_stale01",
-        tenant_id=T,
+        instance_id=T,
         condition_type="time",
         condition="daily",
         action_type="notify",
@@ -254,7 +254,7 @@ async def test_views_are_separate(store, trigger_store):
     """AC3: User and operator views are explicitly separate surfaces."""
     trigger = Trigger(
         trigger_id="trig_sep01",
-        tenant_id=T,
+        instance_id=T,
         condition_type="time",
         condition="daily",
         action_type="notify",

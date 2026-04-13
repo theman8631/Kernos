@@ -11,7 +11,7 @@ class ContextSpace:
     """
 
     id: str                          # "space_{uuid8}"
-    tenant_id: str
+    instance_id: str
     name: str
     description: str = ""            # Router uses this for routing decisions
     space_type: str = "general"      # "general" | "domain" | "subdomain" | "system"

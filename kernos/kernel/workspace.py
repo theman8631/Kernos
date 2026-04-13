@@ -49,7 +49,7 @@ class WorkspaceManifest:
     """Per-space manifest tracking all built artifacts."""
 
     version: int = 1
-    tenant_id: str = ""
+    instance_id: str = ""
     space_id: str = ""
     artifacts: list[Artifact] = field(default_factory=list)
 
@@ -141,21 +141,21 @@ class WorkspaceManager:
 
     # --- Path helpers ---
 
-    def _space_dir(self, tenant_id: str, space_id: str) -> Path:
-        return self._data_dir / _safe_name(tenant_id) / "spaces" / space_id / "files"
+    def _space_dir(self, instance_id: str, space_id: str) -> Path:
+        return self._data_dir / _safe_name(instance_id) / "spaces" / space_id / "files"
 
-    def _manifest_path(self, tenant_id: str, space_id: str) -> Path:
-        return self._space_dir(tenant_id, space_id) / "workspace_manifest.json"
+    def _manifest_path(self, instance_id: str, space_id: str) -> Path:
+        return self._space_dir(instance_id, space_id) / "workspace_manifest.json"
 
     # --- Manifest I/O ---
 
-    async def load_manifest(self, tenant_id: str, space_id: str) -> WorkspaceManifest:
+    async def load_manifest(self, instance_id: str, space_id: str) -> WorkspaceManifest:
         """Load or create a workspace manifest. Caches in memory."""
-        key = f"{tenant_id}:{space_id}"
+        key = f"{instance_id}:{space_id}"
         if key in self._loaded_manifests:
             return self._loaded_manifests[key]
 
-        path = self._manifest_path(tenant_id, space_id)
+        path = self._manifest_path(instance_id, space_id)
         if path.exists():
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
@@ -165,7 +165,7 @@ class WorkspaceManager:
                 ]
                 manifest = WorkspaceManifest(
                     version=raw.get("version", 1),
-                    tenant_id=tenant_id,
+                    instance_id=instance_id,
                     space_id=space_id,
                     artifacts=artifacts,
                 )
@@ -175,20 +175,20 @@ class WorkspaceManager:
                     sum(1 for a in artifacts if a.status == "archived"))
             except Exception as exc:
                 logger.warning("WORKSPACE_MANIFEST: corrupt manifest in %s: %s", space_id, exc)
-                manifest = WorkspaceManifest(tenant_id=tenant_id, space_id=space_id)
+                manifest = WorkspaceManifest(instance_id=instance_id, space_id=space_id)
         else:
-            manifest = WorkspaceManifest(tenant_id=tenant_id, space_id=space_id)
+            manifest = WorkspaceManifest(instance_id=instance_id, space_id=space_id)
 
         self._loaded_manifests[key] = manifest
         return manifest
 
-    async def save_manifest(self, tenant_id: str, space_id: str, manifest: WorkspaceManifest) -> None:
+    async def save_manifest(self, instance_id: str, space_id: str, manifest: WorkspaceManifest) -> None:
         """Persist manifest to disk."""
-        path = self._manifest_path(tenant_id, space_id)
+        path = self._manifest_path(instance_id, space_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "version": manifest.version,
-            "tenant_id": manifest.tenant_id,
+            "instance_id": manifest.instance_id,
             "space_id": manifest.space_id,
             "artifacts": [asdict(a) for a in manifest.artifacts],
         }
@@ -196,9 +196,9 @@ class WorkspaceManager:
 
     # --- Artifact CRUD ---
 
-    async def list_artifacts(self, tenant_id: str, space_id: str) -> str:
+    async def list_artifacts(self, instance_id: str, space_id: str) -> str:
         """List all active artifacts in the workspace. Returns formatted text."""
-        manifest = await self.load_manifest(tenant_id, space_id)
+        manifest = await self.load_manifest(instance_id, space_id)
         active = [a for a in manifest.artifacts if a.status == "active"]
         if not active:
             return "No artifacts built in this space yet. Use execute_code to build something."
@@ -227,10 +227,10 @@ class WorkspaceManager:
         return "\n".join(lines)
 
     async def add_artifact(
-        self, tenant_id: str, space_id: str, artifact_data: dict,
+        self, instance_id: str, space_id: str, artifact_data: dict,
     ) -> tuple[str, Artifact]:
         """Add a new artifact to the manifest. Returns (message, artifact)."""
-        manifest = await self.load_manifest(tenant_id, space_id)
+        manifest = await self.load_manifest(instance_id, space_id)
         now = utc_now()
 
         artifact = Artifact(
@@ -249,7 +249,7 @@ class WorkspaceManager:
         )
 
         manifest.artifacts.append(artifact)
-        await self.save_manifest(tenant_id, space_id, manifest)
+        await self.save_manifest(instance_id, space_id, manifest)
 
         logger.info("WORKSPACE_ADD: space=%s artifact=%s type=%s version=%d",
             space_id, artifact.name, artifact.type, artifact.version)
@@ -257,10 +257,10 @@ class WorkspaceManager:
         return f"Added artifact '{artifact.name}' ({artifact.id}) to workspace.", artifact
 
     async def update_artifact(
-        self, tenant_id: str, space_id: str, artifact_id: str, updates: dict,
+        self, instance_id: str, space_id: str, artifact_id: str, updates: dict,
     ) -> str:
         """Update an existing artifact. Increments version."""
-        manifest = await self.load_manifest(tenant_id, space_id)
+        manifest = await self.load_manifest(instance_id, space_id)
         target = next((a for a in manifest.artifacts if a.id == artifact_id), None)
         if not target:
             return f"Artifact '{artifact_id}' not found."
@@ -274,17 +274,17 @@ class WorkspaceManager:
 
         target.version += 1
         target.last_modified = utc_now()
-        await self.save_manifest(tenant_id, space_id, manifest)
+        await self.save_manifest(instance_id, space_id, manifest)
 
         logger.info("WORKSPACE_UPDATE: space=%s artifact=%s version=%d",
             space_id, target.name, target.version)
         return f"Updated '{target.name}' to version {target.version}."
 
     async def archive_artifact(
-        self, tenant_id: str, space_id: str, artifact_id: str,
+        self, instance_id: str, space_id: str, artifact_id: str,
     ) -> str:
         """Archive an artifact. Removes from catalog but preserves files."""
-        manifest = await self.load_manifest(tenant_id, space_id)
+        manifest = await self.load_manifest(instance_id, space_id)
         target = next((a for a in manifest.artifacts if a.id == artifact_id), None)
         if not target:
             return f"Artifact '{artifact_id}' not found."
@@ -296,14 +296,14 @@ class WorkspaceManager:
         if target.catalog_entry and self._catalog:
             self._catalog.unregister(target.catalog_entry)
 
-        await self.save_manifest(tenant_id, space_id, manifest)
+        await self.save_manifest(instance_id, space_id, manifest)
         logger.info("WORKSPACE_ARCHIVE: space=%s artifact=%s", space_id, target.name)
         return f"Archived '{target.name}'. Files preserved on disk."
 
     # --- Tool Registration ---
 
     async def register_tool(
-        self, tenant_id: str, space_id: str, descriptor_file: str | dict,
+        self, instance_id: str, space_id: str, descriptor_file: str | dict,
     ) -> str:
         """Validate a descriptor and register the tool in the catalog.
 
@@ -317,7 +317,7 @@ class WorkspaceManager:
         if not descriptor_file:
             return "Error: descriptor_file must be a filename string."
 
-        space_dir = self._space_dir(tenant_id, space_id)
+        space_dir = self._space_dir(instance_id, space_id)
 
         # 1. Validate descriptor filename (no path traversal)
         if "/" in descriptor_file or "\\" in descriptor_file or ".." in descriptor_file:
@@ -394,13 +394,13 @@ class WorkspaceManager:
         logger.info("TOOL_REGISTER: name=%s space=%s source=workspace", name, space_id)
 
         # 8. Auto-add to manifest if not already tracked
-        manifest = await self.load_manifest(tenant_id, space_id)
+        manifest = await self.load_manifest(instance_id, space_id)
         existing_artifact = next(
             (a for a in manifest.artifacts if a.catalog_entry == name and a.status == "active"),
             None,
         )
         if not existing_artifact:
-            await self.add_artifact(tenant_id, space_id, {
+            await self.add_artifact(instance_id, space_id, {
                 "name": name,
                 "type": descriptor.get("type", "data_tool"),
                 "description": descriptor["description"],
@@ -418,7 +418,7 @@ class WorkspaceManager:
     # --- Workspace Tool Execution ---
 
     async def execute_workspace_tool(
-        self, tenant_id: str, tool_name: str, tool_input: dict, data_dir: str,
+        self, instance_id: str, tool_name: str, tool_input: dict, data_dir: str,
     ) -> str:
         """Execute a workspace-built tool by calling its implementation."""
         if not self._catalog:
@@ -441,7 +441,7 @@ class WorkspaceManager:
 
         # Write input data to a unique temp file (avoids collision on concurrent calls)
         import tempfile as _tf
-        space_dir = self._space_dir(tenant_id, home_space)
+        space_dir = self._space_dir(instance_id, home_space)
         space_dir.mkdir(parents=True, exist_ok=True)
         fd, input_path = _tf.mkstemp(suffix=".json", prefix="_tool_input_", dir=str(space_dir))
         input_filename = os.path.basename(input_path)
@@ -466,7 +466,7 @@ class WorkspaceManager:
 
         from kernos.kernel.code_exec import execute_code
         result = await execute_code(
-            tenant_id=tenant_id,
+            instance_id=instance_id,
             space_id=home_space,
             code=exec_code,
             timeout_seconds=30,
@@ -488,13 +488,13 @@ class WorkspaceManager:
 
     # --- Lazy Registration on Space Entry ---
 
-    async def ensure_registered(self, tenant_id: str, space_id: str) -> None:
+    async def ensure_registered(self, instance_id: str, space_id: str) -> None:
         """On space entry, ensure all active artifacts with catalog entries are registered.
 
         This is the lazy-load mechanism — manifests load and register tools
         on first visit, not at boot. No cost for unvisited spaces.
         """
-        manifest = await self.load_manifest(tenant_id, space_id)
+        manifest = await self.load_manifest(instance_id, space_id)
         for artifact in manifest.artifacts:
             if artifact.status != "active" or not artifact.catalog_entry:
                 continue
@@ -502,7 +502,7 @@ class WorkspaceManager:
                 # Not yet in catalog — load descriptor and register
                 desc_file = artifact.files.get("descriptor", "")
                 if desc_file:
-                    desc_path = self._space_dir(tenant_id, space_id) / desc_file
+                    desc_path = self._space_dir(instance_id, space_id) / desc_file
                     if desc_path.exists():
                         try:
                             descriptor = json.loads(desc_path.read_text(encoding="utf-8"))

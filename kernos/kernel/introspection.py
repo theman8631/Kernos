@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 async def build_user_truth_view(
-    tenant_id: str,
+    instance_id: str,
     state: Any,              # StateStore
     trigger_store: Any,      # TriggerStore | None
     registry: Any = None,    # CapabilityRegistry | None
@@ -25,7 +25,7 @@ async def build_user_truth_view(
 
     # --- Active Preferences (headline) ---
     try:
-        prefs = await state.query_preferences(tenant_id, active_only=True)
+        prefs = await state.query_preferences(instance_id, active_only=True)
         if prefs:
             lines = ["## Active Preferences"]
             for p in prefs:
@@ -40,7 +40,7 @@ async def build_user_truth_view(
                 # Show linked derived objects
                 if p.derived_trigger_ids:
                     for tid in p.derived_trigger_ids:
-                        trigger_info = await _get_trigger_summary(trigger_store, tenant_id, tid)
+                        trigger_info = await _get_trigger_summary(trigger_store, instance_id, tid)
                         lines.append(f"  → Trigger: {trigger_info}")
                 if p.derived_covenant_ids:
                     for cid in p.derived_covenant_ids:
@@ -52,7 +52,7 @@ async def build_user_truth_view(
     # --- Active Triggers ---
     try:
         if trigger_store:
-            triggers = await trigger_store.list_active(tenant_id)
+            triggers = await trigger_store.list_active(instance_id)
             linked = [t for t in triggers if t.source_preference_id]
             unlinked = [t for t in triggers if not t.source_preference_id]
             if unlinked:
@@ -67,7 +67,7 @@ async def build_user_truth_view(
 
     # --- Active Covenants ---
     try:
-        rules = await state.get_contract_rules(tenant_id, active_only=True)
+        rules = await state.get_contract_rules(instance_id, active_only=True)
         if rules:
             lines = ["## Active Rules"]
             for r in rules:
@@ -81,7 +81,7 @@ async def build_user_truth_view(
     # --- Key Facts (truth-oriented: high confidence, stated) ---
     try:
         knowledge = await state.query_knowledge(
-            tenant_id, active_only=True, limit=50,
+            instance_id, active_only=True, limit=50,
         )
         # Filter to high-confidence, non-preference entries
         key_facts = [
@@ -102,7 +102,7 @@ async def build_user_truth_view(
 
     # --- Context Spaces ---
     try:
-        spaces = await state.list_context_spaces(tenant_id)
+        spaces = await state.list_context_spaces(instance_id)
         active_spaces = [s for s in spaces if s.status == "active"]
         if active_spaces:
             from datetime import datetime, timezone
@@ -151,13 +151,13 @@ async def build_user_truth_view(
         logger.warning("Introspection: capabilities query failed: %s", exc)
 
     if not sections:
-        return "No active state found for this tenant."
+        return "No active state found for this instance."
 
     return "\n\n".join(sections)
 
 
 async def build_operator_state_view(
-    tenant_id: str,
+    instance_id: str,
     state: Any,
     trigger_store: Any,
     registry: Any = None,
@@ -170,12 +170,12 @@ async def build_operator_state_view(
     sections: list[str] = []
 
     # --- User truth view first ---
-    user_view = await build_user_truth_view(tenant_id, state, trigger_store, registry)
+    user_view = await build_user_truth_view(instance_id, state, trigger_store, registry)
     sections.append(user_view)
 
     # --- Context Spaces ---
     try:
-        spaces = await state.list_context_spaces(tenant_id)
+        spaces = await state.list_context_spaces(instance_id)
         if spaces:
             lines = ["## Context Spaces"]
             for s in spaces:
@@ -192,14 +192,14 @@ async def build_operator_state_view(
     try:
         legacy_triggers = []
         if trigger_store:
-            all_triggers = await trigger_store.list_all(tenant_id)
+            all_triggers = await trigger_store.list_all(instance_id)
             legacy_triggers = [
                 t for t in all_triggers
                 if not t.source_preference_id and t.status == "active"
             ]
         legacy_covenants = []
         try:
-            all_rules = await state.get_contract_rules(tenant_id, active_only=True)
+            all_rules = await state.get_contract_rules(instance_id, active_only=True)
             legacy_covenants = [
                 r for r in all_rules
                 if not getattr(r, "source_preference_id", "")
@@ -220,12 +220,12 @@ async def build_operator_state_view(
 
     # --- Stale Reconciliation ---
     try:
-        prefs = await state.query_preferences(tenant_id, active_only=True)
+        prefs = await state.query_preferences(instance_id, active_only=True)
         stale_items = []
         if trigger_store:
             for p in prefs:
                 for tid in p.derived_trigger_ids:
-                    t = await trigger_store.get(tenant_id, tid)
+                    t = await trigger_store.get(instance_id, tid)
                     if t and t.status not in ("active", "completed"):
                         stale_items.append(
                             f"- Pref {p.id} → Trigger {tid}: status={t.status} (expected active)"
@@ -257,10 +257,10 @@ async def build_operator_state_view(
     # --- Superseded Preferences (history note) ---
     try:
         superseded = await state.query_preferences(
-            tenant_id, status="superseded", active_only=False,
+            instance_id, status="superseded", active_only=False,
         )
         revoked = await state.query_preferences(
-            tenant_id, status="revoked", active_only=False,
+            instance_id, status="revoked", active_only=False,
         )
         inactive_count = len(superseded) + len(revoked)
         if inactive_count:
@@ -274,13 +274,13 @@ async def build_operator_state_view(
 
 
 async def _get_trigger_summary(
-    trigger_store: Any, tenant_id: str, trigger_id: str,
+    trigger_store: Any, instance_id: str, trigger_id: str,
 ) -> str:
     """Get a one-line summary of a trigger for display."""
     if not trigger_store:
         return trigger_id
     try:
-        t = await trigger_store.get(tenant_id, trigger_id)
+        t = await trigger_store.get(instance_id, trigger_id)
         if not t:
             return f"{trigger_id} (not found)"
         next_fire = f", next: {t.next_fire_at[:16]}" if t.next_fire_at else ""

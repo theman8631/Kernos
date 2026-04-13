@@ -6,17 +6,17 @@ from datetime import datetime, timezone
 
 import pytest
 
-from kernos.persistence import derive_tenant_id
+from kernos.persistence import derive_instance_id
 from kernos.persistence.json_file import (
     JsonAuditStore,
     JsonConversationStore,
-    JsonTenantStore,
+    JsonInstanceStore,
 )
 from kernos.messages.models import AuthLevel, NormalizedMessage
 
 
 # ---------------------------------------------------------------------------
-# derive_tenant_id (AC18)
+# derive_instance_id (AC18)
 # ---------------------------------------------------------------------------
 
 
@@ -29,26 +29,26 @@ def _make_msg(platform: str = "sms", sender: str = "+15555550100") -> Normalized
         platform_capabilities=["text"],
         conversation_id="conv-1",
         timestamp=datetime.now(timezone.utc),
-        tenant_id="",  # Empty so derive_tenant_id uses platform:sender fallback
+        instance_id="",  # Empty so derive_instance_id uses platform:sender fallback
     )
 
 
-def test_derive_tenant_id_consistent():
+def test_derive_instance_id_consistent():
     msg = _make_msg(platform="discord", sender="123456789")
-    assert derive_tenant_id(msg) == "discord:123456789"
-    assert derive_tenant_id(msg) == derive_tenant_id(msg)
+    assert derive_instance_id(msg) == "discord:123456789"
+    assert derive_instance_id(msg) == derive_instance_id(msg)
 
 
-def test_derive_tenant_id_different_platforms():
+def test_derive_instance_id_different_platforms():
     sms_msg = _make_msg(platform="sms", sender="+15555550100")
     discord_msg = _make_msg(platform="discord", sender="+15555550100")
-    assert derive_tenant_id(sms_msg) != derive_tenant_id(discord_msg)
+    assert derive_instance_id(sms_msg) != derive_instance_id(discord_msg)
 
 
-def test_derive_tenant_id_different_senders():
+def test_derive_instance_id_different_senders():
     msg1 = _make_msg(sender="+15555550100")
     msg2 = _make_msg(sender="+15555550101")
-    assert derive_tenant_id(msg1) != derive_tenant_id(msg2)
+    assert derive_instance_id(msg1) != derive_instance_id(msg2)
 
 
 # ---------------------------------------------------------------------------
@@ -70,13 +70,13 @@ async def test_append_and_get_recent(tmp_path):
         "tenant1",
         "conv1",
         {"role": "user", "content": "Hello", "timestamp": "2026-03-01T00:00:00Z",
-         "platform": "sms", "tenant_id": "tenant1", "conversation_id": "conv1"},
+         "platform": "sms", "instance_id": "tenant1", "conversation_id": "conv1"},
     )
     await store.append(
         "tenant1",
         "conv1",
         {"role": "assistant", "content": "Hi there!", "timestamp": "2026-03-01T00:00:01Z",
-         "platform": "sms", "tenant_id": "tenant1", "conversation_id": "conv1"},
+         "platform": "sms", "instance_id": "tenant1", "conversation_id": "conv1"},
     )
     result = await store.get_recent("tenant1", "conv1")
     assert len(result) == 2
@@ -91,7 +91,7 @@ async def test_get_recent_returns_only_role_and_content(tmp_path):
         "tenant1",
         "conv1",
         {"role": "user", "content": "Test", "timestamp": "2026-03-01T00:00:00Z",
-         "platform": "sms", "tenant_id": "tenant1", "conversation_id": "conv1"},
+         "platform": "sms", "instance_id": "tenant1", "conversation_id": "conv1"},
     )
     result = await store.get_recent("tenant1", "conv1")
     assert len(result) == 1
@@ -106,7 +106,7 @@ async def test_get_recent_limit(tmp_path):
             "tenant1",
             "conv1",
             {"role": "user", "content": f"msg {i}", "timestamp": "2026-03-01T00:00:00Z",
-             "platform": "sms", "tenant_id": "tenant1", "conversation_id": "conv1"},
+             "platform": "sms", "instance_id": "tenant1", "conversation_id": "conv1"},
         )
     result = await store.get_recent("tenant1", "conv1", limit=20)
     assert len(result) == 20
@@ -121,7 +121,7 @@ async def test_get_recent_respects_custom_limit(tmp_path):
         await store.append(
             "t1", "c1",
             {"role": "user", "content": f"msg {i}", "timestamp": "t", "platform": "sms",
-             "tenant_id": "t1", "conversation_id": "c1"},
+             "instance_id": "t1", "conversation_id": "c1"},
         )
     result = await store.get_recent("t1", "c1", limit=5)
     assert len(result) == 5
@@ -135,7 +135,7 @@ async def test_archive_moves_file_and_leaves_metadata(tmp_path):
         "tenant1",
         "conv1",
         {"role": "user", "content": "Test", "timestamp": "2026-03-01T00:00:00Z",
-         "platform": "sms", "tenant_id": "tenant1", "conversation_id": "conv1"},
+         "platform": "sms", "instance_id": "tenant1", "conversation_id": "conv1"},
     )
 
     # Verify the file exists before archiving
@@ -157,7 +157,7 @@ async def test_archive_moves_file_and_leaves_metadata(tmp_path):
     with open(archived_file) as f:
         archived = json.load(f)
     assert "archived_at" in archived
-    assert archived["tenant_id"] == "tenant1"
+    assert archived["instance_id"] == "tenant1"
     assert archived["conversation_id"] == "conv1"
     assert len(archived["entries"]) == 1
 
@@ -168,15 +168,15 @@ async def test_archive_noop_for_nonexistent_conversation(tmp_path):
     await store.archive("tenant1", "nonexistent")  # must not raise
 
 
-async def test_conversations_are_tenant_isolated(tmp_path):
-    """Different tenant_ids produce separate stores."""
+async def test_conversations_areinstance_isolated(tmp_path):
+    """Different instance_ids produce separate stores."""
     store = JsonConversationStore(tmp_path)
     await store.append("tenant_a", "conv1",
                        {"role": "user", "content": "A's message", "timestamp": "t",
-                        "platform": "sms", "tenant_id": "tenant_a", "conversation_id": "conv1"})
+                        "platform": "sms", "instance_id": "tenant_a", "conversation_id": "conv1"})
     await store.append("tenant_b", "conv1",
                        {"role": "user", "content": "B's message", "timestamp": "t",
-                        "platform": "sms", "tenant_id": "tenant_b", "conversation_id": "conv1"})
+                        "platform": "sms", "instance_id": "tenant_b", "conversation_id": "conv1"})
 
     a_history = await store.get_recent("tenant_a", "conv1")
     b_history = await store.get_recent("tenant_b", "conv1")
@@ -188,15 +188,15 @@ async def test_conversations_are_tenant_isolated(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# TenantStore (AC14)
+# InstanceStore (AC14)
 # ---------------------------------------------------------------------------
 
 
 async def test_get_or_create_creates_on_first_call(tmp_path):
-    """AC14: get_or_create creates a tenant record for a new tenant."""
-    store = JsonTenantStore(tmp_path)
+    """AC14: get_or_create creates an instance record for a new tenant."""
+    store = JsonInstanceStore(tmp_path)
     record = await store.get_or_create("discord:123456")
-    assert record["tenant_id"] == "discord:123456"
+    assert record["instance_id"] == "discord:123456"
     assert record["status"] == "active"
     assert "created_at" in record
     assert "capabilities" in record
@@ -204,16 +204,16 @@ async def test_get_or_create_creates_on_first_call(tmp_path):
 
 async def test_get_or_create_returns_existing_on_second_call(tmp_path):
     """AC14: get_or_create returns the same record on subsequent calls."""
-    store = JsonTenantStore(tmp_path)
+    store = JsonInstanceStore(tmp_path)
     first = await store.get_or_create("discord:123456")
     second = await store.get_or_create("discord:123456")
-    assert first["tenant_id"] == second["tenant_id"]
+    assert first["instance_id"] == second["instance_id"]
     assert first["created_at"] == second["created_at"]
 
 
 async def test_get_or_create_creates_full_directory_structure(tmp_path):
     """get_or_create creates archive subdirs from day one."""
-    store = JsonTenantStore(tmp_path)
+    store = JsonInstanceStore(tmp_path)
     await store.get_or_create("discord:123456")
 
     tenant_root = tmp_path / "discord_123456"
@@ -224,8 +224,8 @@ async def test_get_or_create_creates_full_directory_structure(tmp_path):
         assert (archive / subdir).exists(), f"archive/{subdir} missing"
 
 
-async def test_tenant_save_and_reload(tmp_path):
-    store = JsonTenantStore(tmp_path)
+async def testinstance_save_and_reload(tmp_path):
+    store = JsonInstanceStore(tmp_path)
     record = await store.get_or_create("sms:+15555550100")
     record["capabilities"]["google-calendar"] = {"status": "connected"}
     await store.save("sms:+15555550100", record)
@@ -247,7 +247,7 @@ async def test_audit_log_creates_entry(tmp_path):
         {
             "type": "tool_call",
             "timestamp": "2026-03-01T16:30:00Z",
-            "tenant_id": "discord:123456",
+            "instance_id": "discord:123456",
             "conversation_id": "chan-1",
             "tool_name": "list_events",
             "tool_input": {"date": "2026-03-01"},
@@ -268,9 +268,9 @@ async def test_audit_log_creates_entry(tmp_path):
 
 async def test_audit_log_appends_multiple_entries(tmp_path):
     store = JsonAuditStore(tmp_path)
-    await store.log("t1", {"type": "tool_call", "timestamp": "t", "tenant_id": "t1",
+    await store.log("t1", {"type": "tool_call", "timestamp": "t", "instance_id": "t1",
                            "conversation_id": "c1", "tool_name": "foo", "tool_input": {}})
-    await store.log("t1", {"type": "tool_result", "timestamp": "t", "tenant_id": "t1",
+    await store.log("t1", {"type": "tool_result", "timestamp": "t", "instance_id": "t1",
                            "conversation_id": "c1", "tool_name": "foo", "tool_output": "bar"})
 
     import json

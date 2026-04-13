@@ -154,7 +154,7 @@ async def validate_covenant_set(
     state: StateStore,
     events,
     reasoning_service,
-    tenant_id: str,
+    instance_id: str,
     new_rule_id: str,
     awareness_state: StateStore | None = None,
 ) -> dict:
@@ -172,7 +172,7 @@ async def validate_covenant_set(
     stats = {"merges": 0, "conflicts": 0, "rewrites": 0, "supersedes": 0}
 
     try:
-        active_rules = await state.get_contract_rules(tenant_id, active_only=True)
+        active_rules = await state.get_contract_rules(instance_id, active_only=True)
         if len(active_rules) <= 1:
             return stats
 
@@ -192,7 +192,7 @@ async def validate_covenant_set(
             rule_map[rule.id] = rule
 
         user_msg = (
-            "Active covenant rules for this tenant:\n\n"
+            "Active covenant rules for this instance:\n\n"
             + "\n".join(rule_lines)
             + f"\n\nThe most recently written rule is: {new_rule_id}\n\n"
             "Identify any SUPERSEDE, MERGE, CONFLICT, or REWRITE issues. "
@@ -222,22 +222,22 @@ async def validate_covenant_set(
 
             if action_type == "SUPERSEDE":
                 await _handle_supersede(
-                    state, events, tenant_id, action, rule_map, stats,
+                    state, events, instance_id, action, rule_map, stats,
                 )
 
             elif action_type == "MERGE":
                 await _handle_merge(
-                    state, events, tenant_id, action, rule_map, stats,
+                    state, events, instance_id, action, rule_map, stats,
                 )
 
             elif action_type == "CONFLICT":
                 await _handle_conflict(
-                    state, events, tenant_id, action, rule_map, stats,
+                    state, events, instance_id, action, rule_map, stats,
                 )
 
             elif action_type == "REWRITE":
                 await _handle_rewrite(
-                    state, events, tenant_id, action, rule_map, stats,
+                    state, events, instance_id, action, rule_map, stats,
                 )
 
     except Exception as exc:
@@ -249,7 +249,7 @@ async def validate_covenant_set(
 async def _handle_supersede(
     state: StateStore,
     events,
-    tenant_id: str,
+    instance_id: str,
     action: dict,
     rule_map: dict[str, CovenantRule],
     stats: dict,
@@ -286,7 +286,7 @@ async def _handle_supersede(
         retire_rule, keep_rule = keep_rule, retire_rule
 
     await state.update_contract_rule(
-        tenant_id, retire_id,
+        instance_id, retire_id,
         {"superseded_by": keep_id, "updated_at": utc_now()},
     )
 
@@ -298,7 +298,7 @@ async def _handle_supersede(
 
     try:
         await emit_event(
-            events, "covenant.rule.superseded", tenant_id,
+            events, "covenant.rule.superseded", instance_id,
             "covenant_validator",
             payload={
                 "retired_rule_id": retire_id,
@@ -313,7 +313,7 @@ async def _handle_supersede(
 async def _handle_merge(
     state: StateStore,
     events,
-    tenant_id: str,
+    instance_id: str,
     action: dict,
     rule_map: dict[str, CovenantRule],
     stats: dict,
@@ -337,7 +337,7 @@ async def _handle_merge(
 
     for rid in valid_supersede:
         await state.update_contract_rule(
-            tenant_id, rid,
+            instance_id, rid,
             {"superseded_by": keep_id, "updated_at": utc_now()},
         )
 
@@ -349,7 +349,7 @@ async def _handle_merge(
 
     try:
         await emit_event(
-            events, EventType.COVENANT_RULE_MERGED, tenant_id,
+            events, EventType.COVENANT_RULE_MERGED, instance_id,
             "covenant_validator",
             payload={
                 "kept_rule_id": keep_id,
@@ -364,7 +364,7 @@ async def _handle_merge(
 async def _handle_conflict(
     state: StateStore,
     events,
-    tenant_id: str,
+    instance_id: str,
     action: dict,
     rule_map: dict[str, CovenantRule],
     stats: dict,
@@ -394,7 +394,7 @@ async def _handle_conflict(
         keep_id = sorted_by_age[1]
 
         await state.update_contract_rule(
-            tenant_id, retire_id,
+            instance_id, retire_id,
             {"superseded_by": keep_id, "updated_at": utc_now()},
         )
         _conflict_tracker.pop(pair_key, None)
@@ -437,7 +437,7 @@ async def _handle_conflict(
         )
 
         try:
-            await state.save_whisper(tenant_id, whisper)
+            await state.save_whisper(instance_id, whisper)
         except Exception as exc:
             logger.warning("COVENANT_VALIDATE: failed to save conflict whisper: %s", exc)
     else:
@@ -446,7 +446,7 @@ async def _handle_conflict(
 
     try:
         await emit_event(
-            events, EventType.COVENANT_CONTRADICTION_DETECTED, tenant_id,
+            events, EventType.COVENANT_CONTRADICTION_DETECTED, instance_id,
             "covenant_validator",
             payload={
                 "rule_ids": valid_ids,
@@ -461,7 +461,7 @@ async def _handle_conflict(
 async def _handle_rewrite(
     state: StateStore,
     events,
-    tenant_id: str,
+    instance_id: str,
     action: dict,
     rule_map: dict[str, CovenantRule],
     stats: dict,
@@ -496,7 +496,7 @@ async def _handle_rewrite(
     )
     await state.add_contract_rule(new_rule)
     await state.update_contract_rule(
-        tenant_id, rule_id,
+        instance_id, rule_id,
         {"superseded_by": new_id, "updated_at": now},
     )
 
@@ -508,7 +508,7 @@ async def _handle_rewrite(
 
     try:
         await emit_event(
-            events, EventType.COVENANT_RULE_UPDATED, tenant_id,
+            events, EventType.COVENANT_RULE_UPDATED, instance_id,
             "covenant_validator",
             payload={
                 "old_rule_id": rule_id,
@@ -528,14 +528,14 @@ async def _handle_rewrite(
 
 async def supersede_rules(
     state: StateStore,
-    tenant_id: str,
+    instance_id: str,
     rules_to_supersede: list[CovenantRule],
     superseded_by: str,
 ) -> None:
     """Mark rules as superseded."""
     for rule in rules_to_supersede:
         await state.update_contract_rule(
-            tenant_id,
+            instance_id,
             rule.id,
             {"superseded_by": superseded_by, "updated_at": utc_now()},
         )
@@ -548,7 +548,7 @@ async def supersede_rules(
 
 async def handle_manage_covenants(
     state: StateStore,
-    tenant_id: str,
+    instance_id: str,
     action: str,
     rule_id: str = "",
     new_description: str = "",
@@ -556,27 +556,27 @@ async def handle_manage_covenants(
 ) -> str:
     """Handle the manage_covenants kernel tool."""
     if action == "list":
-        return await _list_covenants(state, tenant_id, show_all)
+        return await _list_covenants(state, instance_id, show_all)
     elif action == "remove":
         if not rule_id:
             return "Error: rule_id is required for remove action."
-        return await _remove_covenant(state, tenant_id, rule_id)
+        return await _remove_covenant(state, instance_id, rule_id)
     elif action == "update":
         if not rule_id:
             return "Error: rule_id is required for update action."
         if not new_description:
             return "Error: new_description is required for update action."
-        return await _update_covenant(state, tenant_id, rule_id, new_description)
+        return await _update_covenant(state, instance_id, rule_id, new_description)
     else:
         return f"Error: Unknown action '{action}'. Use 'list', 'remove', or 'update'."
 
 
-async def _list_covenants(state: StateStore, tenant_id: str, show_all: bool) -> str:
+async def _list_covenants(state: StateStore, instance_id: str, show_all: bool) -> str:
     """List covenant rules grouped by type."""
     if show_all:
-        all_rules = await state.get_contract_rules(tenant_id, active_only=False)
+        all_rules = await state.get_contract_rules(instance_id, active_only=False)
     else:
-        all_rules = await state.get_contract_rules(tenant_id, active_only=True)
+        all_rules = await state.get_contract_rules(instance_id, active_only=True)
 
     if not all_rules:
         return "No covenant rules found."
@@ -610,9 +610,9 @@ async def _list_covenants(state: StateStore, tenant_id: str, show_all: bool) -> 
     return "\n".join(lines)
 
 
-async def _remove_covenant(state: StateStore, tenant_id: str, rule_id: str) -> str:
+async def _remove_covenant(state: StateStore, instance_id: str, rule_id: str) -> str:
     """Soft-remove a covenant rule."""
-    rules = await state.get_contract_rules(tenant_id, active_only=False)
+    rules = await state.get_contract_rules(instance_id, active_only=False)
     target = None
     for r in rules:
         if r.id == rule_id:
@@ -625,7 +625,7 @@ async def _remove_covenant(state: StateStore, tenant_id: str, rule_id: str) -> s
         return f"Rule '{rule_id}' is already removed/superseded."
 
     await state.update_contract_rule(
-        tenant_id, rule_id,
+        instance_id, rule_id,
         {"superseded_by": "user_removed", "updated_at": utc_now()},
     )
     logger.info("COVENANT_REMOVE: rule=%s desc=%r", rule_id, target.description)
@@ -633,12 +633,12 @@ async def _remove_covenant(state: StateStore, tenant_id: str, rule_id: str) -> s
 
 
 async def _update_covenant(
-    state: StateStore, tenant_id: str, rule_id: str, new_description: str,
+    state: StateStore, instance_id: str, rule_id: str, new_description: str,
 ) -> str:
     """Update a covenant rule by creating a new one and superseding the old."""
     from dataclasses import replace as _replace
 
-    rules = await state.get_contract_rules(tenant_id, active_only=False)
+    rules = await state.get_contract_rules(instance_id, active_only=False)
     target = None
     for r in rules:
         if r.id == rule_id:
@@ -665,7 +665,7 @@ async def _update_covenant(
     await state.add_contract_rule(new_rule)
 
     await state.update_contract_rule(
-        tenant_id, rule_id,
+        instance_id, rule_id,
         {"superseded_by": new_id, "updated_at": now},
     )
     logger.info(
@@ -685,7 +685,7 @@ async def _update_covenant(
 
 async def run_covenant_cleanup(
     state: StateStore,
-    tenant_id: str,
+    instance_id: str,
     embedding_service=None,
     reasoning_service=None,
 ) -> dict:
@@ -698,7 +698,7 @@ async def run_covenant_cleanup(
     """
     from kernos.kernel.contract_parser import compute_word_overlap
 
-    all_rules = await state.get_contract_rules(tenant_id, active_only=False)
+    all_rules = await state.get_contract_rules(instance_id, active_only=False)
     active_rules = [r for r in all_rules if not r.superseded_by and r.active]
 
     stats = {"deduped": 0, "contradictions_resolved": 0}
@@ -715,7 +715,7 @@ async def run_covenant_cleanup(
             if sim > 0.80:
                 older, newer = (existing, rule) if existing.created_at <= rule.created_at else (rule, existing)
                 await state.update_contract_rule(
-                    tenant_id, older.id,
+                    instance_id, older.id,
                     {"superseded_by": newer.id, "updated_at": utc_now()},
                 )
                 stats["deduped"] += 1
@@ -731,7 +731,7 @@ async def run_covenant_cleanup(
             seen.append(rule)
 
     # Phase 2: Contradiction detection — MUST vs MUST_NOT with word overlap > 0.70
-    all_rules = await state.get_contract_rules(tenant_id, active_only=False)
+    all_rules = await state.get_contract_rules(instance_id, active_only=False)
     active_rules = [r for r in all_rules if not r.superseded_by and r.active]
 
     musts = [r for r in active_rules if r.rule_type == "must"]
@@ -753,7 +753,7 @@ async def run_covenant_cleanup(
             )
 
             await state.update_contract_rule(
-                tenant_id, older.id,
+                instance_id, older.id,
                 {"superseded_by": newer.id, "updated_at": utc_now()},
             )
             stats["contradictions_resolved"] += 1
@@ -764,8 +764,8 @@ async def run_covenant_cleanup(
 
     if stats["deduped"] or stats["contradictions_resolved"]:
         logger.info(
-            "COVENANT_CLEANUP: tenant=%s deduped=%d contradictions=%d",
-            tenant_id, stats["deduped"], stats["contradictions_resolved"],
+            "COVENANT_CLEANUP: instance=%s deduped=%d contradictions=%d",
+            instance_id, stats["deduped"], stats["contradictions_resolved"],
         )
 
     return stats

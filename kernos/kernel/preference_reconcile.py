@@ -55,7 +55,7 @@ async def _cascade_revoke(
     if trigger_store and preference.derived_trigger_ids:
         for tid in preference.derived_trigger_ids:
             try:
-                trigger = await trigger_store.get(preference.tenant_id, tid)
+                trigger = await trigger_store.get(preference.instance_id, tid)
                 if trigger and trigger.status == "active":
                     trigger.status = "paused"
                     await trigger_store.save(trigger)
@@ -75,7 +75,7 @@ async def _cascade_revoke(
         for cid in preference.derived_covenant_ids:
             try:
                 await state.update_contract_rule(
-                    preference.tenant_id, cid,
+                    preference.instance_id, cid,
                     {"active": False, "superseded_by": f"pref_revoked:{preference.id}"},
                 )
                 logger.info(
@@ -115,7 +115,7 @@ async def _cascade_parameter_update(
     if trigger_store and preference.derived_trigger_ids:
         for tid in preference.derived_trigger_ids:
             try:
-                trigger = await trigger_store.get(preference.tenant_id, tid)
+                trigger = await trigger_store.get(preference.instance_id, tid)
                 if trigger and trigger.status == "active":
                     # Merge preference parameters into trigger action_params
                     trigger.action_params.update(preference.parameters)
@@ -158,7 +158,7 @@ async def _refresh_derived_ids(
     # Refresh trigger IDs
     if trigger_store:
         try:
-            all_triggers = await trigger_store.list_all(preference.tenant_id)
+            all_triggers = await trigger_store.list_all(preference.instance_id)
             preference.derived_trigger_ids = [
                 t.trigger_id for t in all_triggers
                 if t.source_preference_id == preference.id
@@ -168,7 +168,7 @@ async def _refresh_derived_ids(
 
     # Refresh covenant IDs
     try:
-        rules = await state.query_covenant_rules(preference.tenant_id, active_only=False)
+        rules = await state.query_covenant_rules(preference.instance_id, active_only=False)
         preference.derived_covenant_ids = [
             r.id for r in rules
             if getattr(r, "source_preference_id", "") == preference.id

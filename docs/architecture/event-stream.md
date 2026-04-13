@@ -12,7 +12,7 @@ Each event (`kernos/kernel/events.py`) has:
 
 - **id** — time-sortable identifier (`evt_{timestamp_us}_{random}`)
 - **type** — hierarchical string (e.g., `message.received`, `reasoning.response`, `tool.called`)
-- **tenant_id** — isolation key
+- **instance_id** — isolation key
 - **timestamp** — ISO 8601
 - **source** — which component emitted it
 - **payload** — type-specific data
@@ -23,7 +23,7 @@ Each event (`kernos/kernel/events.py`) has:
 Events are partitioned by tenant and date into daily JSON files:
 
 ```
-data/{tenant_id}/events/{date}.json
+data/{instance_id}/events/{date}.json
 ```
 
 Uses `filelock` for single-process safety. Not safe for multi-worker (the abstract interface allows swapping backends later).

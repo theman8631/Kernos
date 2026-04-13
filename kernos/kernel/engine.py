@@ -53,7 +53,7 @@ class TaskEngine:
             await emit_event(
                 self._events,
                 EventType.TASK_CREATED,
-                task.tenant_id,
+                task.instance_id,
                 "task_engine",
                 payload={
                     "task_id": task.id,
@@ -83,7 +83,7 @@ class TaskEngine:
                 await emit_event(
                     self._events,
                     EventType.TASK_COMPLETED,
-                    task.tenant_id,
+                    task.instance_id,
                     "task_engine",
                     payload={
                         "task_id": task.id,
@@ -111,7 +111,7 @@ class TaskEngine:
                 await emit_event(
                     self._events,
                     EventType.TASK_FAILED,
-                    task.tenant_id,
+                    task.instance_id,
                     "task_engine",
                     payload={
                         "task_id": task.id,

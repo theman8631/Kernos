@@ -12,7 +12,7 @@ A context space (`ContextSpace` in `kernos/kernel/spaces.py`) has:
 - **status** — `active`, `dormant`, or `archived`
 - **posture** — optional working style override (e.g., "be more formal in this space")
 - **active_tools** — list of capabilities activated for this space (empty = system defaults only)
-- **is_default** — true for the daily space (one per tenant)
+- **is_default** — true for the daily space (one per instance)
 
 ## Instance vs. Space
 

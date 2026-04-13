@@ -101,7 +101,7 @@ When `work_mode=True`, the router signals intentional domain work. The handler l
 
 **Structure:** Tree. General (root default, depth 0) → Domain (depth 1) → Subdomain (depth 2). System space is a separate root plane.
 
-**Fields:** `id`, `tenant_id`, `name`, `description`, `space_type` ("general" | "domain" | "subdomain" | "system"), `status`, `is_default`, `parent_id`, `depth`, `aliases`, `posture`, `active_tools`, `local_affordance_set`, `last_catalog_version`, `renamed_from`, `renamed_at`, `created_at`, `last_active_at`
+**Fields:** `id`, `instance_id`, `name`, `description`, `space_type` ("general" | "domain" | "subdomain" | "system"), `status`, `is_default`, `parent_id`, `depth`, `aliases`, `posture`, `active_tools`, `local_affordance_set`, `last_catalog_version`, `renamed_from`, `renamed_at`, `created_at`, `last_active_at`
 
 **Posture:** Working style note set by the domain assessment LLM. Injected into the NOW block for non-default spaces. Examples: "Creative and improvisational", "Precise and action-oriented".
 
@@ -219,7 +219,7 @@ Knowledge entries deduplicated by normalized content. Each tagged with provenanc
 
 **File:** `kernos/kernel/state.py` — `KnowledgeEntry`
 
-Fields: id, tenant_id, content, lifecycle_archetype, context_space, confidence, source_event_id, source_description, last_referenced, tags, storage_strength, salience, foresight_signal, foresight_expires, entity_node_id, created_at, expired_at, valid_at, invalid_at.
+Fields: id, instance_id, content, lifecycle_archetype, context_space, confidence, source_event_id, source_description, last_referenced, tags, storage_strength, salience, foresight_signal, foresight_expires, entity_node_id, created_at, expired_at, valid_at, invalid_at.
 
 **Lifecycle archetypes:** identity, habitual, structural, episodic, contextual, ephemeral.
 
@@ -353,7 +353,7 @@ The agent improves itself through covenants and procedures without touching sour
 
 ### Behavioral Pattern Detection
 
-Post-turn, the friction observer tracks recurring user corrections. Four pattern types with thresholds: format_correction (3), workflow_correction (3), boundary_correction (2), preference_drift (2). Correction fingerprints (first 80 chars, normalized) are accumulated in `data/{tenant}/state/behavioral_patterns.json`.
+Post-turn, the friction observer tracks recurring user corrections. Four pattern types with thresholds: format_correction (3), workflow_correction (3), boundary_correction (2), preference_drift (2). Correction fingerprints (first 80 chars, normalized) are accumulated in `data/{instance}/state/behavioral_patterns.json`.
 
 When threshold is met, a whisper is generated proposing a covenant or procedure. Proposals are classified:
 - **behavioral** → propose covenant (tier="situational" via Pass 1 selective injection)
@@ -386,7 +386,7 @@ Per-tenant JSONL ring buffer (200 turns) capturing structured events: provider e
 
 Three tools for the agent to investigate and propose fixes:
 - `diagnose_issue` — gathers runtime trace + source + friction evidence, LLM synthesizes diagnosis
-- `propose_fix` — writes structured spec to `data/{tenant}/specs/proposed/`. Protected boundary check blocks gate/auth/credentials/security.
+- `propose_fix` — writes structured spec to `data/{instance}/specs/proposed/`. Protected boundary check blocks gate/auth/credentials/security.
 - `submit_spec` — moves proposed → submitted, generates whisper notification
 
 ### /debug Command
@@ -417,19 +417,13 @@ Background task. Evaluates proactive insights ("whispers") on a timer (default 1
 
 **File:** `kernos/kernel/state_sqlite.py`
 
-`SqliteStateStore` implements the `StateStore` ABC (38 methods) using SQLite + WAL mode. One database per tenant (`data/{tenant}/kernos.db`). Hybrid storage: frequently queried fields as indexed columns, rest in JSON overflow blob. Selectable via `KERNOS_STORE_BACKEND=sqlite` env var. `JsonStateStore` remains as fallback.
+`SqliteStateStore` implements the `StateStore` ABC (38 methods) using SQLite + WAL mode. One database per instance (`data/{instance}/kernos.db`). Hybrid storage: frequently queried fields as indexed columns, rest in JSON overflow blob. Selectable via `KERNOS_STORE_BACKEND=sqlite` env var. `JsonStateStore` remains as fallback.
 
 ### Instance Database
 
 **File:** `kernos/kernel/instance_db.py`
 
-Shared database (`data/instance.db`) for cross-tenant state: members, member_channels, message_relay (V2), shared_spaces (V2). Nearly empty in V1 — just the owner as a member. Architectural slot for multi-tenant without a second migration.
-
-### Migration Tool
-
-**File:** `kernos/tools/migrate_to_sqlite.py`
-
-One-time per-tenant migration: reads JSON files, writes to SQLite, validates counts, backs up JSON to `json_backup/`. Supports `--dry-run`.
+Shared database (`data/instance.db`) for cross-instance state: members, member_channels, message_relay (V2), shared_spaces (V2). Nearly empty in V1 — just the owner as a member. Architectural slot for multi-instance without a second migration.
 
 ---
 
@@ -519,7 +513,7 @@ Shadow archive architecture. `delete_file` preserves files in `.deleted/`. Knowl
 - Memory as the moat — trust earned through thousands of correct small actions
 - Ambient, not demanding
 - No destructive deletions — shadow archive architecture
-- Every piece of state keyed to tenant_id from day one
+- Every piece of state keyed to instance_id from day one
 - Handler never knows about adapters; adapters never know about the handler
 - Infrastructure-level enforcement — agent thinks, kernel enforces
 - Subtraction principle — removal > structural enforcement > simplification > addition

@@ -48,7 +48,7 @@ class Task:
 
     id: str
     type: TaskType
-    tenant_id: str
+    instance_id: str
     conversation_id: str
     status: TaskStatus = TaskStatus.PENDING
     priority: int = TaskPriority.USER_INTERACTIVE
