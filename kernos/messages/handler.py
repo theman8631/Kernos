@@ -3010,6 +3010,8 @@ class MessageHandler:
             message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
         if message.platform == "discord":
             self._channel_registry.update_target("discord", message.conversation_id)
+        if message.platform == "telegram":
+            self._channel_registry.update_target("telegram", message.conversation_id)
 
         if instance_id in self._secure_input_state:
             state = self._secure_input_state[instance_id]

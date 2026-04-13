@@ -446,6 +446,26 @@ async def on_ready():
             sms_poller._interval, owner_phone,
         )
 
+    # Register Telegram channel if bot token is configured
+    telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if telegram_token:
+        from kernos.messages.adapters.telegram_bot import TelegramAdapter
+        tg_adapter = TelegramAdapter()
+        handler.register_adapter("telegram", tg_adapter)
+        handler.register_channel(
+            name="telegram", display_name="Telegram", platform="telegram",
+            can_send_outbound=True, channel_target="",
+        )
+        from kernos.telegram_poller import TelegramPoller
+        tg_poller = TelegramPoller(
+            adapter=tg_adapter, handler=handler,
+            bot_token=telegram_token,
+        )
+        await tg_poller.start()
+        logger.info("Telegram channel registered — long polling active")
+    else:
+        logger.warning("TELEGRAM_BOT_TOKEN not set — Telegram adapter unavailable")
+
     # CLI is always registered but can't push
     handler.register_channel(
         name="cli", display_name="CLI Terminal", platform="cli",

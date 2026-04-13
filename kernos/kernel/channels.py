@@ -155,6 +155,9 @@ _CHANNEL_ALIASES: dict[str, str] = {
     "discord": "discord",
     "chat": "discord",
     "over chat": "discord",
+    # Telegram aliases
+    "telegram": "telegram",
+    "tg": "telegram",
     # Email (future — when Gmail is connected)
     "email": "email",
     "gmail": "email",
