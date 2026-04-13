@@ -13,6 +13,7 @@ class ContextSpace:
     id: str                          # "space_{uuid8}"
     instance_id: str
     name: str
+    member_id: str = ""              # Owner member. Empty = instance-level (legacy/shared)
     description: str = ""            # Router uses this for routing decisions
     space_type: str = "general"      # "general" | "domain" | "subdomain" | "system"
     status: str = "active"           # "active" | "dormant" | "archived"

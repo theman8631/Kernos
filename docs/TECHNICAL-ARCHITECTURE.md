@@ -439,9 +439,32 @@ Shared database (`data/instance.db`) for cross-instance state: members, member_c
 
 ---
 
-## 13b. Member Identity
+## 13b. Member Identity & Multi-Member
 
-**File:** `kernos/kernel/instance_db.py`, `kernos/kernel/members.py`
+**File:** `kernos/kernel/instance_db.py`, `kernos/kernel/members.py`, `kernos/kernel/soul.py`
+
+### The Model
+
+One Kernos instance, one shared identity (Soul), many members. Each member is a first-class person — same personality, different relationship. The initial user is just the first member who bootstrapped the instance.
+
+### Soul Split
+
+The Soul holds instance-level identity: agent_name, emoji, personality_notes, hatched. Per-member state lives in `member_profiles` in instance.db: display_name, timezone, communication_style, interaction_count, bootstrap_graduated. Deprecated Soul fields (user_name, timezone, communication_style, interaction_count, bootstrap_graduated) kept for JSON compat but never read at runtime.
+
+### Member Profile Lifecycle
+
+On invite claim: profile seeded with display_name. On first turn: profile auto-created if missing. Owner migration: Soul per-user fields copied to owner's profile on first boot.
+
+### Per-Member Context
+
+- **NOW block**: "Speaking with: {name} ({role})" — identifies current member each turn
+- **STATE block**: Member's name and communication style, not the owner's
+- **Knowledge**: `query_knowledge(member_id=X)` filters to own entries + unowned legacy
+- **Covenants**: `member_id` field on CovenantRule. Instance-level (spirit) stays shared
+- **Conversation logs**: Keyed to (instance, space, member). Lazy migration from legacy paths
+- **Compaction**: Per-(instance, space, member). Same engine, member-scoped
+- **Spaces**: `member_id` on ContextSpace. Each member has own General space. Router filters by member
+- **Bootstrap**: Per-member prompt + graduation. Members with known names skip the name question
 
 ### Resolution Flow
 

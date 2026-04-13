@@ -1,6 +1,9 @@
-"""Soul — the agent's identity for a specific user.
+"""Soul — the agent's shared identity for a Kernos instance.
 
-Set at hatch (first conversation). Refined through interactions.
+The Soul defines WHO Kernos is — shared across all members.
+Per-member relationship state (name, timezone, communication style,
+bootstrap status) lives in member_profiles in instance.db.
+
 Persists in the State Store at {data_dir}/{instance_id}/state/soul.json.
 """
 from dataclasses import dataclass
@@ -8,45 +11,33 @@ from dataclasses import dataclass
 
 @dataclass
 class Soul:
-    """The agent's identity for a specific user.
+    """The agent's identity for this Kernos instance.
 
     Set at hatch (first meeting). Refined slowly through explicit user signals.
-    Consistent across all context spaces (Phase 2+). The soul governs HOW the
-    agent communicates — values, personality, relationship knowledge. It does NOT
-    govern WHAT the agent does (that's behavioral contracts).
+    Consistent across all context spaces and all members. The soul governs WHO
+    the agent is — personality, values, identity. It does NOT govern per-member
+    relationship state (that's in member_profiles) or behavior rules (that's
+    behavioral contracts / covenants).
     """
 
     instance_id: str
 
-    # Identity
+    # Identity — shared across all members
     agent_name: str = "Kernos"    # Default name; may evolve through conversation
     emoji: str = "🜁"              # Default identity marker; may evolve through conversation
     personality_notes: str = ""   # Free-text personality profile, updated over time
 
-    # User relationship
-    user_name: str = ""           # What to call the user
-    # DEPRECATED: user_context is no longer written or read at runtime.
-    # User knowledge is now queried from KnowledgeEntries at prompt-build time.
-    # Field retained for JSON serialization compat with existing soul.json files.
-    user_context: str = ""
-    communication_style: str = "" # "direct", "warm", "formal", etc. — inferred or stated
-
-    # User locale
-    timezone: str = ""            # IANA timezone (e.g., 'America/Los_Angeles').
-                                  # Empty = use system local until discovered.
-
-    # Lifecycle
+    # Instance lifecycle
     hatched: bool = False              # True after first bootstrap conversation
     hatched_at: str = ""               # ISO timestamp of hatch completion
-    interaction_count: int = 0         # Total interactions since hatch
-    bootstrap_graduated: bool = False  # True after bootstrap consolidation completes
-    bootstrap_graduated_at: str = ""   # ISO timestamp of graduation
 
-    # Workspace scoping (reserved for Phase 2)
-    # When implemented: soul belongs to a workspace, not an instance.
-    # Multiple tenants (e.g., household members, plumber + clients) share
-    # the same soul/personality but have individual behavioral contracts.
-    # workspace_id: str = ""
-
-    # Reserved for Phase 2
-    # context_space_postures: dict[str, str] = field(default_factory=dict)
+    # --- DEPRECATED: Per-user fields migrated to member_profiles in instance.db ---
+    # Retained for JSON deserialization compat with existing soul.json files.
+    # These fields are NO LONGER read or written at runtime.
+    user_name: str = ""
+    user_context: str = ""
+    communication_style: str = ""
+    timezone: str = ""
+    interaction_count: int = 0
+    bootstrap_graduated: bool = False
+    bootstrap_graduated_at: str = ""

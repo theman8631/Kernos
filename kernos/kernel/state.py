@@ -221,6 +221,9 @@ class CovenantRule:
     # --- Selective injection (Improvement Loop Tier 1) ---
     tier: str = ""  # "pinned" | "situational" — empty triggers migration on load
 
+    # --- Member scoping (Multi-Member Pass 1) ---
+    member_id: str = ""  # Empty = instance-level (applies to all). Non-empty = per-member.
+
     # --- Reserved for future phases ---
     agent_id: str = ""
     precondition: str = ""
@@ -421,6 +424,7 @@ class StateStore(ABC):
         tags: list[str] | None = None,
         active_only: bool = True,
         limit: int = 20,
+        member_id: str = "",
     ) -> list[KnowledgeEntry]: ...
 
     @abstractmethod

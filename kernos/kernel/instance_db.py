@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS shared_spaces (
     updated_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS member_profiles (
+    member_id               TEXT PRIMARY KEY,
+    display_name            TEXT DEFAULT '',
+    timezone                TEXT DEFAULT '',
+    communication_style     TEXT DEFAULT '',
+    interaction_count       INTEGER DEFAULT 0,
+    hatched                 INTEGER DEFAULT 0,
+    hatched_at              TEXT DEFAULT '',
+    bootstrap_graduated     INTEGER DEFAULT 0,
+    bootstrap_graduated_at  TEXT DEFAULT '',
+    updated_at              TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (member_id) REFERENCES members(member_id)
+);
+
 CREATE TABLE IF NOT EXISTS platform_config (
     platform    TEXT PRIMARY KEY,
     config      TEXT DEFAULT '{}'
@@ -138,6 +152,42 @@ class InstanceDB:
             (member_id, platform, channel_id, now),
         )
         await self._conn.commit()
+        # Ensure owner has a member profile
+        existing_profile = await self.get_member_profile(member_id)
+        if not existing_profile:
+            await self.upsert_member_profile(member_id, {"display_name": display_name})
+
+    async def migrate_soul_to_member_profile(self, member_id: str, soul_fields: dict) -> bool:
+        """One-time migration: copy per-user Soul fields into the owner's member profile.
+
+        Called at startup when transitioning from single-user to multi-member.
+        Returns True if migration occurred, False if already migrated or nothing to migrate.
+        """
+        if not self._conn:
+            return False
+        profile = await self.get_member_profile(member_id)
+        if not profile:
+            return False
+        # Only migrate if the profile has empty fields and soul has data
+        updates: dict = {}
+        field_map = {
+            "user_name": "display_name",
+            "timezone": "timezone",
+            "communication_style": "communication_style",
+            "interaction_count": "interaction_count",
+            "bootstrap_graduated": "bootstrap_graduated",
+            "bootstrap_graduated_at": "bootstrap_graduated_at",
+        }
+        for soul_field, profile_field in field_map.items():
+            soul_val = soul_fields.get(soul_field)
+            profile_val = profile.get(profile_field)
+            if soul_val and not profile_val:
+                updates[profile_field] = soul_val
+        if updates:
+            await self.upsert_member_profile(member_id, updates)
+            logger.info("SOUL_MIGRATION: migrated %s to member_profile %s", list(updates.keys()), member_id)
+            return True
+        return False
 
     # Fallback invite instructions when platform_config is unavailable
     _INVITE_INSTRUCTIONS_FALLBACK: dict[str, str] = {
@@ -286,6 +336,96 @@ class InstanceDB:
         await self._conn.commit()
         logger.info("Platform config stored: %s → %s", platform, list(config.keys()))
 
+    # --- Member Profiles ---
+
+    async def get_member_profile(self, member_id: str) -> dict | None:
+        """Get a member's profile. Returns None if no profile exists."""
+        if not self._conn:
+            return None
+        async with self._conn.execute(
+            "SELECT * FROM member_profiles WHERE member_id=?", (member_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            d = dict(row)
+            # Normalize booleans from SQLite integers
+            d["hatched"] = bool(d.get("hatched", 0))
+            d["bootstrap_graduated"] = bool(d.get("bootstrap_graduated", 0))
+            return d
+        return None
+
+    async def upsert_member_profile(self, member_id: str, updates: dict) -> None:
+        """Create or update a member's profile fields."""
+        if not self._conn:
+            return
+        from kernos.utils import utc_now
+        existing = await self.get_member_profile(member_id)
+        if existing is None:
+            # Create new profile
+            fields = {
+                "member_id": member_id,
+                "display_name": updates.get("display_name", ""),
+                "timezone": updates.get("timezone", ""),
+                "communication_style": updates.get("communication_style", ""),
+                "interaction_count": updates.get("interaction_count", 0),
+                "hatched": int(updates.get("hatched", False)),
+                "hatched_at": updates.get("hatched_at", ""),
+                "bootstrap_graduated": int(updates.get("bootstrap_graduated", False)),
+                "bootstrap_graduated_at": updates.get("bootstrap_graduated_at", ""),
+                "updated_at": utc_now(),
+            }
+            cols = ", ".join(fields.keys())
+            placeholders = ", ".join("?" for _ in fields)
+            await self._conn.execute(
+                f"INSERT INTO member_profiles ({cols}) VALUES ({placeholders})",
+                tuple(fields.values()),
+            )
+        else:
+            # Update existing fields
+            set_parts: list[str] = []
+            values: list = []
+            for k, v in updates.items():
+                if k == "member_id":
+                    continue
+                if k in ("hatched", "bootstrap_graduated"):
+                    v = int(v)
+                set_parts.append(f"{k}=?")
+                values.append(v)
+            set_parts.append("updated_at=?")
+            values.append(utc_now())
+            values.append(member_id)
+            await self._conn.execute(
+                f"UPDATE member_profiles SET {', '.join(set_parts)} WHERE member_id=?",
+                values,
+            )
+        await self._conn.commit()
+
+    async def increment_interaction_count(self, member_id: str) -> int:
+        """Increment and return the new interaction count for a member."""
+        if not self._conn:
+            return 0
+        from kernos.utils import utc_now
+        await self._conn.execute(
+            "UPDATE member_profiles SET interaction_count = interaction_count + 1, updated_at=? "
+            "WHERE member_id=?",
+            (utc_now(), member_id),
+        )
+        await self._conn.commit()
+        profile = await self.get_member_profile(member_id)
+        return profile["interaction_count"] if profile else 0
+
+    async def get_member(self, member_id: str) -> dict | None:
+        """Get a member record from the members table."""
+        if not self._conn:
+            return None
+        async with self._conn.execute(
+            "SELECT * FROM members WHERE member_id=?", (member_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    # --- Invite Codes ---
+
     async def create_invite_code(
         self, created_by: str, platform: str,
         for_member: str = "", display_name: str = "",
@@ -400,6 +540,8 @@ class InstanceDB:
             role = d.get("role", "member")
             await self.create_member(member_id, display_name, role, "")
             await self.register_channel(member_id, platform, channel_id)
+            # Seed member profile with display_name from invite
+            await self.upsert_member_profile(member_id, {"display_name": display_name})
             await self._conn.execute(
                 "UPDATE invite_codes SET status='used', used_by=?, used_at=? WHERE code=?",
                 (used_by, now, code),

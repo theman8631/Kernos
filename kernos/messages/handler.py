@@ -121,6 +121,7 @@ class TurnContext:
     instance_id: str = ""
     conversation_id: str = ""
     member_id: str = ""
+    member_profile: dict | None = None  # Loaded from instance.db member_profiles
     soul: Soul | None = None
     message: NormalizedMessage | None = None
 
@@ -314,13 +315,15 @@ def _format_contracts(rules: list[CovenantRule], space_names: dict[str, str] | N
     return "\n".join(lines)
 
 
-def _maybe_append_name_ask(response_text: str, soul: Soul) -> str:
+def _maybe_append_name_ask(response_text: str, soul: Soul, member_profile: dict | None = None) -> str:
     """Safety net: if first interaction and agent didn't ask for name, don't force it.
 
     The bootstrap prompt handles the name question. This just logs if it was missed.
     Previously this force-appended a name question, but that caused double-asking.
     """
-    if soul.interaction_count != 0 or soul.user_name:
+    _name = (member_profile or {}).get("display_name", "") or soul.user_name
+    _count = (member_profile or {}).get("interaction_count", 0) or soul.interaction_count
+    if _count != 0 or _name:
         return response_text
     name_question_signals = ["your name", "call you", "who am i talking", "what should i call"]
     if not any(signal in response_text.lower() for signal in name_question_signals):
@@ -328,13 +331,24 @@ def _maybe_append_name_ask(response_text: str, soul: Soul) -> str:
     return response_text
 
 
-def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
-    """Check whether the soul has enough substance for bootstrap graduation.
+def _is_member_mature(member_profile: dict | None, *, has_user_knowledge: bool = False) -> bool:
+    """Check whether a member's relationship has enough substance for bootstrap graduation.
 
     All four signals must be present — interaction count alone is never sufficient.
-    has_user_knowledge replaces the deprecated soul.user_context check —
-    True when the instance has at least one active user-subject KnowledgeEntry.
+    has_user_knowledge is True when the member has at least one active KnowledgeEntry.
     """
+    if not member_profile:
+        return False
+    return (
+        bool(member_profile.get("display_name", ""))
+        and has_user_knowledge
+        and bool(member_profile.get("communication_style", ""))
+        and member_profile.get("interaction_count", 0) >= _BOOTSTRAP_MIN_INTERACTIONS
+    )
+
+
+def _is_soul_mature(soul: Soul, *, has_user_knowledge: bool = False) -> bool:
+    """DEPRECATED: Use _is_member_mature with member_profile. Kept for tests."""
     return (
         bool(soul.user_name)
         and has_user_knowledge
@@ -383,17 +397,44 @@ def _is_stale_knowledge(entry, days: int = 14) -> bool:
         return False
 
 
+_MEMBER_BOOTSTRAP_PROMPT = """\
+NEW MEMBER. {display_name} just joined this Kernos instance.
+
+You already know their name — it was provided when they were invited. \
+DO NOT ask their name again. Greet them warmly and naturally.
+
+Your personality is already established. Be yourself. Don't re-introduce \
+yourself unless they seem unfamiliar with who you are.
+
+Get to know them through natural conversation. Discover their timezone, \
+communication preferences, and what they need help with — but through \
+genuine curiosity, not an intake form.
+
+Within the first few turns, let them know they can customize how you \
+work with them — communication style, notification preferences, etc.
+"""
+
+
 def _build_rules_block(
     template: AgentTemplate, contract_rules: list[CovenantRule], soul: Soul,
     space_names: dict[str, str] | None = None,
+    member_profile: dict | None = None,
 ) -> str:
     """## RULES — operating principles + behavioral contracts + bootstrap."""
     parts = [template.operating_principles]
     contracts_text = _format_contracts(contract_rules, space_names)
     if contracts_text:
         parts.append(contracts_text)
-    if not soul.bootstrap_graduated:
-        parts.append(template.bootstrap_prompt)
+    # Per-member bootstrap: check member profile first, fall back to soul
+    _graduated = (member_profile or {}).get("bootstrap_graduated", False) or soul.bootstrap_graduated
+    if not _graduated:
+        # Use member bootstrap prompt if personality is already formed (instance hatched)
+        # and this member has a known name. Otherwise use the full bootstrap.
+        _name = (member_profile or {}).get("display_name", "")
+        if soul.hatched and _name:
+            parts.append(_MEMBER_BOOTSTRAP_PROMPT.format(display_name=_name))
+        else:
+            parts.append(template.bootstrap_prompt)
     return "## RULES\n" + "\n\n".join(parts)
 
 
@@ -401,11 +442,13 @@ def _build_now_block(
     message: NormalizedMessage, soul: Soul,
     active_space: ContextSpace | None,
     execution_envelope: dict | None = None,
+    member_profile: dict | None = None,
 ) -> str:
-    """## NOW — turn-local operating situation: time, platform, auth, space."""
+    """## NOW — turn-local operating situation: time, platform, auth, space, member."""
     from kernos.utils import utc_now_dt, format_user_datetime
     now_utc = utc_now_dt()
-    user_tz = soul.timezone or ""
+    # Timezone: member profile → soul (instance default) → system local
+    user_tz = (member_profile or {}).get("timezone", "") or soul.timezone or ""
     tz_display = user_tz or "system local"
     date_line = (
         f"Current time: {format_user_datetime(now_utc, user_tz)} "
@@ -421,6 +464,12 @@ def _build_now_block(
         f"Sender auth level: {message.sender_auth_level.value}.",
     )
     parts = [date_line, platform_line, auth_line]
+    # Member identity
+    if member_profile:
+        _name = member_profile.get("display_name", "")
+        _role = member_profile.get("role", "member")
+        if _name:
+            parts.append(f"Speaking with: {_name} ({_role})")
     if active_space and not active_space.is_default and active_space.posture:
         parts.append(
             f"Current operating context: {active_space.name}\n"
@@ -472,14 +521,17 @@ def _build_now_block(
 def _build_state_block(
     soul: Soul, template: AgentTemplate,
     user_knowledge_entries: list | None,
+    member_profile: dict | None = None,
 ) -> str:
     """## STATE — current truth the agent should act from."""
     agent_name = soul.agent_name or "Kernos"
     personality = soul.personality_notes if soul.personality_notes else template.default_personality
     parts = [f"Identity: {agent_name}\n{personality}"]
     user_parts: list[str] = []
-    if soul.user_name:
-        user_parts.append(f"User's name: {soul.user_name}")
+    # Member-first name resolution: profile → soul (legacy compat)
+    _user_name = (member_profile or {}).get("display_name", "") or soul.user_name
+    if _user_name:
+        user_parts.append(f"Name: {_user_name}")
     if user_knowledge_entries:
         _SOURCE_TAGS = {
             "identity": "stated", "habitual": "observed",
@@ -497,8 +549,10 @@ def _build_state_block(
             seen_content.add(normalized)
             tag = _SOURCE_TAGS.get(getattr(entry, "lifecycle_archetype", ""), "known")
             user_parts.append(f"{entry.content} [{tag}]")
-    if soul.communication_style:
-        user_parts.append(f"Communication style: {soul.communication_style}")
+    # Member-first communication style: profile → soul (legacy compat)
+    _comm_style = (member_profile or {}).get("communication_style", "") or soul.communication_style
+    if _comm_style:
+        user_parts.append(f"Communication style: {_comm_style}")
     if user_parts:
         parts.append("USER CONTEXT:\n" + "\n".join(user_parts))
     return "## STATE\n" + "\n\n".join(parts)
@@ -1595,6 +1649,66 @@ class MessageHandler:
 
         return soul
 
+    async def _ensure_member_default_space(self, instance_id: str, member_id: str) -> None:
+        """Ensure a member has their own default General space. Idempotent."""
+        import uuid as _uuid
+        spaces = await self.state.list_context_spaces(instance_id)
+        # Check if this member already has a default space
+        if any(s.is_default and s.member_id == member_id for s in spaces):
+            return
+        # Check if there are legacy spaces with no member_id (owner's spaces)
+        legacy_defaults = [s for s in spaces if s.is_default and not s.member_id]
+        if legacy_defaults:
+            # Claim the first legacy default space for this member if they're the owner
+            # (the owner is whoever had the instance before multi-member)
+            member = None
+            if hasattr(self, '_instance_db') and self._instance_db:
+                member = await self._instance_db.get_member(member_id)
+            if member and member.get("role") == "owner":
+                for ls in legacy_defaults:
+                    ls.member_id = member_id
+                    await self.state.update_context_space(instance_id, ls.id, {"member_id": member_id})
+                logger.info("SPACE_CLAIM: owner %s claimed %d legacy spaces", member_id, len(legacy_defaults))
+                return
+
+        # Create a new default space for this member
+        now = utc_now()
+        member_space = ContextSpace(
+            id=f"space_{_uuid.uuid4().hex[:8]}",
+            instance_id=instance_id,
+            member_id=member_id,
+            name="General",
+            description="General conversation and daily life",
+            space_type="general",
+            status="active",
+            is_default=True,
+            created_at=now,
+            last_active_at=now,
+        )
+        await self.state.save_context_space(member_space)
+        logger.info("Created default General space for member %s on instance %s", member_id, instance_id)
+
+        # Initialize compaction state for the member's default space
+        try:
+            from kernos.kernel.compaction import (
+                CompactionState, compute_document_budget,
+                MODEL_MAX_TOKENS, COMPACTION_MODEL_USABLE_TOKENS,
+                COMPACTION_INSTRUCTION_TOKENS, DEFAULT_DAILY_HEADROOM,
+            )
+            context_def = f"Space: General\nType: general\nDescription: General conversation and daily life\n"
+            context_def_tokens = await self.compaction.adapter.count_tokens(context_def)
+            daily_comp = CompactionState(
+                space_id=member_space.id,
+                _context_def_tokens=context_def_tokens,
+                conversation_headroom=DEFAULT_DAILY_HEADROOM,
+            )
+            daily_comp.document_budget = compute_document_budget(
+                context_def_tokens, daily_comp._system_overhead, COMPACTION_MODEL_USABLE_TOKENS,
+            )
+            await self.compaction.save_state(instance_id, member_space.id, daily_comp)
+        except Exception as exc:
+            logger.warning("Failed to init compaction state for member space: %s", exc)
+
     async def _consolidate_bootstrap(self, soul: Soul) -> None:
         """One-time consolidation: bootstrap wisdom → soul personality notes.
 
@@ -1641,16 +1755,15 @@ class MessageHandler:
                 exc,
             )
 
-    async def _post_response_soul_update(self, soul: Soul) -> None:
-        """Update the soul after a successful response.
+    async def _post_response_soul_update(self, soul: Soul, member_id: str = "", member_profile: dict | None = None) -> None:
+        """Update soul (instance-level) and member profile after a successful response.
 
-        - If not yet hatched: mark hatched, emit agent.hatched
-        - Increment interaction_count
-        - Check bootstrap graduation maturity
-        - Save
+        Instance-level: hatching (first conversation ever)
+        Per-member: interaction_count, bootstrap graduation
         """
         now = utc_now()
 
+        # Instance-level: hatching happens once per instance, with the first member
         if not soul.hatched:
             soul.hatched = True
             soul.hatched_at = now
@@ -1668,39 +1781,57 @@ class MessageHandler:
             except Exception as exc:
                 logger.warning("Failed to emit agent.hatched: %s", exc)
             logger.info("Soul hatched for instance: %s", soul.instance_id)
+            await self.state.save_soul(soul, source="handler_process", trigger="hatching")
 
-        soul.interaction_count += 1
+        # Per-member: increment interaction count
+        if member_id and hasattr(self, '_instance_db') and self._instance_db:
+            new_count = await self._instance_db.increment_interaction_count(member_id)
+            # Reload profile with updated count
+            member_profile = await self._instance_db.get_member_profile(member_id)
 
-        # Check bootstrap graduation: consolidate, then graduate
-        user_ke = await self.state.query_knowledge(
-            soul.instance_id, subject="user", active_only=True, limit=1,
-        )
-        has_user_knowledge = len(user_ke) > 0
-        if not soul.bootstrap_graduated and _is_soul_mature(soul, has_user_knowledge=has_user_knowledge):
-            await self._consolidate_bootstrap(soul)
-            soul.bootstrap_graduated = True
-            soul.bootstrap_graduated_at = now
-            try:
-                await emit_event(
-                    self.events,
-                    EventType.AGENT_BOOTSTRAP_GRADUATED,
-                    soul.instance_id,
-                    "handler",
-                    payload={
-                        "instance_id": soul.instance_id,
-                        "interaction_count": soul.interaction_count,
-                        "graduated_at": now,
-                    },
+            # Per-member: check bootstrap graduation
+            if member_profile and not member_profile.get("bootstrap_graduated"):
+                user_ke = await self.state.query_knowledge(
+                    soul.instance_id, subject="user", active_only=True, limit=1,
                 )
-            except Exception as exc:
-                logger.warning("Failed to emit agent.bootstrap_graduated: %s", exc)
-            logger.info(
-                "Soul bootstrap graduated for instance: %s (interactions: %d)",
-                soul.instance_id,
-                soul.interaction_count,
+                has_user_knowledge = len(user_ke) > 0
+                if _is_member_mature(member_profile, has_user_knowledge=has_user_knowledge):
+                    await self._consolidate_bootstrap(soul)
+                    await self._instance_db.upsert_member_profile(member_id, {
+                        "bootstrap_graduated": True,
+                        "bootstrap_graduated_at": now,
+                    })
+                    try:
+                        await emit_event(
+                            self.events,
+                            EventType.AGENT_BOOTSTRAP_GRADUATED,
+                            soul.instance_id,
+                            "handler",
+                            payload={
+                                "instance_id": soul.instance_id,
+                                "member_id": member_id,
+                                "interaction_count": new_count,
+                                "graduated_at": now,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to emit agent.bootstrap_graduated: %s", exc)
+                    logger.info(
+                        "Member bootstrap graduated: member=%s instance=%s (interactions: %d)",
+                        member_id, soul.instance_id, new_count,
+                    )
+        else:
+            # Legacy path: no member_id, update soul directly
+            soul.interaction_count += 1
+            user_ke = await self.state.query_knowledge(
+                soul.instance_id, subject="user", active_only=True, limit=1,
             )
-
-        await self.state.save_soul(soul, source="handler_process", trigger="interaction_count_update")
+            has_user_knowledge = len(user_ke) > 0
+            if not soul.bootstrap_graduated and _is_soul_mature(soul, has_user_knowledge=has_user_knowledge):
+                await self._consolidate_bootstrap(soul)
+                soul.bootstrap_graduated = True
+                soul.bootstrap_graduated_at = now
+            await self.state.save_soul(soul, source="handler_process", trigger="interaction_count_update")
 
     def _truncate_to_budget(self, messages: list[dict], budget_tokens: int) -> list[dict]:
         """Drop oldest messages to fit within token budget. 4 chars ≈ 1 token."""
@@ -1717,6 +1848,7 @@ class MessageHandler:
         conversation_id: str,
         active_space_id: str,
         active_space: ContextSpace | None,
+        member_id: str = "",
     ) -> tuple[list[dict], str | None, str | None, str | None]:
         """Assemble the agent's conversation context for the active space.
 
@@ -1729,9 +1861,9 @@ class MessageHandler:
         memory_parts: list[str] = []
 
         # 1. Compaction index → MEMORY
-        comp_state = await self.compaction.load_state(instance_id, active_space_id)
+        comp_state = await self.compaction.load_state(instance_id, active_space_id, member_id=member_id)
         if comp_state and comp_state.index_tokens > 0:
-            index_text = await self.compaction.load_index(instance_id, active_space_id)
+            index_text = await self.compaction.load_index(instance_id, active_space_id, member_id=member_id)
             if index_text:
                 memory_parts.append(
                     f"Archived history (summaries — full archives available on request):\n"
@@ -1778,7 +1910,7 @@ class MessageHandler:
                     pass
 
         # 3. Compaction document → MEMORY
-        active_doc = await self.compaction.load_context_document(instance_id, active_space_id)
+        active_doc = await self.compaction.load_context_document(instance_id, active_space_id, member_id=member_id)
         if active_doc:
             memory_parts.append(
                 f"Context history for this space:\n{active_doc}"
@@ -1853,6 +1985,7 @@ class MessageHandler:
                 instance_id, active_space_id,
                 token_budget=SPACE_THREAD_TOKEN_BUDGET,
                 max_messages=50,
+                member_id=member_id,
             )
             if log_entries:
                 recent_messages = [
@@ -4039,6 +4172,35 @@ class MessageHandler:
         await self.tenants.get_or_create(instance_id)
         await self._ensureinstance_state(instance_id, message)
         ctx.soul = await self._get_or_init_soul(instance_id)
+        # Load member profile from instance.db
+        if ctx.member_id and hasattr(self, '_instance_db') and self._instance_db:
+            ctx.member_profile = await self._instance_db.get_member_profile(ctx.member_id)
+            if not ctx.member_profile:
+                # First turn for this member — create profile from members table
+                member = await self._instance_db.get_member(ctx.member_id)
+                if member:
+                    await self._instance_db.upsert_member_profile(ctx.member_id, {
+                        "display_name": member.get("display_name", ""),
+                    })
+                    ctx.member_profile = await self._instance_db.get_member_profile(ctx.member_id)
+            # One-time migration: copy Soul per-user fields to owner's profile
+            if ctx.member_profile and ctx.soul:
+                soul_fields = {
+                    "user_name": ctx.soul.user_name,
+                    "timezone": ctx.soul.timezone,
+                    "communication_style": ctx.soul.communication_style,
+                    "interaction_count": ctx.soul.interaction_count,
+                    "bootstrap_graduated": ctx.soul.bootstrap_graduated,
+                    "bootstrap_graduated_at": ctx.soul.bootstrap_graduated_at,
+                }
+                if any(soul_fields.values()):
+                    await self._instance_db.migrate_soul_to_member_profile(
+                        ctx.member_id, soul_fields)
+                    # Reload profile after migration
+                    ctx.member_profile = await self._instance_db.get_member_profile(ctx.member_id)
+        # Ensure member has their own default space
+        if ctx.member_id:
+            await self._ensure_member_default_space(instance_id, ctx.member_id)
         await self._maybe_load_mcp_config(instance_id)
         await self._maybe_run_covenant_cleanup(instance_id)
         await self._maybe_start_evaluator(instance_id)
@@ -4057,7 +4219,7 @@ class MessageHandler:
             "ROUTE_INPUT: message=%s recent=%d current_focus=%s",
             (message.content or "")[:80], len(recent_full), current_focus_id or "none",
         )
-        ctx.router_result = await self._router.route(instance_id, message.content, recent_full, current_focus_id)
+        ctx.router_result = await self._router.route(instance_id, message.content, recent_full, current_focus_id, member_id=ctx.member_id)
 
         # Query mode: quick question about another domain — stay in current space
         if ctx.router_result.query_mode and current_focus_id and ctx.router_result.focus != current_focus_id:
@@ -4180,7 +4342,8 @@ class MessageHandler:
 
         # Space context (compaction, cross-domain, system events, receipts)
         space_messages, ctx.results_prefix, ctx.memory_prefix, _procedures_prefix = await self._assemble_space_context(
-            instance_id, ctx.conversation_id, active_space_id, active_space
+            instance_id, ctx.conversation_id, active_space_id, active_space,
+            member_id=ctx.member_id,
         )
 
         # Emit message.received
@@ -4214,7 +4377,7 @@ class MessageHandler:
             await self.conversations.append(instance_id, ctx.conversation_id, user_entry)
             await self.conv_logger.append(instance_id=instance_id, space_id=active_space_id,
                 speaker="user", channel=message.platform, content=user_content,
-                timestamp=message.timestamp.isoformat())
+                timestamp=message.timestamp.isoformat(), member_id=ctx.member_id)
 
         # --- Cohort agents: Message Analyzer + Covenant Query -------------------
         # Single LLM call replaces separate Preference Parser + Knowledge Shaper.
@@ -4272,7 +4435,7 @@ class MessageHandler:
 
             # Build knowledge candidates with Bjork dual-strength ranking
             from kernos.kernel.state import compute_retrieval_strength
-            all_ke = await self.state.query_knowledge(instance_id, subject="user", active_only=True, limit=200)
+            all_ke = await self.state.query_knowledge(instance_id, subject="user", active_only=True, limit=200, member_id=ctx.member_id)
             always_inject = [e for e in all_ke if e.lifecycle_archetype == "identity"]
             _never_archetypes = {"ephemeral"}
             _now_iso = utc_now()
@@ -4651,7 +4814,7 @@ class MessageHandler:
                 if _s:
                     _space_names[sid] = _s.name
 
-        rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul, space_names=_space_names)
+        rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul, space_names=_space_names, member_profile=ctx.member_profile)
         # Extract execution envelope for self-directed turns, or check for paused plan
         _exec_envelope = None
         if ctx.is_self_directed and message.context and isinstance(message.context, dict):
@@ -4674,8 +4837,8 @@ class MessageHandler:
                     }
             except Exception:
                 pass
-        now_block = _build_now_block(message, soul, active_space, execution_envelope=_exec_envelope)
-        state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries)
+        now_block = _build_now_block(message, soul, active_space, execution_envelope=_exec_envelope, member_profile=ctx.member_profile)
+        state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries, member_profile=ctx.member_profile)
         results = _build_results_block(ctx.results_prefix)
         actions = _build_actions_block(capability_prompt, message, self._channel_registry)
         memory = _build_memory_block(ctx.memory_prefix)
@@ -4843,8 +5006,8 @@ class MessageHandler:
             active_space_id=ctx.active_space_id, active_space=ctx.active_space,
         )
 
-        ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul)
-        await self._post_response_soul_update(ctx.soul)
+        ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul, member_profile=ctx.member_profile)
+        await self._post_response_soul_update(ctx.soul, member_id=ctx.member_id, member_profile=ctx.member_profile)
 
         # Cross-domain signal check — skip for self-directed turns
         if not ctx.is_self_directed:
@@ -4869,14 +5032,15 @@ class MessageHandler:
         }
         await self.conversations.append(instance_id, ctx.conversation_id, assistant_entry)
         await self.conv_logger.append(instance_id=instance_id, space_id=ctx.active_space_id,
-            speaker="assistant", channel=message.platform, content=ctx.response_text)
+            speaker="assistant", channel=message.platform, content=ctx.response_text,
+            member_id=ctx.member_id)
 
         # Compaction (with concurrency guard + backoff)
         if ctx.active_space_id in self._compacting:
             logger.info("COMPACTION: already in progress for space=%s, skipping", ctx.active_space_id)
         else:
             try:
-                comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id)
+                comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id, member_id=ctx.member_id)
                 if comp_state:
                     _skip = False
                     if comp_state.consecutive_failures > 0 and comp_state.last_compaction_failure_at:
@@ -4888,7 +5052,7 @@ class MessageHandler:
                         except (ValueError, TypeError):
                             pass
                     if not _skip:
-                        log_info = await self.conv_logger.get_current_log_info(instance_id, ctx.active_space_id)
+                        log_info = await self.conv_logger.get_current_log_info(instance_id, ctx.active_space_id, member_id=ctx.member_id)
                         new_tokens = log_info["tokens_est"] - log_info.get("seeded_tokens_est", 0)
                         _real_ctx = self.reasoning.get_last_real_input_tokens(instance_id)
                         logger.info(
@@ -4896,7 +5060,7 @@ class MessageHandler:
                             ctx.active_space_id, new_tokens, comp_state.compaction_threshold, _real_ctx,
                         )
                         if new_tokens >= comp_state.compaction_threshold:
-                            log_text, log_num = await self.conv_logger.read_current_log_text(instance_id, ctx.active_space_id)
+                            log_text, log_num = await self.conv_logger.read_current_log_text(instance_id, ctx.active_space_id, member_id=ctx.member_id)
                             if log_text.strip() and ctx.active_space:
                                 self._compacting.add(ctx.active_space_id)
                                 # UX signal: notify user on Discord (not SMS)
@@ -4911,11 +5075,11 @@ class MessageHandler:
                                 try:
                                     # Fact harvest is now integrated into the compaction call
                                     comp_state = await self.compaction.compact_from_log(
-                                        instance_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state)
-                                    old_num, new_num = await self.conv_logger.roll_log(instance_id, ctx.active_space_id)
+                                        instance_id, ctx.active_space_id, ctx.active_space, log_text, log_num, comp_state, member_id=ctx.member_id)
+                                    old_num, new_num = await self.conv_logger.roll_log(instance_id, ctx.active_space_id, member_id=ctx.member_id)
                                     _seed = comp_state.last_seed_depth
                                     _seed_source = "adaptive" if _seed != 10 else "default"
-                                    await self.conv_logger.seed_from_previous(instance_id, ctx.active_space_id, old_num, tail_entries=_seed)
+                                    await self.conv_logger.seed_from_previous(instance_id, ctx.active_space_id, old_num, tail_entries=_seed, member_id=ctx.member_id)
                                     logger.info("COMPACTION_SEED: space=%s depth=%d (%s)",
                                         ctx.active_space_id, _seed, _seed_source)
                                     self.reasoning.clear_loaded_tools(ctx.active_space_id)
@@ -4989,15 +5153,15 @@ class MessageHandler:
                                 finally:
                                     self._compacting.discard(ctx.active_space_id)
                         else:
-                            await self.compaction.save_state(instance_id, ctx.active_space_id, comp_state)
+                            await self.compaction.save_state(instance_id, ctx.active_space_id, comp_state, member_id=ctx.member_id)
             except Exception as exc:
                 logger.warning("COMPACTION: failed for space=%s: %s", ctx.active_space_id, exc)
                 try:
-                    comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id)
+                    comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id, member_id=ctx.member_id)
                     if comp_state:
                         comp_state.consecutive_failures += 1
                         comp_state.last_compaction_failure_at = utc_now()
-                        await self.compaction.save_state(instance_id, ctx.active_space_id, comp_state)
+                        await self.compaction.save_state(instance_id, ctx.active_space_id, comp_state, member_id=ctx.member_id)
                 except Exception:
                     pass
                 self._compacting.discard(ctx.active_space_id)

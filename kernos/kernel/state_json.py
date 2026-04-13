@@ -238,6 +238,7 @@ class JsonStateStore(StateStore):
         tags: list[str] | None = None,
         active_only: bool = True,
         limit: int = 20,
+        member_id: str = "",
     ) -> list[KnowledgeEntry]:
         path = self._state_dir(instance_id) / "knowledge.json"
         raw = self._read_json(path, [])
@@ -252,6 +253,11 @@ class JsonStateStore(StateStore):
                 continue
             if tags and not any(t in entry.tags for t in tags):
                 continue
+            # Member visibility: own entries + unowned (legacy/instance-level)
+            if member_id:
+                owner = getattr(entry, "owner_member_id", "")
+                if owner and owner != member_id:
+                    continue
             results.append(entry)
         return results[:limit]
 

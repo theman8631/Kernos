@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS covenants (
     enforcement_tier TEXT DEFAULT '',
     tier TEXT DEFAULT '',
     context_space TEXT DEFAULT '',
+    member_id TEXT DEFAULT '',
     superseded_by TEXT DEFAULT '',
     data TEXT DEFAULT '{}',
     created_at TEXT NOT NULL,
@@ -308,6 +309,14 @@ class SqliteStateStore(StateStore):
                 stmt = statement.strip()
                 if stmt:
                     await conn.execute(stmt)
+            # Migrations: add columns that may be missing from older databases
+            for _alt in [
+                "ALTER TABLE covenants ADD COLUMN member_id TEXT DEFAULT ''",
+            ]:
+                try:
+                    await conn.execute(_alt)
+                except Exception:
+                    pass  # Column already exists
             await conn.commit()
             self._connections[instance_id] = conn
         return self._connections[instance_id]
@@ -432,6 +441,7 @@ class SqliteStateStore(StateStore):
         self, instance_id: str, subject: str | None = None,
         category: str | None = None, tags: list[str] | None = None,
         active_only: bool = True, limit: int = 20,
+        member_id: str = "",
     ) -> list[KnowledgeEntry]:
         db = await self._db(instance_id)
         clauses = ["instance_id=?"]
@@ -444,6 +454,10 @@ class SqliteStateStore(StateStore):
             params.append(category)
         if active_only:
             clauses.append("active=1")
+        # Member visibility: own entries + unowned (legacy/instance-level)
+        if member_id:
+            clauses.append("(member_id=? OR member_id='' OR member_id IS NULL)")
+            params.append(member_id)
         sql = f"SELECT * FROM knowledge WHERE {' AND '.join(clauses)} LIMIT ?"
         params.append(limit)
         async with db.execute(sql, params) as cur:
@@ -581,6 +595,7 @@ class SqliteStateStore(StateStore):
         self, instance_id: str, capability: str | None = None,
         context_space_scope: list[str | None] | None = None,
         active_only: bool = True,
+        member_id: str = "",
     ) -> list[CovenantRule]:
         rules = await self.get_contract_rules(instance_id, capability, active_only=active_only)
         if context_space_scope is not None:
@@ -591,6 +606,9 @@ class SqliteStateStore(StateStore):
                 scope_set.add("")
                 scope_set.add(None)
             rules = [r for r in rules if (r.context_space or "") in scope_set or r.context_space in scope_set]
+        # Member scoping: show instance-level + this member's rules
+        if member_id:
+            rules = [r for r in rules if not getattr(r, "member_id", "") or getattr(r, "member_id", "") == member_id]
         return rules
 
     async def add_contract_rule(self, rule: CovenantRule) -> None:

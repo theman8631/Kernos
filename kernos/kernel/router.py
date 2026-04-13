@@ -128,14 +128,22 @@ class LLMRouter:
         message_content: str,
         recent_history: list[dict],
         current_focus_id: str = "",
+        member_id: str = "",
     ) -> RouterResult:
         """Route a message. Returns RouterResult(tags, focus, continuation).
 
         recent_history: full metadata entries from get_recent_full().
         current_focus_id: the instance's last_active_space_id (for continuation logic).
+        member_id: if provided, only route to spaces owned by this member (or legacy unowned).
         """
         spaces = await self._state.list_context_spaces(instance_id)
         active_spaces = [s for s in spaces if s.status == "active"]
+        # Filter by member: show this member's spaces + legacy (no member_id) + system spaces
+        if member_id:
+            active_spaces = [
+                s for s in active_spaces
+                if not s.member_id or s.member_id == member_id or s.space_type == "system"
+            ]
 
         # No spaces at all — nothing to route to
         if not active_spaces:

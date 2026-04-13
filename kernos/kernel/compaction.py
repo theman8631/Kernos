@@ -402,23 +402,29 @@ class CompactionService:
         """Wire up the file service for manifest injection during compaction."""
         self._files = files
 
-    def _space_dir(self, instance_id: str, space_id: str) -> Path:
+    def _space_dir(self, instance_id: str, space_id: str, member_id: str = "") -> Path:
         from kernos.utils import _safe_name
-        return (
+        base = (
             self.data_dir
             / _safe_name(instance_id)
             / "state"
             / "compaction"
             / _safe_name(space_id)
         )
+        if member_id:
+            return base / _safe_name(member_id)
+        return base
 
     # --- Persistence ---
 
     async def load_state(
-        self, instance_id: str, space_id: str
+        self, instance_id: str, space_id: str, member_id: str = "",
     ) -> CompactionState | None:
         """Load CompactionState from disk. Returns None if not found."""
-        state_path = self._space_dir(instance_id, space_id) / "state.json"
+        state_path = self._space_dir(instance_id, space_id, member_id) / "state.json"
+        if not state_path.exists() and member_id:
+            # Lazy migration: try legacy path
+            state_path = self._space_dir(instance_id, space_id) / "state.json"
         if not state_path.exists():
             return None
         try:
@@ -448,10 +454,11 @@ class CompactionService:
             return None
 
     async def save_state(
-        self, instance_id: str, space_id: str, comp_state: CompactionState
+        self, instance_id: str, space_id: str, comp_state: CompactionState,
+        member_id: str = "",
     ) -> None:
         """Persist CompactionState to disk."""
-        space_dir = self._space_dir(instance_id, space_id)
+        space_dir = self._space_dir(instance_id, space_id, member_id)
         space_dir.mkdir(parents=True, exist_ok=True)
         state_path = space_dir / "state.json"
         data = {
@@ -477,10 +484,12 @@ class CompactionService:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     async def load_document(
-        self, instance_id: str, space_id: str
+        self, instance_id: str, space_id: str, member_id: str = "",
     ) -> str | None:
         """Load the active compaction document. Returns None if not found."""
-        doc_path = self._space_dir(instance_id, space_id) / "active_document.md"
+        doc_path = self._space_dir(instance_id, space_id, member_id) / "active_document.md"
+        if not doc_path.exists() and member_id:
+            doc_path = self._space_dir(instance_id, space_id) / "active_document.md"
         if not doc_path.exists():
             return None
         return doc_path.read_text(encoding="utf-8")
@@ -491,7 +500,7 @@ class CompactionService:
 
     async def load_context_document(
         self, instance_id: str, space_id: str,
-        hot_tail_budget: int = 0,
+        hot_tail_budget: int = 0, member_id: str = "",
     ) -> str:
         """Load a context-ready version: archive story + hot tail + Living State.
 
@@ -501,7 +510,7 @@ class CompactionService:
         if hot_tail_budget <= 0:
             hot_tail_budget = self.HOT_TAIL_BUDGET
 
-        document = await self.load_document(instance_id, space_id)
+        document = await self.load_document(instance_id, space_id, member_id)
         if not document:
             return ""
 
@@ -659,16 +668,19 @@ class CompactionService:
             logger.warning("ARCHIVE_STORY_UPDATE_FAILED: %s", exc)
 
     async def load_index(
-        self, instance_id: str, space_id: str
+        self, instance_id: str, space_id: str, member_id: str = "",
     ) -> str | None:
         """Load the compaction index. Returns None if not found."""
-        index_path = self._space_dir(instance_id, space_id) / "index.md"
+        index_path = self._space_dir(instance_id, space_id, member_id) / "index.md"
+        if not index_path.exists() and member_id:
+            index_path = self._space_dir(instance_id, space_id) / "index.md"
         if not index_path.exists():
             return None
         return index_path.read_text(encoding="utf-8")
 
     async def load_archive(
-        self, instance_id: str, space_id: str, archive_number: str
+        self, instance_id: str, space_id: str, archive_number: str,
+        member_id: str = "",
     ) -> str | None:
         """Load a specific compaction archive by number. Returns None if not found."""
         # Normalize archive number — handle "1", "001", "#1", "Archive #1", etc.
@@ -676,7 +688,7 @@ class CompactionService:
         if not num_str:
             return None
         archive_name = f"compaction_archive_{int(num_str):03d}.md"
-        archive_path = self._space_dir(instance_id, space_id) / "archives" / archive_name
+        archive_path = self._space_dir(instance_id, space_id, member_id) / "archives" / archive_name
         if not archive_path.exists():
             return None
         return archive_path.read_text(encoding="utf-8")
@@ -1082,6 +1094,7 @@ class CompactionService:
         log_text: str,
         source_log_number: int,
         comp_state: CompactionState,
+        member_id: str = "",
     ) -> CompactionState:
         """Run compaction from a space log file (P3).
 
