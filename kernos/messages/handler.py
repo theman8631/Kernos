@@ -222,6 +222,31 @@ class SecureInputState:
     """Per-tenant state for secure credential input mode."""
     capability_name: str
     expires_at: datetime
+    mode: str = "capability"  # "capability" (MCP key) or "platform" (adapter token)
+    platform: str = ""        # Platform name when mode="platform"
+    env_var: str = ""         # Target .env variable when mode="platform"
+
+
+# Platform adapter credentials: which env var(s) each platform needs.
+# Platforms with a single primary token support the secure paste flow.
+# Multi-credential platforms (like SMS/Twilio) require manual .env setup.
+_PLATFORM_CREDENTIALS: dict[str, dict] = {
+    "telegram": {
+        "primary_env": "TELEGRAM_BOT_TOKEN",
+        "label": "Telegram bot token",
+        "supports_paste": True,
+    },
+    "discord": {
+        "primary_env": "DISCORD_BOT_TOKEN",
+        "label": "Discord bot token",
+        "supports_paste": False,  # Multi-step setup — will be its own spec
+    },
+    "sms": {
+        "primary_env": "",
+        "label": "Twilio credentials",
+        "supports_paste": False,  # Multiple secrets — manual only
+    },
+}
 
 
 def _safe_instance_name(instance_id: str) -> str:
@@ -862,6 +887,39 @@ class MessageHandler:
 
         return None
 
+    async def _infer_pending_platform(
+        self, instance_id: str, conversation_id: str
+    ) -> str | None:
+        """Infer which platform setup is pending from recent messages.
+
+        Scans the last 5 messages for platform adapter setup context
+        (e.g., 'Telegram is not connected', 'TELEGRAM_BOT_TOKEN').
+        Returns the platform name if found, None otherwise.
+        """
+        system_space = await self._get_system_space(instance_id)
+        if not system_space:
+            return None
+
+        try:
+            recent = await self.conversations.get_space_thread(
+                instance_id, conversation_id, system_space.id, max_messages=5
+            )
+        except Exception:
+            return None
+
+        for platform, cred_info in _PLATFORM_CREDENTIALS.items():
+            if not cred_info.get("supports_paste"):
+                continue
+            env_var = cred_info.get("primary_env", "")
+            for msg in recent:
+                content = str(msg.get("content", "")).lower()
+                if (f"{platform} is not connected" in content
+                        or env_var.lower() in content
+                        or f"secure api" in content and platform in content):
+                    return platform
+
+        return None
+
     async def _store_credential(
         self, instance_id: str, capability_name: str, value: str
     ) -> None:
@@ -938,6 +996,59 @@ class MessageHandler:
                 logger.warning("Failed to emit tool.installed: %s", exc)
 
         return success
+
+    def _write_env_var(self, key: str, value: str) -> None:
+        """Append or update a key=value in the root .env file.
+
+        Also sets os.environ so the current process picks it up immediately.
+        """
+        env_path = Path(".env")
+        value = value.strip()
+        os.environ[key] = value
+
+        lines: list[str] = []
+        found = False
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith(f"{key}="):
+                    lines.append(f"{key}={value}")
+                    found = True
+                else:
+                    lines.append(line)
+        if not found:
+            lines.append(f"{key}={value}")
+        env_path.write_text("\n".join(lines) + "\n")
+        logger.info("Wrote %s to .env", key)
+
+    async def _start_platform_adapter(self, platform: str) -> bool:
+        """Hot-start a platform adapter after credentials have been set.
+
+        Returns True if the adapter was started successfully.
+        """
+        if platform == "telegram":
+            token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+            if not token:
+                return False
+            try:
+                from kernos.messages.adapters.telegram_bot import TelegramAdapter
+                from kernos.telegram_poller import TelegramPoller
+                tg_adapter = TelegramAdapter()
+                self.register_adapter("telegram", tg_adapter)
+                self.register_channel(
+                    name="telegram", display_name="Telegram", platform="telegram",
+                    can_send_outbound=True, channel_target="",
+                )
+                tg_poller = TelegramPoller(
+                    adapter=tg_adapter, handler=self, bot_token=token,
+                )
+                await tg_poller.start()
+                logger.info("Hot-started Telegram adapter — long polling active")
+                return True
+            except Exception as exc:
+                logger.error("Failed to hot-start Telegram adapter: %s", exc)
+                return False
+        # Other platforms require restart for now
+        return False
 
     async def _persist_mcp_config(self, instance_id: str) -> None:
         """Write current MCP config to mcp-servers.json in the system space."""
@@ -3023,27 +3134,62 @@ class MessageHandler:
                     "Say 'secure api' again when you're ready to send your key."
                 )
             credential_value = message.content.strip()
-            cap_name = state.capability_name
             del self._secure_input_state[instance_id]
-            await self._store_credential(instance_id, cap_name, credential_value)
-            success = await self._connect_after_credential(instance_id, cap_name)
-            if success:
-                return f"Key stored securely. {cap_name} is now connected! You can start using it right away."
-            return f"Key stored, but I couldn't connect to {cap_name}. The key might be invalid, or the service might be down."
+
+            if state.mode == "platform":
+                # Platform adapter token — write to .env and hot-start
+                self._write_env_var(state.env_var, credential_value)
+                success = await self._start_platform_adapter(state.platform)
+                if success:
+                    return (
+                        f"Token stored securely. {state.platform.title()} is now live! "
+                        f"You can generate invite codes for {state.platform} right away."
+                    )
+                return (
+                    f"Token saved to .env as {state.env_var}. "
+                    f"I couldn't hot-start the adapter — a restart may be needed. "
+                    f"If the token is correct, restart Kernos and {state.platform.title()} will come online."
+                )
+            else:
+                # MCP capability credential — store in secrets dir
+                cap_name = state.capability_name
+                await self._store_credential(instance_id, cap_name, credential_value)
+                success = await self._connect_after_credential(instance_id, cap_name)
+                if success:
+                    return f"Key stored securely. {cap_name} is now connected! You can start using it right away."
+                return f"Key stored, but I couldn't connect to {cap_name}. The key might be invalid, or the service might be down."
 
         if message.content.strip().lower() == _SECURE_API_TRIGGER:
+            # Try MCP capability first, then platform adapter
             cap_name = await self._infer_pending_capability(instance_id, conversation_id)
-            if not cap_name:
-                return "I'm not sure which tool you're setting up. Head to system settings and start the connection process first."
-            self._secure_input_state[instance_id] = SecureInputState(
-                capability_name=cap_name,
-                expires_at=datetime.now(timezone.utc) + timedelta(minutes=_SECURE_INPUT_TIMEOUT_MINUTES),
-            )
-            return (
-                f"Secure input mode active for {cap_name}. "
-                f"Your next message will NOT be seen by any agent — "
-                f"it will go directly to encrypted storage as your {cap_name} API key. Send your key now."
-            )
+            if cap_name:
+                self._secure_input_state[instance_id] = SecureInputState(
+                    capability_name=cap_name,
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=_SECURE_INPUT_TIMEOUT_MINUTES),
+                )
+                return (
+                    f"Secure input mode active for {cap_name}. "
+                    f"Your next message will NOT be seen by any agent — "
+                    f"it will go directly to encrypted storage as your {cap_name} API key. Send your key now."
+                )
+
+            platform = await self._infer_pending_platform(instance_id, conversation_id)
+            if platform:
+                cred_info = _PLATFORM_CREDENTIALS[platform]
+                self._secure_input_state[instance_id] = SecureInputState(
+                    capability_name=platform,
+                    expires_at=datetime.now(timezone.utc) + timedelta(minutes=_SECURE_INPUT_TIMEOUT_MINUTES),
+                    mode="platform",
+                    platform=platform,
+                    env_var=cred_info["primary_env"],
+                )
+                return (
+                    f"Secure input mode active for {platform.title()}. "
+                    f"Your next message will NOT be seen by any agent — "
+                    f"it will be stored directly as your {cred_info['label']}. Paste it now."
+                )
+
+            return "I'm not sure which tool or platform you're setting up. Start the connection process first, then say 'secure api' again."
         return None
 
     async def _handle_dump(self, ctx: TurnContext) -> str:
@@ -3128,6 +3274,19 @@ class MessageHandler:
         if platform and action in ("invite", "connect_platform"):
             if platform not in self._adapters:
                 setup = self._instance_db.get_setup_instructions(platform)
+                cred_info = _PLATFORM_CREDENTIALS.get(platform, {})
+                if cred_info.get("supports_paste"):
+                    label = cred_info["label"]
+                    return (
+                        f"{platform.title()} is not connected to this Kernos instance yet.\n\n"
+                        f"{setup}\n\n"
+                        f"The user can provide the {label} securely — present these options:\n"
+                        f"1. **Paste {label} here** — reply with `secure api` and the next message "
+                        f"will be intercepted securely (never seen by any agent)\n"
+                        f"2. **Manually add to .env** — add {cred_info['primary_env']} to the "
+                        f"server's .env file and restart\n"
+                        f"3. **Cancel** — skip for now"
+                    )
                 return (
                     f"{platform.title()} is not connected to this Kernos instance yet.\n\n"
                     f"{setup}"

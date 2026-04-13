@@ -55,7 +55,7 @@ from kernos.kernel.tools import (
 
 
 # Provider types re-exported for backward compatibility
-from kernos.providers.base import ContentBlock, Provider, ProviderResponse
+from kernos.providers.base import ChainConfig, ChainEntry, ContentBlock, Provider, ProviderResponse
 
 
 from kernos.providers.anthropic_provider import AnthropicProvider  # re-export
@@ -146,6 +146,28 @@ def _block_to_api_dict(block: ContentBlock) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _build_chains_from_legacy(
+    provider: Provider,
+    fallback_providers: list[Provider] | None = None,
+    fallback_provider: Provider | None = None,
+) -> ChainConfig:
+    """Synthesize a ChainConfig from old-style provider + fallback args.
+
+    Used by tests and legacy call sites that construct ReasoningService with
+    positional provider arguments instead of the new chains kwarg.
+    """
+    fallbacks = list(fallback_providers or [])
+    if fallback_provider and fallback_provider not in fallbacks:
+        fallbacks.append(fallback_provider)
+
+    all_providers = [provider] + fallbacks
+    return {
+        "primary": [ChainEntry(provider=p, model=getattr(p, "main_model", "unknown")) for p in all_providers],
+        "simple": [ChainEntry(provider=p, model=getattr(p, "simple_model", _SIMPLE_MODEL)) for p in all_providers],
+        "cheap": [ChainEntry(provider=p, model=getattr(p, "cheap_model", _CHEAP_MODEL)) for p in all_providers],
+    }
+
+
 class ReasoningService:
     """Owns the full tool-use reasoning loop. Provider-agnostic.
 
@@ -159,18 +181,23 @@ class ReasoningService:
 
     def __init__(
         self,
-        provider: Provider,
-        events: EventStream,
-        mcp: Any,    # MCPClientManager — Any avoids circular import with capability layer
-        audit: Any,  # AuditStore
+        provider: Provider | None = None,
+        events: EventStream | None = None,
+        mcp: Any = None,    # MCPClientManager — Any avoids circular import with capability layer
+        audit: Any = None,  # AuditStore
         fallback_providers: list[Provider] | None = None,
         # Legacy single fallback — converted to list internally
         fallback_provider: Provider | None = None,
+        *,
+        chains: ChainConfig | None = None,
     ) -> None:
-        self._provider = provider
-        self._fallback_providers: list[Provider] = fallback_providers or []
-        if fallback_provider and fallback_provider not in self._fallback_providers:
-            self._fallback_providers.append(fallback_provider)
+        if chains is not None:
+            self._chains = chains
+            self._provider = chains["primary"][0].provider
+        else:
+            assert provider is not None, "Either provider or chains must be supplied"
+            self._provider = provider
+            self._chains = _build_chains_from_legacy(provider, fallback_providers, fallback_provider)
         self._events = events
         self._mcp = mcp
         self._audit = audit
@@ -296,7 +323,74 @@ class ReasoningService:
     @property
     def main_model(self) -> str:
         """The primary model name from the provider."""
-        return getattr(self._provider, "main_model", "unknown")
+        entries = self._chains.get("primary", [])
+        return entries[0].model if entries else "unknown"
+
+    async def _call_chain(
+        self,
+        chain_name: str,
+        system: str | list[dict],
+        messages: list[dict],
+        tools: list[dict],
+        max_tokens: int,
+        request_model: str | None = None,
+        request: "ReasoningRequest | None" = None,
+    ) -> ProviderResponse:
+        """Try each entry in the named chain until one succeeds.
+
+        For the "primary" chain, the first entry uses request_model (from
+        ReasoningRequest) rather than the chain's configured model — this
+        preserves the current handler → reasoning model selection.
+
+        Catches only ReasoningProviderError | ReasoningConnectionError to
+        match existing behavior and avoid masking programming errors.
+        """
+        entries = self._chains.get(chain_name, self._chains.get("primary", []))
+        last_exc: Exception | None = None
+
+        for i, entry in enumerate(entries):
+            model = request_model if (i == 0 and request_model) else entry.model
+            pname = getattr(entry.provider, "provider_name", "unknown")
+
+            # Thread trace to provider for internal event capture
+            if hasattr(entry.provider, "_trace"):
+                entry.provider._trace = getattr(request, "trace", None) if request else None
+
+            try:
+                response = await entry.provider.complete(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                )
+                if i > 0 and request:
+                    # Successful fallback — notify
+                    self._trace(request, "info", "reasoning", "FALLBACK_SUCCESS",
+                        f"chain={chain_name} via {pname}/{model}")
+                    logger.info("CHAIN[%s]: success via %s/%s", chain_name, pname, model)
+                    if hasattr(self, "_handler") and self._handler:
+                        self._handler.queue_system_event(
+                            request.instance_id,
+                            f"[SYSTEM] Primary LLM provider failed — this response was handled by "
+                            f"the fallback provider ({pname}/{model}). The primary provider "
+                            f"may need attention (token refresh, configuration, or service issue)."
+                        )
+                return response
+            except (ReasoningProviderError, ReasoningConnectionError) as exc:
+                if request:
+                    self._trace(request, "warning", "reasoning", "CHAIN_FALLBACK",
+                        f"chain={chain_name} {pname}/{model} failed: {str(exc)[:150]}")
+                logger.warning("CHAIN[%s]: %s/%s failed: %s", chain_name, pname, model, exc)
+                last_exc = exc
+                continue
+
+        # All entries exhausted
+        if request:
+            self._trace(request, "error", "reasoning", "ALL_PROVIDERS_FAILED",
+                f"chain={chain_name} all {len(entries)} entries exhausted")
+        logger.error("CHAIN[%s]: all %d providers failed", chain_name, len(entries))
+        raise last_exc or RuntimeError(f"All providers in chain '{chain_name}' exhausted")
 
     def get_loaded_tools(self, space_id: str) -> set[str]:
         """Get the set of MCP tool names currently loaded for a space."""
@@ -331,28 +425,47 @@ class ReasoningService:
         max_tokens: int = 1024,
         prefer_cheap: bool = False,
         output_schema: dict | None = None,
+        chain: str | None = None,
     ) -> str:
         """Single stateless completion. No tools, no history, no task events.
 
         Used by kernel infrastructure (extraction, consolidation) not by agents.
         Returns raw text response. prefer_cheap uses Haiku-class model for cost efficiency.
 
+        chain: explicit chain name override ("primary", "simple", "cheap").
+        When omitted, prefer_cheap selects "cheap" or "simple".
+
         When output_schema is provided, uses Anthropic's native structured outputs
         (constrained decoding). Schema compliance is guaranteed by the API — no
         json.loads() retry logic needed. Returns "{}" on truncation or refusal.
         """
-        model = (
-            getattr(self._provider, "cheap_model", _CHEAP_MODEL) if prefer_cheap
-            else getattr(self._provider, "simple_model", _SIMPLE_MODEL)
-        )
-        response = await self._provider.complete(
-            model=model,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_content}],
-            tools=[],
-            max_tokens=max_tokens,
-            output_schema=output_schema,
-        )
+        chain_name = chain or ("cheap" if prefer_cheap else "simple")
+        entries = self._chains.get(chain_name, self._chains.get("simple", []))
+        messages = [{"role": "user", "content": user_content}]
+
+        # Walk the chain until one provider succeeds
+        last_exc: Exception | None = None
+        response = None
+        for entry in entries:
+            pname = getattr(entry.provider, "provider_name", type(entry.provider).__name__)
+            try:
+                response = await entry.provider.complete(
+                    model=entry.model,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=[],
+                    max_tokens=max_tokens,
+                    output_schema=output_schema,
+                )
+                break  # Success
+            except Exception as exc:
+                logger.warning("complete_simple[%s]: %s/%s failed: %s", chain_name, pname, entry.model, exc)
+                last_exc = exc
+                continue
+
+        if response is None:
+            raise last_exc or RuntimeError(f"complete_simple: all providers in chain '{chain_name}' failed")
+
         # Log token usage on every simple completion
         logger.info(
             "SIMPLE_RESPONSE: tokens_in=%d tokens_out=%d truncated=%s",
@@ -1774,9 +1887,6 @@ class ReasoningService:
             len(messages), len(tools), request.max_tokens,
         )
         t0 = time.monotonic()
-        # Thread trace to provider for internal event capture
-        if hasattr(self._provider, '_trace'):
-            self._provider._trace = getattr(request, 'trace', None)
         # Build cache-boundary system prompt if static/dynamic split is available
         if request.system_prompt_static:
             _system: str | list[dict] = [
@@ -1785,60 +1895,10 @@ class ReasoningService:
             ]
         else:
             _system = request.system_prompt
-        try:
-            response = await self._provider.complete(
-                model=request.model,
-                system=_system,
-                messages=messages,
-                tools=tools,
-                max_tokens=request.max_tokens,
-            )
-        except (ReasoningProviderError, ReasoningConnectionError) as primary_exc:
-            self._trace(request, "error", "reasoning", "PROVIDER_EXHAUSTED",
-                f"primary failed: {str(primary_exc)[:200]}", phase="reason")
-            if not self._fallback_providers:
-                raise
-            # Primary provider exhausted retries — try fallback chain
-            _last_exc = primary_exc
-            for _fb in self._fallback_providers:
-                _fb_name = getattr(_fb, 'provider_name', 'unknown')
-                _fb_model = getattr(_fb, 'main_model', request.model)
-                self._trace(request, "warning", "reasoning", "FALLBACK",
-                    f"trying {_fb_name}/{_fb_model}", phase="reason")
-                logger.warning("FALLBACK: trying %s/%s after %s",
-                    _fb_name, _fb_model, type(_last_exc).__name__)
-                try:
-                    response = await _fb.complete(
-                        model=_fb_model,
-                        system=_system,
-                        messages=messages,
-                        tools=tools,
-                        max_tokens=request.max_tokens,
-                    )
-                    self._trace(request, "info", "reasoning", "FALLBACK_SUCCESS",
-                        f"via {_fb_name}/{_fb_model}", phase="reason")
-                    logger.info("FALLBACK: success via %s/%s", _fb_name, _fb_model)
-                    # Surface to agent on next turn so they can inform the user
-                    if hasattr(self, '_handler') and self._handler:
-                        self._handler.queue_system_event(
-                            request.instance_id,
-                            f"[SYSTEM] Primary LLM provider failed — this response was handled by "
-                            f"the fallback provider ({_fb_name}/{_fb_model}). The primary provider "
-                            f"may need attention (token refresh, configuration, or service issue)."
-                        )
-                    break  # Success — use this response
-                except Exception as fb_exc:
-                    self._trace(request, "warning", "reasoning", "FALLBACK_FAILED",
-                        f"{_fb_name}/{_fb_model}: {str(fb_exc)[:150]}", phase="reason")
-                    logger.warning("FALLBACK: %s/%s also failed: %s", _fb_name, _fb_model, fb_exc)
-                    _last_exc = fb_exc
-                    continue
-            else:
-                # All fallbacks exhausted
-                self._trace(request, "error", "reasoning", "ALL_PROVIDERS_FAILED",
-                    f"all {len(self._fallback_providers)} fallbacks exhausted", phase="reason")
-                logger.error("FALLBACK: all %d providers failed", len(self._fallback_providers))
-                raise primary_exc from _last_exc
+        response = await self._call_chain(
+            "primary", _system, messages, tools, request.max_tokens,
+            request_model=request.model, request=request,
+        )
         duration_ms = int((time.monotonic() - t0) * 1000)
         total_input_tokens += response.input_tokens
         total_output_tokens += response.output_tokens
@@ -2088,46 +2148,10 @@ class ReasoningService:
                 len(messages), len(tools), request.max_tokens,
             )
             t0 = time.monotonic()
-            if hasattr(self._provider, '_trace'):
-                self._provider._trace = getattr(request, 'trace', None)
-            try:
-                response = await self._provider.complete(
-                    model=request.model,
-                    system=_system,
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=request.max_tokens,
-                )
-            except (ReasoningProviderError, ReasoningConnectionError) as tool_loop_exc:
-                self._trace(request, "error", "reasoning", "TOOLLOOP_PROVIDER_FAILED",
-                    f"iter={iterations} error={str(tool_loop_exc)[:150]}", phase="reason")
-                if not self._fallback_providers:
-                    raise
-                # Tool-loop iteration failed — try fallback chain
-                _last_exc = tool_loop_exc
-                for _fb in self._fallback_providers:
-                    _fb_name = getattr(_fb, 'provider_name', 'unknown')
-                    _fb_model = getattr(_fb, 'main_model', request.model)
-                    self._trace(request, "warning", "reasoning", "FALLBACK_TOOLLOOP",
-                        f"trying {_fb_name}/{_fb_model} iter={iterations}", phase="reason")
-                    logger.warning("FALLBACK_TOOLLOOP: trying %s/%s iter=%d",
-                        _fb_name, _fb_model, iterations)
-                    try:
-                        response = await _fb.complete(
-                            model=_fb_model,
-                            system=_system,
-                            messages=messages,
-                            tools=tools,
-                            max_tokens=request.max_tokens,
-                        )
-                        logger.info("FALLBACK_TOOLLOOP: success via %s/%s", _fb_name, _fb_model)
-                        break
-                    except Exception as fb_exc:
-                        logger.warning("FALLBACK_TOOLLOOP: %s/%s failed: %s", _fb_name, _fb_model, fb_exc)
-                        _last_exc = fb_exc
-                        continue
-                else:
-                    raise tool_loop_exc from _last_exc
+            response = await self._call_chain(
+                "primary", _system, messages, tools, request.max_tokens,
+                request_model=request.model, request=request,
+            )
             duration_ms = int((time.monotonic() - t0) * 1000)
             total_input_tokens += response.input_tokens
             total_output_tokens += response.output_tokens

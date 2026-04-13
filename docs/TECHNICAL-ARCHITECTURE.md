@@ -250,9 +250,19 @@ Post-turn cohort agent. Reads conversation and extracts/updates knowledge entrie
 
 Handles the full tool-use cycle. When the LLM returns tool_use, blocks are classified as concurrent-safe (read) or sequential (write). Read-only tools execute in parallel; write tools sequentially. Up to 10 iterations before safety valve.
 
+### Provider Chains
+
+**Files:** `kernos/providers/base.py` (ChainEntry, ChainConfig), `kernos/providers/chains.py` (builder)
+
+Three named chains: **primary** (main reasoning), **simple** (extraction, compaction, analysis), **cheap** (gate, routing, classification). Each chain is an ordered list of `ChainEntry(provider, model)` pairs. On failure, the next entry in the chain is tried automatically.
+
+`build_chains_from_env()` reads `KERNOS_LLM_PROVIDER` and `KERNOS_LLM_FALLBACK` env vars and builds all three chains. The data structure is `ChainConfig = dict[str, list[ChainEntry]]` — designed so a future config loader can point at `config/providers.json` with zero consumer changes.
+
+`_call_chain()` is the single entry point for chain fallback — used by both `reason()` (primary chain) and `complete_simple()` (simple/cheap chains). Replaces the previous duplicated fallback loops.
+
 ### Dispatch Order
 
-1. **Kernel tools** — Intercepted before MCP. Current set: remember, write_file, read_file, list_files, delete_file, execute_code, manage_workspace, register_tool, inspect_state, request_tool, dismiss_whisper, read_source, read_doc, read_soul, update_soul, manage_covenants, manage_capabilities, manage_channels, send_to_channel, manage_schedule.
+1. **Kernel tools** — Intercepted before MCP. Current set: remember, write_file, read_file, list_files, delete_file, execute_code, manage_workspace, register_tool, inspect_state, request_tool, dismiss_whisper, read_source, read_doc, read_soul, update_soul, manage_covenants, manage_capabilities, manage_channels, send_to_channel, manage_schedule, manage_plan, manage_members, read_runtime_trace, diagnose_issue, propose_fix, submit_spec.
 2. **MCP tools** — Routed via MCPClientManager.call_tool()
 3. **Workspace tools** — Detected via `catalog.has_workspace_tool()`. Executed via `workspace.execute_workspace_tool()` in the tool's home space.
 
@@ -263,6 +273,8 @@ Handles the full tool-use cycle. When the LLM returns tool_use, blocks are class
 Philosophy: reactive user-requested actions (soft_write) are approved. Gate only evaluates hard_write, proactive, and third-party actions.
 
 Steps: (0) denial limit check, (1) approval token bypass, (2) permission override, (3) reactive soft_write bypass, (4) model evaluation → APPROVE / CONFIRM / CONFLICT / CLARIFY.
+
+Action-based tools classified by action param: manage_covenants, manage_capabilities, manage_channels, manage_workspace, manage_members, manage_plan (list/status → read, others → soft_write).
 
 **Denial tracking (IQ-4):** 3 consecutive gate blocks on the same tool per turn → stop retrying. Reset on new turn or approval.
 
@@ -460,6 +472,14 @@ Three adapters: Discord (event-driven via discord.py), SMS (Twilio polling), Tel
 ### Invite Codes (Platform-Locked)
 
 Codes are KERN-XXXX format, one-time use, platform-locked at generation. A code for Discord rejects on Telegram/SMS. The `manage_members` tool returns the code AND platform-specific instructions. If the platform isn't connected (no adapter registered), setup instructions are returned instead. Instructions registry (`_INVITE_INSTRUCTIONS`, `_SETUP_INSTRUCTIONS`) is extensible for future adapters.
+
+### Secure Credential Input for Adapters
+
+Extends the existing `secure api` flow (built for MCP capabilities) to platform adapter tokens. `SecureInputState` has two modes: `capability` (MCP key → secrets dir) and `platform` (adapter token → .env).
+
+`_PLATFORM_CREDENTIALS` maps each platform to its primary env var, label, and whether it supports the paste flow. Telegram supports paste (single token). SMS requires manual .env (multiple credentials). Discord deferred to its own spec.
+
+When setup instructions surface for a paste-capable platform, the agent is given three options to present: (1) paste via `secure api`, (2) manual .env edit, (3) cancel. On paste, `_write_env_var()` updates .env and sets `os.environ`, then `_start_platform_adapter()` hot-starts the adapter without a restart (currently implemented for Telegram).
 
 ---
 

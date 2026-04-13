@@ -36,6 +36,7 @@ class ReasoningProtocol(Protocol):
         self, system_prompt: str, user_content: str,
         max_tokens: int = 1024, prefer_cheap: bool = False,
         output_schema: dict | None = None,
+        chain: str | None = None,
     ) -> str: ...
 
     # Tool state

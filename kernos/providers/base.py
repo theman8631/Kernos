@@ -26,6 +26,18 @@ class ProviderResponse:
     cache_read_input_tokens: int = 0
 
 
+@dataclass
+class ChainEntry:
+    """A single entry in a provider chain: which provider to call, with which model."""
+
+    provider: "Provider"
+    model: str
+
+
+# Chain name → ordered list of entries to try. Standard keys: "primary", "simple", "cheap".
+ChainConfig = dict[str, list[ChainEntry]]
+
+
 class Provider(ABC):
     """Abstract LLM provider. Each implementation wraps a specific SDK."""
 

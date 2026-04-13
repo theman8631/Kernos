@@ -110,6 +110,12 @@ class DispatchGate:
         if tool_name == "manage_channels":
             action = (tool_input or {}).get("action", "list")
             return "read" if action == "list" else "soft_write"
+        if tool_name == "manage_members":
+            action = (tool_input or {}).get("action", "list")
+            return "read" if action == "list" else "soft_write"
+        if tool_name == "manage_plan":
+            action = (tool_input or {}).get("action", "status")
+            return "read" if action == "status" else "soft_write"
         if tool_name == "manage_schedule":
             return "read"
         if tool_name == "manage_workspace":

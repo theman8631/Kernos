@@ -13,7 +13,6 @@ from mcp import StdioServerParameters
 
 import dataclasses
 
-from kernos.kernel.credentials import resolve_anthropic_credential
 from kernos.messages.adapters.discord_bot import DiscordAdapter
 from kernos.messages.handler import MessageHandler
 from kernos.capability.client import AuthCommand, MCPClientManager
@@ -22,7 +21,7 @@ from kernos.capability.registry import CapabilityRegistry, CapabilityStatus
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import JsonEventStream, emit_event
 from kernos.kernel.engine import TaskEngine
-from kernos.kernel.reasoning import AnthropicProvider, ReasoningService
+from kernos.kernel.reasoning import ReasoningService
 from kernos.kernel.state_json import JsonStateStore
 from kernos.persistence.json_file import JsonAuditStore, JsonConversationStore, JsonInstanceStore
 
@@ -357,52 +356,10 @@ async def on_ready():
     connected = [c.name for c in registry.get_connected()]
     logger.info("Capability registry ready — connected: %s", connected or "none")
 
-    provider_name = os.getenv("KERNOS_LLM_PROVIDER", "anthropic")
-    if provider_name == "openai-codex":
-        from kernos.kernel.credentials import resolve_openai_codex_credential
-        from kernos.kernel.reasoning import OpenAICodexProvider
-        provider = OpenAICodexProvider(credential=resolve_openai_codex_credential())
-    elif provider_name == "ollama":
-        from kernos.providers.ollama_provider import OllamaProvider
-        provider = OllamaProvider()
-    else:
-        provider = AnthropicProvider(api_key=resolve_anthropic_credential())
+    from kernos.providers.chains import build_chains_from_env
+    chains, _primary_provider = build_chains_from_env()
 
-    # Build fallback chain (automatic failover: primary → fallback1 → fallback2 → ...)
-    # KERNOS_LLM_FALLBACK is comma-separated: "ollama:glm-5.1:cloud,ollama:gemma4:31b-cloud"
-    fallback_providers: list = []
-    fallback_spec = os.getenv("KERNOS_LLM_FALLBACK", "")
-    if fallback_spec:
-        for entry in fallback_spec.split(","):
-            entry = entry.strip()
-            if not entry:
-                continue
-            try:
-                if entry.startswith("ollama:"):
-                    from kernos.providers.ollama_provider import OllamaProvider
-                    _model = entry[len("ollama:"):]
-                    fb = OllamaProvider(model=_model)
-                    fallback_providers.append(fb)
-                    logger.info("Fallback provider ready: ollama/%s", _model)
-                elif entry == "ollama":
-                    from kernos.providers.ollama_provider import OllamaProvider
-                    fb = OllamaProvider()
-                    fallback_providers.append(fb)
-                    logger.info("Fallback provider ready: ollama (default model)")
-                elif entry == "openai-codex":
-                    from kernos.kernel.credentials import resolve_openai_codex_credential
-                    from kernos.kernel.reasoning import OpenAICodexProvider
-                    fb = OpenAICodexProvider(credential=resolve_openai_codex_credential())
-                    fallback_providers.append(fb)
-                    logger.info("Fallback provider ready: openai-codex")
-                elif entry == "anthropic":
-                    fb = AnthropicProvider(api_key=resolve_anthropic_credential())
-                    fallback_providers.append(fb)
-                    logger.info("Fallback provider ready: anthropic")
-            except Exception as exc:
-                logger.warning("Failed to init fallback provider %s: %s", entry, exc)
-
-    reasoning = ReasoningService(provider, events, mcp_manager, audit, fallback_providers=fallback_providers)
+    reasoning = ReasoningService(events=events, mcp=mcp_manager, audit=audit, chains=chains)
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
     handler._instance_db = instance_db  # Wire instance DB for member resolution

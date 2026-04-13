@@ -21,6 +21,7 @@ from kernos.messages.handler import (
     MessageHandler,
     SecureInputState,
     _safe_instance_name,
+    _PLATFORM_CREDENTIALS,
     resolve_mcp_credentials,
     _SECURE_API_TRIGGER,
 )
@@ -880,3 +881,179 @@ class TestSecureInputState:
         await handler.process(msg)
 
         assert TENANT_ID not in handler._secure_input_state
+
+
+class TestPlatformCredentialFlow:
+    """Tests for platform adapter credential secure input (Telegram, etc.)."""
+
+    def test_platform_credentials_mapping(self):
+        """Telegram supports paste; SMS does not."""
+        assert _PLATFORM_CREDENTIALS["telegram"]["supports_paste"] is True
+        assert _PLATFORM_CREDENTIALS["sms"]["supports_paste"] is False
+        assert _PLATFORM_CREDENTIALS["telegram"]["primary_env"] == "TELEGRAM_BOT_TOKEN"
+
+    def test_secure_input_state_platform_mode(self):
+        """SecureInputState supports platform mode fields."""
+        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        state = SecureInputState(
+            capability_name="telegram",
+            expires_at=expires,
+            mode="platform",
+            platform="telegram",
+            env_var="TELEGRAM_BOT_TOKEN",
+        )
+        assert state.mode == "platform"
+        assert state.platform == "telegram"
+        assert state.env_var == "TELEGRAM_BOT_TOKEN"
+
+    def test_secure_input_state_defaults_to_capability(self):
+        """Default mode is 'capability' for backward compat."""
+        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        state = SecureInputState(capability_name="google-calendar", expires_at=expires)
+        assert state.mode == "capability"
+        assert state.platform == ""
+
+    async def test_platform_secure_trigger(self, tmp_path):
+        """'secure api' for a platform setup enters platform mode."""
+        handler = _make_handler(tmp_path)
+        # No MCP capability to infer — but platform setup context exists
+        handler._infer_pending_capability = AsyncMock(return_value=None)
+        handler._infer_pending_platform = AsyncMock(return_value="telegram")
+
+        msg = _make_message("secure api")
+        response = await handler.process(msg)
+
+        assert "Secure input mode active" in response
+        assert "Telegram" in response
+        assert "bot token" in response.lower()
+        state = handler._secure_input_state.get(TENANT_ID)
+        assert state is not None
+        assert state.mode == "platform"
+        assert state.platform == "telegram"
+        assert state.env_var == "TELEGRAM_BOT_TOKEN"
+
+    async def test_platform_credential_stored_in_env(self, tmp_path):
+        """Platform credential gets written to .env and os.environ."""
+        handler = _make_handler(tmp_path)
+        handler._secure_input_state[TENANT_ID] = SecureInputState(
+            capability_name="telegram",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            mode="platform",
+            platform="telegram",
+            env_var="TELEGRAM_BOT_TOKEN",
+        )
+        handler._start_platform_adapter = AsyncMock(return_value=False)
+        handler._write_env_var = MagicMock()
+
+        msg = _make_message("123456:ABC-TOKEN")
+        response = await handler.process(msg)
+
+        handler._write_env_var.assert_called_once_with("TELEGRAM_BOT_TOKEN", "123456:ABC-TOKEN")
+        assert "Token saved" in response or "Token stored" in response
+        assert TENANT_ID not in handler._secure_input_state
+
+    async def test_platform_hot_start_success(self, tmp_path):
+        """Successful hot-start returns 'now live' message."""
+        handler = _make_handler(tmp_path)
+        handler._secure_input_state[TENANT_ID] = SecureInputState(
+            capability_name="telegram",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            mode="platform",
+            platform="telegram",
+            env_var="TELEGRAM_BOT_TOKEN",
+        )
+        handler._write_env_var = MagicMock()
+        handler._start_platform_adapter = AsyncMock(return_value=True)
+
+        msg = _make_message("123456:ABC-TOKEN")
+        response = await handler.process(msg)
+
+        assert "now live" in response.lower()
+        assert "Telegram" in response
+
+    async def test_platform_hot_start_failure_suggests_restart(self, tmp_path):
+        """Failed hot-start suggests restart."""
+        handler = _make_handler(tmp_path)
+        handler._secure_input_state[TENANT_ID] = SecureInputState(
+            capability_name="telegram",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            mode="platform",
+            platform="telegram",
+            env_var="TELEGRAM_BOT_TOKEN",
+        )
+        handler._write_env_var = MagicMock()
+        handler._start_platform_adapter = AsyncMock(return_value=False)
+
+        msg = _make_message("123456:ABC-TOKEN")
+        response = await handler.process(msg)
+
+        assert "restart" in response.lower()
+        assert "TELEGRAM_BOT_TOKEN" in response
+
+    async def test_write_env_var_creates_file(self, tmp_path):
+        """_write_env_var creates .env if missing and writes the key."""
+        handler = _make_handler(tmp_path)
+
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            handler._write_env_var("MY_TEST_TOKEN", "secret123")
+            content = (tmp_path / ".env").read_text()
+            assert "MY_TEST_TOKEN=secret123" in content
+            assert os.environ.get("MY_TEST_TOKEN") == "secret123"
+        finally:
+            os.chdir(original_cwd)
+            os.environ.pop("MY_TEST_TOKEN", None)
+
+    async def test_write_env_var_updates_existing(self, tmp_path):
+        """_write_env_var updates an existing key without duplicating."""
+        handler = _make_handler(tmp_path)
+        env_path = tmp_path / ".env"
+        env_path.write_text("OTHER_VAR=keep\nMY_TEST_TOKEN=old_value\nANOTHER=yes\n")
+
+        original_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            handler._write_env_var("MY_TEST_TOKEN", "new_value")
+            content = env_path.read_text()
+            assert "MY_TEST_TOKEN=new_value" in content
+            assert "MY_TEST_TOKEN=old_value" not in content
+            assert "OTHER_VAR=keep" in content
+            assert "ANOTHER=yes" in content
+        finally:
+            os.chdir(original_cwd)
+            os.environ.pop("MY_TEST_TOKEN", None)
+
+    async def test_setup_instructions_include_paste_option(self, tmp_path):
+        """Setup instructions for paste-capable platforms include secure api prompt."""
+        handler = _make_handler(tmp_path)
+        assert "telegram" not in handler._adapters
+        # Mock instance_db with real setup instructions
+        mock_idb = MagicMock()
+        mock_idb.get_setup_instructions.return_value = "To set up Telegram:\n1. Create bot via @BotFather\n2. Set TELEGRAM_BOT_TOKEN in .env"
+        mock_idb.get_supported_platforms.return_value = ["discord", "telegram", "sms"]
+        handler._instance_db = mock_idb
+
+        result = await handler._handle_manage_members(
+            TENANT_ID, {"action": "invite", "platform": "telegram"}
+        )
+
+        assert "not connected" in result.lower()
+        assert "secure api" in result.lower()
+        assert "Paste" in result or "paste" in result
+
+    async def test_setup_instructions_sms_no_paste_option(self, tmp_path):
+        """SMS setup instructions do NOT include paste option (multi-credential)."""
+        handler = _make_handler(tmp_path)
+        assert "sms" not in handler._adapters
+        mock_idb = MagicMock()
+        mock_idb.get_setup_instructions.return_value = "To set up SMS:\n1. Create Twilio account"
+        mock_idb.get_supported_platforms.return_value = ["discord", "telegram", "sms"]
+        handler._instance_db = mock_idb
+
+        result = await handler._handle_manage_members(
+            TENANT_ID, {"action": "invite", "platform": "sms"}
+        )
+
+        assert "not connected" in result.lower()
+        assert "secure api" not in result.lower()
