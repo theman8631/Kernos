@@ -4368,6 +4368,7 @@ class MessageHandler:
                     self.reasoning, self.state, self.events,
                     instance_id, ctx.previous_space_id, log_text or "",
                     data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+                    member_id=ctx.member_id,
                 ))
             except Exception:
                 pass

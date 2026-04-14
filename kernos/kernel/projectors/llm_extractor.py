@@ -367,6 +367,7 @@ async def run_tier2_extraction(
     embedding_service: EmbeddingService | None = None,
     embedding_store: JsonEmbeddingStore | None = None,
     active_space_id: str = "",
+    member_id: str = "",
 ) -> None:
     """Run LLM-based knowledge extraction. Called as a background task.
 
@@ -506,6 +507,7 @@ async def run_tier2_extraction(
                     source_description="tier2_llm entity extraction",
                     existing_hashes=existing_hashes, now=now, tags=["entity"],
                     context_space=_space_for_entry(name, lifecycle_archetype),
+                    member_id=member_id,
                 )
 
         # Facts — SKIPPED per-turn. Harvested at compaction boundaries.
@@ -557,6 +559,7 @@ async def run_tier2_extraction(
                     fact_deduplicator=fact_deduplicator,
                     embedding_service=embedding_service,
                     embedding_store=embedding_store,
+                    member_id=member_id,
                 )
             else:
                 wrote = await _write_entry(
@@ -568,6 +571,7 @@ async def run_tier2_extraction(
                     source_description="tier2_llm fact extraction",
                     existing_hashes=existing_hashes, now=now, tags=["fact"],
                     context_space=_space_for_entry(subject, lifecycle_archetype),
+                    member_id=member_id,
                 )
             wrote_count += wrote
 
@@ -612,6 +616,7 @@ async def run_tier2_extraction(
                     fact_deduplicator=fact_deduplicator,
                     embedding_service=embedding_service,
                     embedding_store=embedding_store,
+                    member_id=member_id,
                 )
             else:
                 wrote_count += await _write_entry(
@@ -621,6 +626,7 @@ async def run_tier2_extraction(
                     source_description="tier2_llm preference extraction",
                     existing_hashes=existing_hashes, now=now, tags=["preference"],
                     context_space=_space_for_entry(subject, lifecycle_archetype),
+                    member_id=member_id,
                 )
 
         # Corrections
@@ -672,6 +678,7 @@ async def _write_entry(
     now: str,
     tags: list[str],
     context_space: str = "",
+    member_id: str = "",
 ) -> int:
     """Write a KnowledgeEntry with dedup and confidence precedence. Returns 1 if written, 0 if skipped."""
     h = _content_hash(instance_id, subject, content)
@@ -714,6 +721,7 @@ async def _write_entry(
         foresight_expires=foresight_expires,
         salience=salience,
         context_space=context_space,
+        owner_member_id=member_id,
     )
     await state.save_knowledge_entry(entry)
     existing_hashes.add(h)
@@ -742,6 +750,7 @@ async def _write_entry_enhanced(
     embedding_service: EmbeddingService,
     embedding_store: JsonEmbeddingStore,
     context_space: str = "",
+    member_id: str = "",
 ) -> int:
     """Enhanced write path: embedding-based semantic dedup via FactDeduplicator.
 
@@ -777,6 +786,7 @@ async def _write_entry_enhanced(
             salience=salience,
             source_description=source_description,
             existing_hashes=existing_hashes, now=now, tags=tags,
+            member_id=member_id,
         )
 
     # Build the candidate entry (may or may not be written)
@@ -800,6 +810,7 @@ async def _write_entry_enhanced(
         salience=salience,
         entity_node_id=entity_node_id,
         context_space=context_space,
+        owner_member_id=member_id,
     )
 
     classification, target_id = await fact_deduplicator.classify(

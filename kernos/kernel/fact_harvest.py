@@ -45,14 +45,16 @@ async def harvest_facts(
     space_id: str,
     conversation_text: str,
     data_dir: str = "./data",
+    member_id: str = "",
 ) -> int:
     """Run boundary-driven fact harvest. Returns count of changes made."""
     if not conversation_text.strip() or not reasoning_service:
         return 0
 
-    # Load all active facts for this instance
+    # Load all active facts for this member (or all if no member scoping)
     all_facts = await state_store.query_knowledge(
         instance_id, subject="user", active_only=True, limit=200,
+        member_id=member_id,
     )
 
     # Format facts for the reconciliation prompt
@@ -143,6 +145,7 @@ async def harvest_facts(
                 tags=[],
                 lifecycle_archetype=item.get("archetype", "structural"),
                 valid_at=utc_now(),
+                owner_member_id=member_id,
             )
             await state_store.add_knowledge(entry)
             changes += 1

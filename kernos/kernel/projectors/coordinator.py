@@ -128,6 +128,7 @@ async def run_projectors(
             embedding_store=embedding_store,
             active_space_id=active_space_id,
             active_space=active_space,
+            member_id=member_id,
         )
     )
 
@@ -146,6 +147,7 @@ async def _run_tier2_with_behavioral_detection(
     embedding_store=None,
     active_space_id: str = "",
     active_space: ContextSpace | None = None,
+    member_id: str = "",
 ) -> None:
     """Run Tier 2 extraction, then detect behavioral instructions and create rules."""
     # Run the standard extraction
@@ -161,6 +163,7 @@ async def _run_tier2_with_behavioral_detection(
         embedding_service=embedding_service,
         embedding_store=embedding_store,
         active_space_id=active_space_id,
+        member_id=member_id,
     )
 
     # Detect behavioral instructions from recently created entries
