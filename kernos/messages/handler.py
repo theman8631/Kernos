@@ -7,6 +7,7 @@ from kernos.utils import utc_now
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3117,10 +3118,17 @@ class MessageHandler:
                     await self._phase_assemble(primary_ctx)
                     primary_ctx.phase_timings["assemble"] = int((time.monotonic() - _t0) * 1000)
 
+                    # Check for pending wipe confirmation (exact-phrase match)
+                    _wipe_response = await self._check_wipe_confirmation(primary_ctx)
+                    if _wipe_response:
+                        response = _wipe_response
+
                     # Slash command intercepts — skip reasoning
                     _cmd = (primary_msg.content or "").strip()
                     _cmd_lower = _cmd.lower()
-                    if _cmd_lower == "/dump":
+                    if _wipe_response:
+                        pass  # Already handled above
+                    elif _cmd_lower == "/dump":
                         response = await self._handle_dump(primary_ctx)
                     elif _cmd_lower == "/status":
                         response = await self._handle_status(primary_ctx)
@@ -3128,6 +3136,8 @@ class MessageHandler:
                         response = self._handle_help()
                     elif _cmd_lower.startswith("/spaces"):
                         response = await self._handle_spaces(primary_ctx, _cmd)
+                    elif _cmd_lower.startswith("/wipe"):
+                        response = await self._handle_wipe(primary_ctx, _cmd)
                     else:
                         try:
                             _t0 = time.monotonic()
@@ -3483,8 +3493,140 @@ class MessageHandler:
             '**/spaces create "Name" "Description"** — Manually create a '
             "new context space for testing multi-space routing.\n\n"
             "These commands bypass the reasoning engine and are not stored "
-            "in conversation history."
+            "in conversation history.\n\n"
+            "**/wipe me** — Delete your member profile, conversations, knowledge, "
+            "and spaces. Other members unaffected. Requires confirmation.\n\n"
+            "**/wipe all** — Factory reset the entire instance. All members, all data. "
+            "Owner only. Requires confirmation."
         )
+
+    # --- Wipe commands ---
+
+    # Pending wipe confirmations: {instance_id:member_id → wipe_type}
+    _pending_wipe: dict[str, str] = {}
+
+    async def _handle_wipe(self, ctx: TurnContext, raw_cmd: str) -> str:
+        """Handle /wipe me and /wipe all with exact-phrase confirmation."""
+        parts = raw_cmd.strip().lower().split()
+        sub = parts[1] if len(parts) > 1 else ""
+
+        if sub == "me":
+            if not ctx.member_id:
+                return "Cannot determine your member identity. Are you a registered member?"
+            # Get the member's display name for the confirmation phrase
+            name = (ctx.member_profile or {}).get("display_name", "") or "my data"
+            self._pending_wipe[f"{ctx.instance_id}:{ctx.member_id}"] = "me"
+            return (
+                f"This will permanently delete your profile, conversations, knowledge, "
+                f"spaces, and covenants. Other members are not affected.\n\n"
+                f'To confirm, type exactly: **Delete my {name}!**'
+            )
+        elif sub == "all":
+            # Check if member is owner
+            if hasattr(self, '_instance_db') and self._instance_db and ctx.member_id:
+                member = await self._instance_db.get_member(ctx.member_id)
+                if not member or member.get("role") != "owner":
+                    return "Only the instance owner can wipe all data."
+            self._pending_wipe[f"{ctx.instance_id}:{ctx.member_id}"] = "all"
+            return (
+                "This will permanently delete ALL data for this Kernos instance — "
+                "every member, every conversation, every space, everything.\n\n"
+                'To confirm, type exactly: **Delete it all!**'
+            )
+        else:
+            return (
+                "Usage:\n"
+                "**/wipe me** — Delete your data only (profile, conversations, knowledge, spaces)\n"
+                "**/wipe all** — Factory reset the entire instance (owner only)"
+            )
+
+    async def _check_wipe_confirmation(self, ctx: TurnContext) -> str | None:
+        """Check if an incoming message is a wipe confirmation phrase. Returns response or None."""
+        key = f"{ctx.instance_id}:{ctx.member_id}"
+        if key not in self._pending_wipe:
+            return None
+
+        text = (ctx.message.content or "").strip()
+        wipe_type = self._pending_wipe[key]
+
+        if wipe_type == "me":
+            name = (ctx.member_profile or {}).get("display_name", "") or "my data"
+            expected = f"Delete my {name}!"
+            if text == expected:
+                del self._pending_wipe[key]
+                return await self._execute_wipe_member(ctx)
+            else:
+                # Wrong phrase or changed mind — cancel
+                del self._pending_wipe[key]
+                return "Wipe cancelled."
+
+        elif wipe_type == "all":
+            if text == "Delete it all!":
+                del self._pending_wipe[key]
+                return await self._execute_wipe_all(ctx)
+            else:
+                del self._pending_wipe[key]
+                return "Wipe cancelled."
+
+        del self._pending_wipe[key]
+        return None
+
+    async def _execute_wipe_member(self, ctx: TurnContext) -> str:
+        """Delete a single member's data: profile, conversations, knowledge, spaces, covenants."""
+        instance_id = ctx.instance_id
+        member_id = ctx.member_id
+        name = (ctx.member_profile or {}).get("display_name", member_id)
+
+        # Delete member's knowledge entries
+        try:
+            all_ke = await self.state.query_knowledge(
+                instance_id, active_only=False, limit=10000, member_id=member_id)
+            for ke in all_ke:
+                if getattr(ke, "owner_member_id", "") == member_id:
+                    await self.state.update_knowledge(instance_id, ke.id, {"active": False})
+            logger.info("WIPE_MEMBER: deactivated %d knowledge entries for %s", len(all_ke), member_id)
+        except Exception as exc:
+            logger.warning("WIPE_MEMBER: knowledge cleanup failed: %s", exc)
+
+        # Delete member's spaces
+        try:
+            spaces = await self.state.list_context_spaces(instance_id)
+            for s in spaces:
+                if s.member_id == member_id:
+                    await self.state.update_context_space(instance_id, s.id, {"status": "archived"})
+            logger.info("WIPE_MEMBER: archived member spaces for %s", member_id)
+        except Exception as exc:
+            logger.warning("WIPE_MEMBER: space cleanup failed: %s", exc)
+
+        # Delete member profile
+        if hasattr(self, '_instance_db') and self._instance_db:
+            try:
+                await self._instance_db.upsert_member_profile(member_id, {
+                    "display_name": "", "timezone": "", "communication_style": "",
+                    "interaction_count": 0, "hatched": False, "hatched_at": "",
+                    "bootstrap_graduated": False, "bootstrap_graduated_at": "",
+                    "agent_name": "", "emoji": "", "personality_notes": "",
+                })
+                logger.info("WIPE_MEMBER: reset profile for %s", member_id)
+            except Exception as exc:
+                logger.warning("WIPE_MEMBER: profile reset failed: %s", exc)
+
+        return f"{name}'s data has been wiped. Fresh start — say anything to begin again."
+
+    async def _execute_wipe_all(self, ctx: TurnContext) -> str:
+        """Factory reset — delete everything. Triggers process restart."""
+        import shutil
+        data_dir = Path(os.getenv("KERNOS_DATA_DIR", "./data"))
+        logger.warning("WIPE_ALL: initiated by member=%s instance=%s", ctx.member_id, ctx.instance_id)
+
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+            logger.info("WIPE_ALL: removed %s", data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Restart the process
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+        return "Wiping..."  # Never reached — execv replaces the process
 
     async def _handle_manage_members(
         self, instance_id: str, tool_input: dict,
