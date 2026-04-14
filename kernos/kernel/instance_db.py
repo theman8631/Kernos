@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS member_profiles (
     FOREIGN KEY (member_id) REFERENCES members(member_id)
 );
 
+CREATE TABLE IF NOT EXISTS sender_blocks (
+    sender_key  TEXT PRIMARY KEY,
+    platform    TEXT NOT NULL,
+    channel_id  TEXT NOT NULL,
+    failure_count INTEGER DEFAULT 0,
+    block_tier  INTEGER DEFAULT 0,
+    blocked_until TEXT DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS platform_config (
     platform    TEXT PRIMARY KEY,
     config      TEXT DEFAULT '{}'
@@ -373,6 +384,107 @@ class InstanceDB:
                 "personality_notes": d.get("personality_notes", ""),
             }
         return None
+
+    # --- Abuse Prevention ---
+
+    # Escalating ban durations: 24 hours → 24 days → 24 years
+    _BAN_DURATIONS_HOURS = [24, 24 * 24, 24 * 365 * 24]
+    _FAILURE_THRESHOLD = 3
+
+    async def check_sender_blocked(self, platform: str, channel_id: str) -> str | None:
+        """Check if a sender is currently blocked. Returns block message or None."""
+        if not self._conn:
+            return None
+        from datetime import datetime, timezone
+        key = f"{platform}:{channel_id}"
+        async with self._conn.execute(
+            "SELECT blocked_until, block_tier FROM sender_blocks WHERE sender_key=?", (key,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        blocked_until = row[0]
+        if not blocked_until:
+            return None
+        try:
+            expires = datetime.fromisoformat(blocked_until.replace("Z", "+00:00"))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) < expires:
+                return "This sender has been temporarily blocked due to repeated invalid attempts."
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    async def record_sender_failure(self, platform: str, channel_id: str) -> str | None:
+        """Record a failed attempt. Returns block message if threshold reached, else None."""
+        if not self._conn:
+            return None
+        from datetime import datetime, timezone, timedelta
+        from kernos.utils import utc_now
+        key = f"{platform}:{channel_id}"
+        now = utc_now()
+
+        async with self._conn.execute(
+            "SELECT failure_count, block_tier, blocked_until FROM sender_blocks WHERE sender_key=?", (key,),
+        ) as cur:
+            row = await cur.fetchone()
+
+        if row:
+            count = row[0] + 1
+            tier = row[1]
+            # If currently blocked and still failing, don't reset
+            if row[2]:
+                try:
+                    expires = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
+                    if expires.tzinfo is None:
+                        expires = expires.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) < expires:
+                        return "This sender has been temporarily blocked due to repeated invalid attempts."
+                except (ValueError, TypeError):
+                    pass
+            await self._conn.execute(
+                "UPDATE sender_blocks SET failure_count=?, updated_at=? WHERE sender_key=?",
+                (count, now, key),
+            )
+        else:
+            count = 1
+            tier = 0
+            await self._conn.execute(
+                "INSERT INTO sender_blocks (sender_key, platform, channel_id, failure_count, block_tier, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (key, platform, channel_id, count, tier, now, now),
+            )
+
+        await self._conn.commit()
+
+        if count >= self._FAILURE_THRESHOLD:
+            # Escalate ban tier
+            new_tier = min(tier + 1, len(self._BAN_DURATIONS_HOURS))
+            duration_hours = self._BAN_DURATIONS_HOURS[min(new_tier - 1, len(self._BAN_DURATIONS_HOURS) - 1)]
+            blocked_until = (datetime.now(timezone.utc) + timedelta(hours=duration_hours)).isoformat()
+            await self._conn.execute(
+                "UPDATE sender_blocks SET block_tier=?, blocked_until=?, failure_count=0, updated_at=? "
+                "WHERE sender_key=?",
+                (new_tier, blocked_until, now, key),
+            )
+            await self._conn.commit()
+            _tier_labels = ["24 hours", "24 days", "24 years"]
+            label = _tier_labels[min(new_tier - 1, len(_tier_labels) - 1)]
+            logger.warning("SENDER_BLOCKED: %s tier=%d duration=%s", key, new_tier, label)
+            return "This sender has been temporarily blocked due to repeated invalid attempts."
+
+        return None
+
+    async def clear_sender_failures(self, platform: str, channel_id: str) -> None:
+        """Clear failure count on successful action (invite claim, member resolution)."""
+        if not self._conn:
+            return
+        key = f"{platform}:{channel_id}"
+        await self._conn.execute(
+            "DELETE FROM sender_blocks WHERE sender_key=?", (key,),
+        )
+        await self._conn.commit()
 
     # --- Invite Codes ---
 

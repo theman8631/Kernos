@@ -1271,14 +1271,22 @@ class MessageHandler:
 
         Returns (member_id, static_response).
         If static_response is not None, send it and skip the pipeline.
+        Includes escalating abuse prevention: 3 failures → 24h block → 24d → 24y.
         """
         if not hasattr(self, '_instance_db') or not self._instance_db:
-            # No instance DB — fall back to owner
             return "", None
+
+        # 0. Check if sender is blocked (escalating ban)
+        block_msg = await self._instance_db.check_sender_blocked(platform, sender_id)
+        if block_msg:
+            logger.info("BLOCKED_SENDER: platform=%s sender=%s", platform, sender_id)
+            return "", block_msg
 
         # 1. Known member?
         member = await self._instance_db.get_member_by_channel(platform, sender_id)
         if member:
+            # Successful resolution — clear any prior failure history
+            await self._instance_db.clear_sender_failures(platform, sender_id)
             return member["member_id"], None
 
         # 2. Check for invite code in message
@@ -1286,13 +1294,22 @@ class MessageHandler:
         if code:
             result = await self._instance_db.claim_invite_code(code, platform, sender_id)
             if result:
+                if result.get("action") == "rejected":
+                    # Wrong platform — counts as a failure
+                    ban_msg = await self._instance_db.record_sender_failure(platform, sender_id)
+                    return "", ban_msg or result.get("static_response")
+                # Successful claim — clear failures
+                await self._instance_db.clear_sender_failures(platform, sender_id)
                 return result.get("member_id", ""), result.get("static_response")
             else:
-                return "", "That invite code is invalid or has expired."
+                # Invalid/expired code — record failure
+                ban_msg = await self._instance_db.record_sender_failure(platform, sender_id)
+                return "", ban_msg or "That invite code is invalid or has expired."
 
-        # 3. Unknown sender, no valid code
+        # 3. Unknown sender, no valid code — record failure
+        ban_msg = await self._instance_db.record_sender_failure(platform, sender_id)
         logger.info("UNKNOWN_SENDER: platform=%s sender=%s", platform, sender_id)
-        return "", "This is a private Kernos instance. If you were invited, send your invite code."
+        return "", ban_msg or "This is a private Kernos instance. If you were invited, send your invite code."
 
     async def read_log_text(self, instance_id: str, space_id: str, log_number: int, member_id: str = "") -> str:
         """Read conversation log text — satisfies HandlerProtocol."""

@@ -201,3 +201,73 @@ class TestDynamicInviteInstructions:
         await idb.set_platform_config("telegram", {"bot_username": "dynamic_bot"})
         result = await idb.create_invite_code("owner1", platform="telegram", display_name="Sarah")
         assert "@dynamic_bot" in result["instructions"]
+
+
+class TestAbusePrevention:
+    async def test_no_block_initially(self, idb):
+        result = await idb.check_sender_blocked("telegram", "attacker1")
+        assert result is None
+
+    async def test_failures_below_threshold_no_block(self, idb):
+        await idb.record_sender_failure("telegram", "attacker1")
+        await idb.record_sender_failure("telegram", "attacker1")
+        result = await idb.check_sender_blocked("telegram", "attacker1")
+        assert result is None
+
+    async def test_three_failures_triggers_block(self, idb):
+        await idb.record_sender_failure("telegram", "attacker2")
+        await idb.record_sender_failure("telegram", "attacker2")
+        ban_msg = await idb.record_sender_failure("telegram", "attacker2")
+        assert ban_msg is not None
+        assert "blocked" in ban_msg.lower()
+        # Should also be blocked on check
+        result = await idb.check_sender_blocked("telegram", "attacker2")
+        assert result is not None
+
+    async def test_successful_resolution_clears_failures(self, idb):
+        await idb.record_sender_failure("telegram", "gooduser1")
+        await idb.record_sender_failure("telegram", "gooduser1")
+        # Not yet blocked (2 failures)
+        assert await idb.check_sender_blocked("telegram", "gooduser1") is None
+        # Successful resolution clears
+        await idb.clear_sender_failures("telegram", "gooduser1")
+        await idb.record_sender_failure("telegram", "gooduser1")
+        # Only 1 failure now, not 3
+        assert await idb.check_sender_blocked("telegram", "gooduser1") is None
+
+    async def test_different_senders_independent(self, idb):
+        for _ in range(3):
+            await idb.record_sender_failure("telegram", "bad1")
+        # bad1 is blocked
+        assert await idb.check_sender_blocked("telegram", "bad1") is not None
+        # good1 is not
+        assert await idb.check_sender_blocked("telegram", "good1") is None
+
+    async def test_block_tier_escalates(self, idb):
+        """Verify escalating tiers: 24h → 24d → 24y."""
+        import sqlite3
+        # Tier 1: 3 failures
+        for _ in range(3):
+            await idb.record_sender_failure("discord", "repeat_offender")
+        # Check tier in DB
+        async with idb._conn.execute(
+            "SELECT block_tier FROM sender_blocks WHERE sender_key=?",
+            ("discord:repeat_offender",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row[0] == 1  # First ban tier
+
+        # Simulate unban by clearing blocked_until, then fail 3 more times
+        await idb._conn.execute(
+            "UPDATE sender_blocks SET blocked_until='', failure_count=0 WHERE sender_key=?",
+            ("discord:repeat_offender",),
+        )
+        await idb._conn.commit()
+        for _ in range(3):
+            await idb.record_sender_failure("discord", "repeat_offender")
+        async with idb._conn.execute(
+            "SELECT block_tier FROM sender_blocks WHERE sender_key=?",
+            ("discord:repeat_offender",),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row[0] == 2  # Second ban tier (24 days)
