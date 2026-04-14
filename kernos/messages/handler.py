@@ -3359,6 +3359,8 @@ class MessageHandler:
                 message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
         else:
             message.member_id = self._resolve_member(instance_id, message.platform, message.sender)
+        # Propagate resolved member_id to TurnContext
+        ctx.member_id = message.member_id
         if message.platform == "discord":
             self._channel_registry.update_target("discord", message.conversation_id)
         if message.platform == "telegram":
