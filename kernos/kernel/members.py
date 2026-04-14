@@ -1,15 +1,14 @@
-"""Member management tool schema — Multi-Instance Phase 2."""
+"""Member management tool schema — Multi-Member."""
 
 MANAGE_MEMBERS_TOOL = {
     "name": "manage_members",
     "description": (
-        "Manage Kernos instance members — invite new users, "
-        "list current members, generate connection codes for "
-        "linking new platforms to existing accounts, or remove members. "
-        "Codes are platform-locked — specify which platform (discord, telegram, sms) "
-        "the code is for. The tool returns the code AND platform-specific instructions "
-        "to give to the user. If the platform isn't set up yet, it returns setup "
-        "instructions instead."
+        "Two types of codes — NEVER guess which one. "
+        "INVITE = code for a NEW PERSON to join with their own fresh agent, spaces, and context. "
+        "CONNECT_PLATFORM = code for the CURRENT MEMBER to link a new platform to their existing account "
+        "(same agent, same spaces, same history). "
+        "If ambiguous, ASK the user which they want before generating. "
+        "Also: list members, remove members."
     ),
     "input_schema": {
         "type": "object",
@@ -18,8 +17,10 @@ MANAGE_MEMBERS_TOOL = {
                 "type": "string",
                 "enum": ["invite", "connect_platform", "list", "remove"],
                 "description": (
-                    "invite = generate platform-locked code for new user. "
-                    "connect_platform = generate code for existing user to add a new channel. "
+                    "invite = NEW PERSON joining Kernos. Creates a fresh member with their own "
+                    "agent, soul, spaces, knowledge, and bootstrap. They are a completely separate person. "
+                    "connect_platform = SAME PERSON, new channel. Links the requesting member's existing "
+                    "account to another platform. Everything carries over — agent, spaces, history, services. "
                     "list = show all members and their connected platforms. "
                     "remove = deactivate a member."
                 ),
@@ -34,15 +35,18 @@ MANAGE_MEMBERS_TOOL = {
             },
             "display_name": {
                 "type": "string",
-                "description": "Name for the new member (invite action)",
+                "description": "Name for the new member (invite action only). Ask if not provided.",
             },
             "member_id": {
                 "type": "string",
-                "description": "Member ID (for connect_platform or remove)",
+                "description": (
+                    "For connect_platform: the requesting member's member_id (use their actual mem_ ID). "
+                    "For remove: the member to deactivate."
+                ),
             },
             "expires_hours": {
                 "type": "integer",
-                "description": "Hours until invite code expires (default: 72)",
+                "description": "Hours until code expires (default: 72)",
             },
         },
         "required": ["action"],

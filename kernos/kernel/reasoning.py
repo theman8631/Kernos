@@ -635,7 +635,7 @@ class ReasoningService:
                     return await handle_submit_spec(request.instance_id, tool_input, self._handler)
             elif tool_name == "manage_members":
                 if hasattr(self, '_handler') and self._handler:
-                    return await self._handler._handle_manage_members(request.instance_id, tool_input)
+                    return await self._handler._handle_manage_members(request.instance_id, tool_input, requesting_member_id=request.member_id)
                 return "Member management is not available."
             elif tool_name == "remember":
                 if self._retrieval:
@@ -1140,7 +1140,7 @@ class ReasoningService:
                 if hasattr(self, '_handler') and self._handler:
                     try:
                         result = await self._handler._handle_manage_members(
-                            request.instance_id, tool_args)
+                            request.instance_id, tool_args, requesting_member_id=request.member_id)
                     except Exception as exc:
                         logger.warning("Kernel tool 'manage_members' failed: %s", exc)
                         result = f"Member management failed: {exc}"

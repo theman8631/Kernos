@@ -267,7 +267,7 @@ async def on_ready():
         _instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
         if _owner_discord and _instance_id:
             await instance_db.ensure_owner(
-                member_id=f"discord:{_owner_discord}",
+                member_id="",  # Ignored — ensure_owner finds or creates stable mem_ ID
                 display_name="owner",
                 instance_id=_instance_id,
                 platform="discord",

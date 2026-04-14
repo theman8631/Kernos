@@ -140,29 +140,61 @@ class InstanceDB:
             self._conn = None
 
     async def ensure_owner(self, member_id: str, display_name: str,
-                           instance_id: str, platform: str, channel_id: str) -> None:
-        """Ensure the owner exists as a member. Called at startup."""
+                           instance_id: str, platform: str, channel_id: str) -> str:
+        """Ensure the owner exists as a member. Called at startup.
+
+        Returns the owner's stable member_id (mem_ format).
+        If a legacy platform-prefixed ID exists, migrates it to mem_ format.
+        """
         if not self._conn:
-            return
+            return member_id
+        import uuid
         from kernos.utils import utc_now
         now = utc_now()
-        await self._conn.execute(
-            "INSERT INTO members (member_id, display_name, role, instance_id, status, created_at, updated_at) "
-            "VALUES (?, ?, 'owner', ?, 'active', ?, ?) "
-            "ON CONFLICT(member_id) DO UPDATE SET display_name=?, updated_at=?",
-            (member_id, display_name, instance_id, now, now, display_name, now),
-        )
+
+        # Check if owner already exists (by role, not by the passed member_id)
+        async with self._conn.execute(
+            "SELECT member_id FROM members WHERE role='owner' LIMIT 1",
+        ) as cur:
+            row = await cur.fetchone()
+
+        if row:
+            # Owner exists — use their existing member_id
+            stable_id = row[0]
+            # Migrate legacy platform-prefixed IDs to mem_ format
+            if not stable_id.startswith("mem_"):
+                new_id = f"mem_{uuid.uuid4().hex[:8]}"
+                # Update all references atomically
+                await self._conn.execute("UPDATE members SET member_id=? WHERE member_id=?", (new_id, stable_id))
+                await self._conn.execute("UPDATE member_channels SET member_id=? WHERE member_id=?", (new_id, stable_id))
+                await self._conn.execute("UPDATE member_profiles SET member_id=? WHERE member_id=?", (new_id, stable_id))
+                await self._conn.execute("UPDATE invite_codes SET created_by=? WHERE created_by=?", (new_id, stable_id))
+                await self._conn.commit()
+                logger.info("OWNER_MIGRATE: %s → %s", stable_id, new_id)
+                stable_id = new_id
+        else:
+            # Create new owner with stable mem_ ID
+            stable_id = f"mem_{uuid.uuid4().hex[:8]}"
+            await self._conn.execute(
+                "INSERT INTO members (member_id, display_name, role, instance_id, status, created_at, updated_at) "
+                "VALUES (?, ?, 'owner', ?, 'active', ?, ?)",
+                (stable_id, display_name, instance_id, now, now),
+            )
+
+        # Ensure channel mapping exists
         await self._conn.execute(
             "INSERT INTO member_channels (member_id, platform, channel_id, is_primary, created_at) "
             "VALUES (?, ?, ?, 1, ?) "
-            "ON CONFLICT(platform, channel_id) DO NOTHING",
-            (member_id, platform, channel_id, now),
+            "ON CONFLICT(platform, channel_id) DO UPDATE SET member_id=?",
+            (stable_id, platform, channel_id, now, stable_id),
         )
         await self._conn.commit()
+
         # Ensure owner has a member profile
-        existing_profile = await self.get_member_profile(member_id)
+        existing_profile = await self.get_member_profile(stable_id)
         if not existing_profile:
-            await self.upsert_member_profile(member_id, {"display_name": display_name})
+            await self.upsert_member_profile(stable_id, {"display_name": display_name})
+        return stable_id
 
     async def migrate_soul_to_member_profile(self, member_id: str, soul_fields: dict) -> bool:
         """One-time migration: copy per-user Soul fields into the owner's member profile.

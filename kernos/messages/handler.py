@@ -835,7 +835,7 @@ class MessageHandler:
             "diagnose_issue": "Diagnose a system issue using runtime trace, source code, and friction reports",
             "propose_fix": "Write a structured fix spec for a diagnosed issue",
             "submit_spec": "Submit a proposed fix spec for implementation",
-            "manage_members": "Invite people, generate invite codes, list members, connect platforms, manage access to this instance",
+            "manage_members": "Two code types: 'invite' creates a NEW person with fresh agent/spaces/context. 'connect_platform' links the CURRENT member to a new platform (same agent/spaces/history). Also: list members, remove.",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -3468,6 +3468,7 @@ class MessageHandler:
 
     async def _handle_manage_members(
         self, instance_id: str, tool_input: dict,
+        requesting_member_id: str = "",
     ) -> str:
         """Handle manage_members tool — invite, list, connect_platform, remove."""
         if not hasattr(self, '_instance_db') or not self._instance_db:
@@ -3522,9 +3523,10 @@ class MessageHandler:
             )
 
         elif action == "connect_platform":
-            member_id = tool_input.get("member_id", "")
+            # Auto-fill: connect_platform defaults to the requesting member
+            member_id = tool_input.get("member_id", "") or requesting_member_id
             if not member_id:
-                return "Error: member_id is required for connect_platform."
+                return "Error: could not determine which member to connect. Provide member_id or ensure the request comes from a known member."
             # Validate member_id exists
             members = await self._instance_db.list_members()
             target = next((m for m in members if m["member_id"] == member_id), None)

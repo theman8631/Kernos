@@ -42,10 +42,11 @@ class TestInstanceDB:
         assert members[0]["display_name"] == "Kit"
 
     async def test_get_member_by_channel(self, idb):
-        await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
+        stable_id = await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
         member = await idb.get_member_by_channel("discord", "12345")
         assert member is not None
-        assert member["member_id"] == "owner1"
+        assert member["member_id"] == stable_id
+        assert stable_id.startswith("mem_")
 
     async def test_unknown_channel_returns_none(self, idb):
         member = await idb.get_member_by_channel("discord", "99999")
@@ -83,8 +84,8 @@ class TestInviteCodes:
         assert member is not None
 
     async def test_claim_channel_add(self, idb):
-        await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
-        r = await idb.create_invite_code("owner1", platform="sms", for_member="owner1")
+        stable_id = await idb.ensure_owner("owner1", "Kit", "inst1", "discord", "12345")
+        r = await idb.create_invite_code(stable_id, platform="sms", for_member=stable_id)
         code = r["code"]
 
         result = await idb.claim_invite_code(code, "sms", "+15559876543")
