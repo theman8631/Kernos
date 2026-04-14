@@ -835,7 +835,7 @@ class MessageHandler:
             "diagnose_issue": "Diagnose a system issue using runtime trace, source code, and friction reports",
             "propose_fix": "Write a structured fix spec for a diagnosed issue",
             "submit_spec": "Submit a proposed fix spec for implementation",
-            "manage_members": "Manage Kernos instance members — invite, list, connect platforms, remove",
+            "manage_members": "Invite people, generate invite codes, list members, connect platforms, manage access to this instance",
         }
         for name, desc in _kernel_descs.items():
             self._tool_catalog.register(name, desc, "kernel")
@@ -1643,6 +1643,17 @@ class MessageHandler:
 
         # Ensure a system context space exists — idempotent
         spaces_now = await self.state.list_context_spaces(instance_id)
+        # Migrate: update system space description to include member management
+        for s in spaces_now:
+            if s.space_type == "system" and "invite" not in (s.description or "").lower():
+                await self.state.update_context_space(instance_id, s.id, {
+                    "description": (
+                        "System configuration and management. Install and manage tools, "
+                        "view connected capabilities, invite and manage members, "
+                        "generate invite codes, configure settings, get help with how the system works."
+                    ),
+                })
+                logger.info("SPACE_MIGRATE: updated System description for instance=%s", instance_id)
         if not any(s.space_type == "system" for s in spaces_now):
             now = utc_now()
             system_space = ContextSpace(
@@ -1651,7 +1662,8 @@ class MessageHandler:
                 name="System",
                 description=(
                     "System configuration and management. Install and manage tools, "
-                    "view connected capabilities, get help with how the system works."
+                    "view connected capabilities, invite and manage members, "
+                    "generate invite codes, configure settings, get help with how the system works."
                 ),
                 space_type="system",
                 status="active",
@@ -4797,6 +4809,16 @@ class MessageHandler:
                         schema = self.registry.get_tool_schema(tname)
                         if schema and _add_tool(schema):
                             candidates.append((schema, _schema_tokens(schema)))
+
+        # System space: ensure admin tools are always in the candidate pool
+        if active_space and active_space.space_type == "system":
+            _SYSTEM_SPACE_TOOLS = {"manage_members", "manage_capabilities", "manage_channels", "manage_covenants", "manage_schedule"}
+            for name in _SYSTEM_SPACE_TOOLS:
+                if name in _added:
+                    continue
+                schema = _kernel_tool_map.get(name)
+                if schema and _add_tool(schema):
+                    candidates.append((schema, 0))  # highest priority in system space
 
         # Tier 2: Catalog scan for this turn's intent
         _msg_text = (message.content or "").strip()
