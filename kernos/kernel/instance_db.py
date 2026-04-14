@@ -387,9 +387,17 @@ class InstanceDB:
 
     # --- Abuse Prevention ---
 
-    # Escalating ban durations: 24 hours → 24 days → 24 years
-    _BAN_DURATIONS_HOURS = [24, 24 * 24, 24 * 365 * 24]
-    _FAILURE_THRESHOLD = 3
+    # The 24 Escalation: each failure escalates immediately.
+    # 24 seconds → 24 minutes → 24 hours → 24 days → 24 years → 24 centuries.
+    # After 24 hours it's not practical. But the easter egg is too damn cute.
+    _BAN_TIERS: list[tuple[float, str]] = [
+        (24 / 3600,                "24 seconds"),    # Tier 1: 24 seconds
+        (24 / 60,                  "24 minutes"),    # Tier 2: 24 minutes
+        (24,                       "24 hours"),      # Tier 3: 24 hours
+        (24 * 24,                  "24 days"),       # Tier 4: 24 days
+        (24 * 365 * 24,            "24 years"),      # Tier 5: 24 years
+        (24 * 365 * 100 * 24,     "24 centuries"),   # Tier 6: 24 centuries
+    ]
 
     async def check_sender_blocked(self, platform: str, channel_id: str) -> str | None:
         """Check if a sender is currently blocked. Returns block message or None."""
@@ -411,13 +419,15 @@ class InstanceDB:
             if expires.tzinfo is None:
                 expires = expires.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) < expires:
-                return "This sender has been temporarily blocked due to repeated invalid attempts."
+                tier = row[1]
+                label = self._BAN_TIERS[min(tier - 1, len(self._BAN_TIERS) - 1)][1] if tier > 0 else "a while"
+                return f"Try again in {label}."
         except (ValueError, TypeError):
             pass
         return None
 
     async def record_sender_failure(self, platform: str, channel_id: str) -> str | None:
-        """Record a failed attempt. Returns block message if threshold reached, else None."""
+        """Record a failed attempt. Each failure immediately escalates the ban tier."""
         if not self._conn:
             return None
         from datetime import datetime, timezone, timedelta
@@ -433,14 +443,15 @@ class InstanceDB:
         if row:
             count = row[0] + 1
             tier = row[1]
-            # If currently blocked and still failing, don't reset
+            # If currently blocked and still failing, don't help them
             if row[2]:
                 try:
                     expires = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
                     if expires.tzinfo is None:
                         expires = expires.replace(tzinfo=timezone.utc)
                     if datetime.now(timezone.utc) < expires:
-                        return "This sender has been temporarily blocked due to repeated invalid attempts."
+                        label = self._BAN_TIERS[min(tier - 1, len(self._BAN_TIERS) - 1)][1] if tier > 0 else "a while"
+                        return f"Try again in {label}."
                 except (ValueError, TypeError):
                     pass
             await self._conn.execute(
@@ -458,23 +469,18 @@ class InstanceDB:
 
         await self._conn.commit()
 
-        if count >= self._FAILURE_THRESHOLD:
-            # Escalate ban tier
-            new_tier = min(tier + 1, len(self._BAN_DURATIONS_HOURS))
-            duration_hours = self._BAN_DURATIONS_HOURS[min(new_tier - 1, len(self._BAN_DURATIONS_HOURS) - 1)]
-            blocked_until = (datetime.now(timezone.utc) + timedelta(hours=duration_hours)).isoformat()
-            await self._conn.execute(
-                "UPDATE sender_blocks SET block_tier=?, blocked_until=?, failure_count=0, updated_at=? "
-                "WHERE sender_key=?",
-                (new_tier, blocked_until, now, key),
-            )
-            await self._conn.commit()
-            _tier_labels = ["24 hours", "24 days", "24 years"]
-            label = _tier_labels[min(new_tier - 1, len(_tier_labels) - 1)]
-            logger.warning("SENDER_BLOCKED: %s tier=%d duration=%s", key, new_tier, label)
-            return "This sender has been temporarily blocked due to repeated invalid attempts."
-
-        return None
+        # Every failure escalates immediately
+        new_tier = min(tier + 1, len(self._BAN_TIERS))
+        duration_hours, label = self._BAN_TIERS[min(new_tier - 1, len(self._BAN_TIERS) - 1)]
+        blocked_until = (datetime.now(timezone.utc) + timedelta(hours=duration_hours)).isoformat()
+        await self._conn.execute(
+            "UPDATE sender_blocks SET block_tier=?, blocked_until=?, updated_at=? "
+            "WHERE sender_key=?",
+            (new_tier, blocked_until, now, key),
+        )
+        await self._conn.commit()
+        logger.warning("SENDER_BLOCKED: %s tier=%d duration=%s", key, new_tier, label)
+        return f"Try again in {label}."
 
     async def clear_sender_failures(self, platform: str, channel_id: str) -> None:
         """Clear failure count on successful action (invite claim, member resolution)."""

@@ -208,66 +208,75 @@ class TestAbusePrevention:
         result = await idb.check_sender_blocked("telegram", "attacker1")
         assert result is None
 
-    async def test_failures_below_threshold_no_block(self, idb):
-        await idb.record_sender_failure("telegram", "attacker1")
-        await idb.record_sender_failure("telegram", "attacker1")
-        result = await idb.check_sender_blocked("telegram", "attacker1")
-        assert result is None
-
-    async def test_three_failures_triggers_block(self, idb):
-        await idb.record_sender_failure("telegram", "attacker2")
-        await idb.record_sender_failure("telegram", "attacker2")
-        ban_msg = await idb.record_sender_failure("telegram", "attacker2")
+    async def test_first_failure_blocks_24_seconds(self, idb):
+        ban_msg = await idb.record_sender_failure("telegram", "attacker1")
         assert ban_msg is not None
-        assert "blocked" in ban_msg.lower()
+        assert "24 seconds" in ban_msg
         # Should also be blocked on check
-        result = await idb.check_sender_blocked("telegram", "attacker2")
+        result = await idb.check_sender_blocked("telegram", "attacker1")
         assert result is not None
+        assert "24 seconds" in result
 
     async def test_successful_resolution_clears_failures(self, idb):
         await idb.record_sender_failure("telegram", "gooduser1")
-        await idb.record_sender_failure("telegram", "gooduser1")
-        # Not yet blocked (2 failures)
-        assert await idb.check_sender_blocked("telegram", "gooduser1") is None
-        # Successful resolution clears
+        # Blocked after first failure
+        assert await idb.check_sender_blocked("telegram", "gooduser1") is not None
+        # Successful resolution clears everything
         await idb.clear_sender_failures("telegram", "gooduser1")
-        await idb.record_sender_failure("telegram", "gooduser1")
-        # Only 1 failure now, not 3
         assert await idb.check_sender_blocked("telegram", "gooduser1") is None
 
     async def test_different_senders_independent(self, idb):
-        for _ in range(3):
-            await idb.record_sender_failure("telegram", "bad1")
-        # bad1 is blocked
+        await idb.record_sender_failure("telegram", "bad1")
         assert await idb.check_sender_blocked("telegram", "bad1") is not None
-        # good1 is not
         assert await idb.check_sender_blocked("telegram", "good1") is None
 
-    async def test_block_tier_escalates(self, idb):
-        """Verify escalating tiers: 24h → 24d → 24y."""
-        import sqlite3
-        # Tier 1: 3 failures
-        for _ in range(3):
-            await idb.record_sender_failure("discord", "repeat_offender")
-        # Check tier in DB
-        async with idb._conn.execute(
-            "SELECT block_tier FROM sender_blocks WHERE sender_key=?",
-            ("discord:repeat_offender",),
-        ) as cur:
-            row = await cur.fetchone()
-        assert row[0] == 1  # First ban tier
+    async def test_tiers_escalate_through_the_24s(self, idb):
+        """The 24 Escalation: 24s → 24m → 24h → 24d → 24y → 24 centuries."""
+        # Tier 1: first failure → 24 seconds
+        msg = await idb.record_sender_failure("discord", "persistent")
+        assert "24 seconds" in msg
 
-        # Simulate unban by clearing blocked_until, then fail 3 more times
+        # Simulate unban, fail again → tier 2: 24 minutes
         await idb._conn.execute(
-            "UPDATE sender_blocks SET blocked_until='', failure_count=0 WHERE sender_key=?",
-            ("discord:repeat_offender",),
+            "UPDATE sender_blocks SET blocked_until='' WHERE sender_key=?",
+            ("discord:persistent",),
         )
         await idb._conn.commit()
-        for _ in range(3):
-            await idb.record_sender_failure("discord", "repeat_offender")
-        async with idb._conn.execute(
-            "SELECT block_tier FROM sender_blocks WHERE sender_key=?",
-            ("discord:repeat_offender",),
-        ) as cur:
-            row = await cur.fetchone()
-        assert row[0] == 2  # Second ban tier (24 days)
+        msg = await idb.record_sender_failure("discord", "persistent")
+        assert "24 minutes" in msg
+
+        # Simulate unban, fail again → tier 3: 24 hours
+        await idb._conn.execute(
+            "UPDATE sender_blocks SET blocked_until='' WHERE sender_key=?",
+            ("discord:persistent",),
+        )
+        await idb._conn.commit()
+        msg = await idb.record_sender_failure("discord", "persistent")
+        assert "24 hours" in msg
+
+        # Simulate unban, fail again → tier 4: 24 days
+        await idb._conn.execute(
+            "UPDATE sender_blocks SET blocked_until='' WHERE sender_key=?",
+            ("discord:persistent",),
+        )
+        await idb._conn.commit()
+        msg = await idb.record_sender_failure("discord", "persistent")
+        assert "24 days" in msg
+
+        # Simulate unban, fail again → tier 5: 24 years
+        await idb._conn.execute(
+            "UPDATE sender_blocks SET blocked_until='' WHERE sender_key=?",
+            ("discord:persistent",),
+        )
+        await idb._conn.commit()
+        msg = await idb.record_sender_failure("discord", "persistent")
+        assert "24 years" in msg
+
+        # Simulate unban, fail again → tier 6: 24 centuries
+        await idb._conn.execute(
+            "UPDATE sender_blocks SET blocked_until='' WHERE sender_key=?",
+            ("discord:persistent",),
+        )
+        await idb._conn.commit()
+        msg = await idb.record_sender_failure("discord", "persistent")
+        assert "24 centuries" in msg
