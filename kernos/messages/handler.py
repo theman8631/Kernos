@@ -3519,7 +3519,7 @@ class MessageHandler:
             return (
                 f"This will permanently delete your profile, conversations, knowledge, "
                 f"spaces, and covenants. Other members are not affected.\n\n"
-                f'To confirm, type exactly: **Delete my {name}!**'
+                f'To confirm, type exactly: **Delete my data!**'
             )
         elif sub == "all":
             # Check if member is owner
@@ -3551,7 +3551,7 @@ class MessageHandler:
 
         if wipe_type == "me":
             name = (ctx.member_profile or {}).get("display_name", "") or "my data"
-            expected = f"Delete my {name}!"
+            expected = "Delete my data!"
             if text == expected:
                 del self._pending_wipe[key]
                 return await self._execute_wipe_member(ctx)
