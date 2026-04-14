@@ -4393,6 +4393,20 @@ class MessageHandler:
                 note = await self._handle_file_upload(instance_id, ctx.active_space_id,
                     att.get("filename", "upload.txt"), att.get("content", ""))
                 ctx.upload_notifications.append(note)
+            # Inject hard-stop directive for files that couldn't be processed
+            rejected = message.context.get("rejected_files", [])
+            if rejected:
+                names = ", ".join(rejected)
+                ctx.upload_notifications.append(
+                    f"[SYSTEM] Document processing failure:\n"
+                    f"- Files: {names}\n"
+                    f"- Status: unreadable (binary, unsupported format, or decode error)\n"
+                    f"- Extracted text: none\n\n"
+                    f"You do NOT have access to the contents of these files. "
+                    f"Do not summarize, quote, analyze, or infer their contents. "
+                    f"Tell the user you couldn't read the file and suggest they paste "
+                    f"the text directly or provide a plain-text version."
+                )
 
     async def _phase_assemble(self, ctx: TurnContext) -> None:
         """Phase 3: Build Cognitive UI blocks — system prompt, tools, messages."""

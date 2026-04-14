@@ -589,6 +589,10 @@ async def on_message(message):
                 f"{', '.join(binary_rejections)} cannot be processed (binary or unreadable)."
             )
             await message.channel.send(rejection_note)
+            # Pass rejection info to handler so agent knows it can't reference these files
+            if normalized.context is None:
+                normalized.context = {}
+            normalized.context["rejected_files"] = binary_rejections
             if not text_attachments and not message.content:
                 return
 
