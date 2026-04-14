@@ -1294,9 +1294,9 @@ class MessageHandler:
         logger.info("UNKNOWN_SENDER: platform=%s sender=%s", platform, sender_id)
         return "", "This is a private Kernos instance. If you were invited, send your invite code."
 
-    async def read_log_text(self, instance_id: str, space_id: str, log_number: int) -> str:
+    async def read_log_text(self, instance_id: str, space_id: str, log_number: int, member_id: str = "") -> str:
         """Read conversation log text — satisfies HandlerProtocol."""
-        result = await self.conv_logger.read_log_text(instance_id, space_id, log_number)
+        result = await self.conv_logger.read_log_text(instance_id, space_id, log_number, member_id=member_id)
         return result or ""
 
     def queue_system_event(self, instance_id: str, event: str) -> None:
@@ -1977,6 +1977,7 @@ class MessageHandler:
                         speaker="system",
                         channel="internal",
                         content=evt,
+                        member_id=member_id,
                     )
                 except Exception:
                     pass
@@ -2613,6 +2614,7 @@ class MessageHandler:
             new_space = ContextSpace(
                 id=f"space_{_uuid.uuid4().hex[:8]}",
                 instance_id=instance_id,
+                member_id=space.member_id,  # Inherit from parent
                 name=new_name,
                 description=parsed.get("description", ""),
                 posture=parsed.get("posture", ""),
@@ -3086,6 +3088,7 @@ class MessageHandler:
                             speaker="user",
                             channel=extra_msg.platform,
                             content=extra_msg.content,
+                            member_id=primary_ctx.member_id,
                         )
                     except Exception as exc:
                         logger.warning("Failed to log merged message: %s", exc)
@@ -4090,6 +4093,7 @@ class MessageHandler:
             new_space = ContextSpace(
                 id=f"space_{_uuid.uuid4().hex[:8]}",
                 instance_id=instance_id,
+                member_id=ctx.member_id,
                 name=name,
                 description=description,
                 space_type="domain",
@@ -4214,6 +4218,7 @@ class MessageHandler:
         # read_recent returns [{role, content, timestamp, channel}, ...]
         recent = await self.conv_logger.read_recent(
             ctx.instance_id, prev_space_id, token_budget=1200, max_messages=6,
+            member_id=ctx.member_id,
         )
         if not recent:
             return None
@@ -4373,7 +4378,7 @@ class MessageHandler:
             # Harvest facts from departing space
             try:
                 from kernos.kernel.fact_harvest import harvest_facts
-                log_text = await self.conv_logger.read_current_log_text(instance_id, ctx.previous_space_id)
+                log_text = await self.conv_logger.read_current_log_text(instance_id, ctx.previous_space_id, member_id=ctx.member_id)
                 if isinstance(log_text, tuple):
                     log_text = log_text[0]
                 asyncio.create_task(harvest_facts(

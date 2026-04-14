@@ -871,6 +871,7 @@ async def _store_scheduled_message(handler, trigger: Trigger, content: str) -> N
                 speaker="assistant",
                 channel="scheduled",
                 content=log_content,
+                member_id=trigger.member_id,
             )
     except Exception as exc:
         logger.warning(
@@ -907,6 +908,7 @@ async def _write_receipt(
             speaker="system",
             channel="receipt",
             content=receipt_content,
+            member_id=trigger.member_id,
         )
     except Exception as exc:
         logger.warning("RECEIPT_WRITE_FAILED: trigger=%s error=%s", trigger.trigger_id, exc)
@@ -1418,6 +1420,7 @@ async def _evaluate_calendar_trigger(
                         speaker="assistant",
                         channel="scheduled",
                         content=f"[EVENT] {message}",
+                        member_id=trigger.member_id,
                     )
 
                 # Execution receipt
