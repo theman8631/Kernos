@@ -627,8 +627,9 @@ class TestBootstrapPrompt:
             instance_id="t1",
         )
         prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
-        # Without member_profile, unique hatching prompt is injected
-        assert "HATCHING" in prompt
+        # Both personality foundation AND hatching identity layer present
+        assert "FIRST CONVERSATION" in prompt  # Personality foundation
+        assert "HATCHING" in prompt             # Identity layer
         assert "don't have a name yet" in prompt.lower()
 
 

@@ -445,6 +445,10 @@ def _build_rules_block(
     # Per-member bootstrap: check member profile first, fall back to soul (legacy/tests)
     _graduated = (member_profile or {}).get("bootstrap_graduated", False) or soul.bootstrap_graduated
     if not _graduated:
+        # Layer 1: Full personality foundation — tone, warmth, anti-patterns, presence.
+        # This is the soul of the first conversation and must never be stripped out.
+        parts.append(template.bootstrap_prompt)
+        # Layer 2: Hatching-specific instructions — naming, identity, relationship mode.
         _name = (member_profile or {}).get("display_name", "") or "there"
         _agent_name = (member_profile or {}).get("agent_name", "")
         _name_instruction = (
@@ -453,12 +457,12 @@ def _build_rules_block(
             "You don't know their name yet. Ask naturally."
         )
         if _agent_name:
-            # Inherit mode or agent already named — lighter bootstrap
+            # Inherit mode or agent already named — identity layer only
             parts.append(_INHERIT_HATCHING_PROMPT.format(
                 display_name=_name, agent_name=_agent_name,
                 name_instruction=_name_instruction))
         else:
-            # Unique hatching — agent has no name, full hatching experience
+            # Unique hatching — agent has no name, identity layer
             parts.append(_UNIQUE_HATCHING_PROMPT.format(
                 display_name=_name, name_instruction=_name_instruction))
     return "## RULES\n" + "\n\n".join(parts)

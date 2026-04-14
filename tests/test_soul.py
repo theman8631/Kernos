@@ -198,8 +198,10 @@ def test_system_prompt_includes_hatching_when_not_graduated():
     soul = Soul(instance_id="t1")
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
-    # Without member_profile, unique hatching prompt is injected
-    assert "HATCHING" in prompt
+    # Both personality foundation AND hatching identity layer should be present
+    assert "FIRST CONVERSATION" in prompt  # Personality foundation
+    assert "HATCHING" in prompt             # Identity layer
+    assert "customer support" in prompt.lower()  # Anti-pattern guidance preserved
 
 
 def test_system_prompt_excludes_bootstrap_when_graduated():
