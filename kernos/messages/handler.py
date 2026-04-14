@@ -3525,8 +3525,18 @@ class MessageHandler:
             member_id = tool_input.get("member_id", "")
             if not member_id:
                 return "Error: member_id is required for connect_platform."
-            expires = tool_input.get("expires_hours", 72)
+            # Validate member_id exists
             members = await self._instance_db.list_members()
+            target = next((m for m in members if m["member_id"] == member_id), None)
+            if not target:
+                # Try resolving by display_name or role
+                target = next((m for m in members if m.get("display_name", "").lower() == member_id.lower() or m.get("role", "") == member_id.lower()), None)
+                if target:
+                    member_id = target["member_id"]
+                else:
+                    member_names = [f"{m['member_id']} ({m.get('display_name', '')})" for m in members]
+                    return f"Error: member '{member_id}' not found. Known members: {', '.join(member_names)}"
+            expires = tool_input.get("expires_hours", 72)
             owner = next((m for m in members if m.get("role") == "owner"), None)
             created_by = owner["member_id"] if owner else "unknown"
             result = await self._instance_db.create_invite_code(

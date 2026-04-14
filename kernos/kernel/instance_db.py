@@ -563,6 +563,11 @@ class InstanceDB:
         if d.get("for_member"):
             # CHANNEL ADD — link channel to existing member
             member_id = d["for_member"]
+            # Validate member exists before linking
+            member = await self.get_member(member_id)
+            if not member:
+                logger.warning("INVITE_REJECTED: for_member=%s not found in members table", member_id)
+                return None
             await self.register_channel(member_id, platform, channel_id)
             await self._conn.execute(
                 "UPDATE invite_codes SET status='used', used_by=?, used_at=? WHERE code=?",
