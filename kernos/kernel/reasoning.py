@@ -82,6 +82,7 @@ class ReasoningRequest:
     trigger: str
     max_tokens: int = 64000  # Sonnet/Opus output limit — let the model decide when to stop
     active_space_id: str = ""  # For kernel tool routing (e.g., remember)
+    member_id: str = ""        # Current member — for per-member tool writes
     input_text: str = ""       # Current user message — used by dispatch gate
     active_space: Any = None   # ContextSpace | None — for gate tool effect classification
     user_timezone: str = ""    # IANA timezone from soul — for scheduler extraction
@@ -674,6 +675,15 @@ class ReasoningService:
                             f"Cannot update '{field}'. Only these fields can be updated: "
                             f"{', '.join(sorted(_SOUL_UPDATABLE_FIELDS))}."
                         )
+                    # Per-member soul fields → write to member_profiles
+                    _MEMBER_SOUL_FIELDS = {"agent_name", "emoji", "personality_notes", "communication_style"}
+                    member_id = getattr(request, "member_id", "") if hasattr(request, "member_id") else ""
+                    if field in _MEMBER_SOUL_FIELDS and member_id and hasattr(self, "_handler") and self._handler:
+                        idb = getattr(self._handler, "_instance_db", None)
+                        if idb:
+                            await idb.upsert_member_profile(member_id, {field: value})
+                            return f"Updated {field} to: {value}"
+                    # Legacy fallback: write to instance soul
                     soul = await self._state.get_soul(request.instance_id)
                     if not soul:
                         return "No soul found for this instance."

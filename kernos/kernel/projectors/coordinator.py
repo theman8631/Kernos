@@ -36,6 +36,9 @@ async def run_projectors(
     instance_id: str,
     active_space_id: str = "",
     active_space: "ContextSpace | None" = None,
+    member_id: str = "",
+    member_profile: dict | None = None,
+    instance_db: "Any | None" = None,
 ) -> None:
     """Entry point called by handler after response is assembled.
 
@@ -43,23 +46,33 @@ async def run_projectors(
     Tier 2 is scheduled as a background asyncio task (non-blocking).
     """
     # --- Tier 1: synchronous, zero cost ---
-    t1_result = tier1_extract(user_message, soul.user_name, soul.communication_style)
+    # Read current values from member profile (per-member) → soul (legacy fallback)
+    _current_name = (member_profile or {}).get("display_name", "") or soul.user_name
+    _current_style = (member_profile or {}).get("communication_style", "") or soul.communication_style
+    t1_result = tier1_extract(user_message, _current_name, _current_style)
 
-    soul_updated = False
     updated_fields = []
+    profile_updates: dict = {}
 
-    if t1_result.user_name and t1_result.user_name != soul.user_name:
-        soul.user_name = t1_result.user_name
-        soul_updated = True
-        updated_fields.append("user_name")
+    if t1_result.user_name and t1_result.user_name != _current_name:
+        profile_updates["display_name"] = t1_result.user_name
+        updated_fields.append("display_name")
 
-    if t1_result.communication_style and not soul.communication_style:
-        soul.communication_style = t1_result.communication_style
-        soul_updated = True
+    if t1_result.communication_style and not _current_style:
+        profile_updates["communication_style"] = t1_result.communication_style
         updated_fields.append("communication_style")
 
-    if soul_updated:
-        await state.save_soul(soul, source="tier1_extraction", trigger=f"fields={updated_fields}")
+    if profile_updates:
+        # Write to member profile (per-member) if available
+        if member_id and instance_db:
+            await instance_db.upsert_member_profile(member_id, profile_updates)
+        else:
+            # Legacy fallback: write to soul
+            if "display_name" in profile_updates:
+                soul.user_name = profile_updates["display_name"]
+            if "communication_style" in profile_updates:
+                soul.communication_style = profile_updates["communication_style"]
+            await state.save_soul(soul, source="tier1_extraction", trigger=f"fields={updated_fields}")
         try:
             await emit_event(
                 events,
@@ -68,8 +81,7 @@ async def run_projectors(
                 "tier1_rules",
                 payload={
                     "fields_updated": updated_fields,
-                    "user_name": soul.user_name,
-                    "communication_style": soul.communication_style,
+                    **profile_updates,
                 },
             )
         except Exception as exc:

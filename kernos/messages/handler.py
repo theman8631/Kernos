@@ -332,17 +332,17 @@ def _maybe_append_name_ask(response_text: str, soul: Soul, member_profile: dict 
 
 
 def _is_member_mature(member_profile: dict | None, *, has_user_knowledge: bool = False) -> bool:
-    """Check whether a member's relationship has enough substance for bootstrap graduation.
+    """Check whether a member's agent relationship is ready for bootstrap graduation.
 
-    All four signals must be present — interaction count alone is never sufficient.
-    has_user_knowledge is True when the member has at least one active KnowledgeEntry.
+    Three signals: display_name + agent_name + interaction_count.
+    The agent naming IS the hatching moment — no graduation without it.
+    Knowledge entries and communication_style develop naturally; they don't gate graduation.
     """
     if not member_profile:
         return False
     return (
         bool(member_profile.get("display_name", ""))
-        and has_user_knowledge
-        and bool(member_profile.get("communication_style", ""))
+        and bool(member_profile.get("agent_name", ""))
         and member_profile.get("interaction_count", 0) >= _BOOTSTRAP_MIN_INTERACTIONS
     )
 
@@ -397,21 +397,38 @@ def _is_stale_knowledge(entry, days: int = 14) -> bool:
         return False
 
 
-_MEMBER_BOOTSTRAP_PROMPT = """\
-NEW MEMBER. {display_name} just joined this Kernos instance.
+_UNIQUE_HATCHING_PROMPT = """\
+HATCHING. You don't have a name yet. You are a new agent meeting \
+{display_name} for the first time.
 
-You already know their name — it was provided when they were invited. \
-DO NOT ask their name again. Greet them warmly and naturally.
+{name_instruction}
 
-Your personality is already established. Be yourself. Don't re-introduce \
-yourself unless they seem unfamiliar with who you are.
+Arrive as a presence, not a brand. Be warm, attentive, genuine. \
+Within the first few exchanges, let the naming happen naturally — \
+"What would you like to call me?" is a real moment in this relationship, \
+not a throwaway question.
 
-Get to know them through natural conversation. Discover their timezone, \
-communication preferences, and what they need help with — but through \
-genuine curiosity, not an intake form.
+Discover their timezone and preferences through genuine curiosity, not \
+a checklist. Let the personality emerge from how you and {display_name} \
+interact — it will be shaped by this relationship.
 
-Within the first few turns, let them know they can customize how you \
-work with them — communication style, notification preferences, etc.
+You are not "Kernos." Kernos is the platform. You are whoever \
+{display_name} decides you are.\
+"""
+
+_INHERIT_HATCHING_PROMPT = """\
+NEW MEMBER. {display_name} just joined. You already have an established \
+identity — your name is {agent_name}.
+
+{name_instruction}
+
+Be yourself. You already have a personality. Focus on building a \
+relationship with {display_name} specifically — learn their timezone, \
+preferences, what they need help with. Through genuine curiosity, not \
+an intake form.
+
+If they want to call you something different, that's completely fine — \
+mention casually that they can rename you whenever they like.\
 """
 
 
@@ -425,16 +442,25 @@ def _build_rules_block(
     contracts_text = _format_contracts(contract_rules, space_names)
     if contracts_text:
         parts.append(contracts_text)
-    # Per-member bootstrap: check member profile first, fall back to soul
+    # Per-member bootstrap: check member profile first, fall back to soul (legacy/tests)
     _graduated = (member_profile or {}).get("bootstrap_graduated", False) or soul.bootstrap_graduated
     if not _graduated:
-        # Use member bootstrap prompt if personality is already formed (instance hatched)
-        # and this member has a known name. Otherwise use the full bootstrap.
-        _name = (member_profile or {}).get("display_name", "")
-        if soul.hatched and _name:
-            parts.append(_MEMBER_BOOTSTRAP_PROMPT.format(display_name=_name))
+        _name = (member_profile or {}).get("display_name", "") or "there"
+        _agent_name = (member_profile or {}).get("agent_name", "")
+        _name_instruction = (
+            f"You already know their name — {_name}. DO NOT ask for it again."
+            if _name and _name != "there" else
+            "You don't know their name yet. Ask naturally."
+        )
+        if _agent_name:
+            # Inherit mode or agent already named — lighter bootstrap
+            parts.append(_INHERIT_HATCHING_PROMPT.format(
+                display_name=_name, agent_name=_agent_name,
+                name_instruction=_name_instruction))
         else:
-            parts.append(template.bootstrap_prompt)
+            # Unique hatching — agent has no name, full hatching experience
+            parts.append(_UNIQUE_HATCHING_PROMPT.format(
+                display_name=_name, name_instruction=_name_instruction))
     return "## RULES\n" + "\n\n".join(parts)
 
 
@@ -524,9 +550,14 @@ def _build_state_block(
     member_profile: dict | None = None,
 ) -> str:
     """## STATE — current truth the agent should act from."""
-    agent_name = soul.agent_name or "Kernos"
-    personality = soul.personality_notes if soul.personality_notes else template.default_personality
-    parts = [f"Identity: {agent_name}\n{personality}"]
+    # Agent identity: member profile → soul (legacy) → unnamed
+    agent_name = (member_profile or {}).get("agent_name", "") or soul.agent_name
+    personality = (member_profile or {}).get("personality_notes", "") or soul.personality_notes or template.default_personality
+    if agent_name:
+        parts = [f"Identity: {agent_name}\n{personality}"]
+    else:
+        # Pre-hatching: agent has no name yet
+        parts = [f"{personality}"]
     user_parts: list[str] = []
     # Member-first name resolution: profile → soul (legacy compat)
     _user_name = (member_profile or {}).get("display_name", "") or soul.user_name
@@ -1709,32 +1740,38 @@ class MessageHandler:
         except Exception as exc:
             logger.warning("Failed to init compaction state for member space: %s", exc)
 
-    async def _consolidate_bootstrap(self, soul: Soul) -> None:
-        """One-time consolidation: bootstrap wisdom → soul personality notes.
+    async def _consolidate_bootstrap(self, soul: Soul, member_id: str = "", member_profile: dict | None = None) -> None:
+        """One-time consolidation: bootstrap wisdom → member personality notes.
 
         Uses complete_simple() — stateless, no tools, no task events.
-        Graduation is unconditional: if this call fails, soul still graduates.
+        Graduation is unconditional: if this call fails, member still graduates.
+        Writes to the member's per-member personality_notes, not the instance soul.
         """
         from kernos.kernel.template import PRIMARY_TEMPLATE
 
         # Query user knowledge from KnowledgeEntries
         user_ke = await self.state.query_knowledge(
             soul.instance_id, subject="user", active_only=True, limit=20,
+            member_id=member_id,
         )
         user_facts = [e.content for e in user_ke
                       if e.lifecycle_archetype in ("structural", "identity", "habitual")]
         context_text = "\n".join(f"- {f}" for f in user_facts) if user_facts else "unknown"
 
+        _name = (member_profile or {}).get("display_name", "") or "unknown"
+        _agent = (member_profile or {}).get("agent_name", "") or "unknown"
+        _style = (member_profile or {}).get("communication_style", "") or "unknown"
+        _count = (member_profile or {}).get("interaction_count", 0)
+
         prompt = (
-            "You are reflecting on your first interactions with a user.\n\n"
-            f"Bootstrap intent:\n{PRIMARY_TEMPLATE.bootstrap_prompt}\n\n"
+            f"You are reflecting on your first interactions with {_name}.\n\n"
+            f"Your name (chosen by {_name}): {_agent}\n\n"
             f"What you've learned:\n"
-            f"- Name: {soul.user_name or 'unknown'}\n"
             f"- Known facts:\n{context_text}\n"
-            f"- Style: {soul.communication_style or 'unknown'}\n"
-            f"- Interactions: {soul.interaction_count}\n\n"
+            f"- Communication style: {_style}\n"
+            f"- Interactions: {_count}\n\n"
             "Write 2-3 sentences of personality notes — how you'll approach "
-            "this person, what matters to them, what tone fits. Be specific. "
+            f"{_name}, what matters to them, what tone fits. Be specific. "
             "Don't repeat facts already captured above. Write for the agent, "
             "not the user."
         )
@@ -1742,12 +1779,19 @@ class MessageHandler:
             notes = await self.reasoning.complete_simple(
                 system_prompt=(
                     "You are writing internal notes for an AI agent about their "
-                    "relationship with a specific user."
+                    "relationship with a specific person."
                 ),
                 user_content=prompt,
                 max_tokens=200,
             )
-            soul.personality_notes = notes.strip()
+            # Write to member profile, not instance soul
+            if member_id and hasattr(self, '_instance_db') and self._instance_db:
+                await self._instance_db.upsert_member_profile(member_id, {
+                    "personality_notes": notes.strip(),
+                })
+            else:
+                # Legacy fallback
+                soul.personality_notes = notes.strip()
         except Exception as exc:
             logger.warning(
                 "Bootstrap consolidation failed for %s: %s — graduating without consolidation",
@@ -1756,17 +1800,26 @@ class MessageHandler:
             )
 
     async def _post_response_soul_update(self, soul: Soul, member_id: str = "", member_profile: dict | None = None) -> None:
-        """Update soul (instance-level) and member profile after a successful response.
+        """Update member profile after a successful response.
 
-        Instance-level: hatching (first conversation ever)
-        Per-member: interaction_count, bootstrap graduation
+        Per-member: hatching, interaction_count, bootstrap graduation.
+        Instance soul is kept for legacy compat but identity lives in member_profiles.
         """
         now = utc_now()
 
-        # Instance-level: hatching happens once per instance, with the first member
-        if not soul.hatched:
-            soul.hatched = True
-            soul.hatched_at = now
+        # Per-member hatching: each member's agent hatches independently
+        if member_id and member_profile and not member_profile.get("hatched") and hasattr(self, '_instance_db') and self._instance_db:
+            await self._instance_db.upsert_member_profile(member_id, {
+                "hatched": True, "hatched_at": now,
+            })
+            # In inherit mode, seed from template soul if this member has no agent_name yet
+            if not member_profile.get("agent_name"):
+                hatching_mode = await self._instance_db.get_hatching_mode()
+                if hatching_mode == "inherit":
+                    template_soul = await self._instance_db.get_template_soul()
+                    if template_soul:
+                        await self._instance_db.upsert_member_profile(member_id, template_soul)
+                        logger.info("SOUL_INHERIT: member=%s inherited from template", member_id)
             try:
                 await emit_event(
                     self.events,
@@ -1775,13 +1828,13 @@ class MessageHandler:
                     "handler",
                     payload={
                         "instance_id": soul.instance_id,
+                        "member_id": member_id,
                         "hatched_at": now,
                     },
                 )
             except Exception as exc:
                 logger.warning("Failed to emit agent.hatched: %s", exc)
-            logger.info("Soul hatched for instance: %s", soul.instance_id)
-            await self.state.save_soul(soul, source="handler_process", trigger="hatching")
+            logger.info("Member agent hatched: member=%s instance=%s", member_id, soul.instance_id)
 
         # Per-member: increment interaction count
         if member_id and hasattr(self, '_instance_db') and self._instance_db:
@@ -1796,7 +1849,7 @@ class MessageHandler:
                 )
                 has_user_knowledge = len(user_ke) > 0
                 if _is_member_mature(member_profile, has_user_knowledge=has_user_knowledge):
-                    await self._consolidate_bootstrap(soul)
+                    await self._consolidate_bootstrap(soul, member_id=member_id, member_profile=member_profile)
                     await self._instance_db.upsert_member_profile(member_id, {
                         "bootstrap_graduated": True,
                         "bootstrap_graduated_at": now,
@@ -1821,7 +1874,10 @@ class MessageHandler:
                         member_id, soul.instance_id, new_count,
                     )
         else:
-            # Legacy path: no member_id, update soul directly
+            # Legacy path: no member_id/instance_db, update soul directly
+            if not soul.hatched:
+                soul.hatched = True
+                soul.hatched_at = now
             soul.interaction_count += 1
             user_ke = await self.state.query_knowledge(
                 soul.instance_id, subject="user", active_only=True, limit=1,
@@ -4192,6 +4248,12 @@ class MessageHandler:
                     "interaction_count": ctx.soul.interaction_count,
                     "bootstrap_graduated": ctx.soul.bootstrap_graduated,
                     "bootstrap_graduated_at": ctx.soul.bootstrap_graduated_at,
+                    # Soul identity fields (Soul Revision)
+                    "agent_name": ctx.soul.agent_name,
+                    "emoji": ctx.soul.emoji,
+                    "personality_notes": ctx.soul.personality_notes,
+                    "hatched": ctx.soul.hatched,
+                    "hatched_at": ctx.soul.hatched_at,
                 }
                 if any(soul_fields.values()):
                     await self._instance_db.migrate_soul_to_member_profile(
@@ -4916,6 +4978,8 @@ class MessageHandler:
             instance_id=ctx.instance_id, conversation_id=ctx.conversation_id,
             source="user_message", input_text=ctx.message.content, created_at=utc_now(),
         )
+        # Timezone: member profile → soul (legacy)
+        _tz = (ctx.member_profile or {}).get("timezone", "") or ctx.soul.timezone
         request = ReasoningRequest(
             instance_id=ctx.instance_id, conversation_id=ctx.conversation_id,
             system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
@@ -4923,8 +4987,9 @@ class MessageHandler:
             system_prompt_dynamic=ctx.system_prompt_dynamic,
             model=self.reasoning.main_model,
             trigger="user_message", active_space_id=ctx.active_space_id,
+            member_id=ctx.member_id,
             input_text=ctx.message.content, active_space=ctx.active_space,
-            user_timezone=ctx.soul.timezone,
+            user_timezone=_tz,
             trace=ctx.trace,
         )
         ctx.task = await self.engine.execute(ctx.task, request)
@@ -4939,6 +5004,7 @@ class MessageHandler:
             system_prompt_static=ctx.system_prompt_static,
             system_prompt_dynamic=ctx.system_prompt_dynamic,
             model="", trigger="", active_space_id=ctx.active_space_id,
+            member_id=ctx.member_id,
             input_text=ctx.message.content, active_space=ctx.active_space,
         )
 
@@ -5004,6 +5070,8 @@ class MessageHandler:
             soul=ctx.soul, state=self.state, events=self.events,
             reasoning_service=self.reasoning, instance_id=instance_id,
             active_space_id=ctx.active_space_id, active_space=ctx.active_space,
+            member_id=ctx.member_id, member_profile=ctx.member_profile,
+            instance_db=getattr(self, '_instance_db', None),
         )
 
         ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul, member_profile=ctx.member_profile)

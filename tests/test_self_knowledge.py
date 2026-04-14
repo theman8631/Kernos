@@ -559,20 +559,19 @@ class TestDocsCoverSoul:
 class TestSoulDefaults:
     """Spec tests: soul defaults and migration."""
 
-    def test_new_soul_has_default_name(self):
-        """Create new tenant. Verify soul has agent_name='Kernos'."""
+    def test_new_soul_has_empty_name(self):
+        """Create new soul. Agent name is empty — named during per-member hatching."""
         soul = Soul(instance_id="new_t")
-        assert soul.agent_name == "Kernos"
+        assert soul.agent_name == ""
 
-    def test_new_soul_has_default_emoji(self):
-        """Create new tenant. Verify soul has emoji='🜁'."""
+    def test_new_soul_has_empty_emoji(self):
+        """Create new soul. Emoji is empty — set during per-member hatching."""
         soul = Soul(instance_id="new_t")
-        assert soul.emoji == "🜁"
+        assert soul.emoji == ""
 
-    async def test_migration_backfills_empty_name(self, tmp_path):
-        """Load soul.json with agent_name=''. Verify backfilled to 'Kernos'."""
+    async def test_empty_soul_stays_empty(self, tmp_path):
+        """Load soul.json with empty fields. No backfill — agent named during hatching."""
         store = JsonStateStore(str(tmp_path))
-        # Write a soul with empty agent_name directly to disk
         state_dir = tmp_path / "t_migrate" / "state"
         state_dir.mkdir(parents=True)
         (state_dir / "soul.json").write_text(json.dumps({
@@ -591,13 +590,8 @@ class TestSoulDefaults:
         }))
         soul = await store.get_soul("t_migrate")
         assert soul is not None
-        assert soul.agent_name == "Kernos"
-        assert soul.emoji == "🜁"
-
-        # Verify migration persisted to disk
-        disk_data = json.loads((state_dir / "soul.json").read_text())
-        assert disk_data["agent_name"] == "Kernos"
-        assert disk_data["emoji"] == "🜁"
+        assert soul.agent_name == ""  # No backfill — named during hatching
+        assert soul.emoji == ""       # No backfill — set during hatching
 
 
 class TestBootstrapPrompt:
@@ -616,12 +610,12 @@ class TestBootstrapPrompt:
         assert "You just came online" not in PRIMARY_TEMPLATE.bootstrap_prompt
 
     def test_bootstrap_in_system_prompt_for_unhatched(self):
-        """Build system prompt for unhatched tenant. Assert bootstrap content present."""
+        """Build system prompt for unhatched member. Assert hatching prompt present."""
         from kernos.messages.handler import _build_system_prompt
         from kernos.messages.models import NormalizedMessage, AuthLevel
         from datetime import datetime, timezone
 
-        soul = Soul(instance_id="t1", bootstrap_graduated=False)
+        soul = Soul(instance_id="t1")
         msg = NormalizedMessage(
             content="hello",
             sender="+15555550100",
@@ -633,8 +627,9 @@ class TestBootstrapPrompt:
             instance_id="t1",
         )
         prompt = _build_system_prompt(msg, "", soul, PRIMARY_TEMPLATE, [])
-        assert "FIRST CONVERSATION" in prompt
-        assert "one question" in prompt.lower()
+        # Without member_profile, unique hatching prompt is injected
+        assert "HATCHING" in prompt
+        assert "don't have a name yet" in prompt.lower()
 
 
 class TestNoSoulMd:

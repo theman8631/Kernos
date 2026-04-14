@@ -681,7 +681,7 @@ async def test_coordinator_tier1_emits_event_on_update():
     events.emit.assert_called()
     event = events.emit.call_args[0][0]
     assert event.type == "knowledge.extracted"
-    assert "user_name" in event.payload["fields_updated"]
+    assert "display_name" in event.payload["fields_updated"]
 
 
 async def test_coordinator_tier1_overwrites_existing_name():

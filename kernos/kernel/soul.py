@@ -22,14 +22,17 @@ class Soul:
 
     instance_id: str
 
-    # Identity — shared across all members
-    agent_name: str = "Kernos"    # Default name; may evolve through conversation
-    emoji: str = "🜁"              # Default identity marker; may evolve through conversation
-    personality_notes: str = ""   # Free-text personality profile, updated over time
+    # --- DEPRECATED: Identity fields migrated to per-member in member_profiles ---
+    # "Kernos" is the platform name, not the agent identity.
+    # Each member names their own agent during hatching.
+    # Retained for JSON deserialization compat with existing soul.json files.
+    agent_name: str = ""          # DEPRECATED — per-member in member_profiles
+    emoji: str = ""               # DEPRECATED — per-member in member_profiles
+    personality_notes: str = ""   # DEPRECATED — per-member in member_profiles
 
-    # Instance lifecycle
-    hatched: bool = False              # True after first bootstrap conversation
-    hatched_at: str = ""               # ISO timestamp of hatch completion
+    # Instance lifecycle — tracks whether the platform has ever been used
+    hatched: bool = False              # DEPRECATED — per-member in member_profiles
+    hatched_at: str = ""               # DEPRECATED — per-member in member_profiles
 
     # --- DEPRECATED: Per-user fields migrated to member_profiles in instance.db ---
     # Retained for JSON deserialization compat with existing soul.json files.

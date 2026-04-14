@@ -31,8 +31,8 @@ def test_soul_defaults():
     assert soul.bootstrap_graduated is False
     assert soul.interaction_count == 0
     assert soul.user_name == ""
-    assert soul.agent_name == "Kernos"
-    assert soul.emoji == "🜁"
+    assert soul.agent_name == ""   # Per-member — named during hatching
+    assert soul.emoji == ""        # Per-member — set during hatching
 
 
 def test_soul_instance_id_required():
@@ -194,18 +194,20 @@ def test_system_prompt_includes_operating_principles():
     assert "USE TOOLS" in prompt
 
 
-def test_system_prompt_includes_bootstrap_when_not_graduated():
-    soul = Soul(instance_id="t1", bootstrap_graduated=False)
+def test_system_prompt_includes_hatching_when_not_graduated():
+    soul = Soul(instance_id="t1")
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
-    assert PRIMARY_TEMPLATE.bootstrap_prompt[:50] in prompt
+    # Without member_profile, unique hatching prompt is injected
+    assert "HATCHING" in prompt
 
 
 def test_system_prompt_excludes_bootstrap_when_graduated():
     soul = Soul(instance_id="t1", bootstrap_graduated=True)
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
-    assert PRIMARY_TEMPLATE.bootstrap_prompt[:50] not in prompt
+    # Graduated soul — no hatching prompt
+    assert "HATCHING" not in prompt
 
 
 def test_system_prompt_uses_soul_personality_when_set():
@@ -213,7 +215,6 @@ def test_system_prompt_uses_soul_personality_when_set():
     msg = _make_message_stub()
     prompt = _build_system_prompt(msg, "caps", soul, PRIMARY_TEMPLATE, [])
     assert "Very sarcastic and dry." in prompt
-    assert PRIMARY_TEMPLATE.default_personality[:20] not in prompt
 
 
 def test_system_prompt_uses_default_personality_when_soul_empty():

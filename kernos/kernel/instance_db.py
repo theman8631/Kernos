@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS member_profiles (
     hatched_at              TEXT DEFAULT '',
     bootstrap_graduated     INTEGER DEFAULT 0,
     bootstrap_graduated_at  TEXT DEFAULT '',
+    agent_name              TEXT DEFAULT '',
+    emoji                   TEXT DEFAULT '',
+    personality_notes       TEXT DEFAULT '',
     updated_at              TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (member_id) REFERENCES members(member_id)
 );
@@ -118,12 +121,16 @@ class InstanceDB:
             if stmt:
                 await self._conn.execute(stmt)
         # Migrations: add columns that may be missing from older databases
-        try:
-            await self._conn.execute(
-                "ALTER TABLE invite_codes ADD COLUMN platform TEXT DEFAULT ''"
-            )
-        except Exception:
-            pass  # Column already exists
+        for _alt in [
+            "ALTER TABLE invite_codes ADD COLUMN platform TEXT DEFAULT ''",
+            "ALTER TABLE member_profiles ADD COLUMN agent_name TEXT DEFAULT ''",
+            "ALTER TABLE member_profiles ADD COLUMN emoji TEXT DEFAULT ''",
+            "ALTER TABLE member_profiles ADD COLUMN personality_notes TEXT DEFAULT ''",
+        ]:
+            try:
+                await self._conn.execute(_alt)
+            except Exception:
+                pass  # Column already exists
         await self._conn.commit()
         logger.info("Instance DB ready: %s", self._db_path)
 
@@ -177,6 +184,12 @@ class InstanceDB:
             "interaction_count": "interaction_count",
             "bootstrap_graduated": "bootstrap_graduated",
             "bootstrap_graduated_at": "bootstrap_graduated_at",
+            # Soul identity fields (Soul Revision spec)
+            "agent_name": "agent_name",
+            "emoji": "emoji",
+            "personality_notes": "personality_notes",
+            "hatched": "hatched",
+            "hatched_at": "hatched_at",
         }
         for soul_field, profile_field in field_map.items():
             soul_val = soul_fields.get(soul_field)
@@ -298,6 +311,36 @@ class InstanceDB:
             m["channels"] = [dict(c) for c in channels]
             members.append(m)
         return members
+
+    # --- Instance Config (stored in platform_config with key "_instance") ---
+
+    async def get_hatching_mode(self) -> str:
+        """Get the instance's hatching mode. Returns 'unique' (default) or 'inherit'."""
+        config = await self.get_platform_config("_instance")
+        return config.get("hatching_mode", "unique")
+
+    async def set_hatching_mode(self, mode: str) -> None:
+        """Set hatching mode: 'unique' or 'inherit'."""
+        config = await self.get_platform_config("_instance")
+        config["hatching_mode"] = mode
+        await self.set_platform_config("_instance", config)
+
+    async def get_template_soul(self) -> dict | None:
+        """Get the first hatched member's soul fields for inherit mode."""
+        if not self._conn:
+            return None
+        async with self._conn.execute(
+            "SELECT * FROM member_profiles WHERE hatched=1 ORDER BY hatched_at ASC LIMIT 1",
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            d = dict(row)
+            return {
+                "agent_name": d.get("agent_name", ""),
+                "emoji": d.get("emoji", ""),
+                "personality_notes": d.get("personality_notes", ""),
+            }
+        return None
 
     # --- Invite Codes ---
 

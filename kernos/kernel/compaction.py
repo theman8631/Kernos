@@ -1348,40 +1348,45 @@ class CompactionService:
             instance_id, space_id, comp_state.archive_count,
         )
 
-    async def _evolve_personality(self, instance_id: str) -> None:
-        """Rewrite soul.personality_notes based on accumulated knowledge.
+    async def _evolve_personality(self, instance_id: str, member_id: str = "") -> None:
+        """Rewrite personality_notes based on accumulated knowledge.
 
         Fires only on compaction rotation — infrequent, cheap, deliberate.
-        Failure never blocks rotation.
+        Failure never blocks rotation. Writes to member profile if available.
         """
-        from kernos.kernel.soul import Soul
+        # Load current personality from member profile or soul
+        current_personality = "(no personality notes yet)"
+        if member_id and hasattr(self, '_instance_db') and self._instance_db:
+            profile = await self._instance_db.get_member_profile(member_id)
+            if profile:
+                current_personality = profile.get("personality_notes", "") or current_personality
+        else:
+            soul = await self.state.get_soul(instance_id)
+            if soul and soul.personality_notes:
+                current_personality = soul.personality_notes
 
-        soul = await self.state.get_soul(instance_id)
-        if not soul:
-            return
-
-        # Load recent user knowledge entries (last 30 days or all if fewer)
+        # Load recent user knowledge entries
         user_ke = await self.state.query_knowledge(
             instance_id, subject="user", active_only=True, limit=30,
+            member_id=member_id,
         )
         user_facts = [e.content for e in user_ke
                       if e.lifecycle_archetype in ("structural", "identity", "habitual")]
         if not user_facts:
             return
 
-        current_personality = soul.personality_notes or "(no personality notes yet)"
         facts_text = "\n".join(f"- {f}" for f in user_facts)
 
         result = await self.reasoning.complete_simple(
             system_prompt=(
                 "You are updating an AI agent's internal personality profile "
-                "for a specific user. Revise the existing profile based on new "
+                "for a specific person. Revise the existing profile based on new "
                 "observations. Preserve the stable core — this should feel like "
                 "the same document, revised, not replaced."
             ),
             user_content=(
                 f"Current personality profile:\n{current_personality}\n\n"
-                f"User facts (recent observations):\n{facts_text}\n\n"
+                f"Observations:\n{facts_text}\n\n"
                 "Rewrite the personality profile. Describe PATTERNS, not events. "
                 "'Approaches problems by mapping them to familiar frameworks' is "
                 "a pattern. 'Mentioned late-night coding on March 6' is an event "
@@ -1391,6 +1396,13 @@ class CompactionService:
             prefer_cheap=True,
         )
 
-        soul.personality_notes = result.strip()
-        await self.state.save_soul(soul, source="compaction_rotation", trigger="personality_evolution")
-        logger.info("Personality evolved for instance %s on rotation", instance_id)
+        if member_id and hasattr(self, '_instance_db') and self._instance_db:
+            await self._instance_db.upsert_member_profile(member_id, {
+                "personality_notes": result.strip(),
+            })
+        else:
+            soul = await self.state.get_soul(instance_id)
+            if soul:
+                soul.personality_notes = result.strip()
+                await self.state.save_soul(soul, source="compaction_rotation", trigger="personality_evolution")
+        logger.info("Personality evolved for %s/%s on rotation", instance_id, member_id or "legacy")

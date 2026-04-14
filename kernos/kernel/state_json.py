@@ -186,14 +186,9 @@ class JsonStateStore(StateStore):
         data = self._read_json(path, None)
         if data is None:
             return None
-        # Migration: backfill empty defaults from older soul.json files
+        # Migration: no backfill for agent_name/emoji — these are per-member now.
+        # Empty string means "not yet named" (pre-hatching).
         migrated = False
-        if not data.get("agent_name"):
-            data["agent_name"] = "Kernos"
-            migrated = True
-        if not data.get("emoji"):
-            data["emoji"] = "🜁"
-            migrated = True
         soul = Soul(**data)
         if migrated:
             self._write_json(path, asdict(soul))

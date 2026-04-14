@@ -445,11 +445,15 @@ Shared database (`data/instance.db`) for cross-instance state: members, member_c
 
 ### The Model
 
-One Kernos instance, one shared identity (Soul), many members. Each member is a first-class person — same personality, different relationship. The initial user is just the first member who bootstrapped the instance.
+One Kernos instance, many members. "Kernos" is the platform name, not the agent's identity. Each member hatches their own agent with its own name, personality, and relationship. The Soul dataclass is retained for JSON compat but all identity fields are per-member.
 
-### Soul Split
+### Per-Member Soul
 
-The Soul holds instance-level identity: agent_name, emoji, personality_notes, hatched. Per-member state lives in `member_profiles` in instance.db: display_name, timezone, communication_style, interaction_count, bootstrap_graduated. Deprecated Soul fields (user_name, timezone, communication_style, interaction_count, bootstrap_graduated) kept for JSON compat but never read at runtime.
+Agent identity lives in `member_profiles`: agent_name, emoji, personality_notes, hatched, hatched_at, plus relationship fields (display_name, timezone, communication_style, interaction_count, bootstrap_graduated). The instance-level Soul dataclass has all fields deprecated — kept for backward compat only.
+
+**Hatching mode** (instance config, stored in platform_config): `unique` (default) — each member hatches their own agent from scratch. `inherit` — new members get a copy of the first member's agent identity.
+
+**Graduation criteria**: display_name + agent_name + interaction_count. The agent naming IS the hatching moment.
 
 ### Member Profile Lifecycle
 
