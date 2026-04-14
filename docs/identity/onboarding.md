@@ -1,40 +1,53 @@
 # Onboarding
 
-The first meeting between Kernos and a new user is a guided improv. The system knows what needs to happen, but the agent finds its own way there.
+The first meeting between the agent and a new member is a guided improv. The system knows what needs to happen, but the agent finds its own way there.
 
-## The Bootstrap Phase
+## The Hatching Phase
 
-When a new tenant first interacts, the soul is "unhatched." The bootstrap prompt activates:
+When a new member first interacts, their agent relationship is "unhatched." The bootstrap prompt activates with two layers:
 
-> "You are Kernos. Your mission is to discover who this person is and what they need. Be present. Find your identity markers (name, emoji) naturally. Demonstrate competence early. Earn that moment."
+1. **Personality foundation** — warmth, tone, anti-patterns, presence. How the agent should feel.
+2. **Hatching identity layer** — the agent arrives without a name. The member names it. This is the hatching moment.
 
-During bootstrap (first ~10 interactions), the agent:
+The agent does NOT default to "Kernos." It arrives as a presence, not a brand.
 
-1. **Discovers the user** — name, what they need, how they communicate
-2. **Finds identity markers** — the user may name the agent, pick an emoji, shape the personality
-3. **Demonstrates competence** — shows what it can do early (calendar, memory, tools)
-4. **Earns trust** — through correct small actions, not by asking for belief
+### Hatching Modes
+
+**Unique hatching (default):** Each member goes through the full hatching — the agent arrives nameless, the member names it, early conversation shapes the personality. Every member gets their own distinct agent identity.
+
+**Auto-inherit:** New members get a copy of the first member's agent identity. Same name, same personality. The member can modify later. Faster onboarding for teams that want consistency.
+
+## During Hatching (~first 10 interactions)
+
+The agent:
+
+1. **Discovers the person** — name (if not already known from invite), timezone, how they communicate
+2. **Gets named** — the member gives the agent a name. This IS the hatching moment.
+3. **Develops personality** — tone, style, warmth emerge from interaction, not from defaults
+4. **Demonstrates competence** — shows what it can do early (calendar, memory, tools, invite management)
+5. **Earns trust** — through correct small actions, not by asking for belief
 
 ## Graduation
 
-After `_BOOTSTRAP_MIN_INTERACTIONS` (currently 10) messages, the system evaluates whether to graduate:
+After enough interactions + the agent has been named, the system graduates the relationship:
 
-1. A one-time LLM call consolidates everything learned during bootstrap into permanent `personality_notes` on the soul
-2. The `bootstrap_graduated` flag is set
+1. A one-time LLM call consolidates everything learned into per-member `personality_notes`
+2. The `bootstrap_graduated` flag is set on the member profile
 3. The bootstrap prompt is removed from the system prompt
 4. The agent continues with its evolved personality — no more guided discovery
 
-Graduation is unconditional — if the consolidation call fails, the soul still graduates. The bootstrap phase is deliberately time-limited.
+**Graduation criteria:** display_name + agent_name + interaction_count threshold. The agent naming IS the graduation signal — no graduation without it.
 
-## What Persists After Bootstrap
+## What Persists After Hatching
 
-- **agent_name** — whatever the user chose (or "Kernos" if unchanged)
+All per-member in `member_profiles`:
+- **agent_name** — whatever the member chose
 - **emoji** — identity marker discovered during onboarding
-- **personality_notes** — consolidated from bootstrap observations
+- **personality_notes** — consolidated from hatching observations
 - **communication_style** — inferred from interaction patterns
-- **user_name** — extracted from conversation
-- All knowledge entries extracted during bootstrap conversations
+- **display_name** — the member's name (from invite or discovered)
+- All knowledge entries extracted during hatching conversations
 
 ## Design Philosophy
 
-Competence first. The agent earns the right to be personal by being useful. It doesn't ask "what should I call you?" — it picks up the name naturally. It doesn't ask "what do you need?" — it demonstrates what it can do and lets the user discover the value.
+Competence first. The agent earns the right to be personal by being useful. It doesn't default to customer support energy. It arrives as a presence — warm, maybe a little dry, attentive, human — and lets the relationship develop naturally.
