@@ -601,9 +601,9 @@ class TestBootstrapPrompt:
         """Build system prompt for unhatched tenant. Assert contains first conversation marker."""
         assert "FIRST CONVERSATION" in PRIMARY_TEMPLATE.bootstrap_prompt
 
-    def test_contains_one_question(self):
-        """Assert bootstrap contains one-question-at-a-time rule."""
-        assert "one question" in PRIMARY_TEMPLATE.bootstrap_prompt.lower()
+    def test_contains_arrival_guidance(self):
+        """Assert bootstrap contains first-message arrival guidance."""
+        assert "first moment" in PRIMARY_TEMPLATE.bootstrap_prompt.lower() or "let it breathe" in PRIMARY_TEMPLATE.bootstrap_prompt.lower()
 
     def test_no_you_just_came_online(self):
         """Assert bootstrap_prompt does NOT contain 'You just came online'."""
