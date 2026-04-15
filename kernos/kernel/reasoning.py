@@ -659,6 +659,15 @@ class ReasoningService:
             elif tool_name == "read_doc":
                 return _read_doc(tool_input.get("path", ""))
             elif tool_name == "read_soul":
+                # Per-member: return member profile (the real identity state)
+                member_id = getattr(request, "member_id", "")
+                if member_id and hasattr(self, "_handler") and self._handler:
+                    idb = getattr(self._handler, "_instance_db", None)
+                    if idb:
+                        profile = await idb.get_member_profile(member_id)
+                        if profile:
+                            return json.dumps(profile, indent=2, default=str)
+                # Fallback: instance soul
                 if self._state:
                     soul = await self._state.get_soul(request.instance_id)
                     if soul:
