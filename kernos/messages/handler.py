@@ -335,15 +335,15 @@ def _maybe_append_name_ask(response_text: str, soul: Soul, member_profile: dict 
 def _is_member_mature(member_profile: dict | None, *, has_user_knowledge: bool = False) -> bool:
     """Check whether a member's agent relationship is ready for bootstrap graduation.
 
-    Three signals: display_name + agent_name + interaction_count.
-    The agent naming IS the hatching moment — no graduation without it.
+    Two hard signals: display_name + interaction_count.
+    agent_name is a soft signal — a better agent has one, but graduation
+    proceeds without it. The naming can happen before or after graduation.
     Knowledge entries and communication_style develop naturally; they don't gate graduation.
     """
     if not member_profile:
         return False
     return (
         bool(member_profile.get("display_name", ""))
-        and bool(member_profile.get("agent_name", ""))
         and member_profile.get("interaction_count", 0) >= _BOOTSTRAP_MIN_INTERACTIONS
     )
 
