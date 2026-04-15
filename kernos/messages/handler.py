@@ -183,7 +183,7 @@ CROSS_DOMAIN_INJECTION_TURNS = 5
 ACTIVE_SPACE_CAP = 40
 
 # Minimum interaction count before bootstrap graduation is even evaluated.
-_BOOTSTRAP_MIN_INTERACTIONS = 12
+_BOOTSTRAP_MIN_INTERACTIONS = 15
 
 _PLATFORM_CONTEXT: dict[str, str] = {
     "sms": (
