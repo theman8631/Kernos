@@ -130,7 +130,7 @@ def test_soul_mature_all_signals():
         instance_id="t1",
         user_name="Alice",
         communication_style="direct",
-        interaction_count=10,
+        interaction_count=12,
     )
     assert _is_soul_mature(soul, has_user_knowledge=True) is True
 

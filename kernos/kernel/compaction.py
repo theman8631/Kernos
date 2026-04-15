@@ -1379,18 +1379,22 @@ class CompactionService:
 
         result = await self.reasoning.complete_simple(
             system_prompt=(
-                "You are updating an AI agent's internal personality profile "
-                "for a specific person. Revise the existing profile based on new "
-                "observations. Preserve the stable core — this should feel like "
-                "the same document, revised, not replaced."
+                "You are deepening an AI agent's personality profile based on "
+                "continued interaction. DEEPEN, do not replace. The existing profile "
+                "is a crystallized identity — refine it with more specificity as new "
+                "evidence accumulates. One unusual exchange should add nuance, not "
+                "rewrite the portrait. The agent should be recognizably the same, "
+                "with more texture."
             ),
             user_content=(
                 f"Current personality profile:\n{current_personality}\n\n"
-                f"Observations:\n{facts_text}\n\n"
-                "Rewrite the personality profile. Describe PATTERNS, not events. "
+                f"Recent observations:\n{facts_text}\n\n"
+                "Revise the personality profile. Preserve the stable core — vibe, "
+                "pace, posture, boundaries. Add specificity where new evidence "
+                "supports it. Describe PATTERNS, not events. "
                 "'Approaches problems by mapping them to familiar frameworks' is "
                 "a pattern. 'Mentioned late-night coding on March 6' is an event "
-                "— do not include events. Keep it concise — 3-5 sentences."
+                "— do not include events. Keep it 4-8 sentences. Write a presence."
             ),
             max_tokens=300,
             prefer_cheap=True,
