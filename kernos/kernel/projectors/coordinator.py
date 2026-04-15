@@ -46,17 +46,17 @@ async def run_projectors(
     Tier 2 is scheduled as a background asyncio task (non-blocking).
     """
     # --- Tier 1: synchronous, zero cost ---
-    # Read current values from member profile (per-member) → soul (legacy fallback)
-    _current_name = (member_profile or {}).get("display_name", "") or soul.user_name
+    # Name extraction removed from tier1 — regex patterns produce false positives
+    # ("I'm like..." → "Like"). Name discovery handled by tier2 LLM extraction
+    # and compaction fact harvest which understand context.
     _current_style = (member_profile or {}).get("communication_style", "") or soul.communication_style
-    t1_result = tier1_extract(user_message, _current_name, _current_style)
+    t1_result = tier1_extract(user_message, "", _current_style)
 
     updated_fields = []
     profile_updates: dict = {}
 
-    if t1_result.user_name and t1_result.user_name != _current_name:
-        profile_updates["display_name"] = t1_result.user_name
-        updated_fields.append("display_name")
+    # Ignore t1_result.user_name — regex false positives ("I'm like..." → "Like").
+    # Name discovery handled by tier2 LLM extraction and compaction fact harvest.
 
     if t1_result.communication_style and not _current_style:
         profile_updates["communication_style"] = t1_result.communication_style

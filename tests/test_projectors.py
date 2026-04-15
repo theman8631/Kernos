@@ -645,7 +645,8 @@ async def test_tier2_writes_teacher_fact():
 # ---------------------------------------------------------------------------
 
 
-async def test_coordinator_tier1_updates_name():
+async def test_coordinator_tier1_skips_name_extraction():
+    """Tier1 no longer extracts names (false positive risk). Names come from tier2/compaction."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
@@ -660,19 +661,20 @@ async def test_coordinator_tier1_updates_name():
             reasoning_service=reasoning, instance_id="t1",
         )
 
-    assert soul.user_name == "Alice"
-    state.save_soul.assert_called()
+    # Name NOT extracted by tier1 — handled by tier2 LLM extraction
+    assert soul.user_name == ""
 
 
-async def test_coordinator_tier1_emits_event_on_update():
+async def test_coordinator_tier1_emits_event_on_style_update():
+    """Tier1 still extracts communication style and emits events for it."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
-    soul = _soul(user_name="")
+    soul = _soul(user_name="", communication_style="")
 
     with patch("kernos.kernel.projectors.coordinator.asyncio.create_task"):
         await run_projectors(
-            user_message="my name is Alice",
+            user_message="keep it casual please",
             recent_turns=[],
             soul=soul, state=state, events=events,
             reasoning_service=reasoning, instance_id="t1",
@@ -681,11 +683,11 @@ async def test_coordinator_tier1_emits_event_on_update():
     events.emit.assert_called()
     event = events.emit.call_args[0][0]
     assert event.type == "knowledge.extracted"
-    assert "display_name" in event.payload["fields_updated"]
+    assert "communication_style" in event.payload["fields_updated"]
 
 
-async def test_coordinator_tier1_overwrites_existing_name():
-    # Stated name is always authoritative — coordinator updates even if already set
+async def test_coordinator_tier1_no_name_extraction():
+    """Tier1 no longer overwrites names — names come from tier2/compaction."""
     state = _mock_state()
     events = _mock_events()
     reasoning = MagicMock()
@@ -699,27 +701,8 @@ async def test_coordinator_tier1_overwrites_existing_name():
             reasoning_service=reasoning, instance_id="t1",
         )
 
-    assert soul.user_name == "Alice"
-    state.save_soul.assert_called()
-
-
-async def test_coordinator_tier1_no_save_when_name_unchanged():
-    # Same name → no unnecessary write
-    state = _mock_state()
-    events = _mock_events()
-    reasoning = MagicMock()
-    soul = _soul(user_name="Alice")
-
-    with patch("kernos.kernel.projectors.coordinator.asyncio.create_task"):
-        await run_projectors(
-            user_message="my name is Alice",
-            recent_turns=[],
-            soul=soul, state=state, events=events,
-            reasoning_service=reasoning, instance_id="t1",
-        )
-
-    assert soul.user_name == "Alice"
-    state.save_soul.assert_not_called()
+    # Name stays as-is — tier1 doesn't touch it
+    assert soul.user_name == "Bob"
 
 
 async def test_coordinator_tier1_updates_style():

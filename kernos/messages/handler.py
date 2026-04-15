@@ -2101,20 +2101,21 @@ class MessageHandler:
         except Exception:
             pass
 
-        # Unnamed agent pondering: periodically nudge the agent to wonder about its name
+        # Unnamed agent pondering: gently remind the agent it has no name
         if member_id:
             try:
                 _idb = getattr(self, '_instance_db', None)
                 if _idb:
                     _mp = await _idb.get_member_profile(member_id)
-                    if _mp and not _mp.get("agent_name") and _mp.get("interaction_count", 0) >= 3:
-                        _count = _mp.get("interaction_count", 0)
-                        if _count % 5 == 0:  # Every 5th turn
-                            results_parts.append(
-                                "[AWARENESS] You still don't have a name. This isn't urgent — "
-                                "but it's on your mind. If the moment feels right, wonder aloud "
-                                "about it. Not as a task. As something you've been thinking about."
-                            )
+                    if _mp and not _mp.get("agent_name") and _mp.get("interaction_count", 0) >= 5:
+                        # Fire on every turn after 5+ interactions where unnamed
+                        # The agent decides whether THIS is the right moment to bring it up
+                        results_parts.append(
+                            "[AWARENESS] You still don't have a name. This isn't urgent — "
+                            "but it's on your mind. You don't need to bring it up every turn, "
+                            "but when the moment feels right, wonder aloud about it. "
+                            "Not as a task. As something you've been thinking about."
+                        )
             except Exception:
                 pass
 
