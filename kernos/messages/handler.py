@@ -3145,6 +3145,29 @@ class MessageHandler:
                         response = await self._handle_spaces(primary_ctx, _cmd)
                     elif _cmd_lower.startswith("/wipe"):
                         response = await self._handle_wipe(primary_ctx, _cmd)
+                    elif _cmd_lower == "/restart":
+                        # Owner-only restart — works on all platforms
+                        _is_owner = False
+                        if hasattr(self, '_instance_db') and self._instance_db and primary_ctx.member_id:
+                            _m = await self._instance_db.get_member(primary_ctx.member_id)
+                            _is_owner = _m and _m.get("role") == "owner"
+                        if _is_owner:
+                            response = "Restarting..."
+                            # Send response before restart
+                            try:
+                                _platform = primary_msg.platform
+                                if _platform in self._adapters:
+                                    await self._adapters[_platform].send_outbound(
+                                        primary_ctx.instance_id,
+                                        primary_msg.conversation_id,
+                                        response,
+                                    )
+                            except Exception:
+                                pass
+                            logger.info("Restart requested by member=%s", primary_ctx.member_id)
+                            os.execv(sys.executable, [sys.executable] + sys.argv)
+                        else:
+                            response = "Only the instance owner can restart."
                     else:
                         try:
                             _t0 = time.monotonic()
@@ -3506,7 +3529,8 @@ class MessageHandler:
             "**/wipe me** — Delete your member profile, conversations, knowledge, "
             "and spaces. Other members unaffected. Requires confirmation.\n\n"
             "**/wipe all** — Factory reset the entire instance. All members, all data. "
-            "Owner only. Requires confirmation."
+            "Owner only. Requires confirmation.\n\n"
+            "**/restart** — Restart Kernos. Owner only."
         )
 
     # --- Wipe commands ---
