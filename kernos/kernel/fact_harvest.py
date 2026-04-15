@@ -25,16 +25,46 @@ Return JSON:
 {
   "add": [{"content": "...", "archetype": "identity|structural|habitual|contextual", "confidence": "stated|inferred|observed", "subject": "user"}],
   "update": [{"id": "know_xxx", "new_content": "...", "reason": "..."}],
-  "reinforce": [{"id": "know_xxx"}]
+  "reinforce": [{"id": "know_xxx"}],
+  "stewardship": "one sentence or empty string"
 }
 
-Rules:
+FACTS rules:
 - Only extract facts that are durable and worth remembering
 - Do NOT extract transient conversational content, task requests, or testing
 - Do NOT extract facts already accurately in the current store
 - If a fact updates an existing one, specify which entry to update
 - Use the user's actual statements as ground truth
-- Return empty arrays if nothing durable was said"""
+- Return empty arrays if nothing durable was said
+
+VALUES — also extract what this person holds important. Consider \
+multiple evidence channels, not just what was most eloquently said:
+- What values are declared (they said it matters)
+- What values are enacted (they repeatedly choose, protect, or sacrifice for it)
+- What values are aspirational but unstable (they want it but struggle)
+- Where is there persistent regret or unresolved conflict
+Use archetype "identity" for core values, "structural" for priorities, \
+"habitual" for patterns. Only extract with real evidence — a stated \
+preference is not a core value.
+
+STEWARDSHIP — after processing facts, look at the full conversation \
+alongside the existing fact store. Is there a tension between what \
+this person says matters and what they're actually doing?
+
+Classify any tension found:
+- understandable_lapse — exhaustion, constraint, bad week. Let it go.
+- unresolved_tradeoff — competing priorities, no clear right answer.
+- value_transition — they're changing what matters. Give room.
+- repeated_self_betrayal — persistent pattern contradicting stated values.
+- insufficient_evidence — not enough signal.
+
+Only "repeated_self_betrayal" with strong evidence warrants a stewardship \
+note. A trusted friend speaks up when: the downside is meaningful, the \
+pattern is non-trivial, the concern is grounded in observed history, and \
+silence would feel negligent.
+
+If no tension worth mentioning: set "stewardship" to "".
+If yes: one warm sentence. A thought, not a diagnosis."""
 
 
 async def harvest_facts(
@@ -116,6 +146,10 @@ async def harvest_facts(
                         },
                     },
                 },
+                    "stewardship": {
+                        "type": "string",
+                        "description": "One warm sentence if significant tension detected, empty string otherwise",
+                    },
                 "required": ["add", "update", "reinforce"],
                 "additionalProperties": False,
             },
@@ -176,12 +210,32 @@ async def harvest_facts(
             )
             logger.info("FACT_HARVEST_REINFORCE: instance=%s id=%s", instance_id, entry_id)
 
-        if changes:
-            logger.info("FACT_HARVEST_COMPLETE: instance=%s space=%s adds=%d updates=%d reinforces=%d",
+        # Process stewardship signal → generate ambient whisper
+        stewardship_text = parsed.get("stewardship", "").strip()
+        if stewardship_text:
+            try:
+                from kernos.kernel.awareness import Whisper, generate_whisper_id
+                whisper = Whisper(
+                    whisper_id=generate_whisper_id(),
+                    insight_text=stewardship_text,
+                    delivery_class="ambient",
+                    whisper_type="STEWARDSHIP",
+                    supporting_evidence="compaction harvest tension detection",
+                    source_space_id=space_id,
+                    target_space_id="",  # No specific target — surfaces when context is right
+                )
+                await state_store.add_whisper(instance_id, whisper)
+                logger.info("STEWARDSHIP_WHISPER: instance=%s text=%s", instance_id, stewardship_text[:80])
+            except Exception as exc:
+                logger.warning("STEWARDSHIP_WHISPER: failed to create: %s", exc)
+
+        if changes or stewardship_text:
+            logger.info("FACT_HARVEST_COMPLETE: instance=%s space=%s adds=%d updates=%d reinforces=%d stewardship=%s",
                         instance_id, space_id,
                         len(parsed.get("add", [])),
                         len(parsed.get("update", [])),
-                        len(parsed.get("reinforce", [])))
+                        len(parsed.get("reinforce", [])),
+                        bool(stewardship_text))
         return changes
 
     except Exception as exc:
