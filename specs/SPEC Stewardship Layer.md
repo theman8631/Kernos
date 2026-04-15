@@ -53,46 +53,50 @@ When detecting tensions, apply grace:
 
 The harvest produces knowledge entries tagged with the appropriate confidence and archetype. These accumulate naturally over weeks and months of conversation. The person model builds itself through compaction — no separate extraction pipeline.
 
-### 2. Awareness Evaluator — Stewardship Pass
+### 2. Stewardship Evaluation at Compaction Time
 
-**File:** `kernos/kernel/awareness.py`
+**File:** `kernos/kernel/compaction.py` — within `compact_from_log()`
 
-Add one new evaluation pass to the existing awareness evaluator loop: `run_stewardship_pass()`.
+No separate awareness pass. No background timer. Stewardship evaluation runs as part of compaction, when it has the full conversation snapshot — the right moment to see patterns, tensions, and the shape of what someone values.
 
-**When it runs:** Same cadence as other awareness passes — periodic background evaluation between turns.
+**Why compaction, not awareness:**
+- Compaction sees the **full conversation context** in one snapshot, not fragmented increments
+- The LLM call is already happening with conversation loaded — adding stewardship is additional output tokens, not an additional call
+- Values and tensions don't change between turns — they change when enough new conversation accumulates, which is exactly when compaction fires
+- Zero background cost. No wasted calls at 3 AM when no one is talking
 
 **What it does:**
-1. Query knowledge entries for the current member that contain value-related signals (subject="user", archetypes in identity/structural/habitual, content containing value/priority/commitment/important language)
-2. Query recent conversation patterns from the conversation log
-3. One cheap LLM call: "Given this person's stated values and recent behavior patterns, is there a tension significant enough that a trusted friend would mention it? If yes, describe it. If no, say nothing."
-4. If tension detected → generate a whisper with `delivery_class="ambient"`
 
-**What the LLM prompt should encode:**
+After the standard compaction harvest (ADD/UPDATE/REINFORCE), a second evaluation within the same compaction pass:
+
+1. Load the member's existing value-related knowledge entries
+2. With the full conversation log already in context, ask: "Given what this person has said they value and what this conversation reveals about their actual patterns, is there a tension significant enough that a trusted friend would mention it?"
+3. If tension detected → generate a whisper with `delivery_class="ambient"`
+
+**What the evaluation prompt should encode (added to compaction):**
 
 ```
-You are evaluating whether a tension exists between what this person 
-says matters to them and what they're actually doing.
+STEWARDSHIP — After processing facts, consider the full conversation 
+you just read alongside this person's known values and commitments:
 
-Known values and commitments:
 {values_text}
 
-Recent patterns and behavior:
-{recent_text}
+With the full context of this conversation fresh:
+- Is there a tension between what they say matters and what they're 
+  actually doing?
+- Is it significant enough that a trusted friend would say something?
 
-Apply judgment, not arithmetic:
+Apply grace, not arithmetic:
 - Exhaustion is not betrayal
 - Tradeoffs are not failures  
 - A bad week deserves grace, not intervention
-- A six-month pattern deserves attention
-- One skipped workout is nothing; persistent avoidance after stated health goals is something
-- Someone experimenting with change deserves room to be inconsistent
+- A persistent pattern deserves attention
+- One lapse is nothing; a shape that contradicts stated priorities is something
+- Someone in transition deserves room to be inconsistent
 
-Would a trusted friend who knows this person well enough to care, 
-and wise enough to know when to speak — would they say something?
-
-If NO: respond with "none"
-If YES: describe the tension in one sentence. Be warm, not clinical. 
-This is a thought the agent is having, not a diagnosis.
+If NO tension worth mentioning: return nothing
+If YES: one warm sentence describing what you noticed. This becomes 
+a thought the agent holds — not a diagnosis, not a confrontation.
 ```
 
 **What the whisper looks like:**
@@ -100,19 +104,21 @@ This is a thought the agent is having, not a diagnosis.
 ```python
 Whisper(
     insight_text="You've mentioned wanting to spend more time with family, but the last three weeks have been all-work conversations. Not judging — just noticing.",
-    delivery_class="ambient",  # Agent weaves in naturally, doesn't interrupt
+    delivery_class="ambient",
     whisper_type="STEWARDSHIP",
     supporting_evidence="3 value entries about family priority, 0 family-related actions in recent log",
 )
 ```
 
-The agent receives this as an ambient awareness signal. It decides when and how to surface it — maybe this turn, maybe next week, maybe never if the moment isn't right. The whisper system's suppression mechanism prevents nagging on the same signal.
+The agent receives this as an ambient signal. It decides when and how to surface it — maybe this turn, maybe next week, maybe never. The whisper system's suppression mechanism prevents nagging on the same signal.
 
 ### 3. Nothing Else
 
-No new tables. No epistemic status fields. No plural self model. No stakes tags on the gate. No integrity layer. Not yet.
+No new tables. No epistemic status fields. No plural self model. No stakes tags on the gate. No integrity layer. No separate awareness pass. No background timer calls. Not yet.
 
-The compaction enhancement produces the person model organically. The awareness pass reads it and generates thoughts. The existing prompt principle tells the agent what to do with those thoughts. The existing whisper system controls delivery timing. The existing suppression system prevents nagging.
+The compaction enhancement does everything: extracts values, detects tensions, generates whispers — all within the compaction call that already has the full conversation snapshot loaded. Zero additional LLM calls beyond what compaction already makes. The existing prompt principle tells the agent what to do with the signals. The existing whisper system controls delivery timing. The existing suppression system prevents nagging.
+
+Immediate-relevance safety (Henderson's shellfish allergy) is already handled by per-turn knowledge retrieval and context assembly. Stewardship is for the long-term shape — patterns, values, tensions that emerge over weeks. Compaction is the right boundary for that evaluation because it sees the full context in snapshot moments, not every little increment.
 
 If this works — if the agent starts noticing what matters to people and holding those observations with grace — then the richer modeling (epistemic typing, competing selves, pattern-sensitive stakes) becomes a refinement of a working system rather than architecture for a theoretical one.
 
