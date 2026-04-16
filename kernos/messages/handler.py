@@ -3674,8 +3674,9 @@ class MessageHandler:
             name = (ctx.member_profile or {}).get("display_name", "") or "my data"
             self._pending_wipe[f"{ctx.instance_id}:{ctx.member_id}"] = "me"
             return (
-                f"This will permanently delete your profile, conversations, knowledge, "
-                f"spaces, and covenants. Other members are not affected.\n\n"
+                f"This will permanently delete your account — profile, conversations, "
+                f"knowledge, spaces, covenants, and all platform connections. "
+                f"You'll need a new invite code to rejoin. Other members are not affected.\n\n"
                 f'To confirm, type exactly: **Delete my data!**'
             )
         elif sub == "all":
@@ -3755,20 +3756,30 @@ class MessageHandler:
         except Exception as exc:
             logger.warning("WIPE_MEMBER: space cleanup failed: %s", exc)
 
-        # Delete member profile
+        # Deactivate member record, remove channels, reset profile
         if hasattr(self, '_instance_db') and self._instance_db:
             try:
+                # Remove all channel mappings — member becomes unknown on all platforms
+                await self._instance_db._conn.execute(
+                    "DELETE FROM member_channels WHERE member_id=?", (member_id,),
+                )
+                # Deactivate the member record
+                await self._instance_db._conn.execute(
+                    "UPDATE members SET status='wiped' WHERE member_id=?", (member_id,),
+                )
+                # Reset the profile
                 await self._instance_db.upsert_member_profile(member_id, {
                     "display_name": "", "timezone": "", "communication_style": "",
                     "interaction_count": 0, "hatched": False, "hatched_at": "",
                     "bootstrap_graduated": False, "bootstrap_graduated_at": "",
                     "agent_name": "", "emoji": "", "personality_notes": "",
                 })
-                logger.info("WIPE_MEMBER: reset profile for %s", member_id)
+                await self._instance_db._conn.commit()
+                logger.info("WIPE_MEMBER: deactivated member + removed channels for %s", member_id)
             except Exception as exc:
-                logger.warning("WIPE_MEMBER: profile reset failed: %s", exc)
+                logger.warning("WIPE_MEMBER: member cleanup failed: %s", exc)
 
-        return f"{name}'s data has been wiped. Fresh start — say anything to begin again."
+        return f"{name}'s data has been wiped. This channel is no longer connected — a new invite code is needed to rejoin."
 
     async def _execute_wipe_all(self, ctx: TurnContext) -> str:
         """Factory reset — delete everything. Triggers process restart."""
