@@ -215,7 +215,8 @@ async def harvest_facts(
             )
             await state_store.add_knowledge(entry)
             changes += 1
-            logger.info("FACT_HARVEST_ADD: instance=%s content=%r", instance_id, content[:80])
+            logger.info("FACT_HARVEST_ADD: instance=%s sensitivity=%s content=%r",
+                        instance_id, entry.sensitivity, content[:80])
 
         # Process UPDATEs
         for item in parsed.get("update", []):
@@ -337,7 +338,8 @@ async def process_harvest_results(
                 )
                 await state_store.add_knowledge(entry)
                 changes += 1
-                logger.info("FACT_HARVEST_ADD: instance=%s content=%r", instance_id, content[:80])
+                logger.info("FACT_HARVEST_ADD: instance=%s sensitivity=%s content=%r",
+                        instance_id, entry.sensitivity, content[:80])
             elif action == "update":
                 entry_id = item.get("id", "").strip()
                 content = item.get("content", "").strip()

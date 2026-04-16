@@ -1812,7 +1812,7 @@ class MessageHandler:
                 conversation_headroom=DEFAULT_DAILY_HEADROOM,
             )
             daily_comp.document_budget = compute_document_budget(
-                context_def_tokens, daily_comp._system_overhead, COMPACTION_MODEL_USABLE_TOKENS,
+                MODEL_MAX_TOKENS, 4000, 0, DEFAULT_DAILY_HEADROOM,
             )
             await self.compaction.save_state(instance_id, member_space.id, daily_comp)
         except Exception as exc:
