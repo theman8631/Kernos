@@ -280,3 +280,21 @@ class TestAbusePrevention:
         await idb._conn.commit()
         msg = await idb.record_sender_failure("discord", "persistent")
         assert "24 centuries" in msg
+
+    async def test_spamming_while_blocked_escalates(self, idb):
+        """Attempting while blocked escalates the ban — doesn't stay stuck at tier 1."""
+        # First failure → 24 seconds
+        msg = await idb.record_sender_failure("telegram", "spammer")
+        assert "24 seconds" in msg
+
+        # Spam while blocked → escalates to 24 minutes
+        msg = await idb.record_sender_failure("telegram", "spammer")
+        assert "24 minutes" in msg
+
+        # Keep spamming → 24 hours
+        msg = await idb.record_sender_failure("telegram", "spammer")
+        assert "24 hours" in msg
+
+        # Keep going → 24 days
+        msg = await idb.record_sender_failure("telegram", "spammer")
+        assert "24 days" in msg

@@ -443,21 +443,35 @@ class InstanceDB:
         if row:
             count = row[0] + 1
             tier = row[1]
-            # If currently blocked and still failing, don't help them
+            currently_blocked = False
+            # If currently blocked and still trying — escalate the tier
             if row[2]:
                 try:
                     expires = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
                     if expires.tzinfo is None:
                         expires = expires.replace(tzinfo=timezone.utc)
                     if datetime.now(timezone.utc) < expires:
-                        label = self._BAN_TIERS[min(tier - 1, len(self._BAN_TIERS) - 1)][1] if tier > 0 else "a while"
+                        currently_blocked = True
+                        # Escalate: each attempt while blocked makes the next ban longer
+                        new_tier = min(tier + 1, len(self._BAN_TIERS))
+                        duration_hours, label = self._BAN_TIERS[min(new_tier - 1, len(self._BAN_TIERS) - 1)]
+                        new_blocked_until = (datetime.now(timezone.utc) + timedelta(hours=duration_hours)).isoformat()
+                        await self._conn.execute(
+                            "UPDATE sender_blocks SET block_tier=?, blocked_until=?, failure_count=?, updated_at=? "
+                            "WHERE sender_key=?",
+                            (new_tier, new_blocked_until, count, now, key),
+                        )
+                        await self._conn.commit()
+                        logger.warning("SENDER_ESCALATED: %s tier=%d→%d duration=%s (attempted while blocked)",
+                            key, tier, new_tier, label)
                         return f"Try again in {label}."
                 except (ValueError, TypeError):
                     pass
-            await self._conn.execute(
-                "UPDATE sender_blocks SET failure_count=?, updated_at=? WHERE sender_key=?",
-                (count, now, key),
-            )
+            if not currently_blocked:
+                await self._conn.execute(
+                    "UPDATE sender_blocks SET failure_count=?, updated_at=? WHERE sender_key=?",
+                    (count, now, key),
+                )
         else:
             count = 1
             tier = 0
