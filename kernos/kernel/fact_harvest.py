@@ -64,7 +64,28 @@ pattern is non-trivial, the concern is grounded in observed history, and \
 silence would feel negligent.
 
 If no tension worth mentioning: set "stewardship" to "".
-If yes: one warm sentence. A thought, not a diagnosis."""
+If yes: one warm sentence. A thought, not a diagnosis.
+
+OPERATIONAL INSIGHT — after processing everything above, consider: is there \
+something specific this agent could DO — build, automate, anticipate, \
+pre-stage, remind, or take off their plate — that would genuinely reduce \
+friction or improve their life?
+
+This is not pattern-reporting. Do not surface observations without ideas. \
+A vague "I noticed X" is not worth surfacing. Only generate an insight if \
+you have a concrete, actionable proposal. The gate is: do you have an \
+actual idea that would help?
+
+Examples of what qualifies:
+- "They rebuild the same spreadsheet headers every Thursday — I could \
+build a template that pre-fills them"
+- "They always check three things before approving invoices — I could \
+do that first pass"
+- "They're waiting on Sarah's numbers every week — I could draft the \
+report skeleton so they just paste and send when it arrives"
+
+If no concrete idea: set "operational_insight" to "".
+If yes: one sentence describing what you could do and why it would help."""
 
 
 async def harvest_facts(
@@ -150,6 +171,10 @@ async def harvest_facts(
                         "type": "string",
                         "description": "One warm sentence if significant tension detected, empty string otherwise",
                     },
+                    "operational_insight": {
+                        "type": "string",
+                        "description": "One sentence: a concrete, actionable idea for reducing friction or improving their life. Empty string if no idea.",
+                    },
                 "required": ["add", "update", "reinforce"],
                 "additionalProperties": False,
             },
@@ -229,13 +254,33 @@ async def harvest_facts(
             except Exception as exc:
                 logger.warning("STEWARDSHIP_WHISPER: failed to create: %s", exc)
 
-        if changes or stewardship_text:
-            logger.info("FACT_HARVEST_COMPLETE: instance=%s space=%s adds=%d updates=%d reinforces=%d stewardship=%s",
+        # Process operational insight → generate ambient whisper with concrete idea
+        insight_text = parsed.get("operational_insight", "").strip()
+        if insight_text:
+            try:
+                from kernos.kernel.awareness import Whisper, generate_whisper_id
+                whisper = Whisper(
+                    whisper_id=generate_whisper_id(),
+                    insight_text=insight_text,
+                    delivery_class="ambient",
+                    whisper_type="OPERATIONAL_INSIGHT",
+                    supporting_evidence="compaction harvest — concrete actionable idea",
+                    source_space_id=space_id,
+                    target_space_id="",
+                )
+                await state_store.add_whisper(instance_id, whisper)
+                logger.info("OPERATIONAL_INSIGHT: instance=%s text=%s", instance_id, insight_text[:80])
+            except Exception as exc:
+                logger.warning("OPERATIONAL_INSIGHT: failed to create: %s", exc)
+
+        if changes or stewardship_text or insight_text:
+            logger.info("FACT_HARVEST_COMPLETE: instance=%s space=%s adds=%d updates=%d reinforces=%d stewardship=%s insight=%s",
                         instance_id, space_id,
                         len(parsed.get("add", [])),
                         len(parsed.get("update", [])),
                         len(parsed.get("reinforce", [])),
-                        bool(stewardship_text))
+                        bool(stewardship_text),
+                        bool(insight_text))
         return changes
 
     except Exception as exc:
