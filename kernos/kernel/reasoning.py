@@ -1492,11 +1492,12 @@ class ReasoningService:
                     block.name, exc,
                 )
 
-        # Accumulate trace for friction observer
+        # Accumulate trace for friction observer + tool receipts
         self._turn_tool_trace.append({
             "name": block.name,
             "input": tool_input,
             "success": not is_error,
+            "result_preview": result[:200] if isinstance(result, str) else str(result)[:200],
         })
 
         return {

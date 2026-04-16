@@ -5488,6 +5488,23 @@ class MessageHandler:
             speaker="assistant", channel=message.platform, content=ctx.response_text,
             member_id=ctx.member_id)
 
+        # Log tool receipts — effects in the world, not API calls
+        if ctx.tool_calls_trace:
+            _receipts = []
+            for tc in ctx.tool_calls_trace:
+                if tc.get("success"):
+                    _name = tc.get("name", "")
+                    _preview = tc.get("result_preview", "")[:150]
+                    if _name and _preview:
+                        _receipts.append(f"[{_name}] {_preview}")
+            if _receipts:
+                receipt_text = "Tool effects this turn:\n" + "\n".join(_receipts)
+                await self.conv_logger.append(
+                    instance_id=instance_id, space_id=ctx.active_space_id,
+                    speaker="system", channel="receipt",
+                    content=receipt_text, member_id=ctx.member_id,
+                )
+
         # Compaction (with concurrency guard + backoff)
         if ctx.active_space_id in self._compacting:
             logger.info("COMPACTION: already in progress for space=%s, skipping", ctx.active_space_id)
