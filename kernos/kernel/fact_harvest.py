@@ -146,7 +146,7 @@ async def harvest_facts(
                                 "subject": {"type": "string"},
                                 "sensitivity": {"type": "string", "enum": ["open", "contextual", "personal"]},
                             },
-                            "required": ["content", "archetype", "confidence", "subject"],
+                            "required": ["content", "archetype", "confidence", "subject", "sensitivity"],
                             "additionalProperties": False,
                         },
                     },

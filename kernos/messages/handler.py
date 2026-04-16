@@ -1837,7 +1837,7 @@ class MessageHandler:
         context_text = "\n".join(f"- {f}" for f in user_facts) if user_facts else "unknown"
 
         _name = (member_profile or {}).get("display_name", "") or "unknown"
-        _agent = (member_profile or {}).get("agent_name", "") or "unknown"
+        _agent = (member_profile or {}).get("agent_name", "") or "not yet named"
         _style = (member_profile or {}).get("communication_style", "") or "unknown"
         _count = (member_profile or {}).get("interaction_count", 0)
 
