@@ -3240,6 +3240,8 @@ class MessageHandler:
                             os.execv(sys.executable, [sys.executable] + sys.argv)
                         else:
                             response = "Only the instance owner can restart."
+                    elif _cmd_lower == "/disconnect":
+                        response = await self._handle_disconnect(primary_ctx)
                     else:
                         try:
                             _t0 = time.monotonic()
@@ -3602,6 +3604,8 @@ class MessageHandler:
             "and spaces. Other members unaffected. Requires confirmation.\n\n"
             "**/wipe all** — Factory reset the entire instance. All members, all data. "
             "Owner only. Requires confirmation.\n\n"
+            "**/disconnect** — Disconnect this platform from your account. "
+            "Your other connected platforms still work.\n\n"
             "**/restart** — Restart Kernos. Owner only."
         )
 
@@ -3609,6 +3613,54 @@ class MessageHandler:
 
     # Pending wipe confirmations: {instance_id:member_id → wipe_type}
     _pending_wipe: dict[str, str] = {}
+
+    async def _handle_disconnect(self, ctx: TurnContext) -> str:
+        """Disconnect the current platform channel from the member's account."""
+        if not ctx.member_id or not ctx.message:
+            return "Cannot determine your identity on this platform."
+        if not hasattr(self, '_instance_db') or not self._instance_db:
+            return "Member management is not available."
+
+        platform = ctx.message.platform
+        channel_id = ctx.message.sender
+
+        # Check how many channels this member has
+        member = await self._instance_db.get_member(ctx.member_id)
+        if not member:
+            return "Member not found."
+
+        # Count channels
+        channels = []
+        if self._instance_db._conn:
+            async with self._instance_db._conn.execute(
+                "SELECT platform, channel_id FROM member_channels WHERE member_id=?",
+                (ctx.member_id,),
+            ) as cur:
+                channels = await cur.fetchall()
+
+        if len(channels) <= 1:
+            return (
+                "This is your only connected platform. Disconnecting it would leave "
+                "your account unreachable. Use **/wipe me** if you want to delete "
+                "your account entirely."
+            )
+
+        # Remove this channel
+        await self._instance_db._conn.execute(
+            "DELETE FROM member_channels WHERE member_id=? AND platform=? AND channel_id=?",
+            (ctx.member_id, platform, channel_id),
+        )
+        await self._instance_db._conn.commit()
+
+        # Also clear sender blocks for this channel
+        await self._instance_db.clear_sender_failures(platform, channel_id)
+
+        logger.info("DISCONNECT: member=%s platform=%s channel=%s", ctx.member_id, platform, channel_id)
+        return (
+            f"Disconnected {platform} from your account. Your other channels "
+            f"still work. Messages from this {platform} account will no longer "
+            f"be recognized."
+        )
 
     async def _handle_wipe(self, ctx: TurnContext, raw_cmd: str) -> str:
         """Handle /wipe me and /wipe all with exact-phrase confirmation."""
