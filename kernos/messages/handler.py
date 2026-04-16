@@ -474,9 +474,16 @@ def _build_rules_block(
     template: AgentTemplate, contract_rules: list[CovenantRule], soul: Soul,
     space_names: dict[str, str] | None = None,
     member_profile: dict | None = None,
+    instance_stewardship: str = "",
 ) -> str:
-    """## RULES — operating principles + behavioral contracts + bootstrap."""
+    """## RULES — operating principles + stewardship + behavioral contracts + bootstrap."""
     parts = [template.operating_principles]
+    if instance_stewardship:
+        parts.append(
+            f"INSTANCE PURPOSE:\n{instance_stewardship}\n"
+            f"This is what this Kernos instance is for. When values conflict or "
+            f"tradeoffs exist, orient your judgment toward this purpose."
+        )
     contracts_text = _format_contracts(contract_rules, space_names)
     if contracts_text:
         parts.append(contracts_text)
@@ -5261,7 +5268,14 @@ class MessageHandler:
                 if _s:
                     _space_names[sid] = _s.name
 
-        rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul, space_names=_space_names, member_profile=ctx.member_profile)
+        # Load instance stewardship — the purpose that orients this Kernos
+        _stewardship = ""
+        if hasattr(self, '_instance_db') and self._instance_db:
+            try:
+                _stewardship = await self._instance_db.get_instance_stewardship()
+            except Exception:
+                pass
+        rules = _build_rules_block(PRIMARY_TEMPLATE, contract_rules, soul, space_names=_space_names, member_profile=ctx.member_profile, instance_stewardship=_stewardship)
         # Extract execution envelope for self-directed turns, or check for paused plan
         _exec_envelope = None
         if ctx.is_self_directed and message.context and isinstance(message.context, dict):

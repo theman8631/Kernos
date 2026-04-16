@@ -368,6 +368,18 @@ class InstanceDB:
         config["hatching_mode"] = mode
         await self.set_platform_config("_instance", config)
 
+    async def get_instance_stewardship(self) -> str:
+        """Get the instance's stewardship purpose. What this Kernos is for."""
+        config = await self.get_platform_config("_instance")
+        return config.get("stewardship", "")
+
+    async def set_instance_stewardship(self, stewardship: str) -> None:
+        """Set the instance's stewardship purpose."""
+        config = await self.get_platform_config("_instance")
+        config["stewardship"] = stewardship
+        await self.set_platform_config("_instance", config)
+        logger.info("INSTANCE_STEWARDSHIP: set (%d chars)", len(stewardship))
+
     async def get_template_soul(self) -> dict | None:
         """Get the first hatched member's soul fields for inherit mode."""
         if not self._conn:

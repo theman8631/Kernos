@@ -23,7 +23,7 @@ survive beyond it. Reconcile against existing facts.
 
 Return JSON:
 {
-  "add": [{"content": "...", "archetype": "identity|structural|habitual|contextual", "confidence": "stated|inferred|observed", "subject": "user"}],
+  "add": [{"content": "...", "archetype": "identity|structural|habitual|contextual", "confidence": "stated|inferred|observed", "subject": "user", "sensitivity": "open|contextual|personal"}],
   "update": [{"id": "know_xxx", "new_content": "...", "reason": "..."}],
   "reinforce": [{"id": "know_xxx"}],
   "stewardship": "one sentence or empty string"
@@ -36,6 +36,11 @@ FACTS rules:
 - If a fact updates an existing one, specify which entry to update
 - Use the user's actual statements as ground truth
 - Return empty arrays if nothing durable was said
+- Classify sensitivity for each new fact:
+  "open" — general knowledge, fine to share (hobbies, preferences, public info)
+  "contextual" — usable for reasoning but don't surface casually (work details, plans)
+  "personal" — private to this member, do not disclose to others (health, finances, relationships, emotions)
+  When unsure, classify as "personal" — err conservative
 
 VALUES — also extract what this person holds important. Consider \
 multiple evidence channels, not just what was most eloquently said:
@@ -139,6 +144,7 @@ async def harvest_facts(
                                 "archetype": {"type": "string"},
                                 "confidence": {"type": "string"},
                                 "subject": {"type": "string"},
+                                "sensitivity": {"type": "string", "enum": ["open", "contextual", "personal"]},
                             },
                             "required": ["content", "archetype", "confidence", "subject"],
                             "additionalProperties": False,
@@ -205,6 +211,7 @@ async def harvest_facts(
                 lifecycle_archetype=item.get("archetype", "structural"),
                 valid_at=utc_now(),
                 owner_member_id=member_id,
+                sensitivity=item.get("sensitivity", "personal"),  # Conservative default
             )
             await state_store.add_knowledge(entry)
             changes += 1
