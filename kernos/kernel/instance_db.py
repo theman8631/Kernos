@@ -94,6 +94,21 @@ CREATE TABLE IF NOT EXISTS sender_blocks (
     updated_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS relationships (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    member_a_id     TEXT NOT NULL,
+    member_b_id     TEXT NOT NULL,
+    relationship_type TEXT DEFAULT '',
+    profile         TEXT DEFAULT 'coordination-only',
+    status          TEXT DEFAULT 'proposed',
+    proposed_by     TEXT DEFAULT '',
+    confirmed_by    TEXT DEFAULT '',
+    proposed_at     TEXT DEFAULT '',
+    confirmed_at    TEXT DEFAULT '',
+    updated_at      TEXT NOT NULL,
+    UNIQUE(member_a_id, member_b_id)
+);
+
 CREATE TABLE IF NOT EXISTS platform_config (
     platform    TEXT PRIMARY KEY,
     config      TEXT DEFAULT '{}'
@@ -517,6 +532,90 @@ class InstanceDB:
             "DELETE FROM sender_blocks WHERE sender_key=?", (key,),
         )
         await self._conn.commit()
+
+    # --- Relationships ---
+
+    _VALID_PROFILES = {"full-share", "work-only", "coordination-only", "minimal"}
+
+    async def declare_relationship(
+        self, proposer_id: str, target_id: str,
+        relationship_type: str, profile: str = "coordination-only",
+    ) -> dict:
+        """Declare or update a relationship between two members. Returns the relationship dict."""
+        if not self._conn:
+            return {"error": "Database not available"}
+        from kernos.utils import utc_now
+        now = utc_now()
+        if profile not in self._VALID_PROFILES:
+            profile = "coordination-only"
+        # Normalize order: always store with lower member_id as member_a
+        a, b = (proposer_id, target_id) if proposer_id < target_id else (target_id, proposer_id)
+        # Check for existing
+        async with self._conn.execute(
+            "SELECT * FROM relationships WHERE member_a_id=? AND member_b_id=?", (a, b),
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            d = dict(existing)
+            # Update type and profile
+            await self._conn.execute(
+                "UPDATE relationships SET relationship_type=?, profile=?, updated_at=? "
+                "WHERE member_a_id=? AND member_b_id=?",
+                (relationship_type, profile, now, a, b),
+            )
+            # If the other party proposed, this confirms it
+            if d.get("proposed_by") and d["proposed_by"] != proposer_id and d["status"] == "proposed":
+                await self._conn.execute(
+                    "UPDATE relationships SET status='confirmed', confirmed_by=?, confirmed_at=? "
+                    "WHERE member_a_id=? AND member_b_id=?",
+                    (proposer_id, now, a, b),
+                )
+            await self._conn.commit()
+        else:
+            await self._conn.execute(
+                "INSERT INTO relationships "
+                "(member_a_id, member_b_id, relationship_type, profile, status, proposed_by, proposed_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (a, b, relationship_type, profile, "proposed", proposer_id, now, now),
+            )
+            await self._conn.commit()
+        logger.info("RELATIONSHIP: %s↔%s type=%s profile=%s proposed_by=%s",
+            a, b, relationship_type, profile, proposer_id)
+        return await self.get_relationship(proposer_id, target_id) or {}
+
+    async def get_relationship(self, member_a: str, member_b: str) -> dict | None:
+        """Get the relationship between two members. Checks both directions."""
+        if not self._conn:
+            return None
+        a, b = (member_a, member_b) if member_a < member_b else (member_b, member_a)
+        async with self._conn.execute(
+            "SELECT * FROM relationships WHERE member_a_id=? AND member_b_id=?", (a, b),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_relationships(self, member_id: str) -> list[dict]:
+        """List all relationships for a member."""
+        if not self._conn:
+            return []
+        rows = []
+        async with self._conn.execute(
+            "SELECT * FROM relationships WHERE member_a_id=? OR member_b_id=?",
+            (member_id, member_id),
+        ) as cur:
+            rows = await cur.fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            # Resolve the other member
+            other_id = d["member_b_id"] if d["member_a_id"] == member_id else d["member_a_id"]
+            other = await self.get_member(other_id)
+            d["other_member_id"] = other_id
+            d["other_display_name"] = other.get("display_name", other_id) if other else other_id
+            # Effective profile: coordination-only until confirmed
+            d["effective_profile"] = d["profile"] if d["status"] == "confirmed" else "coordination-only"
+            result.append(d)
+        return result
 
     # --- Invite Codes ---
 

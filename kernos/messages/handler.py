@@ -597,6 +597,7 @@ def _build_state_block(
     soul: Soul, template: AgentTemplate,
     user_knowledge_entries: list | None,
     member_profile: dict | None = None,
+    relationships: list[dict] | None = None,
 ) -> str:
     """## STATE — current truth the agent should act from."""
     # Agent identity: member profile → soul (legacy) → unnamed
@@ -635,6 +636,15 @@ def _build_state_block(
         user_parts.append(f"Communication style: {_comm_style}")
     if user_parts:
         parts.append("USER CONTEXT:\n" + "\n".join(user_parts))
+    # Relationship awareness — compact, just enough for disclosure decisions
+    if relationships:
+        rel_lines = []
+        for r in relationships:
+            name = r.get("other_display_name", "?")
+            rtype = r.get("relationship_type", "")
+            eff = r.get("effective_profile", "coordination-only")
+            rel_lines.append(f"{name} ({rtype}, {eff})")
+        parts.append("RELATIONSHIPS:\n" + ", ".join(rel_lines))
     return "## STATE\n" + "\n\n".join(parts)
 
 
@@ -3909,7 +3919,55 @@ class MessageHandler:
                 return f"Member {member_id} has been deactivated."
             return f"Member {member_id} not found."
 
-        return f"Unknown action: {action}. Use invite, connect_platform, list, or remove."
+        elif action == "declare_relationship":
+            target_id = tool_input.get("member_id", "")
+            rel_type = tool_input.get("relationship_type", "")
+            profile = tool_input.get("profile", "coordination-only")
+            if not target_id:
+                return "Error: member_id of the other person is required for declare_relationship."
+            if not rel_type:
+                return "Error: relationship_type is required (spouse, coworker, friend, etc.)."
+            # Resolve target by name if needed
+            members = await self._instance_db.list_members()
+            target = next((m for m in members if m["member_id"] == target_id), None)
+            if not target:
+                target = next((m for m in members if m.get("display_name", "").lower() == target_id.lower()), None)
+                if target:
+                    target_id = target["member_id"]
+                else:
+                    member_names = [f"{m.get('display_name', '')} ({m['member_id']})" for m in members if m["member_id"] != requesting_member_id]
+                    return f"Error: member '{target_id}' not found. Known members: {', '.join(member_names)}"
+            result = await self._instance_db.declare_relationship(
+                requesting_member_id, target_id, rel_type, profile)
+            if "error" in result:
+                return f"Error: {result['error']}"
+            other_name = result.get("other_display_name", target_id)
+            effective = result.get("effective_profile", profile)
+            status = result.get("status", "proposed")
+            return (
+                f"Relationship declared: {other_name} ({rel_type}), sharing level: {profile}.\n"
+                f"Status: {status}. Effective profile: {effective}.\n"
+                + ("Until they confirm, the effective sharing level is coordination-only." if status == "proposed" else "")
+            )
+
+        elif action == "list_relationships":
+            rels = await self._instance_db.list_relationships(requesting_member_id)
+            if not rels:
+                return "No relationships declared yet. Use declare_relationship to set up how members relate to each other."
+            lines = []
+            for r in rels:
+                name = r.get("other_display_name", r.get("other_member_id", "?"))
+                rtype = r.get("relationship_type", "unspecified")
+                profile = r.get("profile", "coordination-only")
+                effective = r.get("effective_profile", profile)
+                status = r.get("status", "proposed")
+                line = f"- **{name}** ({rtype}) — {effective}"
+                if status != "confirmed":
+                    line += f" [{status}]"
+                lines.append(line)
+            return "Your relationships:\n" + "\n".join(lines)
+
+        return f"Unknown action: {action}. Use invite, connect_platform, list, remove, declare_relationship, or list_relationships."
 
     async def _handle_manage_plan(
         self, instance_id: str, space_id: str, tool_input: dict,
@@ -5299,7 +5357,14 @@ class MessageHandler:
             except Exception:
                 pass
         now_block = _build_now_block(message, soul, active_space, execution_envelope=_exec_envelope, member_profile=ctx.member_profile)
-        state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries, member_profile=ctx.member_profile)
+        # Load relationships for STATE block injection
+        _rels = []
+        if ctx.member_id and hasattr(self, '_instance_db') and self._instance_db:
+            try:
+                _rels = await self._instance_db.list_relationships(ctx.member_id)
+            except Exception:
+                pass
+        state_block = _build_state_block(soul, PRIMARY_TEMPLATE, user_knowledge_entries, member_profile=ctx.member_profile, relationships=_rels)
         results = _build_results_block(ctx.results_prefix)
         actions = _build_actions_block(capability_prompt, message, self._channel_registry)
         memory = _build_memory_block(ctx.memory_prefix)

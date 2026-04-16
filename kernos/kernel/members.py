@@ -15,14 +15,15 @@ MANAGE_MEMBERS_TOOL = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["invite", "connect_platform", "list", "remove"],
+                "enum": ["invite", "connect_platform", "list", "remove", "declare_relationship", "list_relationships"],
                 "description": (
-                    "invite = NEW PERSON joining Kernos. Creates a fresh member with their own "
-                    "agent, soul, spaces, knowledge, and bootstrap. They are a completely separate person. "
-                    "connect_platform = SAME PERSON, new channel. Links the requesting member's existing "
-                    "account to another platform. Everything carries over — agent, spaces, history, services. "
+                    "invite = NEW PERSON joining Kernos. Fresh member, own agent/spaces/context. "
+                    "connect_platform = SAME PERSON, new channel. Same agent/spaces/history. "
                     "list = show all members and their connected platforms. "
-                    "remove = deactivate a member."
+                    "remove = deactivate a member. "
+                    "declare_relationship = declare how two members know each other (spouse, coworker, etc.) "
+                    "and what sharing level applies (full-share, work-only, coordination-only, minimal). "
+                    "list_relationships = show the requesting member's declared relationships."
                 ),
             },
             "platform": {
@@ -47,6 +48,14 @@ MANAGE_MEMBERS_TOOL = {
             "expires_hours": {
                 "type": "integer",
                 "description": "Hours until code expires (default: 72)",
+            },
+            "relationship_type": {
+                "type": "string",
+                "description": "For declare_relationship: how members know each other (spouse, partner, family, coworker, friend, client, etc.)",
+            },
+            "profile": {
+                "type": "string",
+                "description": "For declare_relationship: sharing level — full-share, work-only, coordination-only (default), or minimal.",
             },
         },
         "required": ["action"],
