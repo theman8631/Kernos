@@ -1,9 +1,9 @@
 #!/bin/bash
-# KERNOS Eval Harness Launcher (verbose by default)
+# KERNOS Eval Harness Launcher
 # Usage:
 #   ./evals.sh                              # run all scenarios under evals/scenarios/
 #   ./evals.sh evals/scenarios/01_...md     # run a single scenario
-#   extra flags pass through to python -m kernos.evals
+#   ./evals.sh --verbose                    # pass flags through
 
 cd "$(dirname "$0")"
 
@@ -19,4 +19,4 @@ fi
 
 echo "Running Kernos eval harness..."
 echo ""
-python -m kernos.evals --verbose "$@"
+python -m kernos.evals "$@"
