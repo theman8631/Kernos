@@ -1828,12 +1828,73 @@ class MessageHandler:
         except Exception as exc:
             logger.warning("Failed to init compaction state for member space: %s", exc)
 
-    async def _consolidate_bootstrap(self, soul: Soul, member_id: str = "", member_profile: dict | None = None) -> None:
+    async def _extract_agent_name_from_transcript(
+        self, instance_id: str, space_id: str, member_id: str,
+    ) -> str:
+        """Scan the member's recent conversation log for a chosen agent name.
+
+        Naming often happens as an organic moment ("Slate" / "Slate it is") and
+        the agent doesn't always call update_soul. This compaction-time pass
+        reads the transcript and extracts the name if one was settled on.
+        Returns the name string, or empty.
+        """
+        if not space_id or not member_id:
+            return ""
+        try:
+            entries = await self.conv_logger.read_recent(
+                instance_id, space_id, token_budget=4000,
+                max_messages=30, member_id=member_id,
+            )
+        except Exception as exc:
+            logger.debug("name extract: read_recent failed: %s", exc)
+            return ""
+        if not entries:
+            return ""
+
+        transcript = "\n".join(
+            f"{e.get('role', '?')}: {e.get('content', '')}" for e in entries
+        )
+        schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        }
+        try:
+            raw = await self.reasoning.complete_simple(
+                system_prompt=(
+                    "You are reviewing a conversation between an AI agent and a "
+                    "user. If the agent settled on a name for itself during this "
+                    "conversation (proposed, agreed, or accepted), return that "
+                    "name. Otherwise return empty string. Only return the name "
+                    "itself — no quotes, no extra words. Be conservative: only "
+                    'extract if the naming moment is clearly settled (e.g. '
+                    '"Slate it is", "let\'s go with Tern", user accepting a '
+                    "proposal). Ambiguous or declined names → empty."
+                ),
+                user_content=f"TRANSCRIPT:\n{transcript}",
+                max_tokens=30,
+                prefer_cheap=True,
+                output_schema=schema,
+            )
+            import json as _json
+            parsed = _json.loads(raw)
+            name = (parsed.get("name") or "").strip()
+            # Guard: names are short; reject anything that looks like a sentence
+            if name and len(name) <= 40 and "\n" not in name:
+                return name
+        except Exception as exc:
+            logger.debug("name extract: LLM call failed: %s", exc)
+        return ""
+
+    async def _consolidate_bootstrap(self, soul: Soul, member_id: str = "", member_profile: dict | None = None, active_space_id: str = "") -> None:
         """One-time consolidation: bootstrap wisdom → member personality notes.
 
         Uses complete_simple() — stateless, no tools, no task events.
         Graduation is unconditional: if this call fails, member still graduates.
         Writes to the member's per-member personality_notes, not the instance soul.
+        Also extracts agent_name from the transcript if graduation happened
+        without an explicit update_soul call.
         """
         from kernos.kernel.template import PRIMARY_TEMPLATE
 
@@ -1911,7 +1972,27 @@ class MessageHandler:
                 exc,
             )
 
-    async def _post_response_soul_update(self, soul: Soul, member_id: str = "", member_profile: dict | None = None) -> None:
+        # Agent name extraction: the agent often settles on a name in the
+        # naming moment without calling update_soul. Extract from transcript
+        # at graduation so that moment is captured.
+        if (
+            member_id and active_space_id
+            and hasattr(self, '_instance_db') and self._instance_db
+            and not (member_profile or {}).get("agent_name")
+        ):
+            extracted = await self._extract_agent_name_from_transcript(
+                soul.instance_id, active_space_id, member_id,
+            )
+            if extracted:
+                await self._instance_db.upsert_member_profile(member_id, {
+                    "agent_name": extracted,
+                })
+                logger.info(
+                    "AGENT_NAME_EXTRACTED: member=%s name=%r (graduation-time)",
+                    member_id, extracted,
+                )
+
+    async def _post_response_soul_update(self, soul: Soul, member_id: str = "", member_profile: dict | None = None, active_space_id: str = "") -> None:
         """Update member profile after a successful response.
 
         Per-member: hatching, interaction_count, bootstrap graduation.
@@ -1961,7 +2042,7 @@ class MessageHandler:
                 )
                 has_user_knowledge = len(user_ke) > 0
                 if _is_member_mature(member_profile, has_user_knowledge=has_user_knowledge):
-                    await self._consolidate_bootstrap(soul, member_id=member_id, member_profile=member_profile)
+                    await self._consolidate_bootstrap(soul, member_id=member_id, member_profile=member_profile, active_space_id=active_space_id)
                     await self._instance_db.upsert_member_profile(member_id, {
                         "bootstrap_graduated": True,
                         "bootstrap_graduated_at": now,
@@ -5539,7 +5620,7 @@ class MessageHandler:
         )
 
         ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul, member_profile=ctx.member_profile)
-        await self._post_response_soul_update(ctx.soul, member_id=ctx.member_id, member_profile=ctx.member_profile)
+        await self._post_response_soul_update(ctx.soul, member_id=ctx.member_id, member_profile=ctx.member_profile, active_space_id=ctx.active_space_id)
 
         # Cross-domain signal check — skip for self-directed turns
         if not ctx.is_self_directed:
@@ -5637,16 +5718,37 @@ class MessageHandler:
                                     logger.info("COMPACTION_COMPLETE: space=%s source=log_%03d new_log=log_%03d",
                                         ctx.active_space_id, old_num, new_num)
 
-                                    # Process fact harvest from compaction output
-                                    _harvest = getattr(comp_state, '_fact_harvest', [])
-                                    if _harvest:
-                                        try:
-                                            from kernos.kernel.fact_harvest import process_harvest_results
-                                            await process_harvest_results(
-                                                _harvest, instance_id, ctx.active_space_id,
-                                                self.state, self.events)
-                                        except Exception as _hx:
-                                            logger.warning("COMPACTION_HARVEST: processing failed: %s", _hx)
+                                    # Rich fact harvest — sensitivity-aware reconciliation.
+                                    # Replaces the old FACT_HARVEST-section path (process_harvest_results)
+                                    # which had no sensitivity classification. Primary call extracts
+                                    # facts+sensitivity; secondary surfaces stewardship/insight.
+                                    # Failures never hide: FACT_HARVEST_OUTCOME logs every run.
+                                    try:
+                                        from kernos.kernel.fact_harvest import harvest_facts
+                                        _outcome = await harvest_facts(
+                                            self.reasoning, self.state, self.events,
+                                            instance_id, ctx.active_space_id, log_text,
+                                            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+                                            member_id=ctx.member_id,
+                                        )
+                                        if ctx.trace:
+                                            ctx.trace.record(
+                                                "info" if _outcome.get("primary_ok") else "warning",
+                                                "compaction", "FACT_HARVEST_OUTCOME",
+                                                (f"adds={_outcome.get('adds', 0)} "
+                                                 f"updates={_outcome.get('updates', 0)} "
+                                                 f"reinforces={_outcome.get('reinforces', 0)} "
+                                                 f"primary_ok={_outcome.get('primary_ok')} "
+                                                 f"secondary_ok={_outcome.get('secondary_ok')}"),
+                                                phase="consequence",
+                                            )
+                                    except Exception as _hx:
+                                        logger.warning("COMPACTION_HARVEST: harvest_facts failed: %s", _hx)
+                                        if ctx.trace:
+                                            ctx.trace.record(
+                                                "error", "compaction", "FACT_HARVEST_ERROR",
+                                                str(_hx)[:200], phase="consequence",
+                                            )
 
                                     # Process recurring workflows from compaction output
                                     _workflows = getattr(comp_state, '_recurring_workflows', [])

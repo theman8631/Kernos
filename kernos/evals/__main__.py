@@ -25,6 +25,9 @@ from kernos.evals.scenario import load_scenario
 DEFAULT_SCENARIO_DIR = Path("evals/scenarios")
 DEFAULT_REPORTS_DIR = Path("data/evals/reports")
 DEFAULT_CONCURRENCY = 3
+# Eval scenarios are short — force compaction so fact harvest actually fires.
+# Production default is 24000; this is tuned so even 2-turn scenarios compact.
+DEFAULT_COMPACTION_THRESHOLD = 200
 
 # Library/internal loggers that drown the console at INFO or DEBUG.
 _NOISY_LOGGERS = (
@@ -222,8 +225,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Where to write reports (default: data/evals/reports/)",
     )
     parser.add_argument(
-        "--compaction-threshold", type=int, default=None,
-        help="Override KERNOS_COMPACTION_THRESHOLD so compaction fires earlier.",
+        "--compaction-threshold", type=int, default=DEFAULT_COMPACTION_THRESHOLD,
+        help=(
+            "Override KERNOS_COMPACTION_THRESHOLD so compaction (and fact harvest) "
+            f"fires on short eval transcripts. Default: {DEFAULT_COMPACTION_THRESHOLD}."
+        ),
     )
     parser.add_argument(
         "--concurrent", type=int, default=DEFAULT_CONCURRENCY,
