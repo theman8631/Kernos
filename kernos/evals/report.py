@@ -16,15 +16,14 @@ def write_report(
 ) -> Path:
     """Render the result as markdown and write it to a timestamped file.
 
-    Path: {reports_dir}/{slug(scenario_name)}/{timestamp}.md
+    Path: {reports_dir}/{slug(scenario_name)}__{timestamp}.md
     """
     reports_dir = Path(reports_dir)
-    slug = _slug(result.scenario.name)
-    scenario_dir = reports_dir / slug
-    scenario_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
+    slug = _slug(result.scenario.name)
     ts = result.started_at.replace(":", "-").replace("+00:00", "Z")
-    report_path = scenario_dir / f"{ts}.md"
+    report_path = reports_dir / f"{slug}__{ts}.md"
 
     report_path.write_text(render_report(result), encoding="utf-8")
     return report_path
