@@ -11,7 +11,7 @@ import logging
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from kernos.evals.bootstrap import (
     BootstrappedInstance, attach_setup_members, bootstrap_instance, build_message,
@@ -29,6 +29,7 @@ async def run_scenario(
     scenario: Scenario,
     compaction_threshold: int | None = None,
     background_task_wait_s: float = 3.0,
+    on_event: Callable[[str, dict], None] | None = None,
 ) -> ScenarioResult:
     """Run a scenario end-to-end and return its result.
 
@@ -36,9 +37,20 @@ async def run_scenario(
         compaction fires earlier (needed for scenarios that verify post-compaction state).
     background_task_wait_s: after each turn, wait this long for tier2 extraction
         and other asyncio.create_task work to settle.
+    on_event: optional callback(kind, payload) for progress reporting.
+        Kinds: "setup_done", "turn_done", "observations_done", "rubrics_done".
     """
     result = ScenarioResult(scenario=scenario, started_at=utc_now())
     bi: BootstrappedInstance | None = None
+    total_turns = len(scenario.turns)
+
+    def _emit(kind: str, payload: dict) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(kind, payload)
+        except Exception:  # progress must never break the run
+            logger.debug("on_event callback failed", exc_info=True)
 
     try:
         # --- Setup ---
@@ -47,6 +59,7 @@ async def run_scenario(
         )
         attach_setup_members(bi, scenario.setup.members)
         result.setup_summary = _summarize_setup(scenario, bi)
+        _emit("setup_done", {"scenario": scenario.name})
 
         # --- Turns ---
         for idx, turn in enumerate(scenario.turns, start=1):
@@ -56,14 +69,27 @@ async def run_scenario(
             result.turn_results.append(turn_result)
             if turn_result.error:
                 logger.warning("eval turn %d errored: %s", idx, turn_result.error)
+            _emit("turn_done", {
+                "scenario": scenario.name,
+                "index": idx, "total": total_turns,
+                "duration_ms": turn_result.duration_ms,
+                "error": turn_result.error,
+                "sender": turn_result.sender_display,
+            })
 
         # --- Observations ---
         result.observations = await _capture_observations(bi, scenario.observations)
+        _emit("observations_done", {
+            "scenario": scenario.name, "count": len(scenario.observations),
+        })
 
         # --- Rubrics ---
         result.rubric_verdicts = await evaluate_rubrics(
             bi.reasoning, scenario.rubrics, result,
         )
+        _emit("rubrics_done", {
+            "scenario": scenario.name, "count": len(scenario.rubrics),
+        })
 
     except Exception as exc:
         tb = traceback.format_exc()
