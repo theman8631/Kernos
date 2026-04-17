@@ -13,13 +13,18 @@ A personal agentic operating system. As-built architecture: `docs/TECHNICAL-ARCH
 
 ## Kernel Architecture Context
 
-For Phase 1B work, read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
+Read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
 
 - **Event emission is best-effort.** Every `emit()` call is wrapped in try/except. Event logging failures never break the user's message flow.
 - **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.
 - **Concurrency:** SQLite with WAL mode (shipped 2026-04-12). Concurrent reads supported. Write serialization handled by SQLite's single-writer model. busy_timeout=5000ms. Legacy JSON backend available via `KERNOS_STORE_BACKEND=json`.
 - **Shadow archive:** No method permanently deletes data. "Removal" sets `active: false`.
 - **Cost logging:** Every reasoning call logs model, tokens, estimated cost, duration via events.
+- **Multi-member:** Every member is first-class. Per-member profiles in instance.db (display_name, agent_name, personality_notes, timezone, interaction_count, hatched, bootstrap_graduated). Per-member conversation logs keyed to (instance, space, member). Knowledge entries tagged with `owner_member_id` and `sensitivity`. The Soul dataclass is deprecated for identity — all per-member state lives in member_profiles.
+- **Hatching:** Each member's agent hatches independently through organic 15-turn conversation. Graduation produces personality_notes via LLM consolidation. The agent names itself when the moment is right, not on turn 1.
+- **Stewardship + sensitivity:** Compaction harvest extracts values, detects tensions, classifies sensitivity (open/contextual/personal). Operational insights surface as whispers only when there's a concrete actionable idea.
+- **Relationships:** Declared pairwise between members. Four permission profiles. Conservative defaults until confirmed. Topic exceptions are covenants with `relationship:` scope.
+- **Abuse prevention:** The 24 Escalation — each failed sender attempt escalates immediately (24s→24m→24h→24d→24y→24c). Spamming while blocked accelerates.
 
 ## Architectural Constraints (Always Enforced)
 

@@ -1,9 +1,9 @@
 ## NOW
 
-**Status:** Telegram adapter + platform-locked invite codes shipped. 1783 tests.
+**Status:** Multi-member V1 live. Stewardship, sensitivity, relationships (2c.1) shipped. 1808 tests.
 **Owner:** Founder
-**Action:** Live test multi-member flow (Discord → Telegram invite). Next: Cross-Member Messaging.
-**Tests:** 1783
+**Action:** Live test relationships + sensitivity. Next: Phase 2c.2 (invite-time proposals) or Phase 2d (cross-member decision procedure).
+**Tests:** 1808
 
 > **Rule:** This block is always the first thing in the file. Whoever completes a step updates it before handing off. Format is always: Status (what), Owner (who), Action (next thing to do).
 
@@ -60,6 +60,16 @@ None currently active. Next spec will be assigned by founder.
 | MEMBER | Member Identity & Resolution — invite codes (KERN-XXXX), manage_members tool, per-member scoping | 1773 | 2026-04-12 |
 | TELEGRAM | Telegram Adapter — Bot API long polling, text-only V1, 4096-char chunking | 1781 | 2026-04-12 |
 | PLATLOCK | Platform-Locked Invite Codes — codes bound to platform, setup instructions returned with code | 1783 | 2026-04-12 |
+| CHAINS | Data-Driven Provider Chains — ChainEntry/ChainConfig, three named chains, build_chains_from_env | 1794 | 2026-04-13 |
+| PLAT-ID | Platform Identity Discovery — getMe for Telegram, client.user for Discord, dynamic invite instructions | 1803 | 2026-04-13 |
+| MM-P1 | Multi-Member Pass 1 — per-member profiles, spaces, conversations, compaction, knowledge, covenants, bootstrap | 1803 | 2026-04-13 |
+| SOUL-REV | Soul Revision — per-member agent identity, hatching modes (unique/inherit), "Kernos" is platform not agent | 1803 | 2026-04-13 |
+| HATCH | Hatching Personality Framework — organic emergence, 15-turn graduation, rich consolidation | 1808 | 2026-04-14 |
+| STEWARD | Stewardship V1 — value extraction + tension detection at compaction, operational insights | 1808 | 2026-04-14 |
+| MM-P2ab | Multi-Member Pass 2a+2b — instance stewardship, sensitivity classification (open/contextual/personal) | 1808 | 2026-04-15 |
+| MM-P2c1 | Multi-Member Pass 2c.1 — relationships table, declare/list actions, permission profiles, STATE injection | 1808 | 2026-04-16 |
+| ABUSE | Escalating Abuse Prevention — The 24 Escalation (24s→24m→24h→24d→24y→24c) | 1808 | 2026-04-14 |
+| WIPE | /wipe me + /wipe all with exact-phrase confirmation, /disconnect, /restart cross-platform | 1808 | 2026-04-15 |
 
 ---
 
@@ -108,7 +118,15 @@ These are load-bearing decisions that Claude Code should always respect:
 27. **instance_id replaces tenant_id.** Kernos instances aren't tenants — they're Kernos instances. The naming reflects the product, not infrastructure jargon.
 28. **Invite code system: one mechanism, three use cases.** KERN-XXXX codes handle new user registration, existing user connecting a new platform, and spam rejection. One table, one code path. Zero LLM calls for all unregistered sender paths.
 29. **Invite codes are platform-locked.** A code generated for Discord only redeems on Discord. Instructions travel with the code. If the platform isn't set up, the agent gets setup instructions instead of a code. The instructions registry is extensible for future adapters.
-30. **Adapters are dumb pipe.** Discord, SMS, Telegram adapters know their platform and nothing else. Member identity, authorization, and security are handler concerns. Adding a new platform is ~150 lines of adapter + poller.
+30. **Adapters are dumb pipe.** Discord, SMS, Telegram adapters know their platform and nothing else. Member identity, authorization, and security are handler concerns. Adding a new platform is ~150 lines of adapter + poller. See `docs/ADAPTER-GUIDE.md`.
+31. **Per-member soul.** "Kernos" is the platform name, not the agent identity. Each member hatches their own agent with its own name, personality, and relationship. Soul dataclass fields are deprecated — identity lives in member_profiles.
+32. **Hatching is organic emergence, not configuration.** 15-turn minimum. 8 engagement points (entry energy, resonance testing, naming, emoji, genuine curiosity, correction surfacing, rhetorical discovery, uncertainty honesty). Graduation produces a personality hypothesis, not a verdict.
+33. **Stewardship emerges from compaction.** Value extraction and tension detection ride the compaction harvest — zero additional LLM calls. Operational insights only surface when there's a concrete actionable idea, not pattern reports.
+34. **Sensitivity classification at write time.** Every knowledge entry tagged open/contextual/personal at harvest. Conservative default (personal when unsure). Enforcement via member_id filtering + future cross-member decision procedure.
+35. **Relationships are declared, not inferred.** Pairwise, bidirectional, with four permission profiles (full-share, work-only, coordination-only, minimal). Conservative provisional defaults until both sides confirm. Topic exceptions are covenants with relationship scope.
+36. **The 24 Escalation.** Each failed sender attempt escalates: 24 seconds → 24 minutes → 24 hours → 24 days → 24 years → 24 centuries. Spamming while blocked accelerates through tiers.
+37. **Tool receipts paint reality.** After each turn with tool calls, a receipt entry logs effects in the world ("Created event: Team standup, 9am") not API calls. The agent sees its own prior actions on future turns.
+38. **Full transparency.** The agent has no hidden instructions. The owner may inspect any part of the operating context. "Absence of evidence in your window is not evidence of absence in reality."
 
 ---
 
