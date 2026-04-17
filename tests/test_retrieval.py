@@ -885,8 +885,12 @@ class TestKernelToolRouting:
 
         result = await service.reason(request)
 
-        # Verify retrieval was called instead of MCP
-        retrieval.search.assert_called_once_with("test-tenant", "Henderson", "space_work")
+        # Verify retrieval was called instead of MCP. The disclosure gate threads
+        # requesting_member_id / instance_db through every retrieval call; assert
+        # positional args here and ignore the gate kwargs.
+        retrieval.search.assert_called_once()
+        _args, _kwargs = retrieval.search.call_args
+        assert _args == ("test-tenant", "Henderson", "space_work")
         mcp.call_tool.assert_not_called()
         assert "Henderson" in result.text
 

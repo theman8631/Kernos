@@ -217,6 +217,26 @@ async def _capture_one(bi: BootstrappedInstance, obs: Observation) -> Any:
             for e in entries
         ]
 
+    if kind == "relationships":
+        # Directional relationship declarations involving the named member.
+        # Lets rubrics verify declaration state without parsing chat text.
+        member_ref = obs.args.get("member", "")
+        real_id = bi.member_id_map.get(member_ref, member_ref)
+        rows = await bi.instance_db.list_relationships(real_id)
+        # Re-resolve names using the scenario_id map so rubric text lines up
+        # with what the author wrote (e.g. "emma" not "mem_abc123").
+        reverse_map = {v: k for k, v in bi.member_id_map.items()}
+        out_rows: list[dict] = []
+        for r in rows:
+            d = {
+                "declarer": reverse_map.get(r["declarer_member_id"], r["declarer_member_id"]),
+                "other": reverse_map.get(r["other_member_id"], r["other_member_id"]),
+                "permission": r.get("permission", "by-permission"),
+                "other_display_name": r.get("other_display_name", ""),
+            }
+            out_rows.append(d)
+        return out_rows
+
     if kind == "covenants":
         rules = await bi.state.get_contract_rules(_get_instance_id(bi))
         return [

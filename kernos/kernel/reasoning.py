@@ -639,10 +639,17 @@ class ReasoningService:
                 return "Member management is not available."
             elif tool_name == "remember":
                 if self._retrieval:
+                    _idb = (
+                        getattr(self._handler, '_instance_db', None)
+                        if hasattr(self, '_handler') and self._handler
+                        else None
+                    )
                     return await self._retrieval.search(
                         request.instance_id,
                         tool_input.get("query", ""),
                         request.active_space_id,
+                        requesting_member_id=getattr(request, "member_id", ""),
+                        instance_db=_idb,
                     )
                 return "Memory search is not available."
             elif tool_name == "dismiss_whisper":
@@ -984,10 +991,17 @@ class ReasoningService:
             if block.name == "remember":
                 if self._retrieval:
                     try:
+                        _idb = (
+                            getattr(self._handler, '_instance_db', None)
+                            if hasattr(self, '_handler') and self._handler
+                            else None
+                        )
                         result = await self._retrieval.search(
                             request.instance_id,
                             tool_args.get("query", ""),
                             request.active_space_id,
+                            requesting_member_id=getattr(request, "member_id", ""),
+                            instance_db=_idb,
                         )
                     except Exception as exc:
                         logger.warning("Kernel tool 'remember' failed: %s", exc)

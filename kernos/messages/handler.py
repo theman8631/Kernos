@@ -636,15 +636,26 @@ def _build_state_block(
         user_parts.append(f"Communication style: {_comm_style}")
     if user_parts:
         parts.append("USER CONTEXT:\n" + "\n".join(user_parts))
-    # Relationship awareness — compact, just enough for disclosure decisions
+    # Relationship awareness — compact, only non-default declarations.
+    # Three-value model (RELATIONSHIP-SIMPLIFY): full-access / no-access /
+    # by-permission. The implicit default for every other member is
+    # by-permission; we don't render that. For each rendered row we label
+    # which side owns the declaration ("you →" for the active member's
+    # declaration, "← them" for the other member's declaration toward us).
     if relationships:
-        rel_lines = []
+        active_id = (member_profile or {}).get("member_id", "")
+        rel_lines: list[str] = []
         for r in relationships:
+            perm = r.get("permission", "by-permission")
+            if perm == "by-permission":
+                continue  # default — don't clutter
             name = r.get("other_display_name", "?")
-            rtype = r.get("relationship_type", "")
-            eff = r.get("effective_profile", "coordination-only")
-            rel_lines.append(f"{name} ({rtype}, {eff})")
-        parts.append("RELATIONSHIPS:\n" + ", ".join(rel_lines))
+            if active_id and r.get("declarer_member_id") == active_id:
+                rel_lines.append(f"{name} (you → {perm})")
+            else:
+                rel_lines.append(f"{name} ({perm} ← them)")
+        if rel_lines:
+            parts.append("RELATIONSHIPS:\n" + ", ".join(rel_lines))
     return "## STATE\n" + "\n\n".join(parts)
 
 
@@ -3028,13 +3039,35 @@ class MessageHandler:
 
     async def _downward_search(
         self, instance_id: str, query: str, target_space_ids: list[str],
+        requesting_member_id: str = "", trace: Any = None,
     ) -> str | None:
-        """Search DOWN into child domains for an answer to a quick question."""
+        """Search DOWN into child domains for an answer to a quick question.
+
+        DISCLOSURE-GATE: entries authored by members other than the requesting
+        member are filtered per the simplified relationship permission model.
+        Without this, query-mode routing (e.g., "has Emma been using this?")
+        would surface cross-member personal content to the asking member.
+        """
         import json as _json
 
         # Collect knowledge from target spaces and their children
         all_knowledge = await self.state.query_knowledge(
             instance_id, active_only=True, limit=500)
+
+        # Gate cross-member entries before space matching runs.
+        if requesting_member_id:
+            from kernos.kernel.disclosure_gate import (
+                build_permission_map, filter_knowledge_entries,
+            )
+            _perm_map = await build_permission_map(
+                getattr(self, '_instance_db', None), requesting_member_id,
+            )
+            all_knowledge = filter_knowledge_entries(
+                all_knowledge,
+                requesting_member_id=requesting_member_id,
+                permission_map=_perm_map,
+                trace=trace,
+            )
 
         results_by_space: dict[str, list[str]] = {}
         for space_id in target_space_ids:
@@ -4002,50 +4035,73 @@ class MessageHandler:
 
         elif action == "declare_relationship":
             target_id = tool_input.get("member_id", "")
-            rel_type = tool_input.get("relationship_type", "")
-            profile = tool_input.get("profile", "coordination-only")
+            permission = tool_input.get("permission", "")
             if not target_id:
                 return "Error: member_id of the other person is required for declare_relationship."
-            if not rel_type:
-                return "Error: relationship_type is required (spouse, coworker, friend, etc.)."
+            if not permission:
+                return (
+                    "Error: permission is required. One of: "
+                    "full-access, no-access, by-permission."
+                )
+            if permission not in {"full-access", "no-access", "by-permission"}:
+                return (
+                    f"Error: invalid permission {permission!r}. Must be one of: "
+                    "full-access, no-access, by-permission."
+                )
             # Resolve target by name if needed
             members = await self._instance_db.list_members()
             target = next((m for m in members if m["member_id"] == target_id), None)
             if not target:
-                target = next((m for m in members if m.get("display_name", "").lower() == target_id.lower()), None)
+                target = next(
+                    (m for m in members
+                     if m.get("display_name", "").lower() == target_id.lower()),
+                    None,
+                )
                 if target:
                     target_id = target["member_id"]
                 else:
-                    member_names = [f"{m.get('display_name', '')} ({m['member_id']})" for m in members if m["member_id"] != requesting_member_id]
-                    return f"Error: member '{target_id}' not found. Known members: {', '.join(member_names)}"
+                    member_names = [
+                        f"{m.get('display_name', '')} ({m['member_id']})"
+                        for m in members if m["member_id"] != requesting_member_id
+                    ]
+                    return (
+                        f"Error: member '{target_id}' not found. "
+                        f"Known members: {', '.join(member_names)}"
+                    )
             result = await self._instance_db.declare_relationship(
-                requesting_member_id, target_id, rel_type, profile)
+                requesting_member_id, target_id, permission,
+            )
             if "error" in result:
                 return f"Error: {result['error']}"
-            other_name = result.get("other_display_name", target_id)
-            effective = result.get("effective_profile", profile)
-            status = result.get("status", "proposed")
+            other = target or await self._instance_db.get_member(target_id)
+            other_name = (
+                (other or {}).get("display_name", target_id) or target_id
+            )
             return (
-                f"Relationship declared: {other_name} ({rel_type}), sharing level: {profile}.\n"
-                f"Status: {status}. Effective profile: {effective}.\n"
-                + ("Until they confirm, the effective sharing level is coordination-only." if status == "proposed" else "")
+                f"Declared toward {other_name}: {permission}. "
+                "They keep their own side of the permission; "
+                "yours does not affect theirs."
             )
 
         elif action == "list_relationships":
             rels = await self._instance_db.list_relationships(requesting_member_id)
             if not rels:
-                return "No relationships declared yet. Use declare_relationship to set up how members relate to each other."
-            lines = []
+                return (
+                    "No relationships declared. The default toward everyone is "
+                    "by-permission (conservative). Use declare_relationship to "
+                    "change your side toward a specific member."
+                )
+            lines: list[str] = []
             for r in rels:
-                name = r.get("other_display_name", r.get("other_member_id", "?"))
-                rtype = r.get("relationship_type", "unspecified")
-                profile = r.get("profile", "coordination-only")
-                effective = r.get("effective_profile", profile)
-                status = r.get("status", "proposed")
-                line = f"- **{name}** ({rtype}) — {effective}"
-                if status != "confirmed":
-                    line += f" [{status}]"
-                lines.append(line)
+                name = r.get("other_display_name", "")
+                if r.get("declarer_member_id") == requesting_member_id:
+                    lines.append(
+                        f"- **{name}** — you declared: {r.get('permission', 'by-permission')}"
+                    )
+                else:
+                    lines.append(
+                        f"- **{name}** — they declared toward you: {r.get('permission', 'by-permission')}"
+                    )
             return "Your relationships:\n" + "\n".join(lines)
 
         return f"Unknown action: {action}. Use invite, connect_platform, list, remove, declare_relationship, or list_relationships."
@@ -4799,7 +4855,9 @@ class MessageHandler:
                 logger.info("DOWNWARD_SEARCH: query=%r target_domains=%s",
                     (message.content or "")[:60], target_space_ids)
                 answer = await self._downward_search(
-                    instance_id, message.content or "", target_space_ids)
+                    instance_id, message.content or "", target_space_ids,
+                    requesting_member_id=ctx.member_id, trace=ctx.trace,
+                )
                 if answer:
                     if ctx.results_prefix:
                         ctx.results_prefix += f"\n\n{answer}"
@@ -5168,6 +5226,25 @@ class MessageHandler:
         _cands = analysis_result.get("_candidates", [])
         shaped = [e for e in _cands if e.id in _relevant_ids]
         user_knowledge_entries = _always + shaped
+
+        # DISCLOSURE-GATE: final read-time filter before knowledge reaches STATE.
+        # Catches any entry that slipped through member-scoped queries — legacy
+        # entries with empty owner_member_id, cross-space injections, anything
+        # another read path might have surfaced. Fail-closed, trace-logged.
+        from kernos.kernel.disclosure_gate import (
+            build_permission_map, filter_knowledge_entries,
+        )
+        _perm_map = await build_permission_map(
+            getattr(self, '_instance_db', None), ctx.member_id,
+        )
+        # Cache on ctx for downstream reads in the same turn (downward search etc.)
+        ctx._disclosure_perm_map = _perm_map
+        user_knowledge_entries = filter_knowledge_entries(
+            user_knowledge_entries,
+            requesting_member_id=ctx.member_id,
+            permission_map=_perm_map,
+            trace=ctx.trace,
+        )
 
         # Touch injected entries — updates last_reinforced_at + reinforcement_count
         # This feeds the Bjork decay model: used entries stay accessible longer

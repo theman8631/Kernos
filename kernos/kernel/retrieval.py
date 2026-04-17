@@ -12,6 +12,7 @@ from kernos.utils import utc_now
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 from kernos.kernel.entities import EntityNode
 from kernos.kernel.state import KnowledgeEntry, StateStore
@@ -198,12 +199,19 @@ class RetrievalService:
         instance_id: str,
         query: str,
         active_space_id: str,
+        requesting_member_id: str = "",
+        instance_db: Any = None,
+        trace: Any = None,
     ) -> str:
         """Execute a remember() query. Returns formatted readable text.
 
         Preference/state-shaped queries are automatically augmented with
         structured state from inspect_state — the agent gets authoritative
         data regardless of which tool it called.
+
+        DISCLOSURE-GATE: when requesting_member_id is provided, entries
+        authored by other members are filtered per the simplified relationship
+        permission model. Callers in turn-path should always pass it.
         """
         now = utc_now()
         query_lower = query.lower()
@@ -244,7 +252,9 @@ class RetrievalService:
 
         if query_embedding is not None:
             knowledge_task = self._search_knowledge(
-                instance_id, query, query_embedding, active_space_id, scope_chain
+                instance_id, query, query_embedding, active_space_id, scope_chain,
+                requesting_member_id=requesting_member_id,
+                instance_db=instance_db, trace=trace,
             )
         else:
             knowledge_task = _empty_knowledge()
@@ -296,13 +306,35 @@ class RetrievalService:
         query_embedding: list[float],
         active_space_id: str,
         scope_chain: list[str] | None = None,
+        requesting_member_id: str = "",
+        instance_db: Any = None,
+        trace: Any = None,
     ) -> list[ScoredKnowledge]:
-        """Semantic search over KnowledgeEntries. Walks scope chain."""
+        """Semantic search over KnowledgeEntries. Walks scope chain.
+
+        DISCLOSURE-GATE: entries authored by other members are filtered
+        before space scoping when requesting_member_id is provided.
+        """
         from kernos.kernel.embeddings import cosine_similarity  # noqa: F811
 
         all_entries = await self.state.query_knowledge(
             instance_id, active_only=True, limit=500
         )
+
+        # Disclosure gate — drop cross-member content before it ranks.
+        if requesting_member_id and instance_db is not None:
+            from kernos.kernel.disclosure_gate import (
+                build_permission_map, filter_knowledge_entries,
+            )
+            _perm_map = await build_permission_map(
+                instance_db, requesting_member_id,
+            )
+            all_entries = filter_knowledge_entries(
+                all_entries,
+                requesting_member_id=requesting_member_id,
+                permission_map=_perm_map,
+                trace=trace,
+            )
 
         # Space scoping — include all ancestor spaces + global entries
         _scope = set(scope_chain) if scope_chain else {active_space_id}

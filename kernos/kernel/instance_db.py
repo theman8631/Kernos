@@ -95,18 +95,12 @@ CREATE TABLE IF NOT EXISTS sender_blocks (
 );
 
 CREATE TABLE IF NOT EXISTS relationships (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_a_id     TEXT NOT NULL,
-    member_b_id     TEXT NOT NULL,
-    relationship_type TEXT DEFAULT '',
-    profile         TEXT DEFAULT 'coordination-only',
-    status          TEXT DEFAULT 'proposed',
-    proposed_by     TEXT DEFAULT '',
-    confirmed_by    TEXT DEFAULT '',
-    proposed_at     TEXT DEFAULT '',
-    confirmed_at    TEXT DEFAULT '',
-    updated_at      TEXT NOT NULL,
-    UNIQUE(member_a_id, member_b_id)
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    declarer_member_id TEXT NOT NULL,
+    other_member_id    TEXT NOT NULL,
+    permission         TEXT NOT NULL DEFAULT 'by-permission',
+    updated_at         TEXT NOT NULL,
+    UNIQUE(declarer_member_id, other_member_id)
 );
 
 CREATE TABLE IF NOT EXISTS platform_config (
@@ -157,6 +151,34 @@ class InstanceDB:
                 await self._conn.execute(_alt)
             except Exception:
                 pass  # Column already exists
+
+        # Relationship schema migration: Phase 2c.1 shipped a multi-field
+        # (type, profile, status, proposed_by, confirmed_by) shape. RELATIONSHIP-
+        # SIMPLIFY reduces to a directional three-value permission model.
+        # Pre-launch: no production data to preserve. Drop and recreate.
+        try:
+            async with self._conn.execute(
+                "PRAGMA table_info(relationships)"
+            ) as _cur:
+                _cols = {r[1] for r in await _cur.fetchall()}
+            if _cols and "relationship_type" in _cols and "permission" not in _cols:
+                await self._conn.execute("DROP TABLE relationships")
+                await self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS relationships ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "declarer_member_id TEXT NOT NULL,"
+                    "other_member_id TEXT NOT NULL,"
+                    "permission TEXT NOT NULL DEFAULT 'by-permission',"
+                    "updated_at TEXT NOT NULL,"
+                    "UNIQUE(declarer_member_id, other_member_id))"
+                )
+                logger.info(
+                    "RELATIONSHIPS_MIGRATE: dropped legacy schema "
+                    "(pre-launch, no data preservation)"
+                )
+        except Exception as _exc:
+            logger.warning("RELATIONSHIPS_MIGRATE: check failed: %s", _exc)
+
         await self._conn.commit()
         logger.info("Instance DB ready: %s", self._db_path)
 
@@ -534,88 +556,149 @@ class InstanceDB:
         await self._conn.commit()
 
     # --- Relationships ---
+    #
+    # Simplified three-value permission model (RELATIONSHIP-SIMPLIFY).
+    # Rows are directional: (declarer_member_id, other_member_id) means
+    # "declarer has declared `permission` toward other_member_id."
+    # Absence of a row = implicit `by-permission` default (conservative).
+    # Bidirectional lookup walks both directions; each side stores its own.
 
-    _VALID_PROFILES = {"full-share", "work-only", "coordination-only", "minimal"}
+    _VALID_PERMISSIONS = {"full-access", "no-access", "by-permission"}
 
     async def declare_relationship(
-        self, proposer_id: str, target_id: str,
-        relationship_type: str, profile: str = "coordination-only",
+        self, declarer_id: str, other_id: str, permission: str,
     ) -> dict:
-        """Declare or update a relationship between two members. Returns the relationship dict."""
+        """Declare permission from declarer toward other. Returns the row."""
         if not self._conn:
             return {"error": "Database not available"}
+        if permission not in self._VALID_PERMISSIONS:
+            return {
+                "error": (
+                    f"Invalid permission {permission!r}. "
+                    f"Must be one of: {sorted(self._VALID_PERMISSIONS)}"
+                )
+            }
         from kernos.utils import utc_now
         now = utc_now()
-        if profile not in self._VALID_PROFILES:
-            profile = "coordination-only"
-        # Normalize order: always store with lower member_id as member_a
-        a, b = (proposer_id, target_id) if proposer_id < target_id else (target_id, proposer_id)
-        # Check for existing
-        async with self._conn.execute(
-            "SELECT * FROM relationships WHERE member_a_id=? AND member_b_id=?", (a, b),
-        ) as cur:
-            existing = await cur.fetchone()
-        if existing:
-            d = dict(existing)
-            # Update type and profile
-            await self._conn.execute(
-                "UPDATE relationships SET relationship_type=?, profile=?, updated_at=? "
-                "WHERE member_a_id=? AND member_b_id=?",
-                (relationship_type, profile, now, a, b),
-            )
-            # If the other party proposed, this confirms it
-            if d.get("proposed_by") and d["proposed_by"] != proposer_id and d["status"] == "proposed":
-                await self._conn.execute(
-                    "UPDATE relationships SET status='confirmed', confirmed_by=?, confirmed_at=? "
-                    "WHERE member_a_id=? AND member_b_id=?",
-                    (proposer_id, now, a, b),
-                )
-            await self._conn.commit()
-        else:
-            await self._conn.execute(
-                "INSERT INTO relationships "
-                "(member_a_id, member_b_id, relationship_type, profile, status, proposed_by, proposed_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (a, b, relationship_type, profile, "proposed", proposer_id, now, now),
-            )
-            await self._conn.commit()
-        logger.info("RELATIONSHIP: %s↔%s type=%s profile=%s proposed_by=%s",
-            a, b, relationship_type, profile, proposer_id)
-        return await self.get_relationship(proposer_id, target_id) or {}
+        await self._conn.execute(
+            "INSERT INTO relationships "
+            "(declarer_member_id, other_member_id, permission, updated_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(declarer_member_id, other_member_id) "
+            "DO UPDATE SET permission=excluded.permission, "
+            "updated_at=excluded.updated_at",
+            (declarer_id, other_id, permission, now),
+        )
+        await self._conn.commit()
+        logger.info(
+            "RELATIONSHIP: %s→%s permission=%s",
+            declarer_id, other_id, permission,
+        )
+        return {
+            "declarer_member_id": declarer_id,
+            "other_member_id": other_id,
+            "permission": permission,
+            "updated_at": now,
+        }
 
-    async def get_relationship(self, member_a: str, member_b: str) -> dict | None:
-        """Get the relationship between two members. Checks both directions."""
+    async def get_permission(self, declarer_id: str, other_id: str) -> str:
+        """Return the permission `declarer_id` has declared toward `other_id`.
+
+        Returns the declared permission, or 'by-permission' if no row exists
+        (the implicit conservative default).
+        """
         if not self._conn:
-            return None
-        a, b = (member_a, member_b) if member_a < member_b else (member_b, member_a)
+            return "by-permission"
         async with self._conn.execute(
-            "SELECT * FROM relationships WHERE member_a_id=? AND member_b_id=?", (a, b),
+            "SELECT permission FROM relationships "
+            "WHERE declarer_member_id=? AND other_member_id=?",
+            (declarer_id, other_id),
         ) as cur:
             row = await cur.fetchone()
-        return dict(row) if row else None
+        if row:
+            return row["permission"]
+        return "by-permission"
+
+    async def get_relationship(self, member_a: str, member_b: str) -> dict | None:
+        """Return both directions of the relationship between a and b.
+
+        Returns {permission_a_to_b, permission_b_to_a} or None if neither
+        side has declared (both sides at implicit default).
+        """
+        if not self._conn:
+            return None
+        a_to_b = await self.get_permission(member_a, member_b)
+        b_to_a = await self.get_permission(member_b, member_a)
+        # No row either way: treat as fully-default (return None so callers can
+        # short-circuit without a row check).
+        if a_to_b == "by-permission" and b_to_a == "by-permission":
+            # Check whether any row actually exists — the defaults could be
+            # explicit or implicit. For the render path we only care about
+            # non-default declarations.
+            async with self._conn.execute(
+                "SELECT 1 FROM relationships WHERE "
+                "(declarer_member_id=? AND other_member_id=?) OR "
+                "(declarer_member_id=? AND other_member_id=?) LIMIT 1",
+                (member_a, member_b, member_b, member_a),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+        return {
+            "member_a_id": member_a,
+            "member_b_id": member_b,
+            "permission_a_to_b": a_to_b,
+            "permission_b_to_a": b_to_a,
+        }
 
     async def list_relationships(self, member_id: str) -> list[dict]:
-        """List all relationships for a member."""
+        """List every declaration where `member_id` is either declarer or other.
+
+        Returns per-row dicts with the canonical shape:
+          {declarer_member_id, other_member_id, permission, updated_at,
+           other_display_name}
+        The caller decides how to render each row (e.g., "Tom (full-access)"
+        for rows where member_id is the declarer).
+        """
         if not self._conn:
             return []
-        rows = []
         async with self._conn.execute(
-            "SELECT * FROM relationships WHERE member_a_id=? OR member_b_id=?",
+            "SELECT * FROM relationships "
+            "WHERE declarer_member_id=? OR other_member_id=?",
             (member_id, member_id),
         ) as cur:
             rows = await cur.fetchall()
-        result = []
+        result: list[dict] = []
         for r in rows:
             d = dict(r)
-            # Resolve the other member
-            other_id = d["member_b_id"] if d["member_a_id"] == member_id else d["member_a_id"]
+            # Resolve the OTHER member's display name relative to member_id
+            if d["declarer_member_id"] == member_id:
+                other_id = d["other_member_id"]
+            else:
+                other_id = d["declarer_member_id"]
             other = await self.get_member(other_id)
-            d["other_member_id"] = other_id
-            d["other_display_name"] = other.get("display_name", other_id) if other else other_id
-            # Effective profile: coordination-only until confirmed
-            d["effective_profile"] = d["profile"] if d["status"] == "confirmed" else "coordination-only"
+            d["other_display_name"] = (
+                other.get("display_name", other_id) if other else other_id
+            )
             result.append(d)
         return result
+
+    async def list_permissions_for(self, member_id: str) -> dict[str, str]:
+        """Return a flat map {author_member_id: permission_member_has_toward_author}.
+
+        Used by the disclosure gate to cache, in one query, every permission
+        `member_id` has declared toward any other member. Members with no
+        declaration do not appear; callers treat missing as `by-permission`.
+        """
+        if not self._conn:
+            return {}
+        async with self._conn.execute(
+            "SELECT other_member_id, permission FROM relationships "
+            "WHERE declarer_member_id=?",
+            (member_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return {r["other_member_id"]: r["permission"] for r in rows}
 
     # --- Invite Codes ---
 
