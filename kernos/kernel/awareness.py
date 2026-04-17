@@ -53,6 +53,10 @@ class Whisper:
     created_at: str              # ISO 8601 UTC
     surfaced_at: str = ""        # When the agent actually received it (empty = pending)
     notify_via: str = ""         # Channel preference. Empty = most recently used.
+    owner_member_id: str = ""    # Member whose activity produced this whisper.
+                                 # Disclosure gate filters whispers during another
+                                 # member's turn. Empty = instance-wide (legacy /
+                                 # system whispers; visible to everyone).
 
 
 @dataclass

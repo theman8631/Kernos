@@ -420,11 +420,15 @@ class CompactionService:
     async def load_state(
         self, instance_id: str, space_id: str, member_id: str = "",
     ) -> CompactionState | None:
-        """Load CompactionState from disk. Returns None if not found."""
+        """Load CompactionState from disk. Returns None if not found.
+
+        DISCLOSURE-GATE: previously fell back to the legacy (unscoped) path
+        when the member-scoped path was missing. That fallback leaked
+        another member's compaction state into the requesting member's
+        context. Removed. If a member has no compaction state of their
+        own, return None — do not read a shared file.
+        """
         state_path = self._space_dir(instance_id, space_id, member_id) / "state.json"
-        if not state_path.exists() and member_id:
-            # Lazy migration: try legacy path
-            state_path = self._space_dir(instance_id, space_id) / "state.json"
         if not state_path.exists():
             return None
         try:
@@ -486,10 +490,13 @@ class CompactionService:
     async def load_document(
         self, instance_id: str, space_id: str, member_id: str = "",
     ) -> str | None:
-        """Load the active compaction document. Returns None if not found."""
+        """Load the active compaction document. Returns None if not found.
+
+        DISCLOSURE-GATE: legacy lazy-migration fallback removed — it was
+        the read-side of the scenario-04 leak where one member picked up
+        another member's compaction document.
+        """
         doc_path = self._space_dir(instance_id, space_id, member_id) / "active_document.md"
-        if not doc_path.exists() and member_id:
-            doc_path = self._space_dir(instance_id, space_id) / "active_document.md"
         if not doc_path.exists():
             return None
         return doc_path.read_text(encoding="utf-8")
@@ -670,10 +677,13 @@ class CompactionService:
     async def load_index(
         self, instance_id: str, space_id: str, member_id: str = "",
     ) -> str | None:
-        """Load the compaction index. Returns None if not found."""
+        """Load the compaction index. Returns None if not found.
+
+        DISCLOSURE-GATE: legacy lazy-migration fallback removed — this was
+        the exact read path surfacing Emma's compaction index to Harold in
+        the scenario-04 leak. If member_id has no index, return None.
+        """
         index_path = self._space_dir(instance_id, space_id, member_id) / "index.md"
-        if not index_path.exists() and member_id:
-            index_path = self._space_dir(instance_id, space_id) / "index.md"
         if not index_path.exists():
             return None
         return index_path.read_text(encoding="utf-8")
@@ -1105,7 +1115,14 @@ class CompactionService:
 
         Returns: Updated CompactionState after successful compaction.
         """
-        space_dir = self._space_dir(instance_id, space_id)
+        # DISCLOSURE-GATE: compaction artifacts MUST be member-scoped. When
+        # multiple members share a space (e.g., two members on the same
+        # default space), an unscoped compaction document leaks one member's
+        # transcript summary into the other member's memory block via the
+        # lazy-migration fallback in load_index/load_active_document. This
+        # was the scenario-04 R1 leak path: Emma's compaction wrote to the
+        # legacy (unscoped) path, and Harold's load_index picked it up.
+        space_dir = self._space_dir(instance_id, space_id, member_id)
         space_dir.mkdir(parents=True, exist_ok=True)
 
         # Load existing compaction document
@@ -1209,13 +1226,14 @@ class CompactionService:
 
         # Check rotation
         if new_history_tokens > comp_state.document_budget:
-            await self._rotate(instance_id, space_id, space, comp_state)
+            await self._rotate(instance_id, space_id, space, comp_state, member_id=member_id)
 
-        await self.save_state(instance_id, space_id, comp_state)
+        await self.save_state(instance_id, space_id, comp_state, member_id=member_id)
 
         logger.info(
-            "COMPACTION: space=%s source=log_%03d compaction_number=%d",
-            space_id, source_log_number, comp_state.global_compaction_number,
+            "COMPACTION: space=%s member=%s source=log_%03d compaction_number=%d",
+            space_id, member_id or "(unscoped)", source_log_number,
+            comp_state.global_compaction_number,
         )
 
         return comp_state
@@ -1228,9 +1246,14 @@ class CompactionService:
         space_id: str,
         space: ContextSpace,
         comp_state: CompactionState,
+        member_id: str = "",
     ) -> None:
-        """Seal active document as archive, create fresh document."""
-        space_dir = self._space_dir(instance_id, space_id)
+        """Seal active document as archive, create fresh document.
+
+        Member-scoped: archives and index.md live under the member subdir
+        so one member's compaction history cannot leak into another's.
+        """
+        space_dir = self._space_dir(instance_id, space_id, member_id)
         archive_dir = space_dir / "archives"
         archive_dir.mkdir(parents=True, exist_ok=True)
 

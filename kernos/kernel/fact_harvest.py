@@ -245,12 +245,14 @@ async def harvest_facts(
                     state_store, instance_id, space_id,
                     stewardship_text, "STEWARDSHIP",
                     "compaction harvest tension detection",
+                    member_id=member_id,
                 )
             if insight_text:
                 outcome["insight"] = await _emit_whisper(
                     state_store, instance_id, space_id,
                     insight_text, "OPERATIONAL_INSIGHT",
                     "compaction harvest — concrete actionable idea",
+                    member_id=member_id,
                 )
     except Exception as exc:
         # Never let secondary failure hide primary success.
@@ -376,21 +378,34 @@ async def _apply_reinforces(state_store, instance_id, items: list[dict]) -> int:
 async def _emit_whisper(
     state_store, instance_id: str, space_id: str,
     text: str, whisper_type: str, evidence: str,
+    member_id: str = "",
 ) -> bool:
+    """Create a stewardship/insight whisper from a harvest run.
+
+    Passes owner_member_id through so the disclosure-gate-aware whisper
+    surfacing can avoid leaking a member's stewardship to another member.
+    The previous version of this function had the wrong field names
+    (`whisper_type` / `supporting_evidence=str`) and silently failed on
+    every call — so stewardship whispers weren't actually persisting.
+    """
     try:
         from kernos.kernel.awareness import Whisper, generate_whisper_id
         whisper = Whisper(
             whisper_id=generate_whisper_id(),
             insight_text=text,
             delivery_class="ambient",
-            whisper_type=whisper_type,
-            supporting_evidence=evidence,
             source_space_id=space_id,
             target_space_id="",
+            supporting_evidence=[evidence] if evidence else [],
+            reasoning_trace=f"{whisper_type}: {evidence}",
+            knowledge_entry_id="",
+            foresight_signal=whisper_type,
+            created_at=utc_now(),
+            owner_member_id=member_id,
         )
         await state_store.add_whisper(instance_id, whisper)
-        logger.info("%s_WHISPER: instance=%s text=%s",
-                    whisper_type, instance_id, text[:80])
+        logger.info("%s_WHISPER: instance=%s member=%s text=%s",
+                    whisper_type, instance_id, member_id or "(instance)", text[:80])
         return True
     except Exception as exc:
         logger.warning("%s_WHISPER_FAILED: %s", whisper_type, exc)

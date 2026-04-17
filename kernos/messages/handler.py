@@ -1835,7 +1835,14 @@ class MessageHandler:
             daily_comp.document_budget = compute_document_budget(
                 MODEL_MAX_TOKENS, 4000, 0, DEFAULT_DAILY_HEADROOM,
             )
-            await self.compaction.save_state(instance_id, member_space.id, daily_comp)
+            # DISCLOSURE-GATE: compaction state is member-scoped. Previously
+            # this save wrote to the legacy (unscoped) path, which let one
+            # member's compaction state spill into another member's load via
+            # the lazy-migration fallback. Fallback is gone; state must be
+            # written to the member subdir from the start.
+            await self.compaction.save_state(
+                instance_id, member_space.id, daily_comp, member_id=member_id,
+            )
         except Exception as exc:
             logger.warning("Failed to init compaction state for member space: %s", exc)
 
@@ -2130,8 +2137,10 @@ class MessageHandler:
                     f"{index_text}"
                 )
 
-        # 2. Proactive awareness → RESULTS
-        awareness_block = await self._get_pending_awareness(instance_id, active_space_id)
+        # 2. Proactive awareness → RESULTS (member-scoped per disclosure gate)
+        awareness_block = await self._get_pending_awareness(
+            instance_id, active_space_id, requesting_member_id=member_id,
+        )
         if awareness_block:
             results_parts.append(awareness_block)
 
@@ -2338,8 +2347,17 @@ class MessageHandler:
 
         return recent_messages, results_prefix, memory_prefix, procedures_prefix
 
-    async def _get_pending_awareness(self, instance_id: str, active_space_id: str) -> str:
-        """Get pending whispers formatted for the agent's context."""
+    async def _get_pending_awareness(
+        self, instance_id: str, active_space_id: str,
+        requesting_member_id: str = "",
+    ) -> str:
+        """Get pending whispers formatted for the agent's context.
+
+        DISCLOSURE-GATE: whispers authored by a different member are
+        filtered when requesting_member_id is non-empty. Legacy whispers
+        with empty owner_member_id are treated as instance-wide and
+        visible to everyone (system/admin-level signals).
+        """
         from kernos.kernel.awareness import SuppressionEntry
 
         whispers = await self.state.get_pending_whispers(instance_id)
@@ -2354,6 +2372,22 @@ class MessageHandler:
             or w.target_space_id == ""
             or w.source_space_id == active_space_id
         ]
+
+        # Member scope: only surface whispers authored by the requesting
+        # member, or instance-wide whispers (owner_member_id="").
+        if requesting_member_id:
+            before = len(relevant)
+            relevant = [
+                w for w in relevant
+                if not getattr(w, "owner_member_id", "")
+                or getattr(w, "owner_member_id", "") == requesting_member_id
+            ]
+            _filtered = before - len(relevant)
+            if _filtered:
+                logger.info(
+                    "WHISPER_GATE: filtered=%d cross-member whispers for member=%s",
+                    _filtered, requesting_member_id,
+                )
 
         if not relevant:
             return ""
@@ -4653,7 +4687,10 @@ class MessageHandler:
                     _context_def_tokens=0,
                     _system_overhead=4000,
                 )
-                await self.compaction.save_state(instance_id, new_space.id, comp)
+                # DISCLOSURE-GATE: compaction state member-scoped.
+                await self.compaction.save_state(
+                    instance_id, new_space.id, comp, member_id=ctx.member_id,
+                )
             except Exception as exc:
                 logger.warning("Failed to init compaction for manual space: %s", exc)
 
@@ -5748,6 +5785,35 @@ class MessageHandler:
         else:
             try:
                 comp_state = await self.compaction.load_state(instance_id, ctx.active_space_id, member_id=ctx.member_id)
+                # DISCLOSURE-GATE: when the member-scoped state doesn't exist
+                # yet (e.g. member routes into a space they haven't compacted
+                # in before), initialize a fresh one rather than skipping.
+                # Skipping here is what broke Emma's harvest after the gate
+                # changes removed the lazy-migration fallback on load_state.
+                if comp_state is None and ctx.member_id:
+                    try:
+                        from kernos.kernel.compaction import (
+                            CompactionState as _CS, compute_document_budget as _cdb,
+                            MODEL_MAX_TOKENS as _MMT, DEFAULT_DAILY_HEADROOM as _DDH,
+                        )
+                        comp_state = _CS(
+                            space_id=ctx.active_space_id,
+                            conversation_headroom=_DDH,
+                            document_budget=_cdb(_MMT, 4000, 0, _DDH),
+                        )
+                        await self.compaction.save_state(
+                            instance_id, ctx.active_space_id, comp_state,
+                            member_id=ctx.member_id,
+                        )
+                        logger.info(
+                            "COMPACTION_STATE_INIT: space=%s member=%s",
+                            ctx.active_space_id, ctx.member_id,
+                        )
+                    except Exception as _exc:
+                        logger.warning(
+                            "COMPACTION_STATE_INIT_FAILED: %s", _exc,
+                        )
+                        comp_state = None
                 if comp_state:
                     _skip = False
                     if comp_state.consecutive_failures > 0 and comp_state.last_compaction_failure_at:
