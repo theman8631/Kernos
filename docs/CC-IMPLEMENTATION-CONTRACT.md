@@ -14,7 +14,7 @@ The goal is NOT CC operating unsupervised. It is CC operating autonomously withi
 
 ## The Closed Loop
 
-Every spec handed to CC executes through six steps:
+Every spec handed to CC executes through seven steps:
 
 **1. Implement the spec.** CC reads the spec, uses judgment on implementation details, writes code. Specs describe intent and behavior; CC picks mechanism. If the spec conflicts with what CC sees in the code, CC trusts boots-on-the-ground judgment over the spec.
 
@@ -24,9 +24,11 @@ Every spec handed to CC executes through six steps:
 
 **4. Read the report. Attempt auto-fix within scope.** For failures in auto-fix scope (defined below), CC diagnoses, patches, and re-runs. Bounded retry: two attempts per failing rubric. If the second attempt doesn't pass, escalate.
 
-**5. Produce the batch report.** Stable format (below). Covers what shipped, what was auto-fixed, what's still failing, what's escalated, what the final state is.
+**5. Post-implementation Codex review.** After eval results stabilize, CC hands the shipped delta to Codex (a second-model reviewer) for structured review. One back-and-forth only. CC addresses minor findings within the round; bigger findings kick back to the spec. See "Post-Implementation Codex Review" section below.
 
-**6. Push + report back.** Founder reads the batch report. That's the single human touchpoint.
+**6. Produce the batch report.** Stable format (below). Covers what shipped, what was auto-fixed, Codex findings and their resolution, what's still failing, what's escalated, what the final state is.
+
+**7. Push + report back.** Founder reads the batch report. That's the single human touchpoint.
 
 ## Auto-Fix Scope
 
@@ -81,6 +83,12 @@ Every batch ends with a single markdown report written to `data/diagnostics/batc
 ## Auto-Fixes Applied
 [Each fix: what rubric failed, what CC patched, why, re-run verdict]
 
+## Codex Review
+[Codex's four-part response (correctness, edge cases, improvement, verdict).
+ For each FIX-IN-ROUND: what CC changed in response.
+ For each KICK-BACK: the finding preserved verbatim with CC's reasoning for why
+ it exceeds this batch's scope, logged as a proposed new spec.]
+
 ## Tests
 [Total test count before and after. Green/yellow/red.]
 
@@ -89,6 +97,86 @@ Every batch ends with a single markdown report written to `data/diagnostics/batc
 ```
 
 Founder reads Final State first. If escalations exist, reads them next. If green, scans the rest for awareness.
+
+## Post-Implementation Codex Review
+
+Starting from the SURFACE-DISCIPLINE-PASS batch (2026-04-20), every batch adds a Codex review pass after CC finishes implementation and before the batch report reaches the architect. Treat as contract-level, not batch-specific.
+
+### Mental model
+
+CC is the main programmer. Codex is the assistant. CC writes the code; Codex reviews it. They have ONE back-and-forth: Codex surfaces findings, CC addresses minor points as improved implementation of the spec. Anything bigger kicks back to the spec designers (architect + founder) rather than being patched in the review round.
+
+Rationale: Kit runs on an OpenAI model and reviews specs. That cross-model pattern has consistently surfaced real value. The same principle applies at implementation time — Codex as a second-model review pass catches things CC misses.
+
+### Flow
+
+1. **CC implements the spec** under the existing Implementation Contract. Auto-fix scope, escalations, atomic state discipline — all unchanged.
+2. **Full eval suite run** and variance check (typically 3 runs).
+3. **CC produces a per-deliverable change report** — one short paragraph per deliverable: what changed, why. Gives Codex enough context to review the delta coherently.
+4. **CC invokes Codex** with the structured review brief (below). Codex reads the change report, reviews the relevant diffs, returns findings.
+5. **ONE back-and-forth.** CC addresses Codex's minor findings directly — small improvements, missed edge cases that fit in-scope. Programmer judgment: does this finding improve the implementation of the spec as written, within the same batch? If yes, fix it. If borderline, skip and kick back.
+6. **Anything bigger kicks back to spec.** Architectural concern, genuinely different structural approach, anything that would re-scope the work: does NOT get fixed in this batch. Logged as a proposed new spec in the batch report with Codex's original reasoning preserved.
+7. **CC writes the batch report** including the Codex review, fix-in-round resolutions, and any kick-back items.
+8. **Architect reads, decides.** Close the batch, scope any kick-back items as future batches.
+
+### The kick-back threshold
+
+**Kick back** when the finding:
+- Would require re-opening the spec
+- Introduces new primitives or design concepts
+- Touches frozen surfaces
+- Proposes a genuinely different structural approach
+- Would require another Kit review round
+
+**Fix in round** when the finding:
+- Is a missed edge case the spec implies should be handled
+- Is a correctness improvement within the spec's stated behavior
+- Is a small refactoring that cleans up implementation without changing shape
+- Can be addressed without changing what the spec says the code should do
+
+**When in doubt, kick back.** Review-induced drag on the current batch is worse than parking something for a future batch.
+
+### Codex review brief
+
+Paste to Codex verbatim when invoking:
+
+```
+You are reviewing a KERNOS implementation delta.
+
+KERNOS is an AI agent platform. Your role is structured review of the
+implementation against the spec — not directional approval. Answer each
+of the four questions below specifically. "Looks good" is NOT a valid
+response.
+
+1. CORRECTNESS — Does the implementation match the spec's stated
+   behavior? Name one specific concern about correctness, or confirm no
+   material correctness issue.
+
+2. EDGE CASES — What edge case or failure mode does this implementation
+   not handle that the spec implied it should? Name one specifically
+   or confirm none.
+
+3. IMPROVEMENT OPPORTUNITY — What is one notable improvement that would
+   strengthen this implementation? Categorize it:
+   - FIX-IN-ROUND: CC can address within this review round without
+     re-scoping (small edge case, missed spec detail, correctness
+     improvement, minor refactor)
+   - KICK-BACK: exceeds this batch's scope, needs its own spec
+     (architectural concern, genuinely different structure, new
+     primitives, anything requiring Kit re-review)
+
+4. VERDICT — Pick one:
+   - IMPLEMENTATION SOUND
+   - IMPLEMENTATION SOUND WITH FIX-IN-ROUND IMPROVEMENTS
+   - IMPLEMENTATION HAS KICK-BACK FINDING [specify]
+   Justify in 1-3 sentences.
+
+Respond in the exact format above. Keep each answer tight.
+```
+
+### Reporting
+
+Codex's output appears in the batch report under `## Codex Review`. For each fix-in-round: what CC changed in response. For each kick-back: the finding preserved verbatim with CC's reasoning for why it exceeds scope, logged as a proposed new spec.
 
 ## Escalation Triggers
 
