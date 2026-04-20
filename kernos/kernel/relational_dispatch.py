@@ -24,7 +24,7 @@ calls into this dispatcher.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from kernos.kernel.relational_messaging import (
@@ -213,6 +213,15 @@ class RelationalDispatcher:
     ) -> list[RelationalMessage]:
         """Pickup queued messages on the recipient's active turn.
 
+        Returns messages in states pending / delivered that should be
+        included in the RESULTS block. Pending messages transition to
+        delivered atomically during this call.
+
+        For thread continuity, the handler also wants recently-surfaced
+        messages visible as read-only references (so the agent can reply
+        in-thread without the id falling out of context). Those are
+        collected separately by collect_recent_surfaced_for_member.
+
         Applies expiration sweep first, then the space-hint rule:
           - time_sensitive bypasses hint deferral.
           - Hint set + match exists in recipient's spaces (not active) →
@@ -287,6 +296,42 @@ class RelationalDispatcher:
                         continue
             surfaceable.append(msg)
         return surfaceable
+
+    async def collect_recent_surfaced_for_member(
+        self, *,
+        instance_id: str,
+        member_id: str,
+        window_seconds: int = 3600,
+    ) -> list[RelationalMessage]:
+        """Return surfaced (but not yet resolved) envelopes from the last
+        `window_seconds` for this member, as read-only references for thread
+        continuity. Does NOT transition state. Handler surfaces these in a
+        separate section of the context block so the agent can thread replies
+        via reply_to_id without losing the message id after the first turn.
+        """
+        surfaced = await self.state.query_relational_messages(
+            instance_id,
+            addressee_member_id=member_id,
+            states=["surfaced"],
+            limit=50,
+        )
+        # Filter to recent window by surfaced_at.
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        recent: list[RelationalMessage] = []
+        for m in surfaced:
+            if not m.surfaced_at:
+                continue
+            try:
+                ts = datetime.fromisoformat(
+                    m.surfaced_at.replace("Z", "+00:00"),
+                )
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                continue
+            if ts >= cutoff:
+                recent.append(m)
+        return recent
 
     # --- Public: transitions the handler invokes ---
 

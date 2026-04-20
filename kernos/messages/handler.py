@@ -2070,17 +2070,28 @@ class MessageHandler:
                     member_id, extracted,
                 )
 
-    def _format_relational_messages_block(self, messages: list) -> str:
+    def _format_relational_messages_block(
+        self, messages: list, recent_surfaced: list | None = None,
+    ) -> str:
         """Format collected relational messages for the RESULTS section.
 
-        Each message gets its id, origin (agent+member), intent, urgency,
-        thread id, and content. The agent uses this to decide how to
-        surface / reply / auto-handle per the Obvious Benefit Rule.
+        Active section: messages still needing attention this turn (pending
+        or delivered). Agent should surface per the Obvious Benefit Rule
+        and either let them flow to surfaced at end of turn or auto-handle
+        via resolve_relational_message(auto_handled=true).
+
+        Recent-surfaced section: reference-only list of messages already
+        shown in a recent turn. The agent uses these to thread replies
+        via reply_to_id when the user asks to respond in the same thread.
+        These are NOT re-surfaced; they don't trigger another state
+        transition on this turn.
         """
-        lines: list[str] = [
-            "## RELATIONAL MESSAGES",
-            "",
-            (
+        recent_surfaced = recent_surfaced or []
+        lines: list[str] = []
+        if messages:
+            lines.append("## RELATIONAL MESSAGES")
+            lines.append("")
+            lines.append(
                 "The following messages arrived from other members' agents. "
                 "Surface only if obviously benefits the user (Obvious Benefit "
                 "Rule). To reply in-thread, call send_relational_message "
@@ -2088,21 +2099,38 @@ class MessageHandler:
                 "auto-threads the conversation_id for you. Mark processed "
                 "via resolve_relational_message; use auto_handled=true only "
                 "if you handled it without user involvement."
-            ),
-            "",
-        ]
-        for m in messages:
-            lines.append(
-                f"- id={m.id} | from={m.origin_agent_identity or m.origin_member_id} "
-                f"(member_id={m.origin_member_id}) | intent={m.intent} | "
-                f"urgency={m.urgency} | thread={m.conversation_id}"
-            )
-            lines.append(f"  > {m.content}")
-            lines.append(
-                f"  (reply: send_relational_message(addressee={m.origin_member_id!r}, "
-                f"intent=..., content=..., reply_to_id={m.id!r}))"
             )
             lines.append("")
+            for m in messages:
+                lines.append(
+                    f"- id={m.id} | from={m.origin_agent_identity or m.origin_member_id} "
+                    f"(member_id={m.origin_member_id}) | intent={m.intent} | "
+                    f"urgency={m.urgency} | thread={m.conversation_id}"
+                )
+                lines.append(f"  > {m.content}")
+                lines.append(
+                    f"  (reply: send_relational_message(addressee={m.origin_member_id!r}, "
+                    f"intent=..., content=..., reply_to_id={m.id!r}))"
+                )
+                lines.append("")
+        if recent_surfaced:
+            lines.append("## RECENT RELATIONAL THREADS (reference only)")
+            lines.append("")
+            lines.append(
+                "These messages were shown in a recent turn — they are NOT "
+                "re-surfacing. Included so you can thread replies via "
+                "reply_to_id=<id> when the user asks to follow up. Do NOT "
+                "re-announce them to the user as new."
+            )
+            lines.append("")
+            for m in recent_surfaced:
+                lines.append(
+                    f"- id={m.id} | from={m.origin_agent_identity or m.origin_member_id} "
+                    f"(member_id={m.origin_member_id}) | intent={m.intent} | "
+                    f"thread={m.conversation_id}"
+                )
+                lines.append(f"  > {m.content}")
+                lines.append("")
         return "\n".join(lines)
 
     async def _post_response_soul_update(self, soul: Soul, member_id: str = "", member_profile: dict | None = None, active_space_id: str = "") -> None:
@@ -5236,9 +5264,16 @@ class MessageHandler:
                     active_space_id=active_space_id,
                     recipient_space_ids=_recipient_space_ids,
                 )
-                if ctx.relational_messages:
+                # Thread continuity: show recently-surfaced envelopes as
+                # reference-only so the agent can reply in-thread without
+                # losing the message id after the first surface.
+                _recent_surfaced = await dispatcher.collect_recent_surfaced_for_member(
+                    instance_id=instance_id, member_id=ctx.member_id,
+                )
+                if ctx.relational_messages or _recent_surfaced:
                     rm_block_text = self._format_relational_messages_block(
                         ctx.relational_messages,
+                        recent_surfaced=_recent_surfaced,
                     )
                     if ctx.trace:
                         ctx.trace.record(
