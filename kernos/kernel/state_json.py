@@ -946,3 +946,125 @@ class JsonStateStore(StateStore):
                 continue
             results.append(self._load_preference(e))
         return results
+
+    # --- Relational messaging (RELATIONAL-MESSAGING v5) ---
+
+    def _rm_path(self, instance_id: str) -> Path:
+        return self._state_dir(instance_id) / "relational_messages.json"
+
+    @staticmethod
+    def _rm_from_dict(d: dict):
+        from kernos.kernel.relational_messaging import RelationalMessage
+        return RelationalMessage(
+            id=d["id"], instance_id=d["instance_id"],
+            origin_member_id=d["origin_member_id"],
+            origin_agent_identity=d.get("origin_agent_identity", ""),
+            addressee_member_id=d["addressee_member_id"],
+            intent=d["intent"], content=d["content"],
+            urgency=d.get("urgency", "normal"),
+            conversation_id=d["conversation_id"],
+            state=d.get("state", "pending"),
+            created_at=d["created_at"],
+            target_space_hint=d.get("target_space_hint", ""),
+            delivered_at=d.get("delivered_at", ""),
+            surfaced_at=d.get("surfaced_at", ""),
+            resolved_at=d.get("resolved_at", ""),
+            expired_at=d.get("expired_at", ""),
+            resolution_reason=d.get("resolution_reason", ""),
+            reply_to_id=d.get("reply_to_id", ""),
+        )
+
+    async def add_relational_message(self, message) -> None:
+        from dataclasses import asdict
+        path = self._rm_path(message.instance_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = str(path) + ".lock"
+        with FileLock(lock_path):
+            raw = self._read_json(path, [])
+            raw.append(asdict(message))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(raw, f, ensure_ascii=False, indent=2)
+
+    async def get_relational_message(self, instance_id, message_id):
+        raw = self._read_json(self._rm_path(instance_id), [])
+        for d in raw:
+            if d.get("id") == message_id and d.get("instance_id") == instance_id:
+                return self._rm_from_dict(d)
+        return None
+
+    async def query_relational_messages(
+        self, instance_id, addressee_member_id="", origin_member_id="",
+        states=None, conversation_id="", limit=200,
+    ):
+        raw = self._read_json(self._rm_path(instance_id), [])
+        out = []
+        for d in raw:
+            if d.get("instance_id") != instance_id:
+                continue
+            if addressee_member_id and d.get("addressee_member_id") != addressee_member_id:
+                continue
+            if origin_member_id and d.get("origin_member_id") != origin_member_id:
+                continue
+            if conversation_id and d.get("conversation_id") != conversation_id:
+                continue
+            if states and d.get("state") not in states:
+                continue
+            out.append(self._rm_from_dict(d))
+        # Sort by created_at ascending, cap at limit.
+        out.sort(key=lambda m: m.created_at)
+        return out[:limit]
+
+    async def transition_relational_message_state(
+        self, instance_id, message_id, from_state, to_state, updates=None,
+    ) -> bool:
+        """Atomic CAS on state.json under filelock.
+
+        The filelock spans the full read→check→write sequence, so this is
+        genuinely atomic. Concurrent callers either win (returns True) or
+        see the row in the new state by the time they acquire the lock
+        (returns False).
+        """
+        updates = updates or {}
+        _ALLOWED = {
+            "delivered_at", "surfaced_at", "resolved_at", "expired_at",
+            "resolution_reason",
+        }
+        path = self._rm_path(instance_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = str(path) + ".lock"
+        with FileLock(lock_path):
+            raw = self._read_json(path, [])
+            found = False
+            won = False
+            for i, d in enumerate(raw):
+                if d.get("id") != message_id or d.get("instance_id") != instance_id:
+                    continue
+                found = True
+                if d.get("state") != from_state:
+                    # Another path won the race.
+                    break
+                d["state"] = to_state
+                for k, v in updates.items():
+                    if k in _ALLOWED:
+                        d[k] = v
+                raw[i] = d
+                won = True
+                break
+            if won:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(raw, f, ensure_ascii=False, indent=2)
+            return won and found
+
+    async def delete_relational_message(self, instance_id, message_id) -> None:
+        path = self._rm_path(instance_id)
+        if not path.exists():
+            return
+        lock_path = str(path) + ".lock"
+        with FileLock(lock_path):
+            raw = self._read_json(path, [])
+            raw = [
+                d for d in raw
+                if not (d.get("id") == message_id and d.get("instance_id") == instance_id)
+            ]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(raw, f, ensure_ascii=False, indent=2)

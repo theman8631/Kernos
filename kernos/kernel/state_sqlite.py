@@ -237,6 +237,32 @@ CREATE TABLE IF NOT EXISTS triggers (
 CREATE INDEX IF NOT EXISTS idx_triggers_tenant ON triggers(instance_id);
 CREATE INDEX IF NOT EXISTS idx_triggers_active ON triggers(instance_id, status, next_fire_at)
     WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS relational_messages (
+    id                      TEXT NOT NULL,
+    instance_id             TEXT NOT NULL,
+    origin_member_id        TEXT NOT NULL,
+    origin_agent_identity   TEXT DEFAULT '',
+    addressee_member_id     TEXT NOT NULL,
+    intent                  TEXT NOT NULL,
+    content                 TEXT NOT NULL,
+    urgency                 TEXT NOT NULL DEFAULT 'normal',
+    conversation_id         TEXT NOT NULL,
+    state                   TEXT NOT NULL DEFAULT 'pending',
+    created_at              TEXT NOT NULL,
+    target_space_hint       TEXT DEFAULT '',
+    delivered_at            TEXT DEFAULT '',
+    surfaced_at             TEXT DEFAULT '',
+    resolved_at             TEXT DEFAULT '',
+    expired_at              TEXT DEFAULT '',
+    resolution_reason       TEXT DEFAULT '',
+    reply_to_id             TEXT DEFAULT '',
+    PRIMARY KEY (instance_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_rm_addressee
+    ON relational_messages(instance_id, addressee_member_id, state);
+CREATE INDEX IF NOT EXISTS idx_rm_conversation
+    ON relational_messages(instance_id, conversation_id);
 """
 
 
@@ -1098,3 +1124,121 @@ class SqliteStateStore(StateStore):
         if scope:
             results = [p for p in results if getattr(p, "scope", "") == scope]
         return results
+
+    # --- Relational messaging (RELATIONAL-MESSAGING v5) ---
+
+    async def add_relational_message(self, message) -> None:
+        db = await self._db(message.instance_id)
+        await db.execute(
+            "INSERT INTO relational_messages ("
+            "id, instance_id, origin_member_id, origin_agent_identity, "
+            "addressee_member_id, intent, content, urgency, conversation_id, "
+            "state, created_at, target_space_hint, delivered_at, surfaced_at, "
+            "resolved_at, expired_at, resolution_reason, reply_to_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                message.id, message.instance_id, message.origin_member_id,
+                message.origin_agent_identity, message.addressee_member_id,
+                message.intent, message.content, message.urgency,
+                message.conversation_id, message.state, message.created_at,
+                message.target_space_hint, message.delivered_at,
+                message.surfaced_at, message.resolved_at, message.expired_at,
+                message.resolution_reason, message.reply_to_id,
+            ),
+        )
+        await db.commit()
+
+    @staticmethod
+    def _row_to_rm(row):
+        from kernos.kernel.relational_messaging import RelationalMessage
+        return RelationalMessage(
+            id=row["id"], instance_id=row["instance_id"],
+            origin_member_id=row["origin_member_id"],
+            origin_agent_identity=row["origin_agent_identity"] or "",
+            addressee_member_id=row["addressee_member_id"],
+            intent=row["intent"], content=row["content"],
+            urgency=row["urgency"], conversation_id=row["conversation_id"],
+            state=row["state"], created_at=row["created_at"],
+            target_space_hint=row["target_space_hint"] or "",
+            delivered_at=row["delivered_at"] or "",
+            surfaced_at=row["surfaced_at"] or "",
+            resolved_at=row["resolved_at"] or "",
+            expired_at=row["expired_at"] or "",
+            resolution_reason=row["resolution_reason"] or "",
+            reply_to_id=row["reply_to_id"] or "",
+        )
+
+    async def get_relational_message(self, instance_id, message_id):
+        db = await self._db(instance_id)
+        async with db.execute(
+            "SELECT * FROM relational_messages WHERE instance_id=? AND id=?",
+            (instance_id, message_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return self._row_to_rm(row) if row else None
+
+    async def query_relational_messages(
+        self, instance_id, addressee_member_id="", origin_member_id="",
+        states=None, conversation_id="", limit=200,
+    ):
+        db = await self._db(instance_id)
+        clauses = ["instance_id=?"]
+        params: list = [instance_id]
+        if addressee_member_id:
+            clauses.append("addressee_member_id=?")
+            params.append(addressee_member_id)
+        if origin_member_id:
+            clauses.append("origin_member_id=?")
+            params.append(origin_member_id)
+        if conversation_id:
+            clauses.append("conversation_id=?")
+            params.append(conversation_id)
+        if states:
+            placeholders = ",".join("?" for _ in states)
+            clauses.append(f"state IN ({placeholders})")
+            params.extend(states)
+        sql = (
+            f"SELECT * FROM relational_messages WHERE {' AND '.join(clauses)} "
+            f"ORDER BY created_at ASC LIMIT ?"
+        )
+        params.append(limit)
+        async with db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        return [self._row_to_rm(r) for r in rows]
+
+    async def transition_relational_message_state(
+        self, instance_id, message_id, from_state, to_state, updates=None,
+    ) -> bool:
+        """Atomic CAS on state. SQLite UPDATE with state=? WHERE guard +
+        rowcount check. Concurrent callers that lose the race get False.
+        """
+        updates = updates or {}
+        # Only whitelisted columns may be updated alongside the state flip.
+        _ALLOWED = {
+            "delivered_at", "surfaced_at", "resolved_at", "expired_at",
+            "resolution_reason",
+        }
+        extra_cols = [k for k in updates if k in _ALLOWED]
+        set_clause = "state=?" + "".join(f", {c}=?" for c in extra_cols)
+        params: list = [to_state]
+        for c in extra_cols:
+            params.append(updates[c])
+        params.extend([instance_id, message_id, from_state])
+
+        db = await self._db(instance_id)
+        cursor = await db.execute(
+            f"UPDATE relational_messages SET {set_clause} "
+            f"WHERE instance_id=? AND id=? AND state=?",
+            params,
+        )
+        await db.commit()
+        # rowcount is 1 iff the row existed AND its state matched from_state.
+        return (cursor.rowcount or 0) == 1
+
+    async def delete_relational_message(self, instance_id, message_id) -> None:
+        db = await self._db(instance_id)
+        await db.execute(
+            "DELETE FROM relational_messages WHERE instance_id=? AND id=?",
+            (instance_id, message_id),
+        )
+        await db.commit()

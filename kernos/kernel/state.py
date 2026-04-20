@@ -659,3 +659,60 @@ class StateStore(ABC):
     ) -> list[Preference]:
         """Query preferences with optional filters. active_only filters status='active'."""
         ...
+
+    # --- Relational messaging (RELATIONAL-MESSAGING v5) ---
+
+    @abstractmethod
+    async def add_relational_message(self, message: "RelationalMessage") -> None:
+        """Store a new relational-message envelope."""
+        ...
+
+    @abstractmethod
+    async def get_relational_message(
+        self, instance_id: str, message_id: str,
+    ) -> "RelationalMessage | None":
+        """Fetch a single envelope by id. Returns None if not found."""
+        ...
+
+    @abstractmethod
+    async def query_relational_messages(
+        self,
+        instance_id: str,
+        addressee_member_id: str = "",
+        origin_member_id: str = "",
+        states: list[str] | None = None,
+        conversation_id: str = "",
+        limit: int = 200,
+    ) -> list["RelationalMessage"]:
+        """Query envelopes by recipient / origin / state / thread id."""
+        ...
+
+    @abstractmethod
+    async def transition_relational_message_state(
+        self,
+        instance_id: str,
+        message_id: str,
+        from_state: str,
+        to_state: str,
+        updates: dict | None = None,
+    ) -> bool:
+        """Atomic compare-and-swap on envelope.state.
+
+        Returns True iff the envelope was in `from_state` at the moment of
+        update. Returns False if the state had already advanced (another
+        path won the race) — caller should treat this as "someone else
+        handled it, skip" rather than an error.
+
+        IMPLEMENTATIONS MUST use the backing store's atomic primitives:
+        SQLite via `UPDATE ... WHERE state=?` with a rowcount check;
+        JSON via read-check-write under the existing filelock. Do NOT
+        implement as separate read-then-update at the call site.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_relational_message(
+        self, instance_id: str, message_id: str,
+    ) -> None:
+        """Remove an envelope by id (used by tests and expiration sweep)."""
+        ...
