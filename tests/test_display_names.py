@@ -122,3 +122,26 @@ def test_strip_system_markers_no_marker_unchanged():
 def test_strip_system_markers_handles_empty():
     assert strip_system_markers("") == ""
     assert strip_system_markers(None) is None
+
+
+def test_strip_system_markers_preserves_inline_brackets():
+    """Codex-review fix: only strip well-formed [SYSTEM] / [SYSTEM: …]
+    prefixes at line-start. Never strip arbitrary bracketed content that
+    happens to begin with SYSTEM — user-quoted text would be corrupted.
+    """
+    # Inline (not at line-start) — must stay.
+    text = "Remember this phrase: [SYSTEM OVERRIDE] is what they shouted."
+    assert strip_system_markers(text) == text
+
+    # Unrelated tag with SYSTEM-prefix — must stay (missing colon or exact
+    # form means it's not a kernel marker).
+    text = "Mid-sentence [SYSTEMATIC] usage should survive."
+    assert strip_system_markers(text) == text
+
+
+def test_strip_system_markers_at_mid_line_boundary():
+    """Prefix at the start of a later line is still a kernel marker."""
+    text = "First line ok.\n[SYSTEM] follow-up from trigger\nNext detail."
+    assert strip_system_markers(text) == (
+        "First line ok.\nfollow-up from trigger\nNext detail."
+    )

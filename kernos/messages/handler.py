@@ -1518,6 +1518,30 @@ class MessageHandler:
         )
         return msg_id
 
+    def _finalize_user_facing_response(
+        self, text: str, ctx: "TurnContext", msg: "NormalizedMessage",
+    ) -> str:
+        """User-facing finalizer: sanitize before the adapter.
+
+        This is one of two explicitly different code paths the turn loop
+        routes to. The diagnostic counterpart is _finalize_diagnostic_
+        response — no shared-middleware-at-runtime decision.
+        """
+        return self._sanitize_user_facing_text(
+            text,
+            instance_id=ctx.instance_id,
+            member_id=ctx.member_id,
+            source="turn_reply",
+            channel_name=msg.platform,
+        )
+
+    def _finalize_diagnostic_response(self, text: str) -> str:
+        """Diagnostic finalizer: no sanitization. Raw internal identifiers
+        and `[SYSTEM]` markers are preserved by design on admin surfaces.
+        Separate code path from the user-facing finalizer.
+        """
+        return text
+
     def _sanitize_user_facing_text(
         self, text: str, *,
         instance_id: str = "", member_id: str = "",
@@ -3705,17 +3729,16 @@ class MessageHandler:
                     except Exception as _te:
                         logger.debug("TRACE_FLUSH: failed: %s", _te)
 
-                # SURFACE-DISCIPLINE-PASS D1 — sanitize user-facing
-                # replies before they reach the adapter. Diagnostic
-                # responses (e.g. /dump) skip the sanitizer so raw
-                # internals are preserved as intended.
-                if not primary_ctx.is_diagnostic_response:
-                    response = self._sanitize_user_facing_text(
-                        response,
-                        instance_id=primary_ctx.instance_id,
-                        member_id=primary_ctx.member_id,
-                        source="turn_reply",
-                        channel_name=primary_msg.platform,
+                # SURFACE-DISCIPLINE-PASS D1 — user-facing vs diagnostic
+                # surfaces use explicitly different finalizers. The turn
+                # loop routes to one or the other based on what the
+                # command handler set — no shared middleware deciding
+                # class at runtime.
+                if primary_ctx.is_diagnostic_response:
+                    response = self._finalize_diagnostic_response(response)
+                else:
+                    response = self._finalize_user_facing_response(
+                        response, primary_ctx, primary_msg,
                     )
 
                 # Resolve all futures — primary gets the response,

@@ -98,22 +98,33 @@ def redact_internal_identifiers(text: str) -> str:
     return text
 
 
+# Kernel-emitted [SYSTEM] markers always sit at message-start (or line-start)
+# and follow one of two shapes: `[SYSTEM]` or `[SYSTEM: <short description>]`.
+# The regex below matches only those well-formed prefixes — it will NOT eat
+# arbitrary bracketed text like `[SYSTEM OVERRIDE]` inside user content.
+_SYSTEM_MARKER_PREFIX_RE = re.compile(
+    r"(?m)^\[SYSTEM(?::[^\]\n]{0,200})?\]\s*"
+)
+
+
 def strip_system_markers(text: str) -> str:
-    """Strip `[SYSTEM]` / `[SYSTEM: ...]` prefixes from user-facing replies.
+    """Strip kernel-emitted `[SYSTEM]` / `[SYSTEM: reason]` prefixes.
 
     Kernel-generated markers (scheduler triggers, preference updates, gate
-    rollbacks, etc.) carry a `[SYSTEM]` header for internal tracing. That
-    header is operator-legible; it should not reach the user. This helper
-    removes the prefix line (and trailing blank) so the rest of the message
-    lands cleanly.
+    rollbacks, etc.) carry a `[SYSTEM]` or `[SYSTEM: short-description]`
+    header for internal tracing. That header is operator-legible; it should
+    not reach the user. This helper removes such prefixes when they appear
+    at the start of a line.
+
+    Narrow by design (Codex review feedback): the regex matches only
+    well-formed markers at line-start, so it will not eat arbitrary
+    bracketed text elsewhere in a message (e.g. a user quoting
+    "[SYSTEM OVERRIDE]" as literal content).
 
     Diagnostic surfaces (`/dump`, runtime trace) call the writers directly
     and preserve the marker by design — they never pass through this helper.
     """
     if not text or "[SYSTEM" not in text:
         return text
-    # Remove all `[SYSTEM ...]` opening markers (bracketed, possibly with
-    # a trailing colon+description) along with a single trailing space or
-    # newline if present.
-    cleaned = re.sub(r"\[SYSTEM(?:[^\]]*)\]\s*", "", text)
+    cleaned = _SYSTEM_MARKER_PREFIX_RE.sub("", text)
     return cleaned.strip()
