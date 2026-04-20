@@ -1195,6 +1195,15 @@ class MessageHandler:
             token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
             if not token:
                 return False
+            # Idempotency: server.py boot also hot-starts if the token is in
+            # env. Skip if a telegram adapter is already registered so we
+            # don't end up with two pollers racing the same bot token (which
+            # triggers HTTP 409 spam from getUpdates).
+            if "telegram" in self._adapters:
+                logger.info(
+                    "Telegram adapter already registered — skipping hot-start"
+                )
+                return True
             try:
                 from kernos.messages.adapters.telegram_bot import TelegramAdapter
                 from kernos.telegram_poller import TelegramPoller

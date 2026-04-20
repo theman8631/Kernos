@@ -58,6 +58,13 @@ class TelegramPoller:
         return {}
 
     async def start(self) -> None:
+        # Idempotent: if a poll task is already running, return without
+        # starting a second one. Two concurrent pollers on the same bot
+        # token cause Telegram to return HTTP 409 Conflict on every
+        # getUpdates call, which spams the log every ~3s.
+        if self._task is not None and not self._task.done():
+            logger.info("TELEGRAM_POLL: start() called but poller already running; ignoring")
+            return
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
@@ -67,13 +74,29 @@ class TelegramPoller:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            self._task = None
 
     async def _poll_loop(self) -> None:
+        conflict_streak = 0
         while True:
             try:
                 await self._check_updates()
+                conflict_streak = 0
             except asyncio.CancelledError:
                 raise
+            except _Conflict409 as exc:
+                # Another poller owns this bot token. Warn once per streak,
+                # back off, and try again — typically the other process is
+                # about to exit or was already stale.
+                if conflict_streak == 0:
+                    logger.warning(
+                        "TELEGRAM_POLL: HTTP 409 — another getUpdates caller "
+                        "owns this bot token. Backing off; will keep retrying."
+                    )
+                conflict_streak += 1
+                # 5s, 10s, 20s, 40s, cap 60s.
+                backoff = min(5 * (2 ** min(conflict_streak - 1, 4)), 60)
+                await asyncio.sleep(backoff)
             except Exception as exc:
                 _msg = str(exc).lower()
                 # Auth failure — stop cleanly, don't retry
@@ -82,6 +105,10 @@ class TelegramPoller:
                     break
                 logger.warning("TELEGRAM_POLL: error: %s", exc)
                 await asyncio.sleep(5)
+
+
+class _Conflict409(Exception):
+    """Raised when Telegram returns HTTP 409 (another getUpdates owner)."""
 
     async def _check_updates(self) -> None:
         """GET /getUpdates with long polling."""
@@ -96,6 +123,12 @@ class TelegramPoller:
 
         if resp.status_code == 401:
             raise Exception("401 Unauthorized — invalid bot token")
+
+        if resp.status_code == 409:
+            # Another poller owns this token — short-circuit to the
+            # poll-loop's backoff handler via a typed exception rather
+            # than flooding the log with identical warnings every 3s.
+            raise _Conflict409(resp.text[:200])
 
         if resp.status_code != 200:
             logger.warning("TELEGRAM_POLL: HTTP %d: %s", resp.status_code, resp.text[:200])
