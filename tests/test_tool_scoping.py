@@ -460,7 +460,10 @@ class TestToolDirectory:
     def test_directory_with_no_caps(self):
         registry = make_registry()
         directory = registry.build_tool_directory()
-        assert "None connected" in directory
+        # Prompt now explains that kernel tools remain even when no external
+        # services are connected (RELATIONAL-MESSAGING integration).
+        assert "No external services connected" in directory
+        assert "built-in kernel tools" in directory
 
     def test_directory_shows_available_caps(self):
         mcp = MagicMock()

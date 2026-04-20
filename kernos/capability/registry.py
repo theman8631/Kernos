@@ -405,8 +405,12 @@ class CapabilityRegistry:
 
         if not visible_connected and not available:
             return (
-                "CAPABILITIES: None connected yet. "
-                "You can only have conversations right now. Be honest about limits."
+                "CAPABILITIES: No external services connected yet. "
+                "You still have your built-in kernel tools (file I/O, memory, "
+                "scheduling, member/relationship management, relational "
+                "messaging, workspace, etc.) — use them when the request "
+                "matches. If the user asks for something that requires an "
+                "external service, be honest about the limit."
             )
 
         parts: list[str] = []

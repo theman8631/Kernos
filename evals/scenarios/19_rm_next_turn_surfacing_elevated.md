@@ -33,5 +33,5 @@ members:
 - `relational_messages:emma` contains exactly one envelope, urgency=elevated, origin=owner.
 - The envelope's state is `surfaced` by end of scenario (turn 2 picked it up; persist phase marked it surfaced).
 - `delivered_at` is non-empty (set at pickup) AND `surfaced_at` is non-empty (set at persist).
-- There is NO outbound send during turn 1 for this envelope — `elevated` does not trigger immediate push. (The `outbound` observation may contain unrelated system pings, but no message with the lunch-time content before turn 2.)
+- Check the `outbound` observation — the captured list of send_outbound calls. It contains NO entry whose `message` field mentions "lunch", "12:30", or "Thursday". (Elevated urgency does not trigger immediate push; Emma's platform adapter is not invoked between turns 1 and 2. The agent's own natural-language reply in the transcript is NOT outbound — only captured RecordingAdapter calls count.)
 - The agent's turn-2 reply references the lunch-time change — it surfaced to Emma naturally.
