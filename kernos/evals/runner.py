@@ -112,15 +112,10 @@ async def _run_turn(
     """Run a single turn and capture what happened."""
     display = f"{turn.sender}/{turn.platform}" if turn.platform else f"{turn.sender}"
 
-    # Action turns (wipe, claim_code, etc.) are not yet implemented — skip cleanly.
+    # Action turns: small set of harness primitives for scenarios that need
+    # to manipulate state directly (crash simulation, expiration backdating).
     if turn.action:
-        return TurnResult(
-            turn_index=idx,
-            sender_display=display,
-            content=f"[action: {turn.action}]",
-            reply="",
-            error=f"action turns not yet supported: {turn.action}",
-        )
+        return await _run_action_turn(bi, idx, turn, display)
 
     if not turn.platform or not turn.content:
         return TurnResult(
@@ -157,6 +152,104 @@ async def _run_turn(
         duration_ms=duration_ms,
         error=error,
     )
+
+
+async def _run_action_turn(
+    bi: BootstrappedInstance, idx: int, turn: Turn, display: str,
+) -> TurnResult:
+    """Run a harness action turn.
+
+    Supported actions (minimal set, added per scenario needs):
+
+    - `rm_force_state`: directly transition an envelope to a state without
+      going through the normal turn pipeline — used to simulate mid-turn
+      crashes. Args: message_match (substring of content), to_state.
+    - `rm_backdate`: rewrite an envelope's created_at so it exceeds its
+      urgency TTL — used to exercise the expiration sweep. Args:
+      message_match, seconds_ago.
+    - `rm_sweep_expired`: invoke the expiration sweep for the instance.
+    """
+    action = turn.action.strip()
+    args = dict(turn.action_args or {})
+    instance_id = _get_instance_id(bi)
+    content_preview = f"[action: {action}] args={args}"
+
+    try:
+        if action == "rm_force_state":
+            await _action_rm_force_state(bi, instance_id, args)
+        elif action == "rm_backdate":
+            await _action_rm_backdate(bi, instance_id, args)
+        elif action == "rm_sweep_expired":
+            from kernos.kernel.relational_dispatch import RelationalDispatcher
+            dispatcher = bi.handler._get_relational_dispatcher()
+            if dispatcher is not None:
+                await dispatcher.sweep_expired(instance_id)
+        else:
+            return TurnResult(
+                turn_index=idx, sender_display=display,
+                content=content_preview, reply="",
+                error=f"unknown action: {action}",
+            )
+    except Exception as exc:
+        return TurnResult(
+            turn_index=idx, sender_display=display,
+            content=content_preview, reply="",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return TurnResult(
+        turn_index=idx, sender_display=display,
+        content=content_preview, reply=f"action {action} applied",
+    )
+
+
+async def _action_rm_force_state(
+    bi: BootstrappedInstance, instance_id: str, args: dict,
+) -> None:
+    match = args.get("match", "")
+    to_state = args.get("to_state", "")
+    from_state = args.get("from_state", "")
+    if not match or not to_state:
+        raise ValueError("rm_force_state needs match= and to_state=")
+    rows = await bi.state.query_relational_messages(
+        instance_id=instance_id, limit=500,
+    )
+    target = next((m for m in rows if match in m.content), None)
+    if target is None:
+        raise ValueError(f"rm_force_state: no envelope matches {match!r}")
+    source = from_state or target.state
+    ok = await bi.state.transition_relational_message_state(
+        instance_id, target.id,
+        from_state=source, to_state=to_state,
+    )
+    if not ok:
+        raise RuntimeError(
+            f"rm_force_state: CAS lost (from={source!r}, current={target.state!r})"
+        )
+
+
+async def _action_rm_backdate(
+    bi: BootstrappedInstance, instance_id: str, args: dict,
+) -> None:
+    from datetime import datetime, timezone, timedelta
+    match = args.get("match", "")
+    try:
+        seconds_ago = int(args.get("seconds_ago", "0"))
+    except (TypeError, ValueError):
+        seconds_ago = 0
+    if not match or seconds_ago <= 0:
+        raise ValueError("rm_backdate needs match= and seconds_ago=<positive int>")
+    rows = await bi.state.query_relational_messages(
+        instance_id=instance_id, limit=500,
+    )
+    target = next((m for m in rows if match in m.content), None)
+    if target is None:
+        raise ValueError(f"rm_backdate: no envelope matches {match!r}")
+    new_created = (
+        datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    ).isoformat()
+    target.created_at = new_created
+    await bi.state.delete_relational_message(instance_id, target.id)
+    await bi.state.add_relational_message(target)
 
 
 async def _drain_new_tasks(tasks_before: set, timeout: float) -> None:
@@ -216,6 +309,49 @@ async def _capture_one(bi: BootstrappedInstance, obs: Observation) -> Any:
             }
             for e in entries
         ]
+
+    if kind == "relational_messages":
+        # List envelopes where the named member is EITHER origin or addressee.
+        # Returns only the fields rubrics verify against (no content leaked
+        # to the report beyond what the scenario already pastes in).
+        member_ref = obs.args.get("member", "")
+        real_id = bi.member_id_map.get(member_ref, member_ref)
+        reverse_map = {v: k for k, v in bi.member_id_map.items()}
+        instance_id = _get_instance_id(bi)
+        as_addressee = await bi.state.query_relational_messages(
+            instance_id=instance_id, addressee_member_id=real_id, limit=500,
+        )
+        as_origin = await bi.state.query_relational_messages(
+            instance_id=instance_id, origin_member_id=real_id, limit=500,
+        )
+        seen_ids: set[str] = set()
+        rows: list[dict] = []
+        for m in as_addressee + as_origin:
+            if m.id in seen_ids:
+                continue
+            seen_ids.add(m.id)
+            rows.append({
+                "id": m.id,
+                "origin": reverse_map.get(m.origin_member_id, m.origin_member_id),
+                "addressee": reverse_map.get(
+                    m.addressee_member_id, m.addressee_member_id,
+                ),
+                "intent": m.intent,
+                "urgency": m.urgency,
+                "state": m.state,
+                "conversation_id": m.conversation_id,
+                "content": m.content,
+                "target_space_hint": m.target_space_hint,
+                "resolution_reason": m.resolution_reason,
+                "reply_to_id": m.reply_to_id,
+                "created_at": m.created_at,
+                "delivered_at": m.delivered_at,
+                "surfaced_at": m.surfaced_at,
+                "resolved_at": m.resolved_at,
+                "expired_at": m.expired_at,
+            })
+        rows.sort(key=lambda r: r["created_at"])
+        return rows
 
     if kind == "relationships":
         # Directional relationship declarations involving the named member.
