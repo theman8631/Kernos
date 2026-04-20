@@ -42,6 +42,7 @@ ALWAYS_PINNED: set[str] = {
     "manage_plan",        # self-directed execution
     "send_relational_message",     # agent-to-agent send (RELATIONAL-MESSAGING)
     "resolve_relational_message",  # agent-to-agent resolution
+    "manage_members",              # member + relationship management (catalog-scan misses "declare full-access toward X")
 }
 
 # Common MCP tools that get priority in the active window (not pinned, but preferred)

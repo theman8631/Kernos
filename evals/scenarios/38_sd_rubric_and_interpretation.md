@@ -24,4 +24,4 @@ members:
 ## Rubrics
 - The agent's turn-1 reply contains a greeting word (hello, hi, hey) AND is under 500 characters. BOTH are required; if either fails, FAIL the rubric.
 - The agent's turn-1 reply is in English AND is non-empty. Both required.
-- The agent did NOT fabricate a tool call AND did NOT refer to the user by a fabricated internal id (mem_xxx). Both conditions required.
+- The agent's reply on turn 1 is normal prose (no brackets like `[tool_call: ...]` or `[result: ...]` pretending to be tool output) AND does not include any "mem_" followed by hex characters (no fabricated internal id in the reply text). Both conditions required. Absence of either problem in the reply text counts as that side satisfied.
