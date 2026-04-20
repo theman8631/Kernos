@@ -346,10 +346,15 @@ def test_covenant_rule_loads_from_old_json(tmp_path):
 
 
 def test_default_covenant_rules_updated_wording():
-    """New tenants get the current covenant wording."""
+    """New tenants get the current covenant wording.
+
+    Note: RELATIONAL-MESSAGING clarified the third-party rule to exclude
+    intra-system send_relational_message calls. Updated phrasing uses
+    "third-party CONTACTS" (uppercase emphasis) with the carve-out text.
+    """
     rules = default_covenant_rules("t1", _now())
     descs = [r.description for r in rules]
-    assert any("third-party contacts unless the owner initiated" in d for d in descs)
+    assert any("third-party CONTACTS" in d and "owner initiated" in d for d in descs)
     assert any("owner-directed channel delivery" in d.lower() for d in descs)
     assert any("Information shared with you belongs to whoever shared it" in d for d in descs)
     assert any("Match the depth" in d for d in descs)

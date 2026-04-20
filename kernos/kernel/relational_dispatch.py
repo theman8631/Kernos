@@ -114,10 +114,20 @@ class RelationalDispatcher:
 
         # Resolve addressee (member_id or display_name)
         resolved = await self._resolve_member(addressee)
-        if not resolved:
+        if resolved is None:
             return DispatchResult(
                 ok=False,
                 error=f"addressee not found: {addressee!r}",
+            )
+        if isinstance(resolved, str) and resolved.startswith("AMBIGUOUS:"):
+            _, name, ids = resolved.split(":", 2)
+            return DispatchResult(
+                ok=False,
+                error=(
+                    f"ambiguous addressee {name!r} — multiple members match "
+                    f"({ids}). Ask the user which one, or use a specific "
+                    "member_id."
+                ),
             )
         addressee_id = resolved["member_id"]
 
@@ -144,7 +154,22 @@ class RelationalDispatcher:
             )
 
         # Build envelope (pending) and persist.
-        conv_id = conversation_id or generate_conversation_id()
+        # Thread-id resolution: explicit conversation_id wins; otherwise if
+        # this is a reply_to another envelope, inherit ITS conversation_id
+        # so chains stay on one thread without the agent having to copy ids;
+        # otherwise start a new thread.
+        conv_id = conversation_id
+        if not conv_id and reply_to_id:
+            try:
+                parent = await self.state.get_relational_message(
+                    instance_id, reply_to_id,
+                )
+                if parent is not None:
+                    conv_id = parent.conversation_id
+            except Exception as exc:
+                logger.debug("RM_REPLY_TO_LOOKUP_FAILED: %s", exc)
+        if not conv_id:
+            conv_id = generate_conversation_id()
         msg = RelationalMessage(
             id=generate_message_id(),
             instance_id=instance_id,
@@ -356,8 +381,14 @@ class RelationalDispatcher:
 
     # --- Internals ---
 
-    async def _resolve_member(self, addressee: str) -> dict | None:
-        """Resolve to {member_id, display_name, role} by id or display name."""
+    async def _resolve_member(self, addressee: str):
+        """Resolve to {member_id, display_name, role} by id or display name.
+
+        Returns the member dict on unambiguous match, None on no match,
+        or the string "AMBIGUOUS:<name>:<ids>" when the display name
+        matches more than one member. Callers treat the ambiguous case
+        as a send failure that needs disambiguation from the user.
+        """
         if not addressee:
             return None
         addressee = addressee.strip()
@@ -366,15 +397,21 @@ class RelationalDispatcher:
         except Exception as exc:
             logger.warning("RM_RESOLVE_MEMBERS_FAILED: %s", exc)
             return None
-        # Exact id match first.
+        # Exact id match first (ids are globally unique, so never ambiguous).
         for m in members:
             if m.get("member_id") == addressee:
                 return m
-        # Display-name match (case-insensitive).
+        # Display-name match (case-insensitive). Multiple matches → ambiguous.
         lo = addressee.lower()
-        for m in members:
-            if (m.get("display_name") or "").lower() == lo:
-                return m
+        name_hits = [
+            m for m in members
+            if (m.get("display_name") or "").lower() == lo
+        ]
+        if len(name_hits) == 1:
+            return name_hits[0]
+        if len(name_hits) > 1:
+            ids = ",".join(m.get("member_id", "?") for m in name_hits)
+            return f"AMBIGUOUS:{addressee}:{ids}"
         return None
 
     async def _immediate_push(self, msg: RelationalMessage) -> None:

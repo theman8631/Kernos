@@ -2083,9 +2083,11 @@ class MessageHandler:
             (
                 "The following messages arrived from other members' agents. "
                 "Surface only if obviously benefits the user (Obvious Benefit "
-                "Rule). Reply via send_relational_message when appropriate. "
-                "Mark processed via resolve_relational_message — with "
-                "auto_handled=true only if handled without user involvement."
+                "Rule). To reply in-thread, call send_relational_message "
+                "with reply_to_id=<the message id below> — the dispatcher "
+                "auto-threads the conversation_id for you. Mark processed "
+                "via resolve_relational_message; use auto_handled=true only "
+                "if you handled it without user involvement."
             ),
             "",
         ]
@@ -2096,6 +2098,10 @@ class MessageHandler:
                 f"urgency={m.urgency} | thread={m.conversation_id}"
             )
             lines.append(f"  > {m.content}")
+            lines.append(
+                f"  (reply: send_relational_message(addressee={m.origin_member_id!r}, "
+                f"intent=..., content=..., reply_to_id={m.id!r}))"
+            )
             lines.append("")
         return "\n".join(lines)
 
