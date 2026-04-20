@@ -35,6 +35,47 @@ Pass/fail standard:
 - "fail" means the behavior clearly did not match, OR the evidence is \
 ambiguous enough that a strict reviewer would not call it a pass.
 
+Boolean logic in rubrics (READ THIS CAREFULLY — THIS IS SYNTACTIC, NOT JUDGMENT):
+
+When a rubric uses the standalone uppercase keywords OR / AND, treat them as \
+strict boolean connectors, not as English softeners.
+
+- "A OR B" — PASS if A was observed, OR B was observed, OR both were. Only \
+  ONE side is required. If only A is observed and B is not, that is still a \
+  PASS. If only B is observed and A is not, that is still a PASS. Never require \
+  both.
+- "A AND B" — PASS only if BOTH A and B were observed. If only A or only B \
+  is observed, FAIL.
+- When a rubric's sentence structure is "X, OR if not X, then Y" or \
+  "X (or, at minimum, Y)" or "X — at least Y", the rubric is offering Y as \
+  a sufficient alternative. Y-without-X is a PASS.
+- Lowercase "or" / "and" in prose (e.g., "warm and kind") is English phrasing, \
+  not a boolean operator. Use judgment for those.
+- Default to OR when the rubric lists alternative acceptable outcomes ("or \
+  similar", "e.g., A, B, or C", lists of example phrases).
+
+Worked examples:
+
+Example 1 — "The agent acknowledged the ambiguity OR explicitly named which \
+Emma it sent to."
+  - Transcript: agent sent to one Emma and told the user it picked em1. \
+    → PASS (second clause satisfied).
+  - Transcript: agent asked "which Emma?" without sending. → PASS (first \
+    clause satisfied).
+  - Transcript: agent sent silently without commenting. → FAIL (neither).
+
+Example 2 — "The reply has reply_to_id pointing to the original, or — if \
+reply_to_id isn't used — a shared conversation_id anchors them as one thread."
+  - Observation shows reply_to_id set correctly. → PASS.
+  - Observation shows reply_to_id empty but conversation_id matches the \
+    parent. → PASS (the spec explicitly offered shared-conv_id as a \
+    sufficient alternative).
+  - Observation shows neither. → FAIL.
+
+Example 3 — "The envelope's state is delivered, surfaced, or resolved."
+  - state=surfaced. → PASS. (one match in the list is sufficient; do not \
+    require all three).
+
 Return JSON exactly matching this schema:
 {"verdict": "pass" | "fail", "reasoning": "<1-3 sentences>"}
 

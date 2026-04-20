@@ -165,6 +165,12 @@ class TurnContext:
     # agent already resolved them mid-turn via resolve_relational_message).
     relational_messages: list = field(default_factory=list)
 
+    # SURFACE-DISCIPLINE-PASS D1 — surface classification. Diagnostic
+    # replies (set True by /dump, /debug, etc.) keep raw internal
+    # identifiers by design; user-facing replies (default, False) are
+    # routed through the sanitizer before leaving the handler.
+    is_diagnostic_response: bool = False
+
 
 # Turn serialization: per-(tenant, space) mailbox/runner
 MERGE_WINDOW_MS = 300  # Wait up to 300ms for follow-up messages
@@ -1496,12 +1502,50 @@ class MessageHandler:
             logger.warning("OUTBOUND: no adapter for platform=%s", ch.platform)
             return 0
 
+        # SURFACE-DISCIPLINE-PASS D1 — last-resort guard against internal
+        # identifiers (`mem_xxx`, `space_xxx`) and `[SYSTEM]` markers
+        # reaching a user-facing adapter. Primary mechanism is resolver-at-
+        # generation; this catches anything that slipped through.
+        message = self._sanitize_user_facing_text(
+            message, instance_id=instance_id, member_id=member_id,
+            source="send_outbound", channel_name=ch.name,
+        )
+
         msg_id = await adapter.send_outbound(instance_id, ch.channel_target, message)
         logger.info(
             "OUTBOUND: channel=%s target=%s instance=%s member=%s length=%d msg_id=%s",
             ch.name, ch.channel_target, instance_id, member_id, len(message), msg_id,
         )
         return msg_id
+
+    def _sanitize_user_facing_text(
+        self, text: str, *,
+        instance_id: str = "", member_id: str = "",
+        source: str = "", channel_name: str = "",
+    ) -> str:
+        """Redact internal identifiers + strip `[SYSTEM]` markers.
+
+        Used at user-facing surfaces only. Never called from the diagnostic
+        surfaces (`/dump`, runtime trace read) where raw internals are by
+        design. On leak detection we log `SURFACE_LEAK_DETECTED` and redact
+        in place — dropping the whole message would lose signal the user
+        asked for; a placeholder is less bad than silence.
+        """
+        from kernos.kernel.display_names import (
+            contains_internal_identifier, redact_internal_identifiers,
+            strip_system_markers,
+        )
+        if not text:
+            return text
+        if contains_internal_identifier(text):
+            logger.warning(
+                "SURFACE_LEAK_DETECTED: source=%s channel=%s instance=%s "
+                "member=%s len=%d",
+                source, channel_name, instance_id, member_id, len(text),
+            )
+            text = redact_internal_identifiers(text)
+        text = strip_system_markers(text)
+        return text
 
     def _get_outbound_channel_id(self) -> int:
         """Get the outbound Discord channel ID. Returns 0 if unavailable."""
@@ -3499,13 +3543,20 @@ class MessageHandler:
                     if _wipe_response:
                         response = _wipe_response
 
-                    # Slash command intercepts — skip reasoning
+                    # Slash command intercepts — skip reasoning.
+                    # SURFACE-DISCIPLINE-PASS: /dump is an admin/diagnostic
+                    # surface that retains raw internal identifiers by
+                    # design. Mark ctx.is_diagnostic_response so the
+                    # outbound sanitizer skips it. /status / /help / /spaces
+                    # / /wipe are user-facing — they flow through the
+                    # sanitizer like any other reply.
                     _cmd = (primary_msg.content or "").strip()
                     _cmd_lower = _cmd.lower()
                     if _wipe_response:
                         pass  # Already handled above
                     elif _cmd_lower == "/dump":
                         response = await self._handle_dump(primary_ctx)
+                        primary_ctx.is_diagnostic_response = True
                     elif _cmd_lower == "/status":
                         response = await self._handle_status(primary_ctx)
                     elif _cmd_lower == "/help":
@@ -3653,6 +3704,19 @@ class MessageHandler:
                             runner.instance_id, primary_ctx.trace.events)
                     except Exception as _te:
                         logger.debug("TRACE_FLUSH: failed: %s", _te)
+
+                # SURFACE-DISCIPLINE-PASS D1 — sanitize user-facing
+                # replies before they reach the adapter. Diagnostic
+                # responses (e.g. /dump) skip the sanitizer so raw
+                # internals are preserved as intended.
+                if not primary_ctx.is_diagnostic_response:
+                    response = self._sanitize_user_facing_text(
+                        response,
+                        instance_id=primary_ctx.instance_id,
+                        member_id=primary_ctx.member_id,
+                        source="turn_reply",
+                        channel_name=primary_msg.platform,
+                    )
 
                 # Resolve all futures — primary gets the response,
                 # merged messages get empty (adapter sends nothing)
@@ -3960,40 +4024,65 @@ class MessageHandler:
         )
 
     async def _handle_wipe(self, ctx: TurnContext, raw_cmd: str) -> str:
-        """Handle /wipe me and /wipe all with exact-phrase confirmation."""
-        parts = raw_cmd.strip().lower().split()
-        sub = parts[1] if len(parts) > 1 else ""
+        """Handle /wipe me and /wipe all.
+
+        SURFACE-DISCIPLINE-PASS D5: confirmation gate is now `/wipe <scope> yes`
+        on the same command (simpler than the previous exact-phrase reply).
+        Unconfirmed `/wipe me` or `/wipe all` still arms the legacy exact-
+        phrase path so cautious operators can keep using it. `/wipe <scope>
+        no` or any other input cancels.
+        """
+        parts = raw_cmd.strip().split()
+        parts_lower = [p.lower() for p in parts]
+        sub = parts_lower[1] if len(parts_lower) > 1 else ""
+        suffix = parts_lower[2] if len(parts_lower) > 2 else ""
+
+        if not sub:
+            return (
+                "Usage:\n"
+                "**/wipe me** — Delete your data only. Prompts for confirmation.\n"
+                "**/wipe me yes** — Same, but confirms in one step.\n"
+                "**/wipe all** — Factory reset the entire instance (owner only).\n"
+                "**/wipe all yes** — Owner factory reset, one-step confirmation."
+            )
 
         if sub == "me":
             if not ctx.member_id:
                 return "Cannot determine your member identity. Are you a registered member?"
-            # Get the member's display name for the confirmation phrase
-            name = (ctx.member_profile or {}).get("display_name", "") or "my data"
+            if suffix == "yes":
+                return await self._execute_wipe_member(ctx)
+            if suffix == "no":
+                return "Wipe cancelled."
+            # Unconfirmed — arm the legacy exact-phrase fallback and prompt.
             self._pending_wipe[f"{ctx.instance_id}:{ctx.member_id}"] = "me"
             return (
-                f"This will permanently delete your account — profile, conversations, "
-                f"knowledge, spaces, covenants, and all platform connections. "
-                f"You'll need a new invite code to rejoin. Other members are not affected.\n\n"
-                f'To confirm, type exactly: **Delete my data!**'
+                "This will permanently delete your account — profile, conversations, "
+                "knowledge, spaces, covenants, and all platform connections. "
+                "You'll need a new invite code to rejoin. Other members are not affected.\n\n"
+                "To confirm, reply with **/wipe me yes**. Anything else cancels."
             )
-        elif sub == "all":
-            # Check if member is owner
+
+        if sub == "all":
             if hasattr(self, '_instance_db') and self._instance_db and ctx.member_id:
                 member = await self._instance_db.get_member(ctx.member_id)
                 if not member or member.get("role") != "owner":
                     return "Only the instance owner can wipe all data."
+            if suffix == "yes":
+                return await self._execute_wipe_all(ctx)
+            if suffix == "no":
+                return "Wipe cancelled."
             self._pending_wipe[f"{ctx.instance_id}:{ctx.member_id}"] = "all"
             return (
                 "This will permanently delete ALL data for this Kernos instance — "
                 "every member, every conversation, every space, everything.\n\n"
-                'To confirm, type exactly: **Delete it all!**'
+                "To confirm, reply with **/wipe all yes**. Anything else cancels."
             )
-        else:
-            return (
-                "Usage:\n"
-                "**/wipe me** — Delete your data only (profile, conversations, knowledge, spaces)\n"
-                "**/wipe all** — Factory reset the entire instance (owner only)"
-            )
+
+        return (
+            "Usage:\n"
+            "**/wipe me [yes]** — Delete your data only.\n"
+            "**/wipe all [yes]** — Factory reset the entire instance (owner only)."
+        )
 
     async def _check_wipe_confirmation(self, ctx: TurnContext) -> str | None:
         """Check if an incoming message is a wipe confirmation phrase. Returns response or None."""
@@ -4964,37 +5053,72 @@ class MessageHandler:
         return "\n".join(lines)
 
     async def _handle_status(self, ctx: TurnContext) -> str:
-        """Write operator state view to diagnostic file, return summary."""
-        from kernos.kernel.introspection import build_operator_state_view
+        """User-readable status summary.
 
-        data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
-        from kernos.utils import utc_now
-        ts = utc_now()[:19].replace(":", "-")
-        status_path = Path(data_dir) / "diagnostics" / f"status_{ts}.txt"
-        status_path.parent.mkdir(parents=True, exist_ok=True)
+        SURFACE-DISCIPLINE-PASS D5: `/status` now returns a concise,
+        human-readable summary — no internal identifiers, no file paths.
+        The operator-state-view + timing dump moved to `/dump` which is
+        a diagnostic/admin surface and keeps raw internals by design.
+        """
+        instance_id = ctx.instance_id
+        parts: list[str] = ["**Kernos Status**", ""]
 
+        # Member greeting line
+        member_name = ""
+        if ctx.member_profile:
+            member_name = ctx.member_profile.get("display_name", "") or ""
+        if member_name:
+            parts.append(f"Signed in as **{member_name}**.")
+
+        # Connected platforms (human-readable, no raw channel ids)
+        try:
+            connected = self._channel_registry.get_connected()
+        except Exception:
+            connected = []
+        if connected:
+            platform_names = []
+            for ch in connected:
+                marker = " (current)" if ctx.message and ch.platform == ctx.message.platform else ""
+                platform_names.append(f"{ch.display_name}{marker}")
+            parts.append(f"Platforms connected: {', '.join(platform_names)}.")
+        else:
+            parts.append("No platforms connected.")
+
+        # Current space (display name, not id)
+        if ctx.active_space and getattr(ctx.active_space, "name", ""):
+            parts.append(f"Current space: **{ctx.active_space.name}**.")
+
+        # Pending reminders / triggers count
         trigger_store = getattr(self.reasoning, '_trigger_store', None)
-        operator_view = await build_operator_state_view(
-            ctx.instance_id, self.state, trigger_store, self.registry,
+        if trigger_store is not None:
+            try:
+                triggers = await trigger_store.list_active(instance_id)
+                if triggers:
+                    parts.append(f"Active reminders: {len(triggers)}.")
+            except Exception:
+                pass
+
+        # Pending whispers count
+        try:
+            whispers = await self.state.get_pending_whispers(instance_id)
+            if whispers:
+                # Only count whispers owned by this member or instance-wide.
+                _mine = [
+                    w for w in whispers
+                    if not getattr(w, "owner_member_id", "")
+                    or getattr(w, "owner_member_id", "") == ctx.member_id
+                ]
+                if _mine:
+                    parts.append(f"Pending signals: {len(_mine)}.")
+        except Exception:
+            pass
+
+        parts.append("")
+        parts.append(
+            "For a full diagnostic snapshot (internal ids, runtime trace, "
+            "phase timings) use **/dump** — admin surface."
         )
-
-        with open(status_path, "w") as f:
-            f.write(f"=== OPERATOR STATE VIEW ===\n")
-            f.write(f"Tenant: {ctx.instance_id}\n")
-            f.write(f"Generated: {utc_now()}\n\n")
-            f.write(operator_view)
-
-            # Phase timing averages
-            avgs = self.get_phase_timing_averages()
-            if avgs:
-                f.write("\n\n## Phase Timing (session averages)\n")
-                f.write(f"Turns sampled: {len(self._phase_timing_history)}\n")
-                for phase in ["provision", "route", "assemble", "reason", "consequence", "persist", "total"]:
-                    if phase in avgs:
-                        f.write(f"- {phase}: {avgs[phase]}ms\n")
-
-        logger.info("STATUS: state view written to %s", status_path)
-        return f"State view written to {status_path}"
+        return "\n".join(parts)
 
     async def _build_departure_context(
         self, ctx: TurnContext, prev_space_id: str,

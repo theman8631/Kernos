@@ -267,19 +267,66 @@ async def _drain_new_tasks(tasks_before: set, timeout: float) -> None:
 async def _capture_observations(
     bi: BootstrappedInstance, observations: list[Observation],
 ) -> dict[str, Any]:
-    """Execute each observation directive and collect results."""
+    """Execute each observation directive and collect results.
+
+    SURFACE-DISCIPLINE-PASS D2: resolve a display-name map once at the
+    top so every observation can attach display_name alongside the
+    scenario-id reverse map. Rubrics that reference "Harold" / "Emma"
+    by display name now match the observation output directly.
+    """
+    display_name_map = await _build_display_name_map(bi)
     out: dict[str, Any] = {}
     for obs in observations:
         label = obs.label or obs.kind
         try:
-            out[label] = await _capture_one(bi, obs)
+            out[label] = await _capture_one(bi, obs, display_name_map=display_name_map)
         except Exception as exc:
             out[label] = {"error": str(exc)}
     return out
 
 
-async def _capture_one(bi: BootstrappedInstance, obs: Observation) -> Any:
+async def _build_display_name_map(bi: BootstrappedInstance) -> dict[str, str]:
+    """Map every known member_id (real OR scenario alias) → display_name.
+
+    Result is used by every observation kind that references a member.
+    Falls back to the id unchanged when a profile is missing so legacy
+    tests still behave.
+    """
+    name_map: dict[str, str] = {}
+    for scenario_id, real_id in bi.member_id_map.items():
+        display = ""
+        try:
+            profile = await bi.instance_db.get_member_profile(real_id)
+            if profile:
+                display = profile.get("display_name", "") or ""
+        except Exception:
+            display = ""
+        if not display:
+            try:
+                member = await bi.instance_db.get_member(real_id)
+                if member:
+                    display = member.get("display_name", "") or ""
+            except Exception:
+                display = ""
+        if display:
+            name_map[real_id] = display
+            name_map[scenario_id] = display
+    return name_map
+
+
+async def _capture_one(
+    bi: BootstrappedInstance, obs: Observation,
+    display_name_map: dict[str, str] | None = None,
+) -> Any:
+    """Execute a single observation. display_name_map is a single resolver
+    (built once per capture pass) mapping scenario_id AND real member_id
+    to display name — used by SURFACE-DISCIPLINE-PASS D2.
+    """
     kind = obs.kind.strip().lower()
+    display_name_map = display_name_map or {}
+
+    def _display_for(mid: str) -> str:
+        return display_name_map.get(mid, "") if mid else ""
 
     if kind == "member_profile":
         member_ref = obs.args.get("member", "")
@@ -305,6 +352,9 @@ async def _capture_one(bi: BootstrappedInstance, obs: Observation) -> Any:
                 "sensitivity": getattr(e, "sensitivity", ""),
                 "archetype": getattr(e, "lifecycle_archetype", ""),
                 "owner_member_id": getattr(e, "owner_member_id", ""),
+                "owner_display_name": _display_for(
+                    getattr(e, "owner_member_id", ""),
+                ),
                 "confidence": getattr(e, "confidence", ""),
             }
             for e in entries
@@ -333,9 +383,11 @@ async def _capture_one(bi: BootstrappedInstance, obs: Observation) -> Any:
             rows.append({
                 "id": m.id,
                 "origin": reverse_map.get(m.origin_member_id, m.origin_member_id),
+                "origin_display_name": _display_for(m.origin_member_id),
                 "addressee": reverse_map.get(
                     m.addressee_member_id, m.addressee_member_id,
                 ),
+                "addressee_display_name": _display_for(m.addressee_member_id),
                 "intent": m.intent,
                 "urgency": m.urgency,
                 "state": m.state,
@@ -366,9 +418,13 @@ async def _capture_one(bi: BootstrappedInstance, obs: Observation) -> Any:
         for r in rows:
             d = {
                 "declarer": reverse_map.get(r["declarer_member_id"], r["declarer_member_id"]),
+                "declarer_display_name": _display_for(r["declarer_member_id"]),
                 "other": reverse_map.get(r["other_member_id"], r["other_member_id"]),
+                "other_display_name": (
+                    r.get("other_display_name", "")
+                    or _display_for(r["other_member_id"])
+                ),
                 "permission": r.get("permission", "by-permission"),
-                "other_display_name": r.get("other_display_name", ""),
             }
             out_rows.append(d)
         return out_rows
