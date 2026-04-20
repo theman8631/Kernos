@@ -159,6 +159,12 @@ class TurnContext:
     # Runtime trace collector — structured events for diagnostic visibility
     trace: Any = None  # TurnEventCollector, set at turn start
 
+    # RELATIONAL-MESSAGING v5: messages collected for this turn's recipient.
+    # Populated by the relational-dispatcher pickup in _phase_assemble; the
+    # persist phase walks these to mark delivered → surfaced (unless the
+    # agent already resolved them mid-turn via resolve_relational_message).
+    relational_messages: list = field(default_factory=list)
+
 
 # Turn serialization: per-(tenant, space) mailbox/runner
 MERGE_WINDOW_MS = 300  # Wait up to 300ms for follow-up messages
@@ -812,6 +818,11 @@ class MessageHandler:
         from kernos.kernel.conversation_log import ConversationLogger
         self.conv_logger = ConversationLogger(data_dir=os.getenv("KERNOS_DATA_DIR", "./data"))
 
+        # Relational messaging (RELATIONAL-MESSAGING v5). Dispatcher lazy-binds
+        # to _instance_db after post-init (instance_db is attached by server.py
+        # the same way it's done for bootstrap graduation).
+        self._relational_dispatcher = None  # type: ignore[assignment]
+
         # Wire up file service for kernel file tools
         from kernos.kernel.files import FileService
         self._files = FileService(os.getenv("KERNOS_DATA_DIR", "./data"), state=self.state)
@@ -1303,6 +1314,55 @@ class MessageHandler:
         """Register a platform adapter for outbound messaging."""
         from kernos.kernel.channels import ChannelInfo
         self._adapters[platform] = adapter
+
+    def _get_relational_dispatcher(self):
+        """Lazy-init the relational dispatcher.
+
+        Bound to the handler's state, instance_db, and a push hook that
+        reaches the recipient via their primary platform adapter. Constructed
+        on first use so it picks up the instance_db that server.py/bootstrap
+        sets post-__init__.
+        """
+        if self._relational_dispatcher is not None:
+            return self._relational_dispatcher
+        idb = getattr(self, "_instance_db", None)
+        if idb is None:
+            return None
+        from kernos.kernel.relational_dispatch import RelationalDispatcher
+
+        async def _push(msg) -> None:
+            # Time-sensitive out-of-band push: send a whisper-style outbound
+            # through the recipient's primary channel. Best-effort.
+            try:
+                channels = await idb.list_member_channels(msg.addressee_member_id)
+            except Exception:
+                channels = []
+            if not channels:
+                return
+            # Prefer the most recently registered channel.
+            target = channels[0]
+            platform = target.get("platform", "")
+            if platform not in self._adapters:
+                return
+            adapter = self._adapters[platform]
+            try:
+                text = (
+                    f"Message from {msg.origin_agent_identity or msg.origin_member_id}: "
+                    f"{msg.content}"
+                )
+                await adapter.send_outbound(
+                    msg.instance_id, target.get("channel_id", ""), text,
+                )
+            except Exception as exc:
+                logger.warning("RM_PUSH_ADAPTER_FAILED: %s", exc)
+
+        self._relational_dispatcher = RelationalDispatcher(
+            state=self.state,
+            instance_db=idb,
+            outbound_push=_push,
+            trace_emitter=None,  # handler wires per-turn trace via ctx
+        )
+        return self._relational_dispatcher
 
     def register_channel(
         self, name: str, display_name: str, platform: str,
@@ -2009,6 +2069,35 @@ class MessageHandler:
                     "AGENT_NAME_EXTRACTED: member=%s name=%r (graduation-time)",
                     member_id, extracted,
                 )
+
+    def _format_relational_messages_block(self, messages: list) -> str:
+        """Format collected relational messages for the RESULTS section.
+
+        Each message gets its id, origin (agent+member), intent, urgency,
+        thread id, and content. The agent uses this to decide how to
+        surface / reply / auto-handle per the Obvious Benefit Rule.
+        """
+        lines: list[str] = [
+            "## RELATIONAL MESSAGES",
+            "",
+            (
+                "The following messages arrived from other members' agents. "
+                "Surface only if obviously benefits the user (Obvious Benefit "
+                "Rule). Reply via send_relational_message when appropriate. "
+                "Mark processed via resolve_relational_message — with "
+                "auto_handled=true only if handled without user involvement."
+            ),
+            "",
+        ]
+        for m in messages:
+            lines.append(
+                f"- id={m.id} | from={m.origin_agent_identity or m.origin_member_id} "
+                f"(member_id={m.origin_member_id}) | intent={m.intent} | "
+                f"urgency={m.urgency} | thread={m.conversation_id}"
+            )
+            lines.append(f"  > {m.content}")
+            lines.append("")
+        return "\n".join(lines)
 
     async def _post_response_soul_update(self, soul: Soul, member_id: str = "", member_profile: dict | None = None, active_space_id: str = "") -> None:
         """Update member profile after a successful response.
@@ -4140,6 +4229,100 @@ class MessageHandler:
 
         return f"Unknown action: {action}. Use invite, connect_platform, list, remove, declare_relationship, or list_relationships."
 
+    async def _handle_send_relational_message(
+        self, instance_id: str, tool_input: dict,
+        origin_member_id: str = "",
+    ) -> str:
+        """RELATIONAL-MESSAGING: agent tool to send a purposeful message
+        to another member's agent. Dispatcher enforces permission matrix,
+        creates the envelope, and routes by urgency.
+        """
+        dispatcher = self._get_relational_dispatcher()
+        if dispatcher is None:
+            return "Relational messaging is not available (instance_db missing)."
+        if not origin_member_id:
+            return "Error: origin member is unknown for this turn."
+        addressee = (tool_input.get("addressee") or "").strip()
+        intent = (tool_input.get("intent") or "").strip()
+        content = (tool_input.get("content") or "").strip()
+        urgency = (tool_input.get("urgency") or "normal").strip()
+        target_space_hint = (tool_input.get("target_space_hint") or "").strip()
+        conversation_id = (tool_input.get("conversation_id") or "").strip()
+        reply_to_id = (tool_input.get("reply_to_id") or "").strip()
+
+        # Resolve the origin agent's self-name for the envelope from the
+        # member profile. Falls back to display name, then member_id.
+        origin_agent_identity = ""
+        if self._instance_db:
+            try:
+                profile = await self._instance_db.get_member_profile(origin_member_id)
+                if profile:
+                    origin_agent_identity = (
+                        profile.get("agent_name") or profile.get("display_name") or ""
+                    )
+            except Exception:
+                pass
+        if not origin_agent_identity:
+            origin_agent_identity = origin_member_id
+
+        result = await dispatcher.send(
+            instance_id=instance_id,
+            origin_member_id=origin_member_id,
+            origin_agent_identity=origin_agent_identity,
+            addressee=addressee, intent=intent, content=content,
+            urgency=urgency, target_space_hint=target_space_hint,
+            conversation_id=conversation_id, reply_to_id=reply_to_id,
+        )
+        if not result.ok:
+            return f"Could not send: {result.error}"
+        return (
+            f"Sent (id={result.message_id}, conversation={result.conversation_id}, "
+            f"state={result.state}). Their agent will see it "
+            f"{'now' if urgency == 'time_sensitive' else 'on their next turn'}."
+        )
+
+    async def _handle_resolve_relational_message(
+        self, instance_id: str, tool_input: dict,
+        requesting_member_id: str = "",
+    ) -> str:
+        """RELATIONAL-MESSAGING: agent tool to mark a message processed.
+
+        Default (auto_handled=False): surfaced → resolved. Call after the
+        user's response has been captured and the thread is complete.
+
+        auto_handled=True: delivered → resolved directly. Use when a
+        covenant auto-handled the message and the user was never shown.
+        """
+        dispatcher = self._get_relational_dispatcher()
+        if dispatcher is None:
+            return "Relational messaging is not available."
+        message_id = (tool_input.get("message_id") or "").strip()
+        auto_handled = bool(tool_input.get("auto_handled"))
+        reason = (tool_input.get("reason") or "").strip()
+        if not message_id:
+            return "Error: message_id is required."
+
+        msg = await self.state.get_relational_message(instance_id, message_id)
+        if msg is None:
+            return f"Error: message {message_id!r} not found."
+        # Guard: only the addressee may resolve their own message.
+        if requesting_member_id and msg.addressee_member_id != requesting_member_id:
+            return "Error: only the addressee can resolve a relational message."
+
+        from_state = "delivered" if auto_handled else "surfaced"
+        ok = await dispatcher.mark_resolved(
+            instance_id, message_id, from_state=from_state, reason=reason,
+        )
+        if ok:
+            return f"Resolved (from {from_state}, reason={reason or '-'})."
+        # CAS lost — report current state to help the agent reason.
+        current = await self.state.get_relational_message(instance_id, message_id)
+        cur_state = current.state if current else "unknown"
+        return (
+            f"Could not resolve from {from_state}: current state is {cur_state!r}. "
+            "Another path may have already processed this."
+        )
+
     async def _handle_manage_plan(
         self, instance_id: str, space_id: str, tool_input: dict,
     ) -> str:
@@ -5024,6 +5207,49 @@ class MessageHandler:
             member_id=ctx.member_id,
         )
 
+        # RELATIONAL-MESSAGING v5: pick up any queued messages addressed to
+        # the active member. This promotes pending → delivered atomically
+        # and re-includes delivered-but-not-surfaced envelopes (crash
+        # recovery). Messages that violate the space-hint rule are deferred
+        # (handled in the dispatcher, not here).
+        rm_block_text = ""
+        dispatcher = self._get_relational_dispatcher()
+        if dispatcher is not None and ctx.member_id:
+            try:
+                # Build the recipient's current space id list for the
+                # space-hint matching rule.
+                _all_spaces = await self.state.list_context_spaces(instance_id)
+                _recipient_space_ids = [
+                    s.id for s in _all_spaces
+                    if s.member_id == ctx.member_id
+                    or s.space_type == "system"
+                    or not s.member_id
+                ]
+                ctx.relational_messages = await dispatcher.collect_pending_for_member(
+                    instance_id=instance_id, member_id=ctx.member_id,
+                    active_space_id=active_space_id,
+                    recipient_space_ids=_recipient_space_ids,
+                )
+                if ctx.relational_messages:
+                    rm_block_text = self._format_relational_messages_block(
+                        ctx.relational_messages,
+                    )
+                    if ctx.trace:
+                        ctx.trace.record(
+                            "info", "relational_dispatch", "RM_PICKUP",
+                            f"count={len(ctx.relational_messages)} "
+                            f"member={ctx.member_id} space={active_space_id}",
+                            phase="assemble",
+                        )
+            except Exception as exc:
+                logger.warning("RM_PICKUP_FAILED: %s", exc)
+
+        if rm_block_text:
+            if ctx.results_prefix:
+                ctx.results_prefix = rm_block_text + "\n\n" + ctx.results_prefix
+            else:
+                ctx.results_prefix = rm_block_text
+
         # Emit message.received
         try:
             await emit_event(self.events, EventType.MESSAGE_RECEIVED, instance_id, "handler",
@@ -5321,7 +5547,14 @@ class MessageHandler:
         from kernos.kernel.runtime_trace import READ_RUNTIME_TRACE_TOOL
         from kernos.kernel.diagnostics import DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL
         from kernos.kernel.members import MANAGE_MEMBERS_TOOL
-        _all_kernel.extend([READ_RUNTIME_TRACE_TOOL, DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL, SUBMIT_SPEC_TOOL, MANAGE_MEMBERS_TOOL])
+        from kernos.kernel.relational_tools import (
+            SEND_RELATIONAL_MESSAGE_TOOL, RESOLVE_RELATIONAL_MESSAGE_TOOL,
+        )
+        _all_kernel.extend([
+            READ_RUNTIME_TRACE_TOOL, DIAGNOSE_ISSUE_TOOL, PROPOSE_FIX_TOOL,
+            SUBMIT_SPEC_TOOL, MANAGE_MEMBERS_TOOL,
+            SEND_RELATIONAL_MESSAGE_TOOL, RESOLVE_RELATIONAL_MESSAGE_TOOL,
+        ])
         if self._retrieval:
             from kernos.kernel.retrieval import REMEMBER_TOOL
             _all_kernel.append(REMEMBER_TOOL)
@@ -5750,6 +5983,30 @@ class MessageHandler:
         """Phase 6: Store messages, write to conv log, compaction, events."""
         instance_id = ctx.instance_id
         message = ctx.message
+
+        # RELATIONAL-MESSAGING v5: commit user-visible delivery.
+        # For every envelope collected this turn that is still in the
+        # `delivered` state (i.e., the agent did NOT call
+        # resolve_relational_message with auto_handled=true), transition
+        # to `surfaced`. If the agent already resolved (either auto-handled
+        # or via normal surfaced→resolved), the CAS returns False and we
+        # move on.
+        if ctx.relational_messages:
+            dispatcher = self._get_relational_dispatcher()
+            if dispatcher is not None:
+                for rm in ctx.relational_messages:
+                    try:
+                        # Re-read to pick up any mid-turn resolution.
+                        current = await self.state.get_relational_message(
+                            instance_id, rm.id,
+                        )
+                        if current is None:
+                            continue
+                        if current.state != "delivered":
+                            continue  # already surfaced/resolved/expired
+                        await dispatcher.mark_surfaced(instance_id, rm.id)
+                    except Exception as exc:
+                        logger.warning("RM_MARK_SURFACED_FAILED: %s", exc)
 
         assistant_entry = {
             "role": "assistant", "content": ctx.response_text,

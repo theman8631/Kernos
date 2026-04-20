@@ -489,7 +489,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -637,6 +637,20 @@ class ReasoningService:
                 if hasattr(self, '_handler') and self._handler:
                     return await self._handler._handle_manage_members(request.instance_id, tool_input, requesting_member_id=request.member_id)
                 return "Member management is not available."
+            elif tool_name == "send_relational_message":
+                if hasattr(self, '_handler') and self._handler:
+                    return await self._handler._handle_send_relational_message(
+                        request.instance_id, tool_input,
+                        origin_member_id=request.member_id,
+                    )
+                return "Relational messaging is not available."
+            elif tool_name == "resolve_relational_message":
+                if hasattr(self, '_handler') and self._handler:
+                    return await self._handler._handle_resolve_relational_message(
+                        request.instance_id, tool_input,
+                        requesting_member_id=request.member_id,
+                    )
+                return "Relational messaging is not available."
             elif tool_name == "remember":
                 if self._retrieval:
                     _idb = (
@@ -1169,6 +1183,30 @@ class ReasoningService:
                         result = f"Member management failed: {exc}"
                 else:
                     result = "Member management is not available."
+            elif block.name == "send_relational_message":
+                if hasattr(self, '_handler') and self._handler:
+                    try:
+                        result = await self._handler._handle_send_relational_message(
+                            request.instance_id, tool_args,
+                            origin_member_id=request.member_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'send_relational_message' failed: %s", exc)
+                        result = f"Relational send failed: {exc}"
+                else:
+                    result = "Relational messaging is not available."
+            elif block.name == "resolve_relational_message":
+                if hasattr(self, '_handler') and self._handler:
+                    try:
+                        result = await self._handler._handle_resolve_relational_message(
+                            request.instance_id, tool_args,
+                            requesting_member_id=request.member_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'resolve_relational_message' failed: %s", exc)
+                        result = f"Relational resolve failed: {exc}"
+                else:
+                    result = "Relational messaging is not available."
             elif block.name == "dismiss_whisper":
                 try:
                     result = await self._handle_dismiss_whisper(

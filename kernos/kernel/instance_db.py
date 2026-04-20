@@ -825,6 +825,23 @@ class InstanceDB:
             row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def list_member_channels(self, member_id: str) -> list[dict]:
+        """Return all (platform, channel_id) rows for a member.
+
+        Used by the relational-messaging dispatcher to push time-sensitive
+        envelopes via the recipient's primary adapter.
+        """
+        if not self._conn:
+            return []
+        async with self._conn.execute(
+            "SELECT platform, channel_id, is_primary "
+            "FROM member_channels WHERE member_id=? "
+            "ORDER BY is_primary DESC, created_at ASC",
+            (member_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     # --- Invite Codes ---
 
     async def create_invite_code(
