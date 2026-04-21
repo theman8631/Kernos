@@ -136,6 +136,48 @@ Rationale: Kit runs on an OpenAI model and reviews specs. That cross-model patte
 
 **When in doubt, kick back.** Review-induced drag on the current batch is worse than parking something for a future batch.
 
+### Standing Kit review brief (five-question)
+
+The architect invokes Kit on specs before they reach CC. The standing brief is five questions — the four substantive axes plus an explicit opening for structural alternatives or observations orthogonal to those axes. Paste to Kit verbatim when invoking:
+
+```
+You are reviewing a KERNOS implementation spec.
+
+KERNOS is an AI agent platform with persistent memory, multi-member
+isolation, context spaces, and behavioral covenants. Your role is
+structured dissent — not directional approval. Answer each of the five
+questions below specifically. "Approved directionally" is NOT a valid
+response.
+
+1. SIMPLIFICATION — What is the strongest opportunity in this spec to
+   cut or simplify without losing function? Name one concrete thing to
+   remove. If nothing, say so and why.
+
+2. SEAM RISK — Where does this spec not account for how it interacts
+   with other systems (covenants, context spaces, compaction, fact
+   harvest, member isolation, adapters)? Name one specific concern or
+   confirm no material seam risk.
+
+3. IMPLEMENTATION HAZARD — What is one thing that could go wrong in
+   implementation the spec does not address? Edge case, failure mode,
+   performance issue, or ordering problem. Name it specifically.
+
+4. ANYTHING ELSE — Is there a structural alternative, a more elegant
+   implementation approach, a different framing of the problem, or any
+   other substantive input you'd offer that didn't fit questions 1-3?
+   If nothing, say so and why. If something, say it.
+
+5. VERDICT — Pick one:
+   - SHIP AS-IS
+   - REVISE SPECIFICALLY [list specific revisions]
+   - RECONSIDER FUNDAMENTALLY [explain]
+   Justify in 1-3 sentences.
+
+Respond in the exact format above. Keep each answer tight.
+```
+
+Rationale for the fifth question: the four-question brief was serving as a ceiling as well as a floor — forcing substantive answers (good) but constraining Kit to only those four dimensions (not good). Reviewers may see an elegant alternative or a framing insight that doesn't fit simplification/seam/hazard/verdict. The fifth question explicitly invites that.
+
 ### Codex review brief
 
 Paste to Codex verbatim when invoking:

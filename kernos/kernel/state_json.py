@@ -321,7 +321,18 @@ class JsonStateStore(StateStore):
         # Historical migrations (Phase 4 → Phase 6)
         (
             "Never send messages to external contacts without owner approval",
+            "Never send messages to third-party CONTACTS (external humans via SMS/email/social) unless the owner initiated the request. When the owner has initiated and the intent is clear, send it — hesitation past that point is friction, not caution. This does NOT apply to send_relational_message, which routes to another MEMBER's agent through the internal permission-matrix dispatcher — that's an intra-system message, not a third-party contact.",
+        ),
+        # SELF-MODEL-CLARIFICATION: fold in the positive complement for any instance
+        # that already migrated to the earlier short form, or to the long form
+        # before the paired wording shipped.
+        (
             "Never send messages to third-party contacts unless the owner initiated the request",
+            "Never send messages to third-party CONTACTS (external humans via SMS/email/social) unless the owner initiated the request. When the owner has initiated and the intent is clear, send it — hesitation past that point is friction, not caution. This does NOT apply to send_relational_message, which routes to another MEMBER's agent through the internal permission-matrix dispatcher — that's an intra-system message, not a third-party contact.",
+        ),
+        (
+            "Never send messages to third-party CONTACTS (external humans via SMS/email/social) unless the owner initiated the request. This does NOT apply to send_relational_message, which routes to another MEMBER's agent through the internal permission-matrix dispatcher — that's an intra-system message, not a third-party contact.",
+            "Never send messages to third-party CONTACTS (external humans via SMS/email/social) unless the owner initiated the request. When the owner has initiated and the intent is clear, send it — hesitation past that point is friction, not caution. This does NOT apply to send_relational_message, which routes to another MEMBER's agent through the internal permission-matrix dispatcher — that's an intra-system message, not a third-party contact.",
         ),
         # Phase 6 → current wording
         (
@@ -342,15 +353,31 @@ class JsonStateStore(StateStore):
         ),
         (
             "Always confirm before any action that costs money",
+            "Confirm before spending money unless the owner specified the amount and recipient in their request. When the spend is confirmed, complete it — the confirmation is the authorization event, don't re-confirm.",
+        ),
+        # SELF-MODEL-CLARIFICATION: fold in the positive complement for instances
+        # on the previous money wording.
+        (
             "Confirm before spending money unless the owner specified the amount and recipient in their request.",
+            "Confirm before spending money unless the owner specified the amount and recipient in their request. When the spend is confirmed, complete it — the confirmation is the authorization event, don't re-confirm.",
         ),
         (
             "Always confirm before sending communications to THIRD PARTIES on the owner's behalf. Reminders and notifications TO the owner are always authorized.",
-            "Show drafts before sending to third parties. No confirmation needed for owner-directed channel delivery.",
+            "Show drafts before sending to third parties on open channels (SMS, email, social). Once the draft is approved, send it — approval is the authorization event. No draft needed for owner-directed channel delivery, and no draft needed for send_relational_message — that tool routes to another member's AGENT through the permission-matrix dispatcher, not to the person directly, and the receiving agent applies its own judgment.",
         ),
         (
             "For composed messages to third parties, show the draft before sending. For simple relays, briefly confirm content and recipient. Owner-directed delivery to connected channels needs no confirmation.",
+            "Show drafts before sending to third parties on open channels (SMS, email, social). Once the draft is approved, send it — approval is the authorization event. No draft needed for owner-directed channel delivery, and no draft needed for send_relational_message — that tool routes to another member's AGENT through the permission-matrix dispatcher, not to the person directly, and the receiving agent applies its own judgment.",
+        ),
+        # SELF-MODEL-CLARIFICATION: fold in the positive complement for instances
+        # on the short drafts wording or the pre-pairing long form.
+        (
             "Show drafts before sending to third parties. No confirmation needed for owner-directed channel delivery.",
+            "Show drafts before sending to third parties on open channels (SMS, email, social). Once the draft is approved, send it — approval is the authorization event. No draft needed for owner-directed channel delivery, and no draft needed for send_relational_message — that tool routes to another member's AGENT through the permission-matrix dispatcher, not to the person directly, and the receiving agent applies its own judgment.",
+        ),
+        (
+            "Show drafts before sending to third parties on open channels (SMS, email, social). No draft needed for owner-directed channel delivery, and no draft needed for send_relational_message — that tool routes to another member's AGENT through the permission-matrix dispatcher, not to the person directly, and the receiving agent applies its own judgment.",
+            "Show drafts before sending to third parties on open channels (SMS, email, social). Once the draft is approved, send it — approval is the authorization event. No draft needed for owner-directed channel delivery, and no draft needed for send_relational_message — that tool routes to another member's AGENT through the permission-matrix dispatcher, not to the person directly, and the receiving agent applies its own judgment.",
         ),
         (
             "Keep responses concise unless detail is requested",

@@ -351,6 +351,11 @@ def test_default_covenant_rules_updated_wording():
     Note: RELATIONAL-MESSAGING clarified the third-party rule to exclude
     intra-system send_relational_message calls. Updated phrasing uses
     "third-party CONTACTS" (uppercase emphasis) with the carve-out text.
+
+    SELF-MODEL-CLARIFICATION (Clarification 3) paired every one-sided
+    negative rule with its positive complement. Each negative in this
+    set now includes an explicit "when X, do it" counterpart in the
+    same rule string.
     """
     rules = default_covenant_rules("t1", _now())
     descs = [r.description for r in rules]
@@ -359,6 +364,20 @@ def test_default_covenant_rules_updated_wording():
     assert any("Information shared with you belongs to whoever shared it" in d for d in descs)
     assert any("Match the depth" in d for d in descs)
     assert any("genuinely ambiguous AND involves irreversible" in d for d in descs)
+    # Paired positive complements landed on the negatives (Clarification 3)
+    assert any(
+        "third-party CONTACTS" in d and "hesitation past that point is friction" in d
+        for d in descs
+    )
+    assert any(
+        "Confirm before spending money" in d
+        and "confirmation is the authorization event" in d
+        for d in descs
+    )
+    assert any(
+        "Show drafts" in d and "approval is the authorization event" in d
+        for d in descs
+    )
     # Old wording should NOT be present
     assert not any("external contacts without owner approval" in d for d in descs)
     assert not any("Keep responses concise unless detail" in d for d in descs)
@@ -394,14 +413,23 @@ def test_covenant_migration_updates_old_wording(tmp_path):
         rules = await store.get_contract_rules("t1")
         assert len(rules) == 2
         descs = [r.description for r in rules]
-        assert "Never send messages to third-party contacts unless the owner initiated the request" in descs
+        # Migration lands on the paired wording (SELF-MODEL-CLARIFICATION):
+        # both the negative ("unless owner initiated") and the positive
+        # complement ("when initiated ... send it") present in the same rule.
+        assert any(
+            "third-party CONTACTS" in d
+            and "owner initiated" in d
+            and "send it" in d
+            for d in descs
+        )
         assert any("owner-directed channel delivery" in d.lower() for d in descs)
+        assert any("approval is the authorization event" in d for d in descs)
         # Old wording gone
         assert not any("external contacts without owner approval" in d for d in descs)
         assert not any("THIRD PARTIES" in d for d in descs)
         # Verify migration persisted to disk
         raw = _json.loads((state_dir / "contracts.json").read_text())
-        assert "third-party contacts" in raw[0]["description"]
+        assert "third-party CONTACTS" in raw[0]["description"]
 
     asyncio.get_event_loop().run_until_complete(_check())
 
