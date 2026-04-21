@@ -18,6 +18,7 @@ from typing import Any
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event, estimate_cost
 from kernos.kernel.exceptions import (
+    LLMChainExhausted,
     ReasoningConnectionError,
     ReasoningProviderError,
     ReasoningRateLimitError,
@@ -348,6 +349,10 @@ class ReasoningService:
         """
         entries = self._chains.get(chain_name, self._chains.get("primary", []))
         last_exc: Exception | None = None
+        # LLM-SETUP-AND-FALLBACK: accumulate per-entry failure detail so the
+        # LLMChainExhausted exception can carry it for the pre-rendered
+        # failure message and diagnostic tools.
+        attempts: list[tuple[str, str, str]] = []
 
         for i, entry in enumerate(entries):
             model = request_model if (i == 0 and request_model) else entry.model
@@ -366,17 +371,13 @@ class ReasoningService:
                     max_tokens=max_tokens,
                 )
                 if i > 0 and request:
-                    # Successful fallback — notify
-                    self._trace(request, "info", "reasoning", "FALLBACK_SUCCESS",
-                        f"chain={chain_name} via {pname}/{model}")
+                    # Partial fallback succeeded — silent per the
+                    # LLM-SETUP-AND-FALLBACK contract. Log a FALLBACK_USED
+                    # diagnostic event only; never surface to the agent or
+                    # user, never fire a whisper.
+                    self._trace(request, "info", "reasoning", "FALLBACK_USED",
+                        f"chain={chain_name} via {pname}/{model} (skipped {i} entries)")
                     logger.info("CHAIN[%s]: success via %s/%s", chain_name, pname, model)
-                    if hasattr(self, "_handler") and self._handler:
-                        self._handler.queue_system_event(
-                            request.instance_id,
-                            f"[SYSTEM] Primary LLM provider failed — this response was handled by "
-                            f"the fallback provider ({pname}/{model}). The primary provider "
-                            f"may need attention (token refresh, configuration, or service issue)."
-                        )
                 return response
             except (ReasoningProviderError, ReasoningConnectionError) as exc:
                 if request:
@@ -384,14 +385,17 @@ class ReasoningService:
                         f"chain={chain_name} {pname}/{model} failed: {str(exc)[:150]}")
                 logger.warning("CHAIN[%s]: %s/%s failed: %s", chain_name, pname, model, exc)
                 last_exc = exc
+                attempts.append((pname, model, str(exc)))
                 continue
 
-        # All entries exhausted
+        # All entries exhausted — raise the specific chain-exhaustion
+        # exception the handler catches to deliver a pre-rendered failure
+        # message (instead of an LLM reply) for this turn.
         if request:
-            self._trace(request, "error", "reasoning", "ALL_PROVIDERS_FAILED",
+            self._trace(request, "error", "reasoning", "CHAIN_EXHAUSTED",
                 f"chain={chain_name} all {len(entries)} entries exhausted")
         logger.error("CHAIN[%s]: all %d providers failed", chain_name, len(entries))
-        raise last_exc or RuntimeError(f"All providers in chain '{chain_name}' exhausted")
+        raise LLMChainExhausted(chain_name=chain_name, attempts=attempts)
 
     def get_loaded_tools(self, space_id: str) -> set[str]:
         """Get the set of MCP tool names currently loaded for a space."""
@@ -489,7 +493,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -1368,6 +1372,52 @@ class ReasoningService:
                 except Exception as exc:
                     logger.warning("Kernel tool 'inspect_state' failed: %s", exc)
                     result = "State inspection failed — try again."
+            elif block.name == "set_chain_model":
+                # Admin-only: restrict to system space. The agent's Gate
+                # already confines sensitive tools by space; here we apply a
+                # lightweight space-check at dispatch time since Gate's admin
+                # intent routing is a frozen primitive.
+                space_type = ""
+                if request.active_space is not None:
+                    space_type = getattr(request.active_space, "space_type", "") or ""
+                if space_type != "system":
+                    result = (
+                        "set_chain_model is admin-only and only available "
+                        "in the System space."
+                    )
+                else:
+                    from kernos.setup.admin_tools import set_chain_model as _set_chain_model
+                    try:
+                        admin_res = _set_chain_model(
+                            chain=tool_args.get("chain", ""),
+                            provider_id=tool_args.get("provider_id", ""),
+                            model_id=tool_args.get("model_id", ""),
+                        )
+                        result = admin_res.get("message") or admin_res.get("error") or "set_chain_model returned no result."
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'set_chain_model' failed: %s", exc)
+                        result = f"set_chain_model failed: {exc}"
+            elif block.name == "diagnose_llm_chain":
+                space_type = ""
+                if request.active_space is not None:
+                    space_type = getattr(request.active_space, "space_type", "") or ""
+                if space_type != "system":
+                    result = (
+                        "diagnose_llm_chain is admin-only and only available "
+                        "in the System space."
+                    )
+                else:
+                    from kernos.setup.admin_tools import diagnose_llm_chain as _diagnose_llm_chain
+                    try:
+                        import json as _json
+                        admin_res = _diagnose_llm_chain(
+                            include_fallback_events=bool(tool_args.get("include_fallback_events", False)),
+                            instance_id=request.instance_id,
+                        )
+                        result = _json.dumps(admin_res, indent=2, default=str)
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'diagnose_llm_chain' failed: %s", exc)
+                        result = f"diagnose_llm_chain failed: {exc}"
             elif block.name == "request_tool":
                 result = await self._handle_request_tool(
                     request.instance_id,

@@ -248,6 +248,70 @@ INSPECT_STATE_TOOL = {
 }
 
 
+# LLM-SETUP-AND-FALLBACK admin tools — system space, admin-only.
+# Gate-authorized. No LLM call in the handler path.
+
+SET_CHAIN_MODEL_TOOL = {
+    "name": "set_chain_model",
+    "description": (
+        "Admin-only. Change the model used by a (chain, provider) pair in "
+        "the on-disk LLM chain config. Validates that the provider is "
+        "configured and that the model appears in the provider's /models "
+        "response before writing. Emits a CHAIN_MODEL_CHANGED event. "
+        "Use this when the user wants to swap the model for a provider "
+        "they've already set up, without re-running `kernos setup llm`."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "chain": {
+                "type": "string",
+                "enum": ["primary", "simple", "cheap"],
+                "description": "The chain tier to change.",
+            },
+            "provider_id": {
+                "type": "string",
+                "description": (
+                    "Provider id from the registry (anthropic, openai, "
+                    "google, groq, xai, openrouter, ollama)."
+                ),
+            },
+            "model_id": {
+                "type": "string",
+                "description": "The new model id (e.g. 'claude-opus-4-7').",
+            },
+        },
+        "required": ["chain", "provider_id", "model_id"],
+        "additionalProperties": False,
+    },
+}
+
+
+DIAGNOSE_LLM_CHAIN_TOOL = {
+    "name": "diagnose_llm_chain",
+    "description": (
+        "Admin-only. Return a readable view of the current LLM chain "
+        "configuration: every chain, providers in fallback order, the "
+        "model per provider, the backing storage backend, and whether each "
+        "provider has a stored credential. Optionally include recent "
+        "FALLBACK_USED events for diagnostic purposes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "include_fallback_events": {
+                "type": "boolean",
+                "description": (
+                    "Also include recent FALLBACK_USED events (last 50). "
+                    "Default false."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    },
+}
+
+
 # Allowed fields for update_soul — lifecycle and user fields are read-only
 SOUL_UPDATABLE_FIELDS = {"agent_name", "emoji", "personality_notes", "communication_style"}
 

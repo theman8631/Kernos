@@ -425,7 +425,17 @@ async def test_soul_not_updated_on_reasoning_failure():
     mock_provider.complete.side_effect = ReasoningProviderError("API error")
 
     result = await handler.process(_make_normalized_message())
-    assert "went wrong" in result.lower()
+    # LLM-SETUP-AND-FALLBACK: when every provider in the chain fails, the
+    # handler delivers a pre-rendered chain-exhaustion message instead of
+    # the LLM reply (contract). Accept either the pre-rendered message or
+    # the older "went wrong" phrasing that single-provider test fixtures
+    # used to produce.
+    lowered = result.lower()
+    assert (
+        "chain exhausted" in lowered
+        or "couldn't reach any language-model provider" in lowered
+        or "went wrong" in lowered
+    ), result
 
     # Soul should NOT be updated (save_soul called only once — during init)
     # The post-response update path is not reached on failure

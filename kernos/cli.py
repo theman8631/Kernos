@@ -763,8 +763,30 @@ async def _dispatch(args) -> None:
         await cmd_compaction(args)
     elif args.command == "backfill-embeddings":
         await cmd_backfill_embeddings(args)
+    elif args.command == "setup":
+        cmd_setup(args)
     else:
         print("Unknown command. Run with --help for usage.")
+
+
+def cmd_setup(args) -> None:
+    """`kernos setup llm [status]` — interactive LLM setup console (sync)."""
+    if getattr(args, "setup_target", None) != "llm":
+        print(
+            "Usage: kernos setup llm [status]\n"
+            "  kernos setup llm          interactive LLM configuration\n"
+            "  kernos setup llm status   on-demand per-provider diagnostic"
+        )
+        return
+    # Setup is sync — no asyncio. Zero LLM calls.
+    from kernos.setup.console import run_setup
+
+    rest = list(getattr(args, "setup_args", []) or [])
+    sys_exit = run_setup(rest)
+    if sys_exit:
+        import sys
+
+        sys.exit(sys_exit)
 
 
 def main() -> None:
@@ -856,9 +878,28 @@ def main() -> None:
     p.add_argument("--posture", help="Working style posture text")
     p.add_argument("--description", help="One-line description")
 
+    # setup (interactive LLM configuration)
+    p = subparsers.add_parser(
+        "setup",
+        help="Interactive setup (e.g. `kernos setup llm`)",
+    )
+    p.add_argument(
+        "setup_target", nargs="?", default="",
+        help="What to set up (currently only 'llm').",
+    )
+    p.add_argument(
+        "setup_args", nargs=argparse.REMAINDER,
+        help="Subcommand arguments (e.g. 'status').",
+    )
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
+        return
+
+    # Sync commands run directly, async commands go through asyncio.run().
+    if args.command == "setup":
+        cmd_setup(args)
         return
 
     asyncio.run(_dispatch(args))

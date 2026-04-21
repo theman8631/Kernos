@@ -451,4 +451,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Startup binary health check — binary config read, no network, no LLM.
+    from kernos.setup.health_check import enforce_or_exit
+    enforce_or_exit()
+
     main()

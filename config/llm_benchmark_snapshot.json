@@ -1,0 +1,35 @@
+{
+  "_comment": "Benchmark snapshot for intelligent model picks in `kernos setup llm`. SETUP-TIME ONLY. No runtime code path reads this file. Forkers update it by editing the JSON; new installs pick up the new recommendations, existing installs are unaffected. See docs/updating-llm-benchmark.md.",
+  "schema_version": 1,
+  "snapshot_date": "2026-04-21",
+  "providers": {
+    "anthropic": {
+      "primary": "claude-opus-4-7",
+      "cheap": "claude-haiku-4-5"
+    },
+    "openai": {
+      "primary": "gpt-5.3",
+      "cheap": "gpt-5.3-mini"
+    },
+    "google": {
+      "primary": "gemini-2.5-pro",
+      "cheap": "gemini-2.5-flash"
+    },
+    "groq": {
+      "primary": "llama-3.3-70b-versatile",
+      "cheap": "llama-3.1-8b-instant"
+    },
+    "xai": {
+      "primary": "grok-4",
+      "cheap": "grok-4-mini"
+    },
+    "openrouter": {
+      "primary": "anthropic/claude-opus-4-7",
+      "cheap": "anthropic/claude-haiku-4-5"
+    },
+    "ollama": {
+      "primary": "llama3.1:70b",
+      "cheap": "llama3.1:8b"
+    }
+  }
+}

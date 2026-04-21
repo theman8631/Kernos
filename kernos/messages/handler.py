@@ -20,6 +20,7 @@ from kernos.kernel.router import LLMRouter, RouterResult
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event
 from kernos.kernel.exceptions import (
+    LLMChainExhausted,
     ReasoningConnectionError,
     ReasoningProviderError,
     ReasoningRateLimitError,
@@ -261,6 +262,25 @@ _PLATFORM_CREDENTIALS: dict[str, dict] = {
         "supports_paste": False,  # Multiple secrets — manual only
     },
 }
+
+
+def _render_chain_exhaustion_message(exc: "LLMChainExhausted") -> str:
+    """Pre-rendered user-facing message when an LLM chain exhausts.
+
+    LLM-SETUP-AND-FALLBACK contract: this replaces the agent's LLM reply on
+    turns where ``LLMChainExhausted`` is raised. The message is deterministic
+    Python — no LLM call.
+    """
+    # chain_name tells the user which tier failed; attempts list is for the
+    # diagnostic log and `diagnose_llm_chain` tool, not the user message.
+    chain = getattr(exc, "chain_name", "") or "primary"
+    return (
+        "I couldn't reach any language-model provider on this turn — "
+        f"the '{chain}' chain exhausted every fallback. "
+        "Try again in a moment; if the issue persists, run "
+        "`kernos setup llm status` to diagnose, or re-run "
+        "`kernos setup llm` to add or swap providers."
+    )
 
 
 def _safe_instance_name(instance_id: str) -> str:
@@ -3611,6 +3631,50 @@ class MessageHandler:
                         try:
                             _t0 = time.monotonic()
                             await self._phase_reason(primary_ctx)
+                        except LLMChainExhausted as exc:
+                            # LLM-SETUP-AND-FALLBACK contract: chain exhaustion
+                            # DELIVERS a pre-rendered failure message as the
+                            # reply for this turn. The agent never produces an
+                            # LLM reply on this turn — the tool loop aborted
+                            # before any final text was aggregated, so there's
+                            # nothing to collide with. Contract: failure
+                            # message iff LLMChainExhausted raised.
+                            primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
+                            runner.provider_errors.append(str(exc)[:200])
+                            if primary_ctx.trace:
+                                primary_ctx.trace.record(
+                                    "error", "handler", "CHAIN_EXHAUSTED",
+                                    str(exc)[:300], phase="reason",
+                                )
+                            # Emit HANDLER_ERROR for observability (parallel to
+                            # the other reasoning-error paths) before returning
+                            # the pre-rendered user-facing message.
+                            try:
+                                await emit_event(
+                                    self.events, EventType.HANDLER_ERROR,
+                                    primary_ctx.instance_id, "handler",
+                                    payload={
+                                        "error_type": "LLMChainExhausted",
+                                        "error_message": str(exc),
+                                        "conversation_id": primary_ctx.conversation_id,
+                                        "stage": "chain_exhausted",
+                                        "chain_name": exc.chain_name,
+                                        "attempts": len(exc.attempts),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            response = _render_chain_exhaustion_message(exc)
+                            # Zero any LLM text on the ctx — belt and
+                            # suspenders; _phase_reason shouldn't have
+                            # populated it if _call_chain raised.
+                            primary_ctx.response_text = ""
+                            if not primary_future.done():
+                                primary_future.set_result(response)
+                            for _, _, ef in merged_messages[1:]:
+                                if not ef.done():
+                                    ef.set_result("")
+                            continue
                         except (ReasoningTimeoutError, ReasoningConnectionError) as exc:
                             primary_ctx.phase_timings["reason"] = int((time.monotonic() - _t0) * 1000)
                             runner.provider_errors.append(str(exc)[:200])

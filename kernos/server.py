@@ -613,6 +613,11 @@ async def on_message(message):
 
 
 if __name__ == "__main__":
+    # Startup binary health check — binary config read, no network, no LLM.
+    # Exit cleanly with code 1 if any named chain has no providers configured.
+    from kernos.setup.health_check import enforce_or_exit
+    enforce_or_exit()
+
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_BOT_TOKEN not set in .env")
