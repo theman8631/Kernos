@@ -106,10 +106,6 @@ class TelegramPoller:
                 logger.warning("TELEGRAM_POLL: error: %s", exc)
                 await asyncio.sleep(5)
 
-
-class _Conflict409(Exception):
-    """Raised when Telegram returns HTTP 409 (another getUpdates owner)."""
-
     async def _check_updates(self) -> None:
         """GET /getUpdates with long polling."""
         http = await self._ensure_http()
@@ -180,3 +176,7 @@ class _Conflict409(Exception):
                     channel_target=chat_id,
                     message=response_text,
                 )
+
+
+class _Conflict409(Exception):
+    """Raised when Telegram returns HTTP 409 (another getUpdates owner)."""
