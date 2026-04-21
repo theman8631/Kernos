@@ -489,10 +489,6 @@ async def on_ready():
 
 
 
-import random
-
-_DEFAULT_THINKING_EMOJI = ["⏳", "🤔", "💭", "🧠", "👀", "💡", "🔍"]
-
 DISCORD_MAX_LENGTH = 2000
 
 
@@ -596,25 +592,13 @@ async def on_message(message):
             if not text_attachments and not message.content:
                 return
 
-    # Send placeholder, edit to final response (eliminates dead air)
-    # Pick emoji from active space if available, else defaults
-    _emoji_pool = _DEFAULT_THINKING_EMOJI
-    try:
-        _tp = await handler.state.get_instance_profile(normalized.instance_id)
-        if _tp and _tp.last_active_space_id:
-            _sp = await handler.state.get_context_space(normalized.instance_id, _tp.last_active_space_id)
-            if _sp and getattr(_sp, 'thinking_emoji', None):
-                _emoji_pool = _sp.thinking_emoji
-    except Exception:
-        pass
-    # Emoji placeholder (just the emoji, no text) + typing animation while processing
-    placeholder = await message.channel.send(random.choice(_emoji_pool))
+    # Typing animation during processing (no placeholder message)
     try:
         async with message.channel.typing():
             response_text = await handler.process(normalized)
     except Exception as exc:
         logger.error("Handler error: %s", exc, exc_info=True)
-        await placeholder.edit(content="Something went wrong — try again in a moment.")
+        await message.channel.send("Something went wrong — try again in a moment.")
         try:
             await message.add_reaction("⚠️")
         except Exception:
@@ -622,15 +606,9 @@ async def on_message(message):
         return
 
     if not response_text:  # Merged message — response comes from primary turn
-        try:
-            await placeholder.delete()
-        except Exception:
-            pass
         return
 
-    chunks = _chunk_response(response_text)
-    await placeholder.edit(content=chunks[0])
-    for chunk in chunks[1:]:
+    for chunk in _chunk_response(response_text):
         await message.channel.send(chunk)
 
 

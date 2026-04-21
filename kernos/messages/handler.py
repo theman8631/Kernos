@@ -2783,14 +2783,8 @@ class MessageHandler:
                 "type": "array", "items": {"type": "string"},
                 "description": "Section titles from parent _procedures.md that belong in the new domain",
             },
-            "thinking_emoji": {
-                "type": "array", "items": {"type": "string"},
-                "description": "3-7 emoji that feel right as thinking/processing indicators for this domain. "
-                "Pick emoji that match the domain's vibe. Health → 💊🩺🧬. "
-                "D&D → 🎲🐉⚔️. Finance → 📊💰🧮. Creative → 🎨✨🌀.",
-            },
         },
-        "required": ["create_domain", "confidence", "name", "description", "posture", "reasoning", "rename", "new_name", "rename_evidence", "migrate_covenants", "migrate_files", "migrate_procedure_sections", "thinking_emoji"],
+        "required": ["create_domain", "confidence", "name", "description", "posture", "reasoning", "rename", "new_name", "rename_evidence", "migrate_covenants", "migrate_files", "migrate_procedure_sections"],
         "additionalProperties": False,
     }
 
@@ -3065,7 +3059,6 @@ class MessageHandler:
                 depth=space.depth + 1,
                 created_at=now,
                 last_active_at=now,
-                thinking_emoji=parsed.get("thinking_emoji", []),
             )
             await self.state.save_context_space(new_space)
 

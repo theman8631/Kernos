@@ -89,7 +89,6 @@ _CONTEXT_SPACE_FIELDS = {
     "parent_id", "aliases", "depth",
     "renamed_from", "renamed_at",
     "local_affordance_set", "last_catalog_version",
-    "thinking_emoji",
 }
 
 
