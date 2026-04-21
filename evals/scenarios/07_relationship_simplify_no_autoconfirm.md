@@ -40,8 +40,20 @@ members:
 - relationships: emma
 
 ## Rubrics
-- After the scenario, `relationships:owner` contains a row where declarer=owner, other=emma, permission=full-access. (Harold's declaration stored directionally.)
-- After the scenario, `relationships:emma` contains a row where declarer=emma, other=owner, permission=no-access. (Emma's declaration stored directionally, independently of Harold's.)
+- kind: mechanical
+  check: observation_has
+  observation: relationships:owner
+  where:
+    declarer: owner
+    other: emma
+    permission: full-access
+- kind: mechanical
+  check: observation_has
+  observation: relationships:emma
+  where:
+    declarer: emma
+    other: owner
+    permission: no-access
 - The two declarations do NOT have matching permissions — if auto-flip were happening, both rows would have the same permission. They don't, which confirms no auto-confirmation.
 - No reply in the transcript uses the legacy status words "confirmed", "proposed", or "disputed" when describing the declarations (these terms referred to the old auto-confirmation state machine, which was removed).
 - No reply uses the legacy profile names: `full-share`, `work-only`, `coordination-only`, `minimal`.

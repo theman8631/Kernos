@@ -35,6 +35,12 @@ members:
 - relational_messages: emma
 
 ## Rubrics
-- `relational_messages:owner` contains one envelope with intent=request_action, origin=owner, addressee=emma. This proves the dispatcher allowed the send even with no declared relationship.
+- kind: mechanical
+  check: observation_has
+  observation: relational_messages:owner
+  where:
+    origin: owner
+    addressee: emma
+    intent: request_action
 - The envelope's state is delivered, surfaced, or resolved (it was picked up on Emma's turn).
 - The agent's turn-1 reply confirms the send, NOT a permission denial.

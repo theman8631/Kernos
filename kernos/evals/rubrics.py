@@ -1,8 +1,12 @@
-"""LLM-based rubric evaluation.
+"""Rubric evaluation — mechanical dispatch + LLM fallback.
 
-Each rubric gets one cheap-model call. The system prompt is fixed so verdicts
-are consistent across runs. The model returns structured output:
-  {"verdict": "pass" | "fail", "reasoning": "..."}
+EVAL-MECHANICAL-RUBRICS: rubrics with `kind: mechanical` route through the
+deterministic Python primitives in `kernos.evals.mechanical`. Rubrics with
+`kind: semantic` (the default for any free-text rubric) continue to use the
+LLM evaluator with the system prompt below.
+
+Governing principle: *LLMs for thinking. Python for state.* The LLM stays for
+judgment calls; state identification runs in Python.
 """
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import json
 import logging
 from typing import Any
 
+from kernos.evals.mechanical import MechanicalVerdict, evaluate_mechanical
 from kernos.evals.types import Rubric, RubricVerdict, ScenarioResult
 
 logger = logging.getLogger(__name__)
@@ -100,7 +105,10 @@ async def evaluate_rubrics(
 ) -> list[RubricVerdict]:
     """Run each rubric and collect verdicts.
 
-    Uses the reasoning service's cheap chain. One call per rubric.
+    Dispatch:
+      - `kind == "mechanical"` → run a pure Python primitive against captured
+        state. No LLM call, no variance, millisecond-level.
+      - `kind == "semantic"` (default) → LLM evaluator via the cheap chain.
     """
     verdicts: list[RubricVerdict] = []
     if not rubrics:
@@ -111,6 +119,9 @@ async def evaluate_rubrics(
 
     for rubric in rubrics:
         try:
+            if rubric.kind == "mechanical":
+                verdicts.append(_evaluate_mechanical(rubric, result))
+                continue
             verdict = await _evaluate_one(
                 reasoning_service, rubric, transcript, observations,
             )
@@ -124,6 +135,16 @@ async def evaluate_rubrics(
                 error=f"evaluator failure: {type(exc).__name__}: {exc}",
             ))
     return verdicts
+
+
+def _evaluate_mechanical(rubric: Rubric, result: ScenarioResult) -> RubricVerdict:
+    """Route to a mechanical primitive. Pure function; never touches the LLM."""
+    mv: MechanicalVerdict = evaluate_mechanical(rubric.check, rubric.params, result)
+    return RubricVerdict(
+        question=rubric.question,
+        passed=mv.passed,
+        reasoning=f"[mechanical:{rubric.check}] {mv.reason}",
+    )
 
 
 async def _evaluate_one(

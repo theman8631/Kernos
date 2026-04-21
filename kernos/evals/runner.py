@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import traceback
 from pathlib import Path
@@ -23,6 +24,75 @@ from kernos.evals.types import (
 from kernos.utils import utc_now
 
 logger = logging.getLogger(__name__)
+
+
+# EVAL-MECHANICAL-RUBRICS — log patterns the runner watches to populate
+# ScenarioResult.tool_calls and ScenarioResult.trace_events. These are the
+# only two surfaces mechanical primitives need beyond observations and
+# transcripts; keeping the list small is intentional.
+_TOOL_DISPATCH_RE = re.compile(
+    r"TOOL_DISPATCH:\s*name=(?P<name>[A-Za-z0-9_]+)"
+)
+_AGENT_RESULT_RE = re.compile(
+    r"AGENT_RESULT:\s*tool=(?P<name>[A-Za-z0-9_]+)\s+success=(?P<success>\S+)"
+)
+# trace_event_fired primitive is declarative — when the kernel emits a
+# known log signal (e.g., SURFACE_LEAK_DETECTED) during a turn, the runner
+# captures it so the rubric can assert `trace_event_fired(event_name=...)`.
+_TRACE_EVENT_NAMES = ("SURFACE_LEAK_DETECTED",)
+
+
+class _EvalLogCapture(logging.Handler):
+    """Capture tool invocations and named trace events during a turn.
+
+    Attached to the root logger for the duration of `run_scenario`, removed
+    on exit. Writes into the two lists on the enclosing ScenarioResult. This
+    is the eval-harness side of the mechanical-rubric contract — any kernel
+    `logger.info("TOOL_DISPATCH: …")` or `logger.warning("SURFACE_LEAK_…")`
+    becomes a structured item mechanical primitives can check against.
+    """
+
+    def __init__(
+        self, tool_calls: list[dict], trace_events: list[dict],
+    ) -> None:
+        super().__init__(level=logging.DEBUG)
+        self._tool_calls = tool_calls
+        self._trace_events = trace_events
+        self._current_turn: int = 0
+
+    def set_turn(self, idx: int) -> None:
+        self._current_turn = idx
+
+    def emit(self, record: logging.LogRecord) -> None:  # type: ignore[override]
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return
+        # Tool dispatch / result — dedupe by (name, turn) so TOOL_DISPATCH
+        # + AGENT_RESULT don't double-count a single call.
+        m = _TOOL_DISPATCH_RE.search(msg) or _AGENT_RESULT_RE.search(msg)
+        if m:
+            name = m.group("name")
+            turn = self._current_turn
+            if not any(
+                c.get("name") == name and c.get("turn_index") == turn
+                for c in self._tool_calls
+            ):
+                self._tool_calls.append({
+                    "name": name,
+                    "turn_index": turn,
+                    "source": "AGENT_RESULT" if "AGENT_RESULT" in msg else "TOOL_DISPATCH",
+                })
+            return
+        # Named trace events.
+        for event_name in _TRACE_EVENT_NAMES:
+            if event_name in msg:
+                self._trace_events.append({
+                    "event": event_name,
+                    "detail": msg[:500],
+                    "turn_index": self._current_turn,
+                })
+                return
 
 
 async def run_scenario(
@@ -44,6 +114,27 @@ async def run_scenario(
     bi: BootstrappedInstance | None = None
     total_turns = len(scenario.turns)
 
+    # EVAL-MECHANICAL-RUBRICS — attach log capture for tool calls and named
+    # trace events so mechanical primitives have something to match against.
+    # The default eval config silences `kernos.kernel.reasoning` and
+    # `kernos.messages.handler` at ERROR; we need INFO records from those
+    # loggers to see TOOL_DISPATCH / SURFACE_LEAK_DETECTED, so temporarily
+    # lift them and restore on exit.
+    log_capture = _EvalLogCapture(result.tool_calls, result.trace_events)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_capture)
+    _capture_loggers = (
+        "kernos.kernel.reasoning",
+        "kernos.messages.handler",
+    )
+    _prior_levels: dict[str, int] = {
+        n: logging.getLogger(n).level for n in _capture_loggers
+    }
+    for _name in _capture_loggers:
+        _lg = logging.getLogger(_name)
+        if _lg.level == logging.NOTSET or _lg.level > logging.INFO:
+            _lg.setLevel(logging.INFO)
+
     def _emit(kind: str, payload: dict) -> None:
         if on_event is None:
             return
@@ -63,6 +154,7 @@ async def run_scenario(
 
         # --- Turns ---
         for idx, turn in enumerate(scenario.turns, start=1):
+            log_capture.set_turn(idx)
             turn_result = await _run_turn(
                 bi, idx, turn, background_task_wait_s=background_task_wait_s,
             )
@@ -96,6 +188,15 @@ async def run_scenario(
         result.setup_error = f"{exc}\n\n{tb}"
         logger.exception("eval scenario failed")
     finally:
+        try:
+            root_logger.removeHandler(log_capture)
+        except Exception:
+            pass
+        for _name, _lvl in _prior_levels.items():
+            try:
+                logging.getLogger(_name).setLevel(_lvl)
+            except Exception:
+                pass
         if bi is not None:
             await bi.close()
 

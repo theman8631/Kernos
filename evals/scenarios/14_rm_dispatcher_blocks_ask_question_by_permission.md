@@ -32,7 +32,11 @@ members:
 - relationships: owner
 
 ## Rubrics
-- `relational_messages:owner` is EMPTY — no envelope was created because the dispatcher rejected the send.
-- `relational_messages:emma` is EMPTY — nothing was delivered.
+- kind: mechanical
+  check: observation_absent
+  observation: relational_messages:owner
+- kind: mechanical
+  check: observation_absent
+  observation: relational_messages:emma
 - The agent's turn-1 reply indicates the send failed with a permission-related reason (phrases like "permission denied", "not allowed", "need full-access", or "I can't ask without").
 - No relationships row exists between owner and emma showing full-access (Harold never declared one).

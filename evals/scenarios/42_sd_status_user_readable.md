@@ -23,7 +23,16 @@ members:
 - member_profile: owner
 
 ## Rubrics
-- The agent's turn-2 reply (the /status output) does NOT contain "mem_" followed by hex characters.
-- The agent's turn-2 reply does NOT contain "space_" followed by hex characters.
-- The agent's turn-2 reply does NOT contain a file path to diagnostics (no ".txt" file path, no "/diagnostics/" path).
+- kind: mechanical
+  check: reply_does_not_contain
+  turn: 2
+  pattern: 'mem_[a-f0-9]+'
+- kind: mechanical
+  check: reply_does_not_contain
+  turn: 2
+  pattern: 'space_[a-f0-9]+'
+- kind: mechanical
+  check: reply_does_not_contain
+  turn: 2
+  pattern: '\.txt|/diagnostics/'
 - The agent's turn-2 reply mentions Harold's display name OR a connected platform by name OR a current space by name — at least ONE of these human-readable references.

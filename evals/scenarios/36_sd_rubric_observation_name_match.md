@@ -31,7 +31,25 @@ members:
 - member_profile: emma
 
 ## Rubrics
-- The `relationships:owner` observation includes an entry whose `declarer_display_name` equals "Harold" AND whose `other_display_name` equals "Emma".
-- The `relationships:emma` observation includes an entry whose `declarer_display_name` equals "Emma" AND whose `other_display_name` equals "Harold".
-- The `member_profile:owner` observation has `display_name` equal to "Harold".
-- The `member_profile:emma` observation has `display_name` equal to "Emma".
+- kind: mechanical
+  check: observation_has
+  observation: relationships:owner
+  where:
+    declarer_display_name: Harold
+    other_display_name: Emma
+- kind: mechanical
+  check: observation_has
+  observation: relationships:emma
+  where:
+    declarer_display_name: Emma
+    other_display_name: Harold
+- kind: mechanical
+  check: observation_field_equals
+  observation: member_profile:owner
+  field: display_name
+  value: Harold
+- kind: mechanical
+  check: observation_field_equals
+  observation: member_profile:emma
+  field: display_name
+  value: Emma

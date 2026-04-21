@@ -39,7 +39,13 @@ members:
 - relationships: emma
 
 ## Rubrics
-- After the scenario, `relational_messages:owner` contains exactly one envelope where origin=owner, addressee=emma, intent=request_action.
+- kind: mechanical
+  check: observation_has
+  observation: relational_messages:owner
+  where:
+    origin: owner
+    addressee: emma
+    intent: request_action
 - That envelope's state is one of: delivered, surfaced, or resolved (it was picked up on Emma's turn 4).
 - The envelope content references a 3pm or 3-4pm block / sync / calendar action.
 - Harold's declaration toward Emma is full-access and Emma's is full-access (confirms permission matrix allowed the send).

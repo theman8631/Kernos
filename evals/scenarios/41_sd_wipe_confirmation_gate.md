@@ -27,4 +27,8 @@ members:
 - The agent's turn-1 reply asks for explicit confirmation and mentions "/wipe me yes" (or similar) as the way to proceed. It does NOT execute the wipe on turn 1.
 - The agent's turn-2 reply indicates cancellation ("cancelled" or "not wiping" or similar). It does NOT execute the wipe.
 - The agent's turn-3 reply again prompts for confirmation — turn-2's `no` reset any pending state.
-- After all three turns, member_profile:owner still exists and has display_name "Harold" (the scenario's wipe was never confirmed).
+- kind: mechanical
+  check: observation_field_equals
+  observation: member_profile:owner
+  field: display_name
+  value: Harold

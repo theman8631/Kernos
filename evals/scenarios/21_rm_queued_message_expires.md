@@ -32,6 +32,10 @@ members:
 
 ## Rubrics
 - The envelope "stale queued note" appears in `relational_messages:owner`.
-- Its state is `expired` after the sweep.
+- kind: mechanical
+  check: observation_has
+  observation: relational_messages:owner
+  where:
+    state: expired
 - `expired_at` is non-empty.
 - No `delivered_at` is set — it never reached Emma's turn before expiring.

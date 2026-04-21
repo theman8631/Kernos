@@ -28,5 +28,10 @@ members:
 
 ## Rubrics
 - `relational_messages:owner` contains EXACTLY ONE envelope where `origin` is "owner". Not zero, not two, not more. One.
-- That envelope's addressee resolves to Emma.
+- kind: mechanical
+  check: observation_has
+  observation: relational_messages:owner
+  where:
+    origin: owner
+    addressee: emma
 - The agent's turn-1 reply is a conversational confirmation (e.g., "done", "sent"). It does NOT mention calling additional tools or follow-on actions beyond what Harold asked for.

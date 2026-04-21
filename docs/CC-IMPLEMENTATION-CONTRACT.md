@@ -178,6 +178,33 @@ Respond in the exact format above. Keep each answer tight.
 
 Codex's output appears in the batch report under `## Codex Review`. For each fix-in-round: what CC changed in response. For each kick-back: the finding preserved verbatim with CC's reasoning for why it exceeds scope, logged as a proposed new spec.
 
+## Governing Principle: LLMs for thinking. Python for state.
+
+Established 2026-04-20 after the SURFACE-DISCIPLINE-PASS batch closed. Three consecutive batches tripped over the same pattern — LLM calls doing deterministic work and accumulating variance, latency, and cost for no judgment gain. Posted to the Kernos landing page as a first-class standing principle. Codified here so CC enforces it in implementation and Codex flags it in review.
+
+### The principle
+
+- **Deterministic check** — answer is a function of captured data alone, with no room for interpretation: substring match, field equality, count comparison, event presence, tool invocation, state enum value. **Python.**
+- **Semantic check** — answer requires judgment about meaning, tone, appropriateness, or fuzzy match against conceptual intent: "was the agent warm," "did the response feel coherent," "is this consistent with the personality." **LLM.**
+
+When in doubt, ask: *could a Python function with access to the captured state return the right answer every time?* If yes, mechanical. If the answer depends on interpreting what the text means, semantic.
+
+### When this principle applies
+
+**In specs.** Architect writes specs that keep LLM calls reserved for judgment work. Where a spec could be drafted either way, the deterministic path wins.
+
+**In implementation.** CC rejects any shape where the code calls an LLM to perform state identification. If CC encounters a mechanical check being built against an LLM call during implementation — even outside the immediate spec's scope — flag it as a potential kick-back for a future audit batch.
+
+**In Codex review.** Codex reviewing the shipped delta should flag LLM-for-deterministic-check as a finding. This is not style criticism; it's principle enforcement. The finding is FIX-IN-ROUND if the call sits inside the batch's scope and has an obvious Python replacement; KICK-BACK if it requires new primitives or restructuring.
+
+### Existing kernel call sites
+
+A prior audit flagged these as mostly legitimate semantic work and they stay as LLM calls: `gate`, `router`, `dedup`, `resolution`, `preference_parser`, `covenant_manager`. Any future code that reaches for an LLM call must pass the test: *is there judgment here, or is this state identification?* If it's state identification, it's Python.
+
+### First application
+
+`EVAL-MECHANICAL-RUBRICS` (batch opened 2026-04-21) is the first spec written under this principle. It carved the eval harness's rubric evaluator into two routes — mechanical rubrics run as pure Python functions against captured state; semantic rubrics continue through the LLM evaluator. Governing-principle enforcement applies from that batch forward.
+
 ## Escalation Triggers
 
 CC stops and produces the batch report (flagged as BLOCKED or PARTIAL) in any of these cases:

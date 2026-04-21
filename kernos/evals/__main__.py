@@ -18,6 +18,14 @@ import sys
 import time
 from pathlib import Path
 
+# Load .env so provider API keys are available when the harness runs
+# outside a shell that pre-sources them (matches server.py / cli.py).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from kernos.evals.report import write_report
 from kernos.evals.runner import run_scenario
 from kernos.evals.scenario import load_scenario

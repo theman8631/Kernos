@@ -44,6 +44,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from kernos.evals.mechanical import validate_mechanical_rubric
 from kernos.evals.types import (
     MemberSpec, Observation, Rubric, Scenario, Setup, Turn,
 )
@@ -257,12 +258,205 @@ def _parse_observations(text: str) -> list[Observation]:
 
 
 def _parse_rubrics(text: str) -> list[Rubric]:
+    """Parse the Rubrics section, supporting both semantic and mechanical forms.
+
+    Semantic (free-text, original syntax):
+        - The agent declined politely.
+
+    Mechanical (EVAL-MECHANICAL-RUBRICS, multi-line block):
+        - kind: mechanical
+          check: reply_does_not_contain
+          turn: any
+          pattern: 'mem_[a-f0-9]+'
+
+    Mechanical rubrics are validated at parse time against the projector path
+    registry — an unknown observation kind or a where-key that isn't in the
+    projector schema raises a ValueError right here, so the scenario never
+    loads in a broken state.
+    """
     rubrics: list[Rubric] = []
-    for line in text.splitlines():
-        m = _LIST_RE.match(line)
-        if not m:
-            continue
-        q = m.group(1).strip()
-        if q:
-            rubrics.append(Rubric(question=q))
+    blocks = _split_rubric_blocks(text)
+    for block in blocks:
+        rubrics.append(_parse_rubric_block(block))
     return rubrics
+
+
+def _split_rubric_blocks(text: str) -> list[list[str]]:
+    """Group the Rubrics section into per-rubric line blocks.
+
+    A new rubric starts on a line whose first non-whitespace character is
+    `-`. Continuation lines (for mechanical rubrics' sub-keys like `check:`,
+    `turn:`, `where:`) are indented beneath the starter. Blank lines separate
+    nothing — they just get dropped.
+    """
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(">") or stripped.startswith("#"):
+            continue
+        if _LIST_RE.match(raw):
+            if current is not None:
+                blocks.append(current)
+            current = [raw]
+        else:
+            if current is not None:
+                current.append(raw)
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+_MECH_KIND_RE = re.compile(r"^\s*kind\s*:\s*(.+?)\s*$")
+
+
+def _parse_rubric_block(lines: list[str]) -> Rubric:
+    """Turn one block of lines into a Rubric (semantic or mechanical)."""
+    if not lines:
+        return Rubric(question="")
+
+    first = lines[0]
+    m = _LIST_RE.match(first)
+    header = m.group(1).strip() if m else first.strip()
+
+    # Detect mechanical form: first line reads `- kind: mechanical`.
+    kind_match = _MECH_KIND_RE.match(header)
+    if kind_match and kind_match.group(1).strip().lower() == "mechanical":
+        return _parse_mechanical_rubric(lines)
+
+    # Semantic fallback: the original behaviour. Treat the first line as the
+    # question; additional indented lines (rare) are joined so multi-line
+    # semantic rubrics aren't silently truncated.
+    extras = [l.strip() for l in lines[1:] if l.strip()]
+    question = header
+    if extras:
+        question = " ".join([header] + extras).strip()
+    return Rubric(question=question)
+
+
+def _parse_mechanical_rubric(lines: list[str]) -> Rubric:
+    """Parse a mechanical rubric block into a Rubric with check + params."""
+    first = lines[0]
+    m = _LIST_RE.match(first)
+    header = m.group(1).strip() if m else first.strip()
+    fields: dict[str, object] = {}
+    # Include `kind: mechanical` from the header.
+    _absorb_field(fields, header)
+    # Walk continuation lines, detecting nested `where:` sub-dict.
+    where: dict[str, object] | None = None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("where"):
+            where = {}
+            # `where:` might carry inline value on the same line (rare); accept
+            # `where:` followed by indented key: value pairs (common).
+            _, _, inline = stripped.partition(":")
+            inline = inline.strip()
+            if inline:
+                for k, v in _parse_inline_dict(inline).items():
+                    where[k] = v
+            fields["where"] = where
+            continue
+        if where is not None and line.startswith((" ", "\t")) and not stripped.startswith("-"):
+            # Indented continuation under `where:` — a sub-key.
+            k, _, v = stripped.partition(":")
+            k = k.strip()
+            v = _coerce_scalar(v.strip())
+            if k:
+                where[k] = v
+            continue
+        # Regular top-level sub-key.
+        where = None
+        _absorb_field(fields, stripped)
+
+    check = str(fields.get("check", "")).strip()
+    params: dict[str, object] = {k: v for k, v in fields.items() if k not in ("kind",)}
+    # Note: `check` is kept in params for completeness, but we hoist it to
+    # its own field on the Rubric for the dispatcher.
+    params.pop("check", None)
+
+    err = validate_mechanical_rubric(check, params)
+    if err:
+        raise ValueError(
+            f"mechanical rubric invalid: {err}\nblock was:\n"
+            + "\n".join(lines)
+        )
+
+    question = _synthesize_mechanical_question(check, params)
+    return Rubric(
+        question=question, kind="mechanical", check=check, params=params,
+    )
+
+
+def _synthesize_mechanical_question(check: str, params: dict) -> str:
+    """Make a human-readable line for reports and summary tables."""
+    if check in ("reply_contains", "reply_does_not_contain"):
+        return f"{check}(turn={params.get('turn', 'any')!r}, pattern={params.get('pattern', '')!r})"
+    if check == "observation_has":
+        return f"observation_has({params.get('observation', '')!r}, where={params.get('where', {})!r})"
+    if check == "observation_field_equals":
+        return (
+            f"observation_field_equals({params.get('observation', '')!r}, "
+            f"field={params.get('field', '')!r}, value={params.get('value')!r})"
+        )
+    if check in ("observation_absent", "observation_empty"):
+        return f"{check}({params.get('observation', '')!r})"
+    if check == "trace_event_fired":
+        return f"trace_event_fired({params.get('event_name', '')!r})"
+    if check in ("tool_called", "tool_not_called"):
+        return f"{check}({params.get('tool_name', '')!r})"
+    return f"mechanical:{check}"
+
+
+def _absorb_field(fields: dict, stripped: str) -> None:
+    """Parse `key: value` and store into `fields` with scalar coercion."""
+    if ":" not in stripped:
+        return
+    k, _, v = stripped.partition(":")
+    k = k.strip().lower()
+    v = v.strip()
+    if not k:
+        return
+    fields[k] = _coerce_scalar(v)
+
+
+def _coerce_scalar(v: str) -> object:
+    """Turn a raw YAML-ish scalar string into Python. Strings stay strings
+    unless they parse cleanly as bool/int/None."""
+    s = v.strip()
+    if not s:
+        return ""
+    # Quoted strings — strip the quotes, keep the value verbatim.
+    if (s.startswith("'") and s.endswith("'")) or (s.startswith('"') and s.endswith('"')):
+        return s[1:-1]
+    low = s.lower()
+    if low in ("true", "yes"):
+        return True
+    if low in ("false", "no"):
+        return False
+    if low in ("null", "none", "~"):
+        return None
+    # Integer.
+    try:
+        if s.lstrip("-").isdigit():
+            return int(s)
+    except ValueError:
+        pass
+    return s
+
+
+def _parse_inline_dict(text: str) -> dict:
+    """Parse a minimal `{k: v, k2: v2}` inline dict. Narrow-scope, not YAML."""
+    out: dict = {}
+    body = text.strip().strip("{}").strip()
+    if not body:
+        return out
+    for part in body.split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        k, _, v = part.partition(":")
+        out[k.strip()] = _coerce_scalar(v.strip())
+    return out

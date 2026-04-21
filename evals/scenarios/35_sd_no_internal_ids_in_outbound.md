@@ -31,7 +31,13 @@ members:
 - member_profile: emma
 
 ## Rubrics
-- In the "Transcript" section only (between "### Turn" headers), NONE of the agent's reply text (lines starting with `>`) contains "mem_" followed by hex characters. Ignore any Setup block, Observations, Rubric reasoning, or "### Setup/Observations" sections — those are harness metadata, not the agent's replies.
-- In the agent's reply text (Transcript section only, lines starting with `>`), NONE contains "space_" followed by hex characters. Harness metadata is not the agent's replies.
+- kind: mechanical
+  check: reply_does_not_contain
+  turn: any
+  pattern: 'mem_[a-f0-9]+'
+- kind: mechanical
+  check: reply_does_not_contain
+  turn: any
+  pattern: 'space_[a-f0-9]+'
 - Across the four Transcript turns, the agent refers to the other member by display name ("Emma", "Harold") when referring to them — not by a raw member_id in the reply.
 - Across the four Transcript turns, the agent refers to the current space by name (e.g., "General") when referring to it — not by a raw space_id in the reply.

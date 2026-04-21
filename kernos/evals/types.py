@@ -61,9 +61,25 @@ class Observation:
 
 @dataclass
 class Rubric:
-    """An LLM-judged question. verdict = pass/fail + reasoning."""
+    """A rubric to evaluate against scenario results.
+
+    Two kinds (EVAL-MECHANICAL-RUBRICS):
+      - `semantic` (default): LLM-judged. `question` holds the natural-language
+        criterion; `context` is an optional hint.
+      - `mechanical`: deterministic Python primitive. `check` names the
+        primitive (e.g., `reply_does_not_contain`); `params` holds the
+        structured arguments (turn, pattern, observation, where, field,
+        value, event_name, tool_name). `question` is synthesized for the
+        report so mechanical rubrics render alongside semantic ones.
+
+    No `kind` specified at parse time defaults to `semantic`, preserving the
+    previous behaviour for every existing free-text rubric.
+    """
     question: str
     context: str = ""                   # optional hint about what "pass" means
+    kind: str = "semantic"              # "semantic" | "mechanical"
+    check: str = ""                     # mechanical check primitive name
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -115,6 +131,13 @@ class ScenarioResult:
     setup_summary: str = ""             # what state was prepared
     setup_error: str = ""               # non-empty if setup failed
     artifact_paths: list[str] = field(default_factory=list)  # extra files for the report
+    # EVAL-MECHANICAL-RUBRICS: captured signals for mechanical primitives.
+    # tool_calls: {name, turn_index, success?} — populated by the eval runner's
+    # log hook during each turn. trace_events: {event, detail, turn_index}
+    # collected from specific logger patterns that signal kernel-level events
+    # mechanical rubrics care about (e.g., SURFACE_LEAK_DETECTED).
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    trace_events: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
