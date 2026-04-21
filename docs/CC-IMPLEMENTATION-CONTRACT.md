@@ -247,6 +247,35 @@ A prior audit flagged these as mostly legitimate semantic work and they stay as 
 
 `EVAL-MECHANICAL-RUBRICS` (batch opened 2026-04-21) is the first spec written under this principle. It carved the eval harness's rubric evaluator into two routes — mechanical rubrics run as pure Python functions against captured state; semantic rubrics continue through the LLM evaluator. Governing-principle enforcement applies from that batch forward.
 
+## Governing Principle: Judgment-vs-Plumbing
+
+> **When work requires judgment, a cohort or LLM does it.**
+> **When work is algorithmic, Python does it — and agents/cohorts don't see it.**
+
+This is the dual of "LLMs for thinking, Python for state." One says don't
+misuse LLMs for deterministic work. The other says don't expose deterministic
+work to judgment layers. Together they define the floor.
+
+Practical implications during spec design and implementation:
+
+- Judgment work — semantic understanding, contextual evaluation,
+  interpretation, summarization, natural-language matching — is handled by
+  a cohort or LLM call.
+- Plumbing work — lookups, routing, dispatch, serialization, pair tracking,
+  state mutations, deterministic checks, file IO, config reads, identifier
+  resolution — is handled by Python and does not appear on any agent's or
+  cohort's tool surface or context window.
+- A spec that exposes plumbing to an agent is a spec that hasn't finished
+  its design. A spec that routes deterministic work through an LLM call is
+  a spec that misreads the principle's dual.
+- Cohorts are typically infrastructure, not agent-facing capabilities. When
+  the kernel needs judgment on the agent's behalf, it delegates to a cohort;
+  the agent doesn't invoke the cohort and doesn't see its existence.
+  Fact-harvest, router, compaction, and Messenger all follow this pattern.
+
+Both architect and Claude Code watch for violations during spec design and
+implementation. Codex review flags either violation as a finding.
+
 ## Escalation Triggers
 
 CC stops and produces the batch report (flagged as BLOCKED or PARTIAL) in any of these cases:
