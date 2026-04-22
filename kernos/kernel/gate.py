@@ -190,7 +190,31 @@ class DispatchGate:
         agent_reasoning: str = "",
         is_reactive: bool = True,
     ) -> GateResult:
-        """Full gate evaluation: token → denial limit → override → reactive bypass → model check."""
+        """Full gate evaluation: token → denial limit → override → reactive bypass → model check.
+
+        MESSENGER-IS-THE-VOICE exclusion: ``send_relational_message`` is
+        unconditionally delegated to the Messenger cohort (Layer 3 welfare
+        judgment). The dispatch gate does NOT intervene on cross-member
+        relational exchanges. This is safe only because the Messenger hook
+        in ``RelationalDispatcher.send`` fires on every RM-permitted
+        exchange, after the permission matrix has authorized it. Any code
+        change that makes Messenger's firing conditional on anything (even
+        a feature flag) turns this exclusion into a privacy regression —
+        the two invariants travel together.
+
+        Exclude by tool-call name (not by intent, not by capability). All
+        three intents — ``ask_question``, ``request_action``, ``inform`` —
+        route through ``send_relational_message``, so one exclusion covers
+        the full cross-member surface.
+        """
+        if tool_name == "send_relational_message":
+            self._denial_counts.pop(tool_name, None)
+            return GateResult(
+                allowed=True,
+                reason="messenger_delegated",
+                method="messenger_handoff",
+            )
+
         # Step 0: Denial limit — stop runaway retry loops
         if self._denial_counts.get(tool_name, 0) >= self._denial_limit:
             logger.warning(
