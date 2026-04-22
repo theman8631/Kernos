@@ -687,6 +687,69 @@ class JsonStateStore(StateStore):
         return results
 
     # -----------------------------------------------------------------------
+    # Ephemeral Permissions (MESSENGER-COHORT refer-flow)
+    # -----------------------------------------------------------------------
+    # Flat per-instance JSON. 24h TTL enforced at read time so a missed
+    # expiry sweep doesn't surface stale permissions. No correlation with
+    # any whisper; no refer-id; no reconciliation.
+
+    def _ephemeral_permissions_path(self, instance_id: str) -> Path:
+        return self._state_dir(instance_id) / "ephemeral_permissions.json"
+
+    @staticmethod
+    def _ephemeral_is_expired(d: dict) -> bool:
+        from datetime import datetime, timezone
+        exp = d.get("expires_at", "")
+        if not exp:
+            return True
+        try:
+            ts = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts <= datetime.now(timezone.utc)
+        except (ValueError, TypeError):
+            return True
+
+    async def save_ephemeral_permission(self, perm) -> None:
+        from dataclasses import asdict as _asdict
+        path = self._ephemeral_permissions_path(perm.instance_id)
+        raw = self._read_json(path, [])
+        # Drop expired + upsert by id.
+        raw = [d for d in raw if not self._ephemeral_is_expired(d) and d.get("id") != perm.id]
+        raw.append(_asdict(perm))
+        self._write_json(path, raw)
+
+    async def list_ephemeral_permissions(
+        self,
+        instance_id: str,
+        *,
+        disclosing_member_id: str = "",
+        requesting_member_id: str = "",
+    ) -> list:
+        from kernos.kernel.state import EphemeralPermission
+        path = self._ephemeral_permissions_path(instance_id)
+        raw = self._read_json(path, [])
+        out = []
+        for d in raw:
+            if self._ephemeral_is_expired(d):
+                continue
+            if disclosing_member_id and d.get("disclosing_member_id") != disclosing_member_id:
+                continue
+            if requesting_member_id and d.get("requesting_member_id") != requesting_member_id:
+                continue
+            out.append(EphemeralPermission(**d))
+        return out
+
+    async def expire_ephemeral_permissions(self, instance_id: str) -> int:
+        path = self._ephemeral_permissions_path(instance_id)
+        raw = self._read_json(path, [])
+        kept = [d for d in raw if not self._ephemeral_is_expired(d)]
+        removed = len(raw) - len(kept)
+        if removed:
+            self._write_json(path, kept)
+        return removed
+
+    # -----------------------------------------------------------------------
     # Whispers and Suppressions (Phase 3C)
     # -----------------------------------------------------------------------
 

@@ -1396,8 +1396,248 @@ class MessageHandler:
             instance_db=idb,
             outbound_push=_push,
             trace_emitter=None,  # handler wires per-turn trace via ctx
+            messenger_judge=self._build_messenger_judge_callback(),
         )
         return self._relational_dispatcher
+
+    def _build_messenger_judge_callback(self):
+        """Return the async ``messenger_judge`` callback wired into the RM dispatcher.
+
+        The callback is responsible for: (a) loading the Messenger's judgment
+        inputs (covenants, disclosures, relationship, ephemeral permissions)
+        for the (disclosing, requesting) pair, (b) running
+        ``cohorts.messenger.judge_exchange``, (c) translating the returned
+        ``Optional[MessengerDecision]`` into a ``(content_to_send,
+        refer_whisper|None)`` tuple the dispatcher dispatches on, (d) emitting
+        the MESSENGER_* trace events, and (e) holding the always-respond
+        invariant on exhaustion via the pre-rendered default-deny response.
+
+        Messenger never appears on any agent's tool surface; this callback is
+        the only place the cohort runs, and it runs inside the dispatcher's
+        pre-envelope path — the agent that sent the relational message never
+        sees Messenger's existence in trace or context.
+        """
+        async def _judge(
+            *,
+            instance_id: str,
+            origin_member_id: str,
+            addressee_member_id: str,
+            intent: str,
+            content: str,
+        ):
+            # The exchange's "disclosing" side is the one whose info is being
+            # talked ABOUT. For an outbound ask_question / request_action /
+            # inform, the disclosing side is the RECIPIENT (origin is asking
+            # about them); for other directions the semantics vary. We start
+            # with the conservative read: both directions have the recipient
+            # as the subject of potential welfare concerns. If patterns show
+            # this needs refinement, a future spec can sharpen it.
+            disclosing = addressee_member_id
+            requesting = origin_member_id
+            direction = "inbound"
+
+            async def _display_name(member_id: str) -> str:
+                try:
+                    prof = await self._instance_db.get_member_profile(member_id)
+                    return (prof or {}).get("display_name", "") or member_id
+                except Exception:
+                    return member_id
+            disclosing_name = await _display_name(disclosing)
+            requesting_name = await _display_name(requesting)
+
+            # Relationship profile: the permission string the disclosing
+            # member declared toward the requesting member.
+            relationship = "unknown"
+            try:
+                relationship = await self._instance_db.get_permission(
+                    disclosing, requesting,
+                ) or "unknown"
+            except Exception:
+                pass
+
+            # Covenants — scoped to the disclosing member, currently active.
+            covenants_evidence: list = []
+            try:
+                from kernos.cohorts.messenger import CovenantEvidence
+                rules = await self.state.get_contract_rules(instance_id)
+                for r in rules or []:
+                    # Active, this-member rules only. Member-scoped rules
+                    # with a different member_id are filtered out; empty
+                    # member_id means instance-wide (applies to this member
+                    # by default).
+                    if not getattr(r, "active", True):
+                        continue
+                    owner = getattr(r, "member_id", "") or ""
+                    if owner and owner != disclosing:
+                        continue
+                    # Further narrow by target if populated: exact member id
+                    # match OR relationship-profile identifier match.
+                    target = getattr(r, "target", "") or ""
+                    if target and target != requesting and target != relationship:
+                        # Non-matching targeted covenant — skip.
+                        continue
+                    covenants_evidence.append(
+                        CovenantEvidence(
+                            id=getattr(r, "id", ""),
+                            description=getattr(r, "description", ""),
+                            rule_type=getattr(r, "rule_type", ""),
+                            topic=getattr(r, "topic", "") or "",
+                            target=target,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("MESSENGER_JUDGE_COVENANT_LOAD_FAILED: %s", exc)
+
+            # Ephemeral permissions — treated as synthesized low-priority
+            # covenant evidence so the Messenger sees standing and ephemeral
+            # grants uniformly.
+            try:
+                from kernos.cohorts.messenger import CovenantEvidence
+                eph = await self.state.list_ephemeral_permissions(
+                    instance_id,
+                    disclosing_member_id=disclosing,
+                    requesting_member_id=requesting,
+                )
+                for p in eph or []:
+                    kind = "must" if p.granted else "must_not"
+                    phrasing = (
+                        f"ephemeral permission granted for topic "
+                        f"{p.topic!r}, expires {p.expires_at}"
+                        if p.granted else
+                        f"ephemeral denial for topic {p.topic!r}, "
+                        f"expires {p.expires_at}"
+                    )
+                    covenants_evidence.append(
+                        CovenantEvidence(
+                            id=p.id, description=phrasing,
+                            rule_type=kind, topic=p.topic,
+                            target=requesting,
+                        )
+                    )
+            except Exception:
+                pass
+
+            # Disclosures — recent sensitive knowledge entries about the
+            # disclosing member. Bounded to cap tokens.
+            disclosures: list = []
+            try:
+                from kernos.cohorts.messenger import Disclosure
+                entries = await self.state.query_knowledge(
+                    instance_id=instance_id,
+                    member_id=disclosing,
+                    limit=10,
+                )
+                for e in entries or []:
+                    sens = getattr(e, "sensitivity", "") or ""
+                    if sens in ("contextual", "personal"):
+                        disclosures.append(
+                            Disclosure(
+                                content=getattr(e, "content", "")[:280],
+                                sensitivity=sens,
+                                subject=getattr(e, "subject", "") or "",
+                                created_at=getattr(e, "created_at", "") or "",
+                            )
+                        )
+            except Exception as exc:
+                logger.debug("MESSENGER_DISCLOSURES_LOAD_SKIPPED: %s", exc)
+
+            from kernos.cohorts.messenger import (
+                ExchangeContext,
+                MessengerExhausted,
+                judge_exchange,
+                render_exhaustion_response,
+            )
+            ctx = ExchangeContext(
+                disclosing_member_id=disclosing,
+                disclosing_display_name=disclosing_name,
+                requesting_member_id=requesting,
+                requesting_display_name=requesting_name,
+                relationship_profile=relationship,
+                exchange_direction=direction,
+                content=content,
+                covenants=covenants_evidence,
+                disclosures=disclosures,
+            )
+
+            def _trace_messenger(event_name: str, detail: str) -> None:
+                try:
+                    logger.info("%s: %s", event_name, detail)
+                except Exception:
+                    pass
+
+            try:
+                decision = await judge_exchange(
+                    ctx, reasoning_service=self.reasoning,
+                )
+            except MessengerExhausted as exc:
+                _trace_messenger(
+                    "MESSENGER_EXHAUSTED",
+                    f"disclosing={disclosing} requesting={requesting} "
+                    f"reason={exc.reason[:120]}",
+                )
+                deny_text = render_exhaustion_response(
+                    disclosing_display_name=disclosing_name,
+                    requesting_display_name=requesting_name,
+                )
+                return deny_text, None
+            except Exception as exc:
+                # Callback promises not to raise; log and fall through to
+                # unchanged-send. Always-respond holds: the original content
+                # dispatches as-is.
+                logger.warning("MESSENGER_JUDGE_UNEXPECTED: %s", exc, exc_info=True)
+                return content, None
+
+            if decision is None:
+                _trace_messenger(
+                    "MESSENGER_UNCHANGED",
+                    f"disclosing={disclosing} requesting={requesting}",
+                )
+                return content, None
+
+            if decision.outcome == "revise":
+                _trace_messenger(
+                    "MESSENGER_DECIDED",
+                    f"outcome=revise disclosing={disclosing} "
+                    f"requesting={requesting} "
+                    f"covenants_consulted={len(decision.matched_covenants)}",
+                )
+                return decision.response_text, None
+
+            if decision.outcome == "refer":
+                _trace_messenger(
+                    "MESSENGER_REFERRED",
+                    f"disclosing={disclosing} requesting={requesting}",
+                )
+                # Build a whisper that surfaces to the DISCLOSING member
+                # with the refer_prompt. The handler's awareness layer
+                # already supports owner_member_id-scoped whispers so the
+                # other members don't see this.
+                from datetime import datetime, timezone
+                from kernos.kernel.awareness import Whisper
+                import uuid as _uuid
+                wsp_id = f"wsp_msgr_{_uuid.uuid4().hex[:8]}"
+                whisper = Whisper(
+                    whisper_id=wsp_id,
+                    insight_text=decision.refer_prompt,
+                    delivery_class="ambient",
+                    source_space_id="",
+                    target_space_id="",
+                    supporting_evidence=[],
+                    reasoning_trace=decision.reasoning or "",
+                    knowledge_entry_id="",
+                    foresight_signal=f"messenger_refer:{disclosing}:{requesting}",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    owner_member_id=disclosing,
+                )
+                return decision.response_text, whisper
+
+            # Unknown outcome — log and fall through unchanged.
+            logger.warning(
+                "MESSENGER_UNKNOWN_OUTCOME_FROM_DECISION: %r", decision.outcome,
+            )
+            return content, None
+
+        return _judge
 
     def register_channel(
         self, name: str, display_name: str, platform: str,

@@ -175,6 +175,32 @@ def compute_retrieval_strength(entry: KnowledgeEntry, now_iso: str) -> float:
 
 
 @dataclass
+class EphemeralPermission:
+    """A one-off Messenger permission granted by the disclosing member in
+    response to a refer-flow whisper.
+
+    Consulted by the Messenger as a judgment input alongside covenants; when
+    ``granted`` is True, Messenger can treat the topic as cleared for this
+    specific requester for the lifetime of the entry. When False, it's an
+    explicit denial for this ask that shouldn't be relitigated soon.
+
+    TTL is 24h from creation (V1 contract; not configurable). Entries past
+    their TTL are filtered at read time. No reconciliation pass; no refer-id;
+    no correlation with the original whisper. Kept deliberately flat —
+    durable refer-state is a V2 consideration gated on empirical need.
+    """
+
+    id: str                       # "eph_{uuid8}"
+    instance_id: str
+    disclosing_member_id: str     # Who granted the permission
+    requesting_member_id: str     # Who can use it
+    topic: str                    # User-phrased verbatim ("therapy", "dad's surgery")
+    granted: bool                 # True = permission; False = explicit denial
+    created_at: str
+    expires_at: str               # ISO timestamp, 24h after created_at
+
+
+@dataclass
 class CovenantRule:
     """A behavioral rule in the Covenant — the living contract between agent and user."""
 
@@ -223,6 +249,15 @@ class CovenantRule:
 
     # --- Member scoping (Multi-Member Pass 1) ---
     member_id: str = ""  # Empty = instance-level (applies to all). Non-empty = per-member.
+
+    # --- Messenger cross-member scoping (MESSENGER-COHORT) ---
+    # Optional, user-phrased, no taxonomy. Populated by the covenant-creation
+    # path when the user's directive is recognizably scoped ("don't tell mom
+    # about therapy"). Empty means this covenant is not cross-member-scoped;
+    # Messenger still sees it but doesn't get a direct topic/target anchor.
+    topic: str = ""   # Verbatim user phrasing: "therapy", "the breakup", "dad's surgery".
+    target: str = ""  # Either a resolved member_id OR a relationship-profile identifier
+                      # (e.g. "by-permission-members"). Resolution is Python, deterministic.
 
     # --- Reserved for future phases ---
     agent_id: str = ""
@@ -574,6 +609,32 @@ class StateStore(ABC):
         - The entry is active
         """
         ...
+
+    # Ephemeral Permissions (MESSENGER-COHORT refer-flow, 24h TTL)
+    # Default empty implementation so stores that don't yet implement the
+    # surface return a safe no-op (empty list, silent save). Concrete stores
+    # are encouraged to override. The Messenger's flow degrades gracefully
+    # when ephemeral permissions aren't available — the covenant path still
+    # works, and absent ephemeral state the next ask simply re-refers.
+    async def save_ephemeral_permission(
+        self, perm: "EphemeralPermission",
+    ) -> None:
+        """Persist an ephemeral permission. Idempotent by id."""
+        return None
+
+    async def list_ephemeral_permissions(
+        self,
+        instance_id: str,
+        *,
+        disclosing_member_id: str = "",
+        requesting_member_id: str = "",
+    ) -> "list[EphemeralPermission]":
+        """List unexpired ephemeral permissions, optionally filtered by pair."""
+        return []
+
+    async def expire_ephemeral_permissions(self, instance_id: str) -> int:
+        """Remove expired ephemeral permissions. Returns count removed."""
+        return 0
 
     # Whispers and Suppressions (Phase 3C: Proactive Awareness)
     @abstractmethod

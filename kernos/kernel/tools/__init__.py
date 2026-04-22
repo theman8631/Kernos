@@ -6,6 +6,7 @@ Tool HANDLERS remain in ReasoningService for now (they need the full service con
 """
 from kernos.kernel.tools.schemas import (
     DIAGNOSE_LLM_CHAIN_TOOL,
+    DIAGNOSE_MESSENGER_TOOL,
     INSPECT_STATE_TOOL,
     MANAGE_CAPABILITIES_TOOL,
     READ_DOC_TOOL,
@@ -22,6 +23,7 @@ from kernos.kernel.tools.schemas import (
 
 __all__ = [
     "DIAGNOSE_LLM_CHAIN_TOOL",
+    "DIAGNOSE_MESSENGER_TOOL",
     "INSPECT_STATE_TOOL",
     "MANAGE_CAPABILITIES_TOOL",
     "READ_DOC_TOOL",

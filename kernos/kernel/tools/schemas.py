@@ -287,6 +287,35 @@ SET_CHAIN_MODEL_TOOL = {
 }
 
 
+DIAGNOSE_MESSENGER_TOOL = {
+    "name": "diagnose_messenger",
+    "description": (
+        "Admin-only. Return a readable view of what the Messenger cohort "
+        "would see for a (member_a, member_b) pair: the covenants scoped to "
+        "this pair, the unexpired ephemeral permissions, and the current "
+        "relationship profile. Does not surface recent Messenger decisions "
+        "themselves — Messenger outcomes are friction-trace-only per the "
+        "MESSENGER-COHORT contract and never reach this tool. System space "
+        "only."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "member_a_id": {
+                "type": "string",
+                "description": "The disclosing member's id.",
+            },
+            "member_b_id": {
+                "type": "string",
+                "description": "The requesting member's id.",
+            },
+        },
+        "required": ["member_a_id", "member_b_id"],
+        "additionalProperties": False,
+    },
+}
+
+
 DIAGNOSE_LLM_CHAIN_TOOL = {
     "name": "diagnose_llm_chain",
     "description": (

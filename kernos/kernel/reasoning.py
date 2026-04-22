@@ -493,7 +493,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain", "diagnose_messenger"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -1418,6 +1418,31 @@ class ReasoningService:
                     except Exception as exc:
                         logger.warning("Kernel tool 'diagnose_llm_chain' failed: %s", exc)
                         result = f"diagnose_llm_chain failed: {exc}"
+            elif block.name == "diagnose_messenger":
+                space_type = ""
+                if request.active_space is not None:
+                    space_type = getattr(request.active_space, "space_type", "") or ""
+                if space_type != "system":
+                    result = (
+                        "diagnose_messenger is admin-only and only available "
+                        "in the System space."
+                    )
+                else:
+                    from kernos.cohorts.admin import diagnose_messenger as _diagnose_messenger
+                    try:
+                        import json as _json
+                        idb = getattr(self._handler, "_instance_db", None) if hasattr(self, "_handler") else None
+                        admin_res = await _diagnose_messenger(
+                            instance_id=request.instance_id,
+                            member_a_id=tool_args.get("member_a_id", ""),
+                            member_b_id=tool_args.get("member_b_id", ""),
+                            state=self._state,
+                            instance_db=idb,
+                        )
+                        result = _json.dumps(admin_res, indent=2, default=str)
+                    except Exception as exc:
+                        logger.warning("Kernel tool 'diagnose_messenger' failed: %s", exc)
+                        result = f"diagnose_messenger failed: {exc}"
             elif block.name == "request_tool":
                 result = await self._handle_request_tool(
                     request.instance_id,

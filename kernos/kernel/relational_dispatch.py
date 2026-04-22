@@ -69,6 +69,17 @@ class RelationalDispatcher:
 
     Holds references to state + instance_db + an outbound-push hook.
     Construction is done once per handler; called per turn.
+
+    The optional ``messenger_judge`` callback is the MESSENGER-COHORT
+    judgment hook. When wired, it runs on every RM-permitted cross-member
+    exchange (after Layer-1 permission passes, before envelope creation)
+    and may rewrite content (`revise`), replace content with a holding
+    response while queueing a whisper to the disclosing member (`refer`),
+    or — on cheap-chain exhaustion — deliver a pre-rendered default-deny
+    response. When the callback returns ``None``, the exchange passes
+    through unchanged. The always-respond invariant is preserved by
+    ``_apply_messenger_decision``: every path produces exactly one
+    non-empty RM delivery.
     """
 
     def __init__(
@@ -77,11 +88,16 @@ class RelationalDispatcher:
         instance_db,
         outbound_push=None,   # async (instance_id, member_id, text) -> bool
         trace_emitter=None,   # callable(event_name: str, detail: str) — optional
+        messenger_judge=None, # async (ctx: kernos.cohorts.messenger.ExchangeContext,
+                              #        origin_member_id, addressee_member_id,
+                              #        intent, content) -> (content_to_send, refer_whisper|None)
+                              # See _apply_messenger_decision for the contract.
     ) -> None:
         self.state = state
         self.instance_db = instance_db
         self._push = outbound_push
         self._trace = trace_emitter
+        self._messenger_judge = messenger_judge
 
     # --- Public: send ---
 
@@ -153,6 +169,37 @@ class RelationalDispatcher:
                 ),
             )
 
+        # MESSENGER-COHORT hook: Layer-2 welfare judgment on every exchange
+        # the permission matrix has already permitted. The callback owns the
+        # judgment inputs (covenants, disclosures, relationship profile) and
+        # returns either the original content (unchanged), a rewritten
+        # response (revise), a holding response + a whisper to surface
+        # (refer), or the default-deny response (MessengerExhausted). The
+        # callback itself never raises — it translates Messenger outcomes to
+        # deterministic dispatch directives.
+        content_to_send = content
+        refer_whisper: Any = None
+        if self._messenger_judge is not None:
+            try:
+                content_to_send, refer_whisper = await self._messenger_judge(
+                    instance_id=instance_id,
+                    origin_member_id=origin_member_id,
+                    addressee_member_id=addressee_id,
+                    intent=intent,
+                    content=content,
+                )
+            except Exception as exc:
+                # Defensive: the callback should handle its own exceptions.
+                # If something still leaks, we log and proceed with the
+                # original content — always-respond prevents silence, and
+                # failing-open here is recoverable (Cross-Member Disclosure
+                # retrieval gate is the defense-in-depth backstop).
+                logger.warning(
+                    "MESSENGER_JUDGE_CALLBACK_RAISED: %s", exc, exc_info=True,
+                )
+                content_to_send = content
+                refer_whisper = None
+
         # Build envelope (pending) and persist.
         # Thread-id resolution: explicit conversation_id wins; otherwise if
         # this is a reply_to another envelope, inherit ITS conversation_id
@@ -177,7 +224,7 @@ class RelationalDispatcher:
             origin_agent_identity=origin_agent_identity or "",
             addressee_member_id=addressee_id,
             intent=intent,
-            content=content,
+            content=content_to_send,
             urgency=urgency,
             conversation_id=conv_id,
             state="pending",
@@ -191,6 +238,17 @@ class RelationalDispatcher:
             f"id={msg.id} origin={origin_member_id} addressee={addressee_id} "
             f"intent={intent} urgency={urgency} conversation={conv_id}",
         )
+
+        # Surface the refer-flow whisper to the disclosing member. Persist
+        # is best-effort — the holding response has already been dispatched,
+        # so a whisper-write failure doesn't break always-respond.
+        if refer_whisper is not None:
+            try:
+                await self.state.save_whisper(instance_id, refer_whisper)
+            except Exception as exc:
+                logger.warning(
+                    "MESSENGER_REFER_WHISPER_PERSIST_FAILED: %s", exc,
+                )
 
         # Route by urgency.
         if urgency == "time_sensitive":
