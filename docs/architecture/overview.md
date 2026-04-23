@@ -97,6 +97,10 @@ Every tool call passes through a dispatch gate that classifies effect (read / so
 
 The system prompt as a typed document with named zones — RULES, ACTIONS, NOW, STATE, RESULTS, PROCEDURES, MEMORY — cacheable prefix, provenance tags on knowledge fragments. The runtime refreshes zones selectively without rebuilding the prompt.
 
+### [Canvases →](canvas.md)
+
+Scoped directories of markdown pages — personal / specific-members / team — that accumulate structured content across turns and members. Page types (note / decision / log) are advisory; state transitions fire routes and can consult the operator; canvas creation dispatches `canvas_offer` envelopes to declared members.
+
 *(This is six, not five. The sixth — Cognitive UI grammar — is the structural companion to the other five; it's how the cohort-produced context actually lands in the agent's prompt.)*
 
 ## Hard invariants
