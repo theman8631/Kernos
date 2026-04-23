@@ -283,6 +283,19 @@ async def on_ready():
     except Exception as exc:
         logger.warning("Failed to emit system.started: %s", exc)
 
+    # Post-update whisper: if the previous startup applied an auto-update,
+    # a pending-marker + commit-range log sit in {data_dir}. Convert to a
+    # queued Whisper so the first member turn after restart surfaces a
+    # brief summary of what changed.
+    try:
+        from kernos.setup.self_update import queue_pending_whisper
+        if _instance_id:
+            await queue_pending_whisper(
+                state=state, instance_id=_instance_id, data_dir=data_dir,
+            )
+    except Exception as exc:
+        logger.warning("AUTO_UPDATE_WHISPER_QUEUE_FAILED: %s", exc)
+
     mcp_manager = MCPClientManager(events=events)
 
     credentials_path = os.getenv("GOOGLE_OAUTH_CREDENTIALS_PATH", "")
@@ -622,6 +635,14 @@ if __name__ == "__main__":
     # log effective configuration and any scoped/unscoped pairing warnings.
     from kernos.setup.workspace_config import enforce_or_exit as _enforce_workspace_config
     _enforce_workspace_config()
+
+    # Startup auto-update: pull origin/{KERNOS_UPDATE_BRANCH}, reinstall deps,
+    # execv restart if behind. Graceful fallback on every failure mode
+    # (not a git checkout, dirty tree, network failure, diverged history).
+    # This is the earliest point where config is validated but no external
+    # side effects have happened — safe to replace the process.
+    from kernos.setup.self_update import enforce_or_continue as _self_update
+    _self_update()
 
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:

@@ -131,6 +131,29 @@ Ollama endpoints are configured through chain-specific variables.
 KERNOS_COMPACTION_THRESHOLD=500
 ```
 
+## Auto-Update
+
+**`KERNOS_AUTO_UPDATE`** — controls whether Kernos checks for and applies updates at startup.
+
+### `on` (default)
+
+On each startup, Kernos checks `origin/main` for new commits. If the remote is ahead of your local clone, Kernos pulls the new code, reinstalls dependencies, and restarts itself before proceeding to normal startup. The first member turn after an update surfaces a brief summary of what changed.
+
+The update is skipped without blocking startup if:
+
+- The install directory is not a git clone
+- The working tree has uncommitted or untracked changes
+- The network is unavailable or the remote is unreachable
+- The local history has diverged from `origin/main` (non-fast-forwardable)
+
+### `off`
+
+Skip the startup update check entirely. Use this when you want to control update cadence manually (running `git pull && pip install -e . && systemctl restart kernos` on your own schedule).
+
+### `KERNOS_UPDATE_BRANCH`
+
+Optional override. Defaults to `main`. Set to a different branch name if you want to track a non-main line (e.g., `dogfood`, `pre-release`).
+
 ## Workspace Scope
 
 **`KERNOS_WORKSPACE_SCOPE`** — controls filesystem access for code the agent writes and runs.
