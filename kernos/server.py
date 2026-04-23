@@ -618,6 +618,11 @@ if __name__ == "__main__":
     from kernos.setup.health_check import enforce_or_exit
     enforce_or_exit()
 
+    # Workspace scope + builder toggle validation. Exit 1 on unknown values;
+    # log effective configuration and any scoped/unscoped pairing warnings.
+    from kernos.setup.workspace_config import enforce_or_exit as _enforce_workspace_config
+    _enforce_workspace_config()
+
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         raise RuntimeError("DISCORD_BOT_TOKEN not set in .env")

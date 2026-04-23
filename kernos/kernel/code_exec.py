@@ -3,10 +3,25 @@
 Runs Python code in a subprocess scoped to the current space's directory.
 Hard security walls: tenant isolation, no parent env inheritance, no network
 credentials, no Kernos internals access.
+
+Two install-time toggles shape execution:
+
+``KERNOS_WORKSPACE_SCOPE`` (``isolated`` default / ``unleashed``) — when
+isolated, a Python preamble monkey-patches filesystem entry points so reads
+and writes that resolve outside the space directory raise ``PermissionError``.
+Honest ceiling: catches accidental and casually-malicious access, not a
+determined adversary with ctypes or a native binary.
+
+``KERNOS_BUILDER`` (``native`` default / ``aider`` / ``claude-code`` / ``codex``)
+— which backend fulfills the build/execute request. ``native`` runs the local
+subprocess below; the other three route through the builder dispatcher and
+currently return a structured not-implemented response from a shared stub
+until their adapter batches ship.
 """
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -20,6 +35,17 @@ MAX_TIMEOUT = 300  # seconds
 DEFAULT_TIMEOUT = 30
 STDOUT_BUDGET = 4000  # chars
 STDERR_BUDGET = 2000
+
+#: Valid values for ``KERNOS_WORKSPACE_SCOPE``. Order matters for error
+#: messages.
+VALID_SCOPES: tuple[str, ...] = ("isolated", "unleashed")
+
+#: Where the sandbox preamble lives inside a space directory. Dot-prefixed so
+#: it stays out of casual listings (``Path.glob('*.py')``, ``ls`` without
+#: ``-a``, etc.) while remaining plain Python accessible to the subprocess.
+_PREAMBLE_SUBDIR = ".kernos_sandbox"
+_PREAMBLE_FILENAME = "sandbox_preamble.py"
+
 
 EXECUTE_CODE_TOOL = {
     "name": "execute_code",
@@ -82,20 +108,84 @@ def _validate_filename(name: str) -> bool:
     return True
 
 
-async def execute_code(
+def _effective_scope() -> str:
+    """Read ``KERNOS_WORKSPACE_SCOPE`` with default + normalization."""
+    raw = (os.getenv("KERNOS_WORKSPACE_SCOPE", "") or "isolated").strip().lower()
+    if raw not in VALID_SCOPES:
+        # Server startup validation rejects invalid values up front; this
+        # belt-and-suspenders path falls back to the safer default so a
+        # misconfigured worker never silently loses scope enforcement.
+        logger.warning(
+            "WORKSPACE_SCOPE: unknown value %r — defaulting to 'isolated'", raw,
+        )
+        return "isolated"
+    return raw
+
+
+def _effective_builder() -> str:
+    """Read ``KERNOS_BUILDER`` with default + normalization."""
+    raw = (os.getenv("KERNOS_BUILDER", "") or "native").strip().lower()
+    return raw
+
+
+def _install_preamble(space_dir: str) -> str:
+    """Copy sandbox_preamble.py into the space's ``.kernos_sandbox/`` dir.
+
+    Returns the absolute path to the preamble's parent directory, which is
+    what the launcher puts on ``sys.path``.
+    """
+    preamble_dir = os.path.join(space_dir, _PREAMBLE_SUBDIR)
+    os.makedirs(preamble_dir, exist_ok=True)
+    src = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sandbox_preamble.py",
+    )
+    dst = os.path.join(preamble_dir, _PREAMBLE_FILENAME)
+    # Copy unconditionally; preamble is tiny and this keeps the sandbox
+    # dir in sync with the shipped module even after an upgrade.
+    shutil.copyfile(src, dst)
+    return preamble_dir
+
+
+def _build_launcher(
+    space_dir: str, preamble_dir: str, source_path: str,
+) -> str:
+    """Render the launcher body that installs scope and execs the user source."""
+    return (
+        "import sys\n"
+        f"sys.path.insert(0, {preamble_dir!r})\n"
+        "from sandbox_preamble import install_scope_wrapper\n"
+        f"install_scope_wrapper({space_dir!r})\n"
+        f"with open({source_path!r}) as _kernos_launcher_f:\n"
+        "    _kernos_launcher_src = _kernos_launcher_f.read()\n"
+        "exec(\n"
+        f"    compile(_kernos_launcher_src, {source_path!r}, 'exec'),\n"
+        "    {'__name__': '__main__', '__file__': "
+        f"{source_path!r}" "},\n"
+        ")\n"
+    )
+
+
+async def _run_native(
     instance_id: str,
     space_id: str,
     code: str,
     timeout_seconds: int = DEFAULT_TIMEOUT,
     write_file_name: str | None = None,
     data_dir: str = "./data",
+    scope: str | None = None,
 ) -> dict[str, Any]:
-    """Execute Python code in a sandboxed subprocess.
+    """Native backend: run Python in a sandboxed subprocess.
+
+    Honors ``scope`` (``isolated`` applies the preamble wrapper). Called by
+    :class:`kernos.kernel.builders.native.NativeBuilder`.
 
     Returns dict with: success, stdout, stderr, exit_code, error (optional).
     """
     # Clamp timeout
     timeout_seconds = max(1, min(MAX_TIMEOUT, timeout_seconds))
+    effective_scope = (scope or _effective_scope()).lower()
+    if effective_scope not in VALID_SCOPES:
+        effective_scope = "isolated"
 
     # Resolve the space's working directory
     space_dir = str(
@@ -103,29 +193,62 @@ async def execute_code(
     )
     os.makedirs(space_dir, exist_ok=True)
 
-    exec_path: str = ""
-    is_temp = False
+    # Paths we create during this call, tracked so finally: can clean up.
+    source_path: str = ""
+    launcher_path: str = ""
+    is_temp_source = False
 
     try:
-        # If write_file specified, persist the code first
+        # 1. Persist user code to source file. write_file_name path keeps
+        #    the persisted copy clean — no preamble boilerplate in it.
         if write_file_name:
             if not _validate_filename(write_file_name):
-                return {"success": False, "error": "Invalid filename — no path separators or '..' allowed", "exit_code": -1}
-            exec_path = os.path.join(space_dir, write_file_name)
-            with open(exec_path, "w", encoding="utf-8") as f:
+                return {
+                    "success": False,
+                    "error": "Invalid filename — no path separators or '..' allowed",
+                    "exit_code": -1,
+                }
+            source_path = os.path.join(space_dir, write_file_name)
+            with open(source_path, "w", encoding="utf-8") as f:
                 f.write(code)
-            logger.info("CODE_EXEC_WRITE: space=%s file=%s bytes=%d", space_id, write_file_name, len(code))
+            logger.info(
+                "CODE_EXEC_WRITE: space=%s file=%s bytes=%d",
+                space_id, write_file_name, len(code),
+            )
         else:
-            # Write to a temp file for execution
-            fd, exec_path = tempfile.mkstemp(suffix=".py", dir=space_dir)
+            fd, source_path = tempfile.mkstemp(
+                prefix="_kernos_src_", suffix=".py", dir=space_dir,
+            )
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(code)
-            is_temp = True
+            is_temp_source = True
 
-        _display_name = write_file_name or os.path.basename(exec_path)
-        logger.info("CODE_EXEC: space=%s file=%s timeout=%d", space_id, _display_name, timeout_seconds)
+        # 2. Choose exec_path. In isolated mode, a launcher wraps the source
+        #    with preamble-load + exec; in unleashed mode, the source runs
+        #    directly.
+        if effective_scope == "isolated":
+            preamble_dir = _install_preamble(space_dir)
+            launcher_body = _build_launcher(
+                space_dir=space_dir,
+                preamble_dir=preamble_dir,
+                source_path=source_path,
+            )
+            fd, launcher_path = tempfile.mkstemp(
+                prefix="_kernos_launcher_", suffix=".py", dir=space_dir,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(launcher_body)
+            exec_path = launcher_path
+        else:
+            exec_path = source_path
 
-        # Execute in subprocess with sandboxed env
+        _display_name = write_file_name or os.path.basename(source_path)
+        logger.info(
+            "CODE_EXEC: space=%s file=%s scope=%s timeout=%d",
+            space_id, _display_name, effective_scope, timeout_seconds,
+        )
+
+        # 3. Subprocess exec.
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: subprocess.run(
             ["python3", exec_path],
@@ -157,8 +280,10 @@ async def execute_code(
         return out
 
     except subprocess.TimeoutExpired:
-        logger.warning("CODE_EXEC_TIMEOUT: space=%s timeout=%ds file=%s",
-            space_id, timeout_seconds, write_file_name or "temp")
+        logger.warning(
+            "CODE_EXEC_TIMEOUT: space=%s timeout=%ds file=%s",
+            space_id, timeout_seconds, write_file_name or "temp",
+        )
         return {
             "success": False,
             "error": f"Execution timed out after {timeout_seconds}s",
@@ -172,8 +297,65 @@ async def execute_code(
             "exit_code": -1,
         }
     finally:
-        if is_temp and exec_path and os.path.exists(exec_path):
-            try:
-                os.unlink(exec_path)
-            except OSError as exc:
-                logger.warning("CODE_EXEC_CLEANUP: failed to delete %s: %s", exec_path, exc)
+        # Always delete launcher; delete source only if it was a temp.
+        for _path, _should_delete in (
+            (launcher_path, bool(launcher_path)),
+            (source_path, is_temp_source and bool(source_path)),
+        ):
+            if _should_delete and os.path.exists(_path):
+                try:
+                    os.unlink(_path)
+                except OSError as exc:
+                    logger.warning(
+                        "CODE_EXEC_CLEANUP: failed to delete %s: %s",
+                        _path, exc,
+                    )
+
+
+async def execute_code(
+    instance_id: str,
+    space_id: str,
+    code: str,
+    timeout_seconds: int = DEFAULT_TIMEOUT,
+    write_file_name: str | None = None,
+    data_dir: str = "./data",
+) -> dict[str, Any]:
+    """Execute code via the configured builder backend.
+
+    Reads ``KERNOS_BUILDER`` + ``KERNOS_WORKSPACE_SCOPE`` at call time. The
+    default (``native`` / ``isolated``) matches the shipped behavior of
+    every earlier batch; other backends route through the builder dispatcher
+    and — until their adapter batches ship — return a structured
+    not-implemented response from a shared stub.
+
+    Returns dict with: success, stdout, stderr, exit_code, error (optional).
+    """
+    # Local import to keep this module import-safe for tests that don't need
+    # the builder surface yet.
+    from kernos.kernel.builders import UnknownBuilderError, get_builder
+
+    scope = _effective_scope()
+    builder_name = _effective_builder()
+
+    try:
+        backend = get_builder(builder_name)
+    except UnknownBuilderError as exc:
+        # Startup validation should have caught this; fall back to a safe
+        # structured error rather than crashing the turn.
+        logger.warning("CODE_EXEC: %s", exc)
+        return {
+            "success": False,
+            "error": str(exc),
+            "exit_code": -1,
+        }
+
+    result = await backend.build(
+        instance_id=instance_id,
+        space_id=space_id,
+        code=code,
+        timeout_seconds=timeout_seconds,
+        write_file_name=write_file_name,
+        data_dir=data_dir,
+        scope=scope,
+    )
+    return result.to_dict()

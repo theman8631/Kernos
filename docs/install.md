@@ -131,6 +131,42 @@ Ollama endpoints are configured through chain-specific variables.
 KERNOS_COMPACTION_THRESHOLD=500
 ```
 
+## Workspace Scope
+
+**`KERNOS_WORKSPACE_SCOPE`** — controls filesystem access for code the agent writes and runs.
+
+### `isolated` (default)
+
+The agent's code execution can only read and write files inside the active space directory. Catches accidental and casually-malicious filesystem access.
+
+A determined adversary who can write Python can bypass this via `ctypes` or native syscalls — this is not a security boundary against hostile code execution. It's a scope boundary against workspace spillover.
+
+Use this for: multi-member Kernos, shared machines, anytime "my agent shouldn't casually wander around my filesystem" is a valuable property.
+
+### `unleashed`
+
+The agent's code execution has the same filesystem access the Kernos process itself has. Read anywhere, write anywhere, chdir anywhere.
+
+Use this for: single-user operator setups where the agent is an extension of you, and you want workspace tools that can reach across your whole machine.
+
+## Workspace Builder Backend
+
+**`KERNOS_BUILDER`** — which tool writes and runs code for the workspace.
+
+### `native` (default)
+
+Kernos's own sandboxed Python subprocess. No external dependencies.
+
+### `aider`, `claude-code`, `codex`
+
+Planned integrations for hand-off to external builder agents. Config is accepted but dispatch currently returns not-yet-implemented. Adapters ship as follow-on work.
+
+### Scoped vs Unscoped backends
+
+`native` and `aider` run as Python processes that Kernos can wrap with scope enforcement. `claude-code` and `codex` run as Node binaries that Kernos cannot wrap — they operate at OS level with their own filesystem access.
+
+The Isolated scope toggle only enforces on scoped backends. If you select Isolated scope with an Unscoped backend, Kernos logs a startup warning stating that the external builder is not constrained by scope. Proceed if you trust the external builder the way you'd trust any coding agent you run in a terminal.
+
 ## Verifying Install
 
 After `python kernos/server.py` starts, Kernos begins listening on its configured adapters. Send a message to your Discord bot or SMS number. The first interaction triggers onboarding — Kernos will ask you your name, then guide you through a conversational hatching sequence that produces your per-member agent.
