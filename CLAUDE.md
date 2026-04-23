@@ -7,13 +7,13 @@ A personal agentic operating system. As-built architecture: `docs/TECHNICAL-ARCH
 ## Before You Do Anything
 
 1. **Read `DECISIONS.md` first.** The NOW block tells you what to do. It contains the Active Spec you should execute and recent architectural decisions. If something in DECISIONS.md conflicts with other documents, DECISIONS.md wins (it's more recent).
-2. **Read `docs/TECHNICAL-ARCHITECTURE.md`** for as-built architecture — components, data flows, interfaces. (`docs/BLUEPRINT.md` is a historical vision document, not the current reference.)
+2. **Read `docs/TECHNICAL-ARCHITECTURE.md`** for as-built architecture — components, data flows, interfaces. (`docs/reference/blueprint-original-vision.md` is a historical vision document, not the current reference.)
 3. **Execute only the Active Spec** in DECISIONS.md. Don't jump ahead to future phases. Don't build things not in the current spec. Planning lives in Notion; specs come to you via DECISIONS.md.
 4. **Check instance_id naming** — the codebase uses `instance_id` (not `tenant_id`). All state is keyed to `instance_id`.
 
 ## Kernel Architecture Context
 
-Read `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
+Read `docs/reference/kernel-architecture-outline.md` for the kernel design vision. Key conventions for the kernel layer (`kernos/kernel/`):
 
 - **Event emission is best-effort.** Every `emit()` call is wrapped in try/except. Event logging failures never break the user's message flow.
 - **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.

@@ -78,9 +78,9 @@ None currently active. Next spec will be assigned by founder.
 - **Full roadmap + priority stack:** Notion (Kernos Roadmap — Canonical)
 - **Kit reviews + design documents:** Notion (Kit Reviews)
 - **As-built architecture:** `docs/TECHNICAL-ARCHITECTURE.md`
-- **Kernel design:** `docs/KERNEL-ARCHITECTURE-OUTLINE.md`
+- **Kernel design:** `docs/reference/kernel-architecture-outline.md`
 - **Completed specs:** `specs/completed/`
-- **Design documents:** `docs/DESIGN-*.md`
+- **Design documents:** `docs/reference/design-*.md`
 - **Friction reports:** `data/diagnostics/friction/`
 
 ---

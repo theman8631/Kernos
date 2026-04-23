@@ -89,7 +89,7 @@ KERNOS inverts this. The agent receives pre-assembled context, reasons about the
 
 **Origin:** Synthesized from the full 1B brainstorm plus OSBuilder's answers.
 
-The kernel has five core primitives that compose into three modes of operation. This was distilled into the Kernel Architecture Outline v2 (now in the repo at `docs/KERNEL-ARCHITECTURE-OUTLINE.md`). Here I capture the *reasoning* behind the choices that the outline encodes but doesn't explain.
+The kernel has five core primitives that compose into three modes of operation. This was distilled into the Kernel Architecture Outline v2 (now in the repo at `docs/reference/kernel-architecture-outline.md`). Here I capture the *reasoning* behind the choices that the outline encodes but doesn't explain.
 
 **1. Event Stream** — Chosen as Primitive 1 because OSBuilder's answer to "what do you wish you'd built from day one?" was unequivocal: a unified event bus. We had already built event-sourcing into 1A.4's persistence layer. The key decision was: generalize the three stores (ConversationStore, AuditStore, InstanceStore) into a single typed event stream that multiple consumers can read. Conversation entries and audit entries are both events in the same stream, separated by type rather than by store.
 

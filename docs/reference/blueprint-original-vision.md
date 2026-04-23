@@ -89,7 +89,7 @@ The bidirectional rules governing how humans express intent and how the system p
 The KERNOS kernel architecture was derived from first-principles analysis of what traditional operating system concepts (process scheduling, memory management, resource abstraction, access control) look like when applied to LLM-based agents serving non-technical users.
 
 - **Origin:** A February 26, 2026 conversation between the founder and Claude, deriving agentic OS pillars from traditional OS theory. Refined through architectural brainstorming and a structured interview with OSBuilder (OpenClaw's primary agent), whose real-world experience running a production agent system validated key design decisions and revealed critical failure modes.
-- **Architecture:** Five primitives (Event Stream, State Store, Capability Graph, Reasoning Service, Task Engine) composing into three operational modes (reactive, proactive, generative). See `docs/KERNEL-ARCHITECTURE-OUTLINE.md` for the full design.
+- **Architecture:** Five primitives (Event Stream, State Store, Capability Graph, Reasoning Service, Task Engine) composing into three operational modes (reactive, proactive, generative). See `docs/reference/kernel-architecture-outline.md` for the full design.
 - **Core inversion:** "The agent thinks, the kernel remembers." Unlike existing systems where agents manage their own memory, tool discovery, and safety enforcement, KERNOS separates reasoning (agent) from infrastructure (kernel). The agent receives pre-assembled context, reasons about the current moment, and returns a response. Everything else is kernel responsibility.
 - **Language:** Python for faster iteration in the kernel. No external kernel codebase is forked or integrated — the kernel is KERNOS-native.
 
