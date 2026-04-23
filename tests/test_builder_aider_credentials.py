@@ -28,22 +28,36 @@ def clean_env(monkeypatch):
 
 
 class TestAnthropicPassThrough:
-    """Pillar 2 expected behavior #1: Anthropic pass-through works."""
+    """Pillar 2 expected behavior #1: Anthropic pass-through works.
 
-    def test_anthropic_with_key_yields_sonnet(self, monkeypatch):
+    Aider now mirrors Kernos's primary Anthropic model
+    (``AnthropicProvider.main_model``) instead of using aider's ``sonnet``
+    alias. Keeps the two agents on the same model family without a
+    separate config knob.
+    """
+
+    def _primary_anthropic_model(self):
+        from kernos.providers.anthropic_provider import AnthropicProvider
+        return AnthropicProvider.main_model
+
+    def test_anthropic_with_key_mirrors_primary(self, monkeypatch):
         monkeypatch.setenv("KERNOS_LLM_PROVIDER", "anthropic")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-value")
         cfg = _resolve_aider_config()
         assert cfg["error"] is None
-        assert cfg["model"] == "sonnet"
+        # Mirrors Kernos's primary AnthropicProvider.main_model
+        assert cfg["model"] == self._primary_anthropic_model()
+        # Sanity: it's a claude-* model (Kernos's primary family)
+        assert cfg["model"].startswith("claude-")
         assert cfg["env_updates"] == {"ANTHROPIC_API_KEY": "sk-ant-test-value"}
 
     def test_default_provider_is_anthropic(self, monkeypatch):
         # Unset KERNOS_LLM_PROVIDER — default must be anthropic
+        monkeypatch.delenv("KERNOS_LLM_PROVIDER", raising=False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
         cfg = _resolve_aider_config()
         assert cfg["error"] is None
-        assert cfg["model"] == "sonnet"
+        assert cfg["model"] == self._primary_anthropic_model()
 
 
 class TestAnthropicMissingKey:
@@ -69,12 +83,36 @@ class TestCodexWithoutOverride:
         assert "AIDER_API_KEY" in cfg["error"]
         assert "openai-codex" in cfg["error"]
 
-    def test_ollama_without_aider_model_errors(self, monkeypatch):
+    def test_ollama_without_aider_model_or_ollama_model_errors(self, monkeypatch):
+        """With ollama provider and NEITHER AIDER_MODEL nor OLLAMA_MODEL set,
+        the adapter has no way to mirror Kernos's primary — must error."""
         monkeypatch.setenv("KERNOS_LLM_PROVIDER", "ollama")
+        monkeypatch.delenv("OLLAMA_MODEL", raising=False)
         cfg = _resolve_aider_config()
         assert cfg["model"] == ""
         assert cfg["error"] is not None
-        assert "AIDER_MODEL" in cfg["error"]
+        assert "AIDER_MODEL" in cfg["error"] or "OLLAMA_MODEL" in cfg["error"]
+
+    def test_ollama_mirrors_ollama_model_env(self, monkeypatch):
+        """KERNOS_LLM_PROVIDER=ollama + OLLAMA_MODEL=foo → aider uses
+        ``ollama_chat/foo`` automatically (mirrors Kernos's primary)."""
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "ollama")
+        monkeypatch.setenv("OLLAMA_MODEL", "gemma4:31b-cloud")
+        monkeypatch.setenv("OLLAMA_API_BASE", "https://ollama.com")
+        monkeypatch.setenv("OLLAMA_API_KEY", "cloud-key")
+        cfg = _resolve_aider_config()
+        assert cfg["error"] is None
+        assert cfg["model"] == "ollama_chat/gemma4:31b-cloud"
+        assert cfg["env_updates"]["OLLAMA_API_BASE"] == "https://ollama.com"
+        assert cfg["env_updates"]["OLLAMA_API_KEY"] == "cloud-key"
+
+    def test_ollama_mirrors_with_already_prefixed_model(self, monkeypatch):
+        """If OLLAMA_MODEL already has the ollama_chat/ prefix, don't double-prefix."""
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "ollama")
+        monkeypatch.setenv("OLLAMA_MODEL", "ollama_chat/llama3")
+        cfg = _resolve_aider_config()
+        assert cfg["error"] is None
+        assert cfg["model"] == "ollama_chat/llama3"
 
 
 class TestAiderModelOverride:

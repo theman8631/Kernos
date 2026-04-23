@@ -96,7 +96,10 @@ class TestFlagCorrectness:
         assert "--edit-format" in args
         assert args[args.index("--edit-format") + 1] == "diff"
         assert "--model" in args
-        assert args[args.index("--model") + 1] == "sonnet"
+        # Adapter now mirrors Kernos's primary Anthropic model
+        # (AnthropicProvider.main_model) instead of the ``sonnet`` alias.
+        from kernos.providers.anthropic_provider import AnthropicProvider
+        assert args[args.index("--model") + 1] == AnthropicProvider.main_model
 
     async def test_write_file_name_appended_as_positional(
         self, tmp_path, monkeypatch, fake_aider_bin,

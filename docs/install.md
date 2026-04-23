@@ -161,14 +161,15 @@ Kernos's own sandboxed Python subprocess. No external dependencies.
 
 Hand workspace build tasks to [Aider](https://aider.chat), an open-source AI pair-programming tool. Aider ships as a Kernos dependency — no separate install required.
 
-Aider uses the same LLM credentials Kernos is configured with:
+**By default, Aider uses the same model as Kernos's primary chain**, automatically:
 
-- With `KERNOS_LLM_PROVIDER=anthropic`, Aider uses your `ANTHROPIC_API_KEY` automatically, defaulting to Anthropic's Sonnet model.
-- With `KERNOS_LLM_PROVIDER=openai-codex` or `=ollama`, Aider needs separate configuration because those providers use non-standard credentials. Set `AIDER_MODEL` (e.g. `gpt-4o`, `ollama_chat/llama3`) and `AIDER_API_KEY` (for cloud models) in your `.env`.
+- `KERNOS_LLM_PROVIDER=anthropic` → Aider uses Kernos's primary Anthropic model with your `ANTHROPIC_API_KEY`.
+- `KERNOS_LLM_PROVIDER=ollama` → Aider uses `ollama_chat/$OLLAMA_MODEL` with `OLLAMA_API_BASE` + `OLLAMA_API_KEY` (works for both local and cloud Ollama).
+- `KERNOS_LLM_PROVIDER=openai-codex` → Aider cannot consume Codex OAuth tokens; you must set `AIDER_MODEL` + `AIDER_API_KEY` explicitly.
 
-Optional override: `AIDER_MODEL` works regardless of provider if you want Aider on a different model than Kernos's primary chain.
+**Override: pick a different model for Aider.** Set `AIDER_MODEL` in your `.env` to any aider-supported model string (e.g. `gpt-4o`, `ollama_chat/llama3`, `claude-opus-4-6`). When set, Aider uses that model regardless of Kernos's primary. `AIDER_API_KEY` supplies the matching credential if Kernos's primary credential doesn't cover it. A future `kernos setup llm` wizard step will surface this as a prompt; for now, the env vars are the knob.
 
-Aider is a scoped backend — it respects `KERNOS_WORKSPACE_SCOPE=isolated`. An isolated-mode Aider invocation cannot read or write outside the active space.
+Aider is a scoped backend — it respects `KERNOS_WORKSPACE_SCOPE=isolated`. An isolated-mode Aider invocation cannot read or write outside the active space (with a limited read-only carve-out for Python runtime paths so Aider's own imports work).
 
 ### `claude-code`, `codex`
 

@@ -76,6 +76,50 @@ def _api_key_env_for_model(model: str) -> str:
     return ""
 
 
+#: Anthropic primary model is a class constant on the provider, not an env
+#: var. Reading the provider module directly avoids circular imports from
+#: ``kernos.providers.chains.build_chains_from_env``. If this constant
+#: drifts from the Kernos primary, the default here drifts with it.
+def _kernos_primary_model_for_aider() -> str:
+    """Return the aider-compatible model string for Kernos's primary chain.
+
+    Mirrors the model the Kernos reasoning service would pick as its
+    primary, translated into the shape aider / litellm expects:
+
+      * anthropic → ``AnthropicProvider.main_model`` (e.g. ``claude-sonnet-4-6``)
+      * ollama    → ``ollama_chat/<OLLAMA_MODEL>`` (litellm prefix)
+      * codex     → "" (aider cannot consume Codex OAuth tokens)
+
+    Returning "" means "can't mirror Kernos's primary; caller should fall
+    through to the error path or honor an operator override."
+
+    **Future setup hook.** The operator can override this at any time by
+    setting ``AIDER_MODEL`` in their ``.env``. A future ``kernos setup llm``
+    extension could add a dedicated Aider-model prompt that writes
+    ``AIDER_MODEL=...`` — no code change here required.
+    """
+    provider = (os.getenv("KERNOS_LLM_PROVIDER", "") or "anthropic").strip().lower()
+    if provider == "anthropic":
+        # Pull the class attribute from the provider module directly to stay
+        # in sync with Kernos's chain defaults without instantiating the
+        # provider (which would require a real API key).
+        try:
+            from kernos.providers.anthropic_provider import AnthropicProvider
+
+            return getattr(AnthropicProvider, "main_model", "") or ""
+        except Exception:
+            return ""
+    if provider == "ollama":
+        m = (os.getenv("OLLAMA_MODEL", "") or "").strip()
+        if not m:
+            return ""
+        if m.startswith(("ollama_chat/", "ollama/")):
+            return m
+        return f"ollama_chat/{m}"
+    # Codex and any other provider: not directly consumable by aider.
+    return ""
+
+
 def _resolve_aider_config() -> dict[str, Any]:
     """Decide which model + which env vars Aider will run with.
 
@@ -154,7 +198,9 @@ def _resolve_aider_config() -> dict[str, Any]:
             ),
         }
 
-    # Case 2: no override — follow KERNOS_LLM_PROVIDER
+    # Case 2: no override — mirror Kernos's primary chain when possible
+    mirrored = _kernos_primary_model_for_aider()
+
     if provider == "anthropic":
         anthropic_key = (os.getenv("ANTHROPIC_API_KEY", "") or "").strip()
         if not anthropic_key:
@@ -166,14 +212,48 @@ def _resolve_aider_config() -> dict[str, Any]:
                     "and AIDER_MODEL is unset. See /docs/install.md."
                 ),
             }
-        # ``sonnet`` is Aider's default Anthropic alias (see aider --list-models)
+        # Use Kernos's primary Anthropic model (e.g. claude-sonnet-4-6) so
+        # aider reasons with the same model Kernos's principal agent uses.
+        # Falls back to aider's ``sonnet`` alias if we somehow can't resolve
+        # the primary.
         return {
-            "model": "sonnet",
+            "model": mirrored or "sonnet",
             "env_updates": {"ANTHROPIC_API_KEY": anthropic_key},
             "error": None,
         }
 
-    # Case 3: codex / ollama / anything else without override — explicit error
+    if provider == "ollama":
+        # Mirror Kernos's primary ollama model when OLLAMA_MODEL is set.
+        # Without it, there's no sensible default — error explicitly so the
+        # operator sees why.
+        if not mirrored:
+            return {
+                "model": "",
+                "env_updates": {},
+                "error": (
+                    "Aider backend requires AIDER_MODEL or OLLAMA_MODEL when "
+                    "KERNOS_LLM_PROVIDER=ollama. See /docs/install.md."
+                ),
+            }
+        ollama_env: dict[str, str] = {}
+        api_base = (os.getenv("OLLAMA_API_BASE", "") or "").strip()
+        if not api_base:
+            api_base = (os.getenv("OLLAMA_BASE_URL", "") or "").strip()
+        if api_base:
+            ollama_env["OLLAMA_API_BASE"] = api_base
+        api_key = (os.getenv("OLLAMA_API_KEY", "") or "").strip()
+        if api_key:
+            ollama_env["OLLAMA_API_KEY"] = api_key
+        return {
+            "model": mirrored,
+            "env_updates": ollama_env,
+            "error": None,
+        }
+
+    # Case 3: codex / anything else without override — explicit error.
+    # Codex OAuth tokens are not standard OpenAI API keys; aider / litellm
+    # cannot consume them directly. The operator must set AIDER_MODEL +
+    # AIDER_API_KEY (or move Kernos to an aider-compatible provider).
     return {
         "model": "",
         "env_updates": {},
