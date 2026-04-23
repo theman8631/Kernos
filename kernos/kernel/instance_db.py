@@ -57,14 +57,34 @@ CREATE TABLE IF NOT EXISTS message_relay (
 CREATE INDEX IF NOT EXISTS idx_relay_pending ON message_relay(to_member, status)
     WHERE status = 'pending';
 
+-- CANVAS-V1: shared_spaces was declared as an instance-level shared-space
+-- registry for V2 but never used. CANVAS-V1 repurposes it as the canvas
+-- registry. columns added: canvas_id (aliases space_id), scope,
+-- owner_member_id, pinned_to_spaces (JSON list), canvas_yaml_path.
+-- Old columns (space_id, name, description, status, created_at, updated_at)
+-- are preserved. canvas_id is an alias of space_id for new rows.
 CREATE TABLE IF NOT EXISTS shared_spaces (
-    space_id    TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    status      TEXT DEFAULT 'active',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    space_id           TEXT PRIMARY KEY,          -- canvas_id
+    name               TEXT NOT NULL,
+    description        TEXT DEFAULT '',
+    status             TEXT DEFAULT 'active',     -- active | archived
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    scope              TEXT DEFAULT 'personal',   -- personal | specific | team
+    owner_member_id    TEXT DEFAULT '',
+    pinned_to_spaces   TEXT DEFAULT '',           -- JSON list, empty = unpinned (universal)
+    canvas_yaml_path   TEXT DEFAULT ''            -- absolute path to canvas.yaml on disk
 );
+
+CREATE TABLE IF NOT EXISTS canvas_members (
+    canvas_id   TEXT NOT NULL,
+    member_id   TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    active      INTEGER DEFAULT 1,
+    PRIMARY KEY (canvas_id, member_id)
+);
+CREATE INDEX IF NOT EXISTS idx_canvas_members_member
+    ON canvas_members(member_id, active);
 
 CREATE TABLE IF NOT EXISTS member_profiles (
     member_id               TEXT PRIMARY KEY,
@@ -173,6 +193,11 @@ class InstanceDB:
             "ALTER TABLE member_profiles ADD COLUMN agent_name TEXT DEFAULT ''",
             "ALTER TABLE member_profiles ADD COLUMN emoji TEXT DEFAULT ''",
             "ALTER TABLE member_profiles ADD COLUMN personality_notes TEXT DEFAULT ''",
+            # CANVAS-V1: shared_spaces repurposed as canvas registry
+            "ALTER TABLE shared_spaces ADD COLUMN scope TEXT DEFAULT 'personal'",
+            "ALTER TABLE shared_spaces ADD COLUMN owner_member_id TEXT DEFAULT ''",
+            "ALTER TABLE shared_spaces ADD COLUMN pinned_to_spaces TEXT DEFAULT ''",
+            "ALTER TABLE shared_spaces ADD COLUMN canvas_yaml_path TEXT DEFAULT ''",
         ]:
             try:
                 await self._conn.execute(_alt)
@@ -1046,6 +1071,163 @@ class InstanceDB:
         result = await self._conn.execute(
             "UPDATE members SET status='inactive', updated_at=? WHERE member_id=?",
             (utc_now(), member_id),
+        )
+        await self._conn.commit()
+        return result.rowcount > 0
+
+    # =========================================================================
+    # Canvases — CANVAS-V1
+    # =========================================================================
+
+    async def save_canvas(self, canvas: dict) -> None:
+        """Insert or replace a canvas registry row."""
+        if not self._conn:
+            return
+        from kernos.utils import utc_now
+        now = utc_now()
+        await self._conn.execute(
+            """
+            INSERT INTO shared_spaces (
+                space_id, name, description, status,
+                created_at, updated_at,
+                scope, owner_member_id, pinned_to_spaces, canvas_yaml_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(space_id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                status = excluded.status,
+                updated_at = excluded.updated_at,
+                scope = excluded.scope,
+                owner_member_id = excluded.owner_member_id,
+                pinned_to_spaces = excluded.pinned_to_spaces,
+                canvas_yaml_path = excluded.canvas_yaml_path
+            """,
+            (
+                canvas["canvas_id"], canvas["name"], canvas.get("description", ""),
+                canvas.get("status", "active"),
+                canvas.get("created_at", now), now,
+                canvas["scope"], canvas.get("owner_member_id", ""),
+                canvas.get("pinned_to_spaces", ""),
+                canvas.get("canvas_yaml_path", ""),
+            ),
+        )
+        await self._conn.commit()
+
+    async def get_canvas(self, canvas_id: str) -> dict | None:
+        """Return the canvas registry row, or None if not found."""
+        if not self._conn:
+            return None
+        cur = await self._conn.execute(
+            "SELECT * FROM shared_spaces WHERE space_id=?", (canvas_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        cols = [c[0] for c in cur.description]
+        out = dict(zip(cols, row))
+        # Alias the primary-key column for canvas-side clarity
+        out["canvas_id"] = out.get("space_id")
+        return out
+
+    async def list_canvases_for_member(
+        self, *, member_id: str, include_archived: bool = False,
+    ) -> list[dict]:
+        """Return canvases this member has access to.
+
+        A member has access if:
+          - they are an explicit member (canvas_members row, active=1), OR
+          - the canvas scope is 'team' (visible to all instance members)
+
+        Personal canvases with scope='personal' + owner_member_id=member_id
+        are also returned via the explicit-membership path (canvas_create
+        inserts a canvas_members row for the owner).
+        """
+        if not self._conn:
+            return []
+        status_clause = "" if include_archived else "AND ss.status = 'active'"
+        query = f"""
+            SELECT ss.* FROM shared_spaces ss
+            WHERE (
+                ss.scope = 'team'
+                OR EXISTS (
+                    SELECT 1 FROM canvas_members cm
+                    WHERE cm.canvas_id = ss.space_id
+                      AND cm.member_id = ?
+                      AND cm.active = 1
+                )
+            )
+            {status_clause}
+            ORDER BY ss.updated_at DESC
+        """
+        cur = await self._conn.execute(query, (member_id,))
+        rows = await cur.fetchall()
+        cols = [c[0] for c in cur.description]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            d["canvas_id"] = d.get("space_id")
+            out.append(d)
+        return out
+
+    async def member_has_canvas_access(
+        self, *, canvas_id: str, member_id: str,
+    ) -> bool:
+        """Fast access-check used by tool-layer enforcement."""
+        if not self._conn:
+            return False
+        canvas = await self.get_canvas(canvas_id)
+        if not canvas or canvas.get("status") != "active":
+            return False
+        if canvas.get("scope") == "team":
+            return True
+        # Specific or personal → explicit membership required
+        cur = await self._conn.execute(
+            "SELECT 1 FROM canvas_members WHERE canvas_id=? AND member_id=? AND active=1",
+            (canvas_id, member_id),
+        )
+        row = await cur.fetchone()
+        return row is not None
+
+    async def add_canvas_member(
+        self, *, canvas_id: str, member_id: str,
+    ) -> None:
+        """Add a member to a canvas. Idempotent."""
+        if not self._conn:
+            return
+        from kernos.utils import utc_now
+        await self._conn.execute(
+            """
+            INSERT INTO canvas_members (canvas_id, member_id, added_at, active)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(canvas_id, member_id) DO UPDATE SET active = 1
+            """,
+            (canvas_id, member_id, utc_now()),
+        )
+        await self._conn.commit()
+
+    async def list_canvas_members(self, canvas_id: str) -> list[str]:
+        """Return the active member_ids for a canvas (explicit members only).
+
+        For team canvases, the caller should separately walk `members` and
+        merge — this function returns only explicit canvas_members rows.
+        """
+        if not self._conn:
+            return []
+        cur = await self._conn.execute(
+            "SELECT member_id FROM canvas_members WHERE canvas_id=? AND active=1",
+            (canvas_id,),
+        )
+        rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+    async def archive_canvas(self, canvas_id: str) -> bool:
+        """Soft-delete: set status='archived'. Row preserved."""
+        if not self._conn:
+            return False
+        from kernos.utils import utc_now
+        result = await self._conn.execute(
+            "UPDATE shared_spaces SET status='archived', updated_at=? WHERE space_id=?",
+            (utc_now(), canvas_id),
         )
         await self._conn.commit()
         return result.rowcount > 0

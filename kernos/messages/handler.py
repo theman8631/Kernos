@@ -865,6 +865,10 @@ class MessageHandler:
         reasoning.set_registry(registry)
         reasoning.set_state(state)
 
+        # Canvas primitive (CANVAS-V1). Lazy-bind the instance_db — server.py
+        # attaches it after construction, same pattern as _relational_dispatcher.
+        self._canvas = None  # set on first call via _get_canvas_service()
+
         # Wire up retrieval service for the `remember` kernel tool
         self._retrieval = None
         try:
@@ -1357,6 +1361,30 @@ class MessageHandler:
         """Register a platform adapter for outbound messaging."""
         from kernos.kernel.channels import ChannelInfo
         self._adapters[platform] = adapter
+
+    def _get_canvas_service(self):
+        """Lazy-init the CanvasService (CANVAS-V1).
+
+        Constructed on first use so it picks up the ``_instance_db`` that
+        server.py/bootstrap attaches post-__init__. Mirrors the same
+        lazy pattern as :meth:`_get_relational_dispatcher`.
+        """
+        if self._canvas is not None:
+            return self._canvas
+        idb = getattr(self, "_instance_db", None)
+        if idb is None:
+            return None
+        from kernos.kernel.canvas import CanvasService
+        self._canvas = CanvasService(
+            instance_db=idb,
+            data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+        )
+        # Keep the reasoning service in sync so tool dispatch can reach it.
+        try:
+            self.reasoning.set_canvas(self._canvas)
+        except Exception:
+            pass
+        return self._canvas
 
     def _get_relational_dispatcher(self):
         """Lazy-init the relational dispatcher.

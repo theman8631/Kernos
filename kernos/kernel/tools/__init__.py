@@ -5,6 +5,8 @@ Pure helper functions (_read_doc, _read_source) are co-located with their schema
 Tool HANDLERS remain in ReasoningService for now (they need the full service context).
 """
 from kernos.kernel.tools.schemas import (
+    CANVAS_CREATE_TOOL,
+    CANVAS_LIST_TOOL,
     DIAGNOSE_LLM_CHAIN_TOOL,
     DIAGNOSE_MESSENGER_TOOL,
     INSPECT_PARCEL_TOOL,
@@ -12,6 +14,10 @@ from kernos.kernel.tools.schemas import (
     LIST_PARCELS_TOOL,
     MANAGE_CAPABILITIES_TOOL,
     PACK_PARCEL_TOOL,
+    PAGE_LIST_TOOL,
+    PAGE_READ_TOOL,
+    PAGE_SEARCH_TOOL,
+    PAGE_WRITE_TOOL,
     READ_DOC_TOOL,
     READ_SOURCE_TOOL,
     READ_SOUL_TOOL,
@@ -26,6 +32,8 @@ from kernos.kernel.tools.schemas import (
 )
 
 __all__ = [
+    "CANVAS_CREATE_TOOL",
+    "CANVAS_LIST_TOOL",
     "DIAGNOSE_LLM_CHAIN_TOOL",
     "DIAGNOSE_MESSENGER_TOOL",
     "INSPECT_PARCEL_TOOL",
@@ -33,6 +41,10 @@ __all__ = [
     "LIST_PARCELS_TOOL",
     "MANAGE_CAPABILITIES_TOOL",
     "PACK_PARCEL_TOOL",
+    "PAGE_LIST_TOOL",
+    "PAGE_READ_TOOL",
+    "PAGE_SEARCH_TOOL",
+    "PAGE_WRITE_TOOL",
     "READ_DOC_TOOL",
     "READ_SOURCE_TOOL",
     "READ_SOUL_TOOL",

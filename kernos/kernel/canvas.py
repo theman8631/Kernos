@@ -1,0 +1,582 @@
+"""Canvas primitive — scoped, named directories of markdown pages.
+
+CANVAS-V1 (SPEC-CANVAS-V1). A canvas is a shared-state primitive for
+accumulating structured content across turns and members: world-building
+notes, decision history, project logs, household planning, campaign
+state. Three scope tiers (personal / specific / team). Pages are
+markdown files with YAML frontmatter. Page types (note / decision / log)
+are advisory; state vocabulary is type-specific.
+
+File layout on disk:
+    data/{instance_id}/canvases/{canvas_id}/
+        canvas.yaml         - canvas-level metadata
+        index.md            - landing page (auto-created)
+        {slug}.md           - content pages
+        {slug}.v{N}.md      - prior versions (retained on page_write)
+
+Storage model:
+    - Canvas registry rides the existing instance.db shared_spaces table
+      (repurposed from its vestigial V2 slot; see CANVAS-V1 spec).
+    - canvas_members table holds explicit membership for personal + specific
+      scopes. Team-scope canvases don't need per-member rows; the access
+      check in ``member_has_canvas_access`` short-circuits on scope='team'.
+
+Discipline:
+    - Canvas writes do NOT go through conversation_log / compaction.
+      Canvases are shared artifacts, not turn-level conversation state.
+    - Page types are advisory only; they don't enter the dispatch gate's
+      effect classification.
+    - Out-of-scope members must not see the canvas exists — enforcement
+      at tool + disclosure-gate layer (see filter_canvases_by_membership).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from kernos.utils import _safe_name, utc_now
+
+logger = logging.getLogger(__name__)
+
+
+VALID_SCOPES = ("personal", "specific", "team")
+
+#: Advisory — page-type state vocabularies. v1 accepts writes with any
+#: state string (types are advisory per spec); this table drives the
+#: routes detector + default templates. Logs have no routable states
+#: (append-only semantics).
+PAGE_TYPE_STATES: dict[str, tuple[str, ...]] = {
+    "note": ("drafted", "current", "archived"),
+    "decision": ("proposed", "ratified", "superseded"),
+    "log": (),
+}
+
+DEFAULT_PAGE_TYPE = "note"
+
+#: Instance default for operator-in-loop preferences (see Pillar 5).
+DEFAULT_CONSULT_OPERATOR_AT = ("shipped", "on_conflict")
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter parse + serialize
+# ---------------------------------------------------------------------------
+
+
+_FRONTMATTER_PATTERN = re.compile(
+    r"^---\s*\n(.*?\n)---\s*\n?(.*)$", re.DOTALL,
+)
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Parse YAML frontmatter from a markdown string.
+
+    Returns (frontmatter_dict, body_text). If the text has no frontmatter
+    block, returns ({}, text) unchanged.
+    """
+    m = _FRONTMATTER_PATTERN.match(text or "")
+    if not m:
+        return {}, text or ""
+    fm_text, body = m.group(1), m.group(2)
+    try:
+        parsed = yaml.safe_load(fm_text) or {}
+        if not isinstance(parsed, dict):
+            return {}, text
+        return parsed, body
+    except yaml.YAMLError as exc:
+        logger.warning("CANVAS_FRONTMATTER_PARSE_FAILED: %s", exc)
+        return {}, text
+
+
+def serialize_frontmatter(frontmatter: dict, body: str) -> str:
+    """Render frontmatter dict + body as a markdown string with ``---`` fences."""
+    if not frontmatter:
+        return body or ""
+    fm_text = yaml.safe_dump(
+        frontmatter, sort_keys=False, default_flow_style=False,
+    ).rstrip()
+    return f"---\n{fm_text}\n---\n{body or ''}"
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Canvas:
+    """Canvas registry record + on-disk layout pointer."""
+
+    canvas_id: str
+    name: str
+    scope: str
+    owner_member_id: str
+    created_at: str
+    description: str = ""
+    pinned_to_spaces: list[str] = field(default_factory=list)
+    default_page_type: str = DEFAULT_PAGE_TYPE
+    default_consult_operator_at: list[str] = field(
+        default_factory=lambda: list(DEFAULT_CONSULT_OPERATOR_AT),
+    )
+    canvas_yaml_path: str = ""
+    status: str = "active"
+
+    def to_yaml_dict(self) -> dict:
+        """Shape serialized into canvas.yaml on disk."""
+        return {
+            "name": self.name,
+            "scope": self.scope,
+            "owner": self.owner_member_id,
+            "created_at": self.created_at,
+            "default_page_type": self.default_page_type,
+            "default_consult_operator_at": list(self.default_consult_operator_at),
+            "pinned_to_spaces": list(self.pinned_to_spaces),
+        }
+
+
+@dataclass
+class CanvasPage:
+    """A single page inside a canvas. Frontmatter + markdown body."""
+
+    canvas_id: str
+    path: str                   # relative path inside the canvas dir
+    title: str = ""
+    type: str = DEFAULT_PAGE_TYPE
+    state: str = ""
+    body: str = ""
+    last_updated: str = ""
+    last_updated_by: str = ""
+    watchers: list[str] = field(default_factory=list)
+    routes: dict[str, Any] = field(default_factory=dict)
+    consult_operator_at: list[str] | None = None
+    extra: dict = field(default_factory=dict)
+
+    def to_frontmatter(self) -> dict:
+        fm: dict = {
+            "title": self.title,
+            "type": self.type,
+            "last_updated": self.last_updated,
+            "last_updated_by": self.last_updated_by,
+        }
+        if self.state:
+            fm["state"] = self.state
+        if self.watchers:
+            fm["watchers"] = list(self.watchers)
+        if self.routes:
+            fm["routes"] = dict(self.routes)
+        if self.consult_operator_at is not None:
+            fm["consult_operator_at"] = list(self.consult_operator_at)
+        # Preserve any extra fields the agent included
+        for k, v in self.extra.items():
+            if k not in fm:
+                fm[k] = v
+        return fm
+
+    def to_markdown(self) -> str:
+        return serialize_frontmatter(self.to_frontmatter(), self.body)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _generate_canvas_id() -> str:
+    return f"canvas_{uuid.uuid4().hex[:12]}"
+
+
+def _validate_page_slug(slug: str) -> bool:
+    """Canvas page paths are relative; allow slashes for nesting but not
+    path escape or absolute paths."""
+    if not slug or ".." in slug:
+        return False
+    if slug.startswith("/") or "\\" in slug:
+        return False
+    # Allow one trailing .md or no extension; canvas.py adds .md
+    return True
+
+
+def canvas_dir(data_dir: str, instance_id: str, canvas_id: str) -> Path:
+    return (
+        Path(data_dir)
+        / _safe_name(instance_id)
+        / "canvases"
+        / canvas_id
+    )
+
+
+def _page_path_in_canvas(canvas_root: Path, page_slug: str) -> Path:
+    """Resolve a page slug under canvas_root, enforcing no-escape.
+
+    Accepts slug with or without ``.md`` suffix; appends ``.md`` if absent.
+    Rejects absolute paths and ``..`` segments.
+    """
+    if not _validate_page_slug(page_slug):
+        raise ValueError(f"Invalid page slug: {page_slug!r}")
+    name = page_slug if page_slug.endswith(".md") else f"{page_slug}.md"
+    candidate = (canvas_root / name).resolve()
+    root = canvas_root.resolve()
+    if root != candidate and root not in candidate.parents:
+        raise ValueError(
+            f"Page path escapes canvas directory: {page_slug!r}"
+        )
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# CanvasService
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CanvasOpResult:
+    ok: bool
+    canvas_id: str = ""
+    page_path: str = ""
+    error: str = ""
+    extra: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        out = {"ok": self.ok}
+        if self.canvas_id:
+            out["canvas_id"] = self.canvas_id
+        if self.page_path:
+            out["page_path"] = self.page_path
+        if self.error:
+            out["error"] = self.error
+        for k, v in self.extra.items():
+            out[k] = v
+        return out
+
+
+class CanvasService:
+    """Orchestrates canvas create/read/write/list + frontmatter roundtrip.
+
+    Instance_db holds the registry + membership; this service handles the
+    on-disk files and the Canvas dataclass lifecycle. Notifications,
+    watchers, and routes are layered on top (Pillars 4+5).
+    """
+
+    def __init__(
+        self,
+        instance_db: Any,
+        data_dir: str = "./data",
+    ) -> None:
+        self._db = instance_db
+        self._data_dir = data_dir
+        # Page-frontmatter cache keyed on absolute path; invalidated on write
+        self._fm_cache: dict[str, tuple[float, dict, str]] = {}
+
+    # ---- Create ----------------------------------------------------------
+
+    async def create(
+        self,
+        *,
+        instance_id: str,
+        creator_member_id: str,
+        name: str,
+        scope: str,
+        members: list[str] | None = None,
+        description: str = "",
+        default_page_type: str = DEFAULT_PAGE_TYPE,
+        pinned_to_spaces: list[str] | None = None,
+    ) -> CanvasOpResult:
+        if scope not in VALID_SCOPES:
+            return CanvasOpResult(
+                ok=False,
+                error=f"Unknown scope {scope!r}; expected one of {list(VALID_SCOPES)}.",
+            )
+        if not name or not name.strip():
+            return CanvasOpResult(ok=False, error="Canvas name is required.")
+        if scope == "specific" and not members:
+            return CanvasOpResult(
+                ok=False,
+                error="scope='specific' requires an explicit members list.",
+            )
+
+        canvas_id = _generate_canvas_id()
+        root = canvas_dir(self._data_dir, instance_id, canvas_id)
+        root.mkdir(parents=True, exist_ok=True)
+
+        canvas = Canvas(
+            canvas_id=canvas_id,
+            name=name.strip(),
+            scope=scope,
+            owner_member_id=creator_member_id,
+            created_at=utc_now(),
+            description=description,
+            pinned_to_spaces=list(pinned_to_spaces or []),
+            default_page_type=default_page_type,
+            canvas_yaml_path=str(root / "canvas.yaml"),
+        )
+
+        # Write canvas.yaml
+        yaml_text = yaml.safe_dump(
+            canvas.to_yaml_dict(), sort_keys=False, default_flow_style=False,
+        )
+        (root / "canvas.yaml").write_text(yaml_text, encoding="utf-8")
+
+        # Seed index.md
+        index_page = CanvasPage(
+            canvas_id=canvas_id,
+            path="index.md",
+            title=canvas.name,
+            type=default_page_type,
+            state=PAGE_TYPE_STATES.get(default_page_type, ("",))[0] or "",
+            body=f"# {canvas.name}\n\n{description or 'Canvas landing page.'}\n",
+            last_updated=canvas.created_at,
+            last_updated_by=creator_member_id,
+        )
+        (root / "index.md").write_text(index_page.to_markdown(), encoding="utf-8")
+
+        # Persist registry row
+        await self._db.save_canvas({
+            "canvas_id": canvas_id,
+            "name": canvas.name,
+            "description": description,
+            "status": "active",
+            "created_at": canvas.created_at,
+            "scope": scope,
+            "owner_member_id": creator_member_id,
+            "pinned_to_spaces": json.dumps(list(pinned_to_spaces or [])),
+            "canvas_yaml_path": str(root / "canvas.yaml"),
+        })
+
+        # Membership. Personal + specific: explicit rows. Team: owner only
+        # (team scope accesses via scope='team' shortcut in the DB check).
+        if scope == "personal":
+            await self._db.add_canvas_member(
+                canvas_id=canvas_id, member_id=creator_member_id,
+            )
+        elif scope == "specific":
+            await self._db.add_canvas_member(
+                canvas_id=canvas_id, member_id=creator_member_id,
+            )
+            for m in members or []:
+                if m and m != creator_member_id:
+                    await self._db.add_canvas_member(
+                        canvas_id=canvas_id, member_id=m,
+                    )
+        elif scope == "team":
+            # Owner still needs a row so list_canvas_members can enumerate
+            await self._db.add_canvas_member(
+                canvas_id=canvas_id, member_id=creator_member_id,
+            )
+
+        logger.info(
+            "CANVAS_CREATED: instance=%s canvas=%s scope=%s owner=%s",
+            instance_id, canvas_id, scope, creator_member_id,
+        )
+        return CanvasOpResult(
+            ok=True, canvas_id=canvas_id,
+            extra={"name": canvas.name, "scope": scope},
+        )
+
+    # ---- Page read -------------------------------------------------------
+
+    async def page_read(
+        self, *, instance_id: str, canvas_id: str, page_slug: str,
+    ) -> CanvasOpResult:
+        root = canvas_dir(self._data_dir, instance_id, canvas_id)
+        try:
+            page_path = _page_path_in_canvas(root, page_slug)
+        except ValueError as exc:
+            return CanvasOpResult(ok=False, error=str(exc))
+        if not page_path.is_file():
+            return CanvasOpResult(
+                ok=False, page_path=page_slug,
+                error=f"Page not found: {page_slug!r}",
+            )
+        frontmatter, body = self._read_page_cached(page_path)
+        return CanvasOpResult(
+            ok=True, canvas_id=canvas_id, page_path=page_slug,
+            extra={"frontmatter": frontmatter, "body": body},
+        )
+
+    def _read_page_cached(self, page_path: Path) -> tuple[dict, str]:
+        """Mtime-invalidated parse of a page's frontmatter + body."""
+        try:
+            mtime = page_path.stat().st_mtime
+        except OSError:
+            return {}, ""
+        key = str(page_path)
+        cached = self._fm_cache.get(key)
+        if cached and cached[0] == mtime:
+            return cached[1], cached[2]
+        text = page_path.read_text(encoding="utf-8")
+        frontmatter, body = parse_frontmatter(text)
+        self._fm_cache[key] = (mtime, frontmatter, body)
+        return frontmatter, body
+
+    # ---- Page write ------------------------------------------------------
+
+    async def page_write(
+        self,
+        *,
+        instance_id: str,
+        canvas_id: str,
+        page_slug: str,
+        body: str,
+        writer_member_id: str,
+        title: str | None = None,
+        page_type: str | None = None,
+        state: str | None = None,
+        frontmatter_overrides: dict | None = None,
+    ) -> CanvasOpResult:
+        root = canvas_dir(self._data_dir, instance_id, canvas_id)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            page_path = _page_path_in_canvas(root, page_slug)
+        except ValueError as exc:
+            return CanvasOpResult(ok=False, error=str(exc))
+
+        # Preserve existing frontmatter when updating
+        existing_fm: dict = {}
+        prev_state: str = ""
+        if page_path.is_file():
+            existing_fm, _ = self._read_page_cached(page_path)
+            prev_state = (existing_fm.get("state") or "").strip()
+            # Version retention: copy old to .v{N}.md before overwrite
+            version_num = 1
+            while (
+                page_path.parent / f"{page_path.stem}.v{version_num}.md"
+            ).exists():
+                version_num += 1
+            try:
+                old_text = page_path.read_text(encoding="utf-8")
+                (
+                    page_path.parent / f"{page_path.stem}.v{version_num}.md"
+                ).write_text(old_text, encoding="utf-8")
+            except OSError as exc:
+                logger.warning("CANVAS_VERSION_RETAIN_FAILED: %s", exc)
+        else:
+            page_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Merge frontmatter: existing < explicit args < overrides
+        new_fm = dict(existing_fm)
+        new_fm["title"] = title or existing_fm.get("title") or page_slug
+        new_fm["type"] = (
+            page_type
+            or existing_fm.get("type")
+            or DEFAULT_PAGE_TYPE
+        )
+        if state is not None:
+            new_fm["state"] = state
+        if frontmatter_overrides:
+            new_fm.update(frontmatter_overrides)
+        new_fm["last_updated"] = utc_now()
+        new_fm["last_updated_by"] = writer_member_id
+
+        rendered = serialize_frontmatter(new_fm, body or "")
+        page_path.write_text(rendered, encoding="utf-8")
+
+        # Invalidate cache entry
+        self._fm_cache.pop(str(page_path), None)
+
+        # Flag advisory type issues
+        declared_type = new_fm.get("type", DEFAULT_PAGE_TYPE)
+        type_ok = declared_type in PAGE_TYPE_STATES
+        new_state = (new_fm.get("state") or "").strip()
+
+        logger.info(
+            "CANVAS_PAGE_WRITTEN: canvas=%s page=%s by=%s type=%s state=%s prev_state=%s",
+            canvas_id, page_slug, writer_member_id, declared_type,
+            new_state or "(none)", prev_state or "(none)",
+        )
+        return CanvasOpResult(
+            ok=True, canvas_id=canvas_id, page_path=page_slug,
+            extra={
+                "type": declared_type,
+                "state": new_state,
+                "prev_state": prev_state,
+                "state_changed": bool(new_state and new_state != prev_state),
+                "type_recognized": type_ok,
+                "frontmatter": new_fm,
+            },
+        )
+
+    # ---- Page list + search ---------------------------------------------
+
+    async def page_list(
+        self, *, instance_id: str, canvas_id: str,
+    ) -> list[dict]:
+        """Return a list of {path, title, type, state, last_updated} entries."""
+        root = canvas_dir(self._data_dir, instance_id, canvas_id)
+        if not root.is_dir():
+            return []
+        out: list[dict] = []
+        for md_path in sorted(root.rglob("*.md")):
+            # Skip version files
+            if re.search(r"\.v\d+\.md$", md_path.name):
+                continue
+            rel = md_path.relative_to(root)
+            fm, _ = self._read_page_cached(md_path)
+            out.append({
+                "path": str(rel).replace(os.sep, "/"),
+                "title": fm.get("title", str(rel)),
+                "type": fm.get("type", DEFAULT_PAGE_TYPE),
+                "state": fm.get("state", ""),
+                "last_updated": fm.get("last_updated", ""),
+            })
+        return out
+
+    async def page_search(
+        self,
+        *,
+        instance_id: str,
+        canvas_ids: list[str],
+        query: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return pages whose body or title matches ``query`` (case-insensitive).
+
+        Naive text match in v1. Ranking by match-count, not semantic.
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        hits: list[dict] = []
+        for canvas_id in canvas_ids:
+            root = canvas_dir(self._data_dir, instance_id, canvas_id)
+            if not root.is_dir():
+                continue
+            for md_path in root.rglob("*.md"):
+                if re.search(r"\.v\d+\.md$", md_path.name):
+                    continue
+                fm, body = self._read_page_cached(md_path)
+                haystack = (fm.get("title", "") + "\n" + body).lower()
+                count = haystack.count(q)
+                if count:
+                    rel = md_path.relative_to(root)
+                    hits.append({
+                        "canvas_id": canvas_id,
+                        "path": str(rel).replace(os.sep, "/"),
+                        "title": fm.get("title", str(rel)),
+                        "matches": count,
+                    })
+        hits.sort(key=lambda h: h["matches"], reverse=True)
+        return hits[:limit]
+
+    # ---- Canvas list -----------------------------------------------------
+
+    async def list_for_member(
+        self, *, member_id: str, include_archived: bool = False,
+    ) -> list[dict]:
+        canvases = await self._db.list_canvases_for_member(
+            member_id=member_id, include_archived=include_archived,
+        )
+        # Decode pinned_to_spaces JSON column for callers
+        for c in canvases:
+            raw = c.get("pinned_to_spaces") or ""
+            try:
+                c["pinned_to_spaces"] = json.loads(raw) if raw else []
+            except Exception:
+                c["pinned_to_spaces"] = []
+        return canvases

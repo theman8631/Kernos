@@ -181,6 +181,65 @@ def filter_knowledge_entries(
     return kept
 
 
+def filter_canvases_by_membership(
+    canvases: list[dict],
+    *,
+    requesting_member_id: str,
+    canvas_member_lookup,
+    trace: Any = None,
+) -> list[dict]:
+    """Filter a canvas list to those the requesting member can see.
+
+    CANVAS-V1 parallel to :func:`filter_knowledge_entries`. A canvas is
+    visible if:
+      * its scope == 'team' (every instance member sees team canvases), OR
+      * the calling member is in the canvas's explicit member list.
+
+    ``canvas_member_lookup`` is a sync callable
+    ``(canvas_id) -> list[member_id]`` that returns the explicit members
+    for a canvas. Usually a lambda closing over a pre-fetched map.
+
+    Fails closed: on any error the canvas is filtered out. Consistent
+    with the disclosure-gate discipline elsewhere in this module.
+    """
+    if not canvases:
+        return canvases
+    kept: list[dict] = []
+    filtered = 0
+    filter_reasons: dict[str, int] = {}
+    for c in canvases:
+        try:
+            canvas_id = c.get("canvas_id") or c.get("space_id", "")
+            scope = (c.get("scope") or "").lower()
+            if scope == "team":
+                kept.append(c)
+                continue
+            members = canvas_member_lookup(canvas_id) or []
+            if requesting_member_id and requesting_member_id in members:
+                kept.append(c)
+                continue
+            filtered += 1
+            filter_reasons["not_a_member"] = filter_reasons.get("not_a_member", 0) + 1
+        except Exception as exc:
+            logger.warning(
+                "DISCLOSURE_GATE: filter_canvases error on canvas=%r: %s",
+                c.get("canvas_id"), exc,
+            )
+            filtered += 1
+            filter_reasons["gate_error"] = filter_reasons.get("gate_error", 0) + 1
+
+    if trace and filtered:
+        try:
+            trace.record(
+                "info", "disclosure_gate", "GATE_FILTER_CANVASES",
+                f"filtered={filtered} kept={len(kept)} reasons={filter_reasons}",
+                phase="assemble",
+            )
+        except Exception:
+            pass
+    return kept
+
+
 def filter_log_entries(
     entries: list[dict],
     *,

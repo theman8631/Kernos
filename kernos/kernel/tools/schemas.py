@@ -1,6 +1,186 @@
 """Kernel tool JSON schemas and pure helper functions."""
 
 # ---------------------------------------------------------------------------
+# CANVAS-V1: shared-state primitive (scoped directories of markdown pages)
+# ---------------------------------------------------------------------------
+
+CANVAS_LIST_TOOL = {
+    "name": "canvas_list",
+    "description": (
+        "List canvases accessible to the calling member. Returns a list of "
+        "{canvas_id, name, scope, owner_member_id, pinned_to_spaces, last_updated}. "
+        "Out-of-scope canvases do not appear — the member cannot see they exist."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "include_archived": {
+                "type": "boolean",
+                "description": "If true, include archived canvases. Default false.",
+            },
+        },
+    },
+}
+
+
+CANVAS_CREATE_TOOL = {
+    "name": "canvas_create",
+    "description": (
+        "Create a new canvas: a named directory of markdown pages with "
+        "YAML frontmatter. Three scopes: 'personal' (caller only), "
+        "'specific' (an explicit member list), 'team' (all instance "
+        "members current and future). Caller becomes owner. "
+        "For scope='specific', the members list is required."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human-readable canvas name.",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["personal", "specific", "team"],
+                "description": "Visibility tier. Fixed at creation.",
+            },
+            "members": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Required for scope='specific'. Explicit member_id list. "
+                    "Caller is auto-included."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": "Short description seeded into index.md.",
+            },
+            "default_page_type": {
+                "type": "string",
+                "enum": ["note", "decision", "log"],
+                "description": "Default page type for new pages. Default 'note'.",
+            },
+            "pinned_to_spaces": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional list of space_ids. If set, the canvas appears "
+                    "in the Available Canvases zone ONLY when operating in "
+                    "those spaces. Unset = universal visibility."
+                ),
+            },
+        },
+        "required": ["name", "scope"],
+    },
+}
+
+
+PAGE_READ_TOOL = {
+    "name": "page_read",
+    "description": (
+        "Read a page's body + frontmatter from a canvas. Returns "
+        "{frontmatter, body}. Page paths are relative to the canvas "
+        "(e.g., 'index.md', 'decisions/launch.md')."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "string"},
+            "page_path": {
+                "type": "string",
+                "description": "Relative page path. '.md' optional.",
+            },
+        },
+        "required": ["canvas_id", "page_path"],
+    },
+}
+
+
+PAGE_WRITE_TOOL = {
+    "name": "page_write",
+    "description": (
+        "Create or update a page in a canvas. Reversible: old versions "
+        "retained as '{slug}.v{N}.md' files. For cross-member canvases, "
+        "a page_write to a shared (non-log) page without confirmed=true "
+        "returns requires_confirmation=true and does NOT write — the "
+        "agent must surface to the user and re-call with confirmed=true."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "string"},
+            "page_path": {"type": "string"},
+            "body": {
+                "type": "string",
+                "description": "Markdown body (without the '---' frontmatter fences).",
+            },
+            "title": {"type": "string"},
+            "page_type": {
+                "type": "string",
+                "enum": ["note", "decision", "log"],
+            },
+            "state": {
+                "type": "string",
+                "description": (
+                    "Optional state for this page. Advisory; type-specific "
+                    "vocabularies: note (drafted/current/archived), "
+                    "decision (proposed/ratified/superseded), log (none)."
+                ),
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": (
+                    "Required true when writing to a cross-member "
+                    "(non-log) page in a shared canvas. Signals the user "
+                    "has explicitly approved this write."
+                ),
+            },
+        },
+        "required": ["canvas_id", "page_path", "body"],
+    },
+}
+
+
+PAGE_LIST_TOOL = {
+    "name": "page_list",
+    "description": "Enumerate pages in a canvas. Returns {path, title, type, state, last_updated} per page.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "string"},
+        },
+        "required": ["canvas_id"],
+    },
+}
+
+
+PAGE_SEARCH_TOOL = {
+    "name": "page_search",
+    "description": (
+        "Search page bodies + titles for a query string. Case-insensitive "
+        "substring match, ranked by match count. If canvas_id is omitted, "
+        "searches across all canvases the caller has access to."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "canvas_id": {
+                "type": "string",
+                "description": "Optional. If omitted, search across accessible canvases.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max hits. Default 20.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # PARCEL-PRIMITIVE-V1: cross-space file transfer
 # ---------------------------------------------------------------------------
 

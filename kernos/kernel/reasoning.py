@@ -210,6 +210,7 @@ class ReasoningService:
         self._channel_registry = None  # Set by handler after construction
         self._trigger_store = None     # Set by handler after construction
         self._handler = None           # Set by handler after construction (for schedule tool)
+        self._canvas = None            # Set by handler after construction (CanvasService)
         self._gate: DispatchGate | None = None  # Created lazily after registry/state are set
         self._pending_actions: dict[str, list[PendingAction]] = {}  # instance_id → list
         self._conflict_raised_this_turn: bool = False  # Set when gate blocks; cleared at turn start
@@ -290,6 +291,10 @@ class ReasoningService:
     def set_handler(self, handler: Any) -> None:
         """Wire up the handler (implements HandlerProtocol)."""
         self._handler = handler
+
+    def set_canvas(self, canvas: Any) -> None:
+        """Wire up the CanvasService for canvas_* / page_* tool routing."""
+        self._canvas = canvas
 
     # --- Public state accessors (replace private attribute access from handler) ---
 
@@ -493,7 +498,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain", "diagnose_messenger"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain", "diagnose_messenger", "canvas_list", "canvas_create", "page_read", "page_write", "page_list", "page_search"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -825,6 +830,9 @@ class ReasoningService:
                     tool_input.get("capability_name", "unknown"),
                     tool_input.get("description", ""),
                 )
+            elif tool_name in ("canvas_list", "canvas_create", "page_read",
+                                "page_write", "page_list", "page_search"):
+                return await self._handle_canvas_tool(tool_name, tool_input, request)
             else:
                 return f"Kernel tool '{tool_name}' not handled."
         else:
@@ -1858,6 +1866,165 @@ class ReasoningService:
             return f"Removed '{capability}'. It has been uninstalled."
 
         return f"Unknown action: '{action}'. Use list, enable, disable, install, or remove."
+
+    async def _handle_canvas_tool(
+        self, tool_name: str, tool_input: dict, request: "ReasoningRequest",
+    ) -> str:
+        """Dispatch canvas_*/page_* tool calls to CanvasService.
+
+        Pillar 3 of CANVAS-V1. Consent-on-cross-member-writes lives here
+        (at the tool layer, above the dispatch gate): page_write to a
+        cross-member non-log page without ``confirmed=true`` short-circuits
+        and tells the agent to re-ask the user.
+        """
+        # Lazy-resolve the canvas service via the handler. Keeps the
+        # wire-up simple: server.py/bootstrap attach _instance_db to the
+        # handler post-init, and the first canvas tool call constructs
+        # the service on demand.
+        canvas = self._canvas
+        if canvas is None and self._handler and hasattr(self._handler, "_get_canvas_service"):
+            canvas = self._handler._get_canvas_service()
+            if canvas is not None:
+                self._canvas = canvas
+        if not canvas:
+            return "Canvas service is not available."
+
+        import json as _json
+
+        instance_id = request.instance_id
+        member_id = getattr(request, "member_id", "") or ""
+
+        async def _assert_access(canvas_id: str) -> str | None:
+            idb = getattr(self._handler, "_instance_db", None) if self._handler else None
+            if not idb:
+                return "Instance database is not available."
+            ok = await idb.member_has_canvas_access(
+                canvas_id=canvas_id, member_id=member_id,
+            )
+            if not ok:
+                return _json.dumps({
+                    "ok": False,
+                    "error": "canvas_not_accessible",
+                    "detail": f"Canvas {canvas_id!r} does not exist or is not accessible.",
+                })
+            return None
+
+        if tool_name == "canvas_list":
+            include_archived = bool(tool_input.get("include_archived", False))
+            canvases = await self._canvas.list_for_member(
+                member_id=member_id, include_archived=include_archived,
+            )
+            return _json.dumps({"ok": True, "canvases": canvases}, default=str)
+
+        if tool_name == "canvas_create":
+            result = await self._canvas.create(
+                instance_id=instance_id,
+                creator_member_id=member_id,
+                name=tool_input.get("name", ""),
+                scope=tool_input.get("scope", ""),
+                members=tool_input.get("members") or [],
+                description=tool_input.get("description", ""),
+                default_page_type=tool_input.get("default_page_type", "note"),
+                pinned_to_spaces=tool_input.get("pinned_to_spaces") or [],
+            )
+            return _json.dumps(result.to_dict(), default=str)
+
+        if tool_name == "page_read":
+            canvas_id = tool_input.get("canvas_id", "")
+            err = await _assert_access(canvas_id)
+            if err:
+                return err
+            result = await self._canvas.page_read(
+                instance_id=instance_id,
+                canvas_id=canvas_id,
+                page_slug=tool_input.get("page_path", ""),
+            )
+            return _json.dumps(result.to_dict(), default=str)
+
+        if tool_name == "page_list":
+            canvas_id = tool_input.get("canvas_id", "")
+            err = await _assert_access(canvas_id)
+            if err:
+                return err
+            pages = await self._canvas.page_list(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+            return _json.dumps({"ok": True, "canvas_id": canvas_id, "pages": pages}, default=str)
+
+        if tool_name == "page_search":
+            query = tool_input.get("query", "")
+            canvas_id = tool_input.get("canvas_id") or ""
+            limit = int(tool_input.get("limit", 20) or 20)
+            if canvas_id:
+                err = await _assert_access(canvas_id)
+                if err:
+                    return err
+                canvas_ids = [canvas_id]
+            else:
+                canvases = await self._canvas.list_for_member(member_id=member_id)
+                canvas_ids = [c["canvas_id"] for c in canvases if c.get("canvas_id")]
+            hits = await self._canvas.page_search(
+                instance_id=instance_id,
+                canvas_ids=canvas_ids,
+                query=query,
+                limit=limit,
+            )
+            return _json.dumps({"ok": True, "hits": hits}, default=str)
+
+        if tool_name == "page_write":
+            canvas_id = tool_input.get("canvas_id", "")
+            page_slug = tool_input.get("page_path", "")
+            err = await _assert_access(canvas_id)
+            if err:
+                return err
+
+            # Consent gate for cross-member shared writes.
+            # Scope: team or specific canvases with >1 member AND non-log page
+            # writes require explicit confirmed=true. Personal canvases and
+            # log pages skip this — personal is solo, logs are append-only.
+            idb = getattr(self._handler, "_instance_db", None) if self._handler else None
+            canvas_row = await idb.get_canvas(canvas_id) if idb else None
+            canvas_scope = (canvas_row or {}).get("scope", "") if canvas_row else ""
+            page_type = (tool_input.get("page_type") or "note").lower()
+            confirmed = bool(tool_input.get("confirmed", False))
+
+            is_cross_member = canvas_scope in ("team", "specific")
+            requires_consent = (
+                is_cross_member
+                and page_type != "log"
+                and not confirmed
+            )
+            if requires_consent:
+                members = await idb.list_canvas_members(canvas_id) if idb else []
+                other_members = [m for m in members if m and m != member_id]
+                return _json.dumps({
+                    "ok": False,
+                    "requires_confirmation": True,
+                    "canvas_id": canvas_id,
+                    "page_path": page_slug,
+                    "scope": canvas_scope,
+                    "other_members": other_members,
+                    "proposed_summary": (tool_input.get("body") or "")[:200],
+                    "detail": (
+                        "This is a shared canvas with other members. Surface the "
+                        "proposed write to the user and re-call page_write with "
+                        "confirmed=true after they approve."
+                    ),
+                })
+
+            result = await self._canvas.page_write(
+                instance_id=instance_id,
+                canvas_id=canvas_id,
+                page_slug=page_slug,
+                body=tool_input.get("body", ""),
+                writer_member_id=member_id,
+                title=tool_input.get("title"),
+                page_type=tool_input.get("page_type"),
+                state=tool_input.get("state"),
+            )
+            return _json.dumps(result.to_dict(), default=str)
+
+        return f"Canvas tool {tool_name!r} not dispatched."
 
     async def _handle_dismiss_whisper(
         self, instance_id: str, whisper_id: str, reason: str = "user_dismissed"

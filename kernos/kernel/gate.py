@@ -93,12 +93,19 @@ class DispatchGate:
             "dismiss_whisper", "read_source", "read_doc", "read_soul",
             "manage_channels", "request_tool", "inspect_state",
             "list_parcels", "inspect_parcel",
+            # CANVAS-V1
+            "canvas_list", "page_read", "page_list", "page_search",
         }
         _KERNEL_WRITES = {
             "write_file", "delete_file", "manage_covenants",
             "update_soul", "manage_capabilities", "send_to_channel",
             "execute_code",
             "pack_parcel",
+            # CANVAS-V1: page_write is soft_write (reversible — prior
+            # versions retained as .v{N}.md). canvas_create is hard_write
+            # (creates a new shared-state primitive — classified separately
+            # below so the model-check path applies).
+            "page_write",
         }
 
         if tool_name in _KERNEL_READS:
@@ -123,6 +130,11 @@ class DispatchGate:
             # hard_write. decline is reversible / informational → soft_write.
             action = (tool_input or {}).get("action", "")
             return "hard_write" if action == "accept" else "soft_write"
+        if tool_name == "canvas_create":
+            # Creating a canvas provisions shared state + fires notifications
+            # to declared members → hard_write so the gate model evaluates
+            # whether it's a reactive user request or a proactive agent move.
+            return "hard_write"
         if tool_name == "manage_schedule":
             return "read"
         if tool_name == "manage_workspace":
