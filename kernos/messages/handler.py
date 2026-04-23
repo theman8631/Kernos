@@ -3816,7 +3816,11 @@ class MessageHandler:
                     except Exception as exc:
                         logger.warning("Failed to log merged message: %s", exc)
 
-                # Execute the full turn (assemble → reason → persist)
+                # Execute the full turn (assemble → reason → persist).
+                # HANDLER-PIPELINE-DECOMPOSE: calls go through the
+                # handler shim methods which delegate to
+                # kernos.messages.phases.<name>.run(ctx). See the
+                # matching comment in process() above.
                 _turn_t0 = time.monotonic()
                 try:
                     _t0 = time.monotonic()
@@ -4106,7 +4110,14 @@ class MessageHandler:
         if early is not None:
             return early
 
-        # Lightweight phases — safe to run concurrently
+        # Lightweight phases — safe to run concurrently.
+        # HANDLER-PIPELINE-DECOMPOSE: the _phase_* methods are 10-line
+        # shims that delegate to kernos.messages.phases.<name>.run(ctx).
+        # We call through the shims (not through the phase modules
+        # directly) so existing tests that monkey-patch handler._phase_*
+        # for observability keep working. A future batch can migrate
+        # tests to monkey-patch phases.<name>.run instead, which unlocks
+        # the final shim-size shrink.
         _t0 = time.monotonic()
         await self._phase_provision(ctx)
         ctx.phase_timings["provision"] = int((time.monotonic() - _t0) * 1000)
