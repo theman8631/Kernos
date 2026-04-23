@@ -37,6 +37,7 @@ async def run(ctx: PhaseContext) -> PhaseContext:
     from kernos.messages.handler import (
         PRIMARY_TEMPLATE,
         _build_actions_block,
+        _build_canvases_block,
         _build_memory_block,
         _build_now_block,
         _build_procedures_block,
@@ -53,7 +54,10 @@ async def run(ctx: PhaseContext) -> PhaseContext:
     active_space_id = ctx.active_space_id
 
     # Space context (compaction, cross-domain, system events, receipts)
-    space_messages, ctx.results_prefix, ctx.memory_prefix, _procedures_prefix = await handler._assemble_space_context(
+    (
+        space_messages, ctx.results_prefix, ctx.memory_prefix,
+        _procedures_prefix, _canvases_prefix,
+    ) = await handler._assemble_space_context(
         instance_id, ctx.conversation_id, active_space_id, active_space,
         member_id=ctx.member_id,
     )
@@ -655,11 +659,15 @@ async def run(ctx: PhaseContext) -> PhaseContext:
     actions = _build_actions_block(capability_prompt, message, handler._channel_registry)
     memory = _build_memory_block(ctx.memory_prefix)
     procedures = _build_procedures_block(_procedures_prefix)
+    canvases = _build_canvases_block(_canvases_prefix)
 
     # Cache boundary: static prefix (RULES + ACTIONS) is stable across turns,
-    # dynamic suffix (NOW + STATE + RESULTS + PROCEDURES + MEMORY) changes every turn.
+    # dynamic suffix (NOW + STATE + RESULTS + PROCEDURES + CANVASES + MEMORY)
+    # changes every turn. CANVAS-V1: the canvases block sits alongside
+    # procedures — cacheable-prefix-eligible, changes only when a canvas is
+    # created / archived / repinned.
     ctx.system_prompt_static = _compose_blocks(rules, actions)
-    ctx.system_prompt_dynamic = _compose_blocks(now_block, state_block, results, procedures, memory)
+    ctx.system_prompt_dynamic = _compose_blocks(now_block, state_block, results, procedures, canvases, memory)
     ctx.system_prompt = _compose_blocks(ctx.system_prompt_static, ctx.system_prompt_dynamic)
 
     # Developer mode: inject pending errors

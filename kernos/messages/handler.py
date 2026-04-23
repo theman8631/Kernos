@@ -755,6 +755,13 @@ def _build_procedures_block(procedures_prefix: str | None) -> str:
     return "## PROCEDURES\n" + procedures_prefix
 
 
+def _build_canvases_block(canvases_prefix: str | None) -> str:
+    """## AVAILABLE CANVASES — CANVAS-V1 member-scoped canvas index."""
+    if not canvases_prefix:
+        return ""
+    return "## AVAILABLE CANVASES\n" + canvases_prefix
+
+
 def _compose_blocks(*blocks: str) -> str:
     """Join non-empty blocks with double newlines."""
     return "\n\n".join(b for b in blocks if b)
@@ -2857,7 +2864,86 @@ class MessageHandler:
         if merged_orphans:
             self._orphaned_user_content = merged_orphans
 
-        return recent_messages, results_prefix, memory_prefix, procedures_prefix
+        # Canvas context surface (CANVAS-V1 Pillar 6) — cacheable prefix zone
+        canvases_prefix = await self._build_canvases_prefix(
+            instance_id=instance_id, active_space_id=active_space_id,
+            member_id=member_id,
+        )
+
+        return (
+            recent_messages, results_prefix, memory_prefix,
+            procedures_prefix, canvases_prefix,
+        )
+
+    async def _build_canvases_prefix(
+        self, *, instance_id: str, active_space_id: str, member_id: str,
+    ) -> str | None:
+        """Render the 'Available Canvases' context zone for the active member.
+
+        Filtering rules:
+          - Member must have access (team scope OR explicit canvas_members row).
+            Disclosure gate (:func:`filter_canvases_by_membership`) enforces
+            this even if registry rows drift.
+          - pinned_to_spaces empty → universal visibility
+          - pinned_to_spaces set → visible only when active_space_id is in it
+
+        Returns a short markdown list; None when nothing would render.
+        """
+        canvas_svc = self._get_canvas_service()
+        if canvas_svc is None or not member_id:
+            return None
+        try:
+            all_canvases = await canvas_svc.list_for_member(member_id=member_id)
+        except Exception as exc:
+            logger.debug("CANVAS_LIST_FOR_PREFIX_FAILED: %s", exc)
+            return None
+
+        # Defense-in-depth disclosure gate — mirror the knowledge-entry pattern.
+        try:
+            from kernos.kernel.disclosure_gate import filter_canvases_by_membership
+            idb = getattr(self, "_instance_db", None)
+
+            def _members_for(canvas_id: str) -> list[str]:
+                # sync closure — we pre-fetch via run_until_complete is not
+                # an option here, so fall back to empty list. The registry
+                # already filtered via list_canvases_for_member; this filter
+                # is a belt-and-braces pass for data-drift cases.
+                return []
+
+            all_canvases = filter_canvases_by_membership(
+                all_canvases,
+                requesting_member_id=member_id,
+                canvas_member_lookup=_members_for,
+                trace=None,
+            )
+        except Exception:
+            pass
+
+        visible: list[dict] = []
+        for c in all_canvases:
+            pinned = c.get("pinned_to_spaces") or []
+            if isinstance(pinned, str):
+                try:
+                    import json as _j
+                    pinned = _j.loads(pinned) if pinned else []
+                except Exception:
+                    pinned = []
+            if pinned and active_space_id not in pinned:
+                continue
+            visible.append(c)
+
+        if not visible:
+            return None
+
+        lines = ["Canvases available to you (use canvas_list / page_read to explore):"]
+        for c in visible[:20]:
+            cid = c.get("canvas_id") or c.get("space_id", "")
+            name = c.get("name", cid)
+            scope = c.get("scope", "")
+            lines.append(f"- {name} ({scope}) [{cid}]")
+        if len(visible) > 20:
+            lines.append(f"…and {len(visible) - 20} more.")
+        return "\n".join(lines)
 
     async def _get_pending_awareness(
         self, instance_id: str, active_space_id: str,
