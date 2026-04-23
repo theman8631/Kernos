@@ -5535,28 +5535,14 @@ class MessageHandler:
         await assemble.run(ctx)
 
     async def _phase_reason(self, ctx: TurnContext) -> None:
-        """Phase 4: Build ReasoningRequest, execute via task engine."""
-        ctx.task = Task(
-            id=generate_task_id(), type=TaskType.REACTIVE_SIMPLE,
-            instance_id=ctx.instance_id, conversation_id=ctx.conversation_id,
-            source="user_message", input_text=ctx.message.content, created_at=utc_now(),
-        )
-        # Timezone: member profile → soul (legacy)
-        _tz = (ctx.member_profile or {}).get("timezone", "") or ctx.soul.timezone
-        request = ReasoningRequest(
-            instance_id=ctx.instance_id, conversation_id=ctx.conversation_id,
-            system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
-            system_prompt_static=ctx.system_prompt_static,
-            system_prompt_dynamic=ctx.system_prompt_dynamic,
-            model=self.reasoning.main_model,
-            trigger="user_message", active_space_id=ctx.active_space_id,
-            member_id=ctx.member_id,
-            input_text=ctx.message.content, active_space=ctx.active_space,
-            user_timezone=_tz,
-            trace=ctx.trace,
-        )
-        ctx.task = await self.engine.execute(ctx.task, request)
-        ctx.response_text = ctx.task.result_text
+        """Phase 4: Build ReasoningRequest, execute via task engine.
+
+        HANDLER-PIPELINE-DECOMPOSE: delegates to phases/reason.py.
+        """
+        from kernos.messages.phases import reason
+        if ctx.handler is None:
+            ctx.handler = self
+        await reason.run(ctx)
 
     async def _phase_consequence(self, ctx: TurnContext) -> None:
         """Phase 5: Confirmation replay, tool config, projectors, soul update."""
