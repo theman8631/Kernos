@@ -5545,96 +5545,14 @@ class MessageHandler:
         await reason.run(ctx)
 
     async def _phase_consequence(self, ctx: TurnContext) -> None:
-        """Phase 5: Confirmation replay, tool config, projectors, soul update."""
-        instance_id = ctx.instance_id
-        request = ReasoningRequest(
-            instance_id=instance_id, conversation_id=ctx.conversation_id,
-            system_prompt=ctx.system_prompt, messages=ctx.messages, tools=ctx.tools,
-            system_prompt_static=ctx.system_prompt_static,
-            system_prompt_dynamic=ctx.system_prompt_dynamic,
-            model="", trigger="", active_space_id=ctx.active_space_id,
-            member_id=ctx.member_id,
-            input_text=ctx.message.content, active_space=ctx.active_space,
-        )
+        """Phase 5: Confirmation replay, tool config, projectors, soul update.
 
-        # Confirmation replay
-        pending = self.reasoning.get_pending_actions(instance_id)
-        conflict_this_turn = self.reasoning.get_conflict_raised()
-        if pending and conflict_this_turn:
-            confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
-            ctx.response_text = confirm_pattern.sub("", ctx.response_text).strip()
-            logger.info("CONFIRM_BLOCKED: instance=%s reason=same_turn_as_conflict", instance_id)
-        elif pending:
-            confirm_pattern = re.compile(r'\[CONFIRM:(\d+|ALL)\]', re.IGNORECASE)
-            matches = confirm_pattern.findall(ctx.response_text)
-            if matches:
-                actions_to_execute: list[int] = []
-                for match in matches:
-                    if match.upper() == "ALL":
-                        actions_to_execute = list(range(len(pending)))
-                        break
-                    else:
-                        idx = int(match)
-                        if 0 <= idx < len(pending) and idx not in actions_to_execute:
-                            actions_to_execute.append(idx)
-                execution_results: list[str] = []
-                for idx in actions_to_execute:
-                    action = pending[idx]
-                    if datetime.now(timezone.utc) < action.expires_at:
-                        try:
-                            result = await self.reasoning.execute_tool(action.tool_name, action.tool_input, request)
-                            execution_results.append(f"✓ {action.proposed_action}: {result}")
-                            logger.info("CONFIRM_EXECUTE: tool=%s idx=%d", action.tool_name, idx)
-                        except Exception as exc:
-                            execution_results.append(f"Failed: {action.proposed_action} ({exc})")
-                            logger.warning("CONFIRM_EXECUTE_FAILED: tool=%s idx=%d error=%s", action.tool_name, idx, exc)
-                    else:
-                        execution_results.append(f"Expired: {action.proposed_action}")
-                        logger.warning("CONFIRM_EXPIRED: tool=%s idx=%d", action.tool_name, idx)
-                self.reasoning.clear_pending_actions(instance_id)
-                ctx.response_text = confirm_pattern.sub("", ctx.response_text).strip()
-                if execution_results:
-                    ctx.response_text += "\n\n" + "\n".join(execution_results)
-            else:
-                all_expired = all(datetime.now(timezone.utc) >= a.expires_at for a in pending)
-                if all_expired:
-                    self.reasoning.clear_pending_actions(instance_id)
-                    logger.info("PENDING_CLEARED: instance=%s reason=all_expired", instance_id)
-
-        # Tool config persistence
-        if self.reasoning.get_tools_changed():
-            self.reasoning.reset_tools_changed()
-            try:
-                await self._persist_mcp_config(instance_id)
-                system_space = await self._get_system_space(instance_id)
-                if system_space:
-                    await self._write_capabilities_overview(instance_id, system_space.id)
-            except Exception as exc:
-                logger.warning("Failed to persist tools config: %s", exc)
-
-        # Projectors
-        history = await self.conversations.get_recent(instance_id, ctx.conversation_id, limit=20)
-        await run_projectors(
-            user_message=ctx.message.content, recent_turns=history[-4:],
-            soul=ctx.soul, state=self.state, events=self.events,
-            reasoning_service=self.reasoning, instance_id=instance_id,
-            active_space_id=ctx.active_space_id, active_space=ctx.active_space,
-            member_id=ctx.member_id, member_profile=ctx.member_profile,
-            instance_db=getattr(self, '_instance_db', None),
-        )
-
-        ctx.response_text = _maybe_append_name_ask(ctx.response_text, ctx.soul, member_profile=ctx.member_profile)
-        await self._post_response_soul_update(ctx.soul, member_id=ctx.member_id, member_profile=ctx.member_profile, active_space_id=ctx.active_space_id)
-
-        # Cross-domain signal check — skip for self-directed turns
-        if not ctx.is_self_directed:
-            try:
-                import asyncio as _aio
-                _aio.create_task(self._check_cross_domain_signals(
-                    ctx.instance_id, ctx.active_space_id,
-                    ctx.message.content or "", ctx.response_text))
-            except Exception:
-                pass
+        HANDLER-PIPELINE-DECOMPOSE: delegates to phases/consequence.py.
+        """
+        from kernos.messages.phases import consequence
+        if ctx.handler is None:
+            ctx.handler = self
+        await consequence.run(ctx)
 
     async def _phase_persist(self, ctx: TurnContext) -> None:
         """Phase 6: Store messages, write to conv log, compaction, events."""
