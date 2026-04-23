@@ -121,6 +121,33 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     expires_at   TEXT DEFAULT '',
     used_at      TEXT DEFAULT ''
 );
+
+-- PARCEL-PRIMITIVE-V1: cross-space file transfer lifecycle
+CREATE TABLE IF NOT EXISTS parcels (
+    parcel_id           TEXT PRIMARY KEY,
+    instance_id         TEXT NOT NULL,
+    sender_member_id    TEXT NOT NULL,
+    recipient_member_id TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'packed',
+        -- packed | accepted | delivered | declined | expired | failed
+    payload_manifest    TEXT NOT NULL DEFAULT '[]',   -- JSON: [{filename, size_bytes, sha256}]
+    total_bytes         INTEGER NOT NULL DEFAULT 0,
+    note                TEXT DEFAULT '',
+    ttl_days            INTEGER NOT NULL DEFAULT 7,
+    sender_path         TEXT DEFAULT '',              -- absolute path to sender's staged dir
+    recipient_path      TEXT DEFAULT '',              -- populated on delivery
+    decline_reason      TEXT DEFAULT '',
+    created_at          TEXT NOT NULL,
+    responded_at        TEXT DEFAULT '',
+    delivered_at        TEXT DEFAULT '',
+    expired_at          TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_parcels_recipient
+    ON parcels(recipient_member_id, status);
+CREATE INDEX IF NOT EXISTS idx_parcels_sender
+    ON parcels(sender_member_id, status);
+CREATE INDEX IF NOT EXISTS idx_parcels_instance
+    ON parcels(instance_id, status);
 """
 
 
@@ -1022,3 +1049,164 @@ class InstanceDB:
         )
         await self._conn.commit()
         return result.rowcount > 0
+
+    # =========================================================================
+    # Parcels — PARCEL-PRIMITIVE-V1
+    # =========================================================================
+
+    async def save_parcel(self, parcel: dict) -> None:
+        """Insert a new parcel row. Expects the dict shape produced by
+        :func:`kernos.kernel.parcel.Parcel.to_row`."""
+        if not self._conn:
+            return
+        await self._conn.execute(
+            """
+            INSERT INTO parcels (
+                parcel_id, instance_id, sender_member_id, recipient_member_id,
+                status, payload_manifest, total_bytes, note, ttl_days,
+                sender_path, recipient_path, decline_reason,
+                created_at, responded_at, delivered_at, expired_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                parcel["parcel_id"], parcel["instance_id"],
+                parcel["sender_member_id"], parcel["recipient_member_id"],
+                parcel["status"], parcel["payload_manifest"],
+                parcel["total_bytes"], parcel.get("note", ""),
+                parcel.get("ttl_days", 7),
+                parcel.get("sender_path", ""),
+                parcel.get("recipient_path", ""),
+                parcel.get("decline_reason", ""),
+                parcel["created_at"],
+                parcel.get("responded_at", ""),
+                parcel.get("delivered_at", ""),
+                parcel.get("expired_at", ""),
+            ),
+        )
+        await self._conn.commit()
+
+    async def get_parcel(self, parcel_id: str) -> dict | None:
+        """Return the parcel row, or None if not found."""
+        if not self._conn:
+            return None
+        cur = await self._conn.execute(
+            "SELECT * FROM parcels WHERE parcel_id=?", (parcel_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        cols = [c[0] for c in cur.description]
+        return dict(zip(cols, row))
+
+    async def update_parcel_status(
+        self,
+        parcel_id: str,
+        status: str,
+        *,
+        responded_at: str = "",
+        delivered_at: str = "",
+        expired_at: str = "",
+        recipient_path: str = "",
+        decline_reason: str = "",
+    ) -> bool:
+        """Update mutable parcel fields. Empty strings are ignored (no overwrite)."""
+        if not self._conn:
+            return False
+        updates = ["status = ?"]
+        args: list = [status]
+        for name, val in (
+            ("responded_at", responded_at),
+            ("delivered_at", delivered_at),
+            ("expired_at", expired_at),
+            ("recipient_path", recipient_path),
+            ("decline_reason", decline_reason),
+        ):
+            if val:
+                updates.append(f"{name} = ?")
+                args.append(val)
+        args.append(parcel_id)
+        query = f"UPDATE parcels SET {', '.join(updates)} WHERE parcel_id = ?"
+        result = await self._conn.execute(query, args)
+        await self._conn.commit()
+        return result.rowcount > 0
+
+    async def list_parcels(
+        self,
+        *,
+        instance_id: str,
+        member_id: str = "",
+        direction: str = "all",   # sent | received | all
+        status: str = "all",
+        limit: int = 200,
+    ) -> list[dict]:
+        """Return parcels for a member filtered by direction + status.
+
+        ``direction='sent'`` selects parcels where ``sender_member_id == member_id``;
+        ``'received'`` selects ``recipient_member_id == member_id``; ``'all'``
+        unions both.
+        """
+        if not self._conn:
+            return []
+        clauses = ["instance_id = ?"]
+        args: list = [instance_id]
+        if member_id:
+            if direction == "sent":
+                clauses.append("sender_member_id = ?")
+                args.append(member_id)
+            elif direction == "received":
+                clauses.append("recipient_member_id = ?")
+                args.append(member_id)
+            else:  # 'all'
+                clauses.append("(sender_member_id = ? OR recipient_member_id = ?)")
+                args.extend([member_id, member_id])
+        if status and status != "all":
+            clauses.append("status = ?")
+            args.append(status)
+        args.append(limit)
+        query = (
+            "SELECT * FROM parcels WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at DESC LIMIT ?"
+        )
+        cur = await self._conn.execute(query, args)
+        rows = await cur.fetchall()
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    async def expire_stale_parcels(self, *, now_iso: str) -> int:
+        """Transition any ``packed`` parcel whose TTL has elapsed to ``expired``.
+
+        Returns the number of parcels transitioned. Called from a maintenance
+        tick (e.g. startup or periodic scheduler pass). Parallel to the RM
+        ``state=expired`` pattern — identical shape, identical discipline.
+        """
+        if not self._conn:
+            return 0
+        from datetime import datetime, timezone, timedelta
+
+        try:
+            now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+        except Exception:
+            now_dt = datetime.now(timezone.utc)
+        cur = await self._conn.execute(
+            "SELECT parcel_id, created_at, ttl_days FROM parcels WHERE status = 'packed'",
+        )
+        stale: list[str] = []
+        for row in await cur.fetchall():
+            parcel_id, created_at, ttl_days = row
+            try:
+                created_dt = datetime.fromisoformat(
+                    (created_at or "").replace("Z", "+00:00"),
+                )
+            except Exception:
+                continue
+            if created_dt + timedelta(days=int(ttl_days or 7)) <= now_dt:
+                stale.append(parcel_id)
+        for pid in stale:
+            await self._conn.execute(
+                "UPDATE parcels SET status='expired', expired_at=? WHERE parcel_id=?",
+                (now_iso, pid),
+            )
+        if stale:
+            await self._conn.commit()
+        return len(stale)

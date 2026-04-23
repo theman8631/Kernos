@@ -1061,6 +1061,8 @@ class JsonStateStore(StateStore):
             expired_at=d.get("expired_at", ""),
             resolution_reason=d.get("resolution_reason", ""),
             reply_to_id=d.get("reply_to_id", ""),
+            envelope_type=d.get("envelope_type", "message"),
+            parcel_id=d.get("parcel_id", ""),
         )
 
     async def add_relational_message(self, message) -> None:

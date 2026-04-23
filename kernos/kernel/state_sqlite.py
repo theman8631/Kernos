@@ -257,6 +257,8 @@ CREATE TABLE IF NOT EXISTS relational_messages (
     expired_at              TEXT DEFAULT '',
     resolution_reason       TEXT DEFAULT '',
     reply_to_id             TEXT DEFAULT '',
+    envelope_type           TEXT DEFAULT 'message',
+    parcel_id               TEXT DEFAULT '',
     PRIMARY KEY (instance_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_rm_addressee
@@ -338,6 +340,8 @@ class SqliteStateStore(StateStore):
             # Migrations: add columns that may be missing from older databases
             for _alt in [
                 "ALTER TABLE covenants ADD COLUMN member_id TEXT DEFAULT ''",
+                "ALTER TABLE relational_messages ADD COLUMN envelope_type TEXT DEFAULT 'message'",
+                "ALTER TABLE relational_messages ADD COLUMN parcel_id TEXT DEFAULT ''",
             ]:
                 try:
                     await conn.execute(_alt)
@@ -1134,8 +1138,9 @@ class SqliteStateStore(StateStore):
             "id, instance_id, origin_member_id, origin_agent_identity, "
             "addressee_member_id, intent, content, urgency, conversation_id, "
             "state, created_at, target_space_hint, delivered_at, surfaced_at, "
-            "resolved_at, expired_at, resolution_reason, reply_to_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "resolved_at, expired_at, resolution_reason, reply_to_id, "
+            "envelope_type, parcel_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message.id, message.instance_id, message.origin_member_id,
                 message.origin_agent_identity, message.addressee_member_id,
@@ -1144,6 +1149,8 @@ class SqliteStateStore(StateStore):
                 message.target_space_hint, message.delivered_at,
                 message.surfaced_at, message.resolved_at, message.expired_at,
                 message.resolution_reason, message.reply_to_id,
+                getattr(message, "envelope_type", "message") or "message",
+                getattr(message, "parcel_id", "") or "",
             ),
         )
         await db.commit()
@@ -1151,6 +1158,17 @@ class SqliteStateStore(StateStore):
     @staticmethod
     def _row_to_rm(row):
         from kernos.kernel.relational_messaging import RelationalMessage
+        # Older DBs may not have envelope_type / parcel_id columns yet.
+        # sqlite3.Row supports ``[key]`` access with KeyError on miss; fall
+        # back to defaults so a pre-parcel DB continues to load cleanly.
+        try:
+            envelope_type = row["envelope_type"] or "message"
+        except (IndexError, KeyError):
+            envelope_type = "message"
+        try:
+            parcel_id = row["parcel_id"] or ""
+        except (IndexError, KeyError):
+            parcel_id = ""
         return RelationalMessage(
             id=row["id"], instance_id=row["instance_id"],
             origin_member_id=row["origin_member_id"],
@@ -1166,6 +1184,8 @@ class SqliteStateStore(StateStore):
             expired_at=row["expired_at"] or "",
             resolution_reason=row["resolution_reason"] or "",
             reply_to_id=row["reply_to_id"] or "",
+            envelope_type=envelope_type,
+            parcel_id=parcel_id,
         )
 
     async def get_relational_message(self, instance_id, message_id):

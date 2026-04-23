@@ -92,11 +92,13 @@ class DispatchGate:
             "remember", "remember_details", "list_files", "read_file",
             "dismiss_whisper", "read_source", "read_doc", "read_soul",
             "manage_channels", "request_tool", "inspect_state",
+            "list_parcels", "inspect_parcel",
         }
         _KERNEL_WRITES = {
             "write_file", "delete_file", "manage_covenants",
             "update_soul", "manage_capabilities", "send_to_channel",
             "execute_code",
+            "pack_parcel",
         }
 
         if tool_name in _KERNEL_READS:
@@ -116,6 +118,11 @@ class DispatchGate:
         if tool_name == "manage_plan":
             action = (tool_input or {}).get("action", "status")
             return "read" if action == "status" else "soft_write"
+        if tool_name == "respond_to_parcel":
+            # accept triggers a permanent cross-member file delivery →
+            # hard_write. decline is reversible / informational → soft_write.
+            action = (tool_input or {}).get("action", "")
+            return "hard_write" if action == "accept" else "soft_write"
         if tool_name == "manage_schedule":
             return "read"
         if tool_name == "manage_workspace":

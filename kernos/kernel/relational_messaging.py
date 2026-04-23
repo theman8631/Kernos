@@ -87,6 +87,13 @@ class RelationalMessage:
     expired_at: str = ""
     resolution_reason: str = ""          # outcome category for trace
     reply_to_id: str = ""                # chains replies to a prior message
+    #: PARCEL-PRIMITIVE-V1: discriminates free-form messages (default) from
+    #: structured envelope types like ``parcel_offer``. Recipients'
+    #: surfacing code reads this to render structured metadata without
+    #: relying on content parsing.
+    envelope_type: str = "message"
+    #: Optional back-reference to a parcel when envelope_type='parcel_offer'.
+    parcel_id: str = ""
 
 
 def generate_message_id() -> str:

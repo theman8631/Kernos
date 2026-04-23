@@ -49,18 +49,32 @@ class DispatchResult:
         conversation_id: str = "",
         state: str = "",
         error: str = "",
+        messenger_decision: str = "pass",   # pass | revise | refer | none
+        envelope_skipped: bool = False,     # true when parcel-offer refer
     ) -> None:
         self.ok = ok
         self.message_id = message_id
         self.conversation_id = conversation_id
         self.state = state
         self.error = error
+        #: PARCEL-PRIMITIVE-V1: surface Messenger's outcome so callers
+        #: (notably ParcelService) can react. ``none`` means no callback
+        #: was wired; ``pass``/``revise``/``refer`` mirror the cohort's
+        #: named outcomes.
+        self.messenger_decision = messenger_decision
+        #: PARCEL-PRIMITIVE-V1: true when the envelope was deliberately
+        #: not persisted (e.g. parcel-offer + Messenger refer). The
+        #: ``refer_whisper`` still goes to the sender; the recipient
+        #: sees nothing.
+        self.envelope_skipped = envelope_skipped
 
     def to_dict(self) -> dict:
         return {
             "ok": self.ok, "message_id": self.message_id,
             "conversation_id": self.conversation_id,
             "state": self.state, "error": self.error,
+            "messenger_decision": self.messenger_decision,
+            "envelope_skipped": self.envelope_skipped,
         }
 
 
@@ -113,6 +127,8 @@ class RelationalDispatcher:
         target_space_hint: str = "",
         conversation_id: str = "",
         reply_to_id: str = "",
+        envelope_type: str = "message",
+        parcel_id: str = "",
     ) -> DispatchResult:
         """Validate + create + route. Returns DispatchResult with outcome."""
         # Basic enum validation
@@ -179,6 +195,7 @@ class RelationalDispatcher:
         # deterministic dispatch directives.
         content_to_send = content
         refer_whisper: Any = None
+        messenger_decision = "none"
         if self._messenger_judge is not None:
             try:
                 content_to_send, refer_whisper = await self._messenger_judge(
@@ -188,6 +205,12 @@ class RelationalDispatcher:
                     intent=intent,
                     content=content,
                 )
+                if refer_whisper is not None:
+                    messenger_decision = "refer"
+                elif content_to_send != content:
+                    messenger_decision = "revise"
+                else:
+                    messenger_decision = "pass"
             except Exception as exc:
                 # Defensive: the callback should handle its own exceptions.
                 # If something still leaks, we log and proceed with the
@@ -199,6 +222,38 @@ class RelationalDispatcher:
                 )
                 content_to_send = content
                 refer_whisper = None
+                messenger_decision = "pass"
+
+        # PARCEL-PRIMITIVE-V1: when the envelope is a parcel_offer and the
+        # Messenger referred, we skip persisting the envelope so the
+        # recipient sees nothing. The refer whisper still flows to the
+        # sender below so they learn why. The parcel service observes the
+        # ``envelope_skipped`` flag and auto-declines the parcel.
+        envelope_skipped = (
+            envelope_type == "parcel_offer"
+            and messenger_decision == "refer"
+        )
+        if envelope_skipped:
+            if refer_whisper is not None:
+                try:
+                    await self.state.save_whisper(instance_id, refer_whisper)
+                except Exception as exc:
+                    logger.warning(
+                        "RM_REFER_WHISPER_SAVE_FAILED: %s", exc,
+                    )
+            self._emit(
+                "relational_message.parcel_offer_refer",
+                f"origin={origin_member_id} addressee={addressee_id} "
+                f"parcel={parcel_id}",
+            )
+            return DispatchResult(
+                ok=True,
+                message_id="",
+                conversation_id="",
+                state="skipped",
+                messenger_decision=messenger_decision,
+                envelope_skipped=True,
+            )
 
         # Build envelope (pending) and persist.
         # Thread-id resolution: explicit conversation_id wins; otherwise if
@@ -231,6 +286,8 @@ class RelationalDispatcher:
             created_at=utc_now(),
             target_space_hint=target_space_hint or "",
             reply_to_id=reply_to_id or "",
+            envelope_type=envelope_type,
+            parcel_id=parcel_id,
         )
         await self.state.add_relational_message(msg)
         self._emit(
@@ -258,6 +315,7 @@ class RelationalDispatcher:
         return DispatchResult(
             ok=True, message_id=msg.id,
             conversation_id=conv_id, state=msg.state,
+            messenger_decision=messenger_decision,
         )
 
     # --- Public: pickup ---

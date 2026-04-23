@@ -1,4 +1,135 @@
 """Kernel tool JSON schemas and pure helper functions."""
+
+# ---------------------------------------------------------------------------
+# PARCEL-PRIMITIVE-V1: cross-space file transfer
+# ---------------------------------------------------------------------------
+
+PACK_PARCEL_TOOL = {
+    "name": "pack_parcel",
+    "description": (
+        "Pack one or more files from your active space and offer them to "
+        "another member. Files are copied into a staged parcel directory; "
+        "the recipient gets an offer via relational messaging and can "
+        "accept or decline. On accept, files copy to the recipient's "
+        "space with sha256 verification. Use when a member has asked you "
+        "to 'send' or 'share' files to another member."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Filenames in the active space to include in the parcel. "
+                    "Paths must resolve inside the space. Max 50 files."
+                ),
+            },
+            "recipient_member_id": {
+                "type": "string",
+                "description": (
+                    "Target member's ID. Use list_members / declare_relationship "
+                    "output to find IDs."
+                ),
+            },
+            "note": {
+                "type": "string",
+                "description": "Optional short context for the recipient.",
+            },
+            "ttl_days": {
+                "type": "integer",
+                "description": (
+                    "Days the offer stays open before auto-expiring. "
+                    "Default 7, max 30."
+                ),
+            },
+        },
+        "required": ["files", "recipient_member_id"],
+    },
+}
+
+
+RESPOND_TO_PARCEL_TOOL = {
+    "name": "respond_to_parcel",
+    "description": (
+        "Respond to a parcel offer you received. Accept copies the files "
+        "into your active space at parcels/{parcel_id}/ with sha256 "
+        "verification; decline leaves the sender's staged files alone "
+        "and returns a reason to the sender."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "parcel_id": {
+                "type": "string",
+                "description": "The parcel's ID (from the offer envelope).",
+            },
+            "action": {
+                "type": "string",
+                "enum": ["accept", "decline"],
+                "description": "accept | decline",
+            },
+            "reason": {
+                "type": "string",
+                "description": (
+                    "Optional; surfaced to the sender on decline."
+                ),
+            },
+        },
+        "required": ["parcel_id", "action"],
+    },
+}
+
+
+LIST_PARCELS_TOOL = {
+    "name": "list_parcels",
+    "description": (
+        "List parcels involving the calling member. Direction filters "
+        "by whether the member is the sender or recipient; status filters "
+        "by lifecycle state. Results are scoped — a member only sees "
+        "parcels they sent or received."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "direction": {
+                "type": "string",
+                "enum": ["sent", "received", "all"],
+                "description": "Default 'all'.",
+            },
+            "status": {
+                "type": "string",
+                "enum": [
+                    "packed", "accepted", "delivered", "declined",
+                    "expired", "failed", "all",
+                ],
+                "description": "Default 'all'.",
+            },
+        },
+    },
+}
+
+
+INSPECT_PARCEL_TOOL = {
+    "name": "inspect_parcel",
+    "description": (
+        "Return full detail for a single parcel: manifest (filenames, "
+        "sizes, sha256 hashes), all lifecycle timestamps, current status. "
+        "Scoped — a member can only inspect parcels they sent or received."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "parcel_id": {
+                "type": "string",
+                "description": "The parcel's ID.",
+            },
+        },
+        "required": ["parcel_id"],
+    },
+}
+
+
 REQUEST_TOOL = {
     "name": "request_tool",
     "description": (
