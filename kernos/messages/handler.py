@@ -5117,11 +5117,42 @@ class MessageHandler:
         _max_step_retries = 5
         _step_backoffs = [30, 60, 120, 300, 600]  # 30s, 1m, 2m, 5m, 10m
 
+        # EVENT-STREAM-TO-SQLITE: plan step started. Fires once per step
+        # (the retry loop inside re-tries the same step on failure).
+        try:
+            from kernos.kernel import event_stream
+            await event_stream.emit(
+                instance_id, "plan.step_started",
+                {
+                    "plan_id": envelope.plan_id,
+                    "step_id": envelope.step_id,
+                    "step_description": (envelope.step_description or "")[:200],
+                },
+                space_id=space_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit plan.step_started: %s", exc)
+
         for step_attempt in range(_max_step_retries):
             try:
                 response = await self.process(msg)
                 logger.info("PLAN_STEP_COMPLETE: plan=%s step=%s response_len=%d",
                     envelope.plan_id, envelope.step_id, len(response or ""))
+                # EVENT-STREAM-TO-SQLITE: plan step completed.
+                try:
+                    from kernos.kernel import event_stream
+                    await event_stream.emit(
+                        instance_id, "plan.step_completed",
+                        {
+                            "plan_id": envelope.plan_id,
+                            "step_id": envelope.step_id,
+                            "response_len": len(response or ""),
+                            "attempts": step_attempt + 1,
+                        },
+                        space_id=space_id,
+                    )
+                except Exception as exc:
+                    logger.debug("Failed to emit plan.step_completed: %s", exc)
 
                 # Delete the progress notification for this step
                 _progress = self._plan_progress_msgs.pop(envelope.plan_id, None)
@@ -5171,6 +5202,22 @@ class MessageHandler:
                 logger.warning("PLAN_STEP_FAILED: plan=%s step=%s attempt=%d/%d error=%s retry_in=%ds",
                     envelope.plan_id, envelope.step_id,
                     step_attempt + 1, _max_step_retries, exc, _delay)
+                # EVENT-STREAM-TO-SQLITE: plan step failure.
+                try:
+                    from kernos.kernel import event_stream
+                    await event_stream.emit(
+                        instance_id, "plan.step_failed",
+                        {
+                            "plan_id": envelope.plan_id,
+                            "step_id": envelope.step_id,
+                            "attempt": step_attempt + 1,
+                            "max_retries": _max_step_retries,
+                            "error": str(exc)[:200],
+                        },
+                        space_id=space_id,
+                    )
+                except Exception as _em_exc:
+                    logger.debug("Failed to emit plan.step_failed: %s", _em_exc)
 
                 if step_attempt == 0:
                     # First failure — notify user

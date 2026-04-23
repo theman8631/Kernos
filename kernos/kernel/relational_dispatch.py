@@ -177,6 +177,22 @@ class RelationalDispatcher:
                 f"origin={origin_member_id} addressee={addressee_id} "
                 f"intent={intent} reason=permission_{perm}",
             )
+            # EVENT-STREAM-TO-SQLITE: permission-denied emission on the
+            # unified timeline.
+            try:
+                from kernos.kernel import event_stream
+                await event_stream.emit(
+                    instance_id, "rm.rejected",
+                    {
+                        "from": origin_member_id,
+                        "to": addressee_id,
+                        "intent": intent,
+                        "reason": f"permission_{perm}",
+                    },
+                    member_id=origin_member_id,
+                )
+            except Exception as exc:
+                logger.debug("Failed to emit rm.rejected: %s", exc)
             return DispatchResult(
                 ok=False,
                 error=(
@@ -312,6 +328,26 @@ class RelationalDispatcher:
             await self._immediate_push(msg)
         # elevated / normal: stay pending; collect on recipient's next turn.
 
+        # EVENT-STREAM-TO-SQLITE: successful dispatch emission on the
+        # unified timeline.
+        try:
+            from kernos.kernel import event_stream
+            await event_stream.emit(
+                instance_id, "rm.dispatched",
+                {
+                    "from": origin_member_id,
+                    "to": addressee_id,
+                    "intent": intent,
+                    "urgency": urgency,
+                    "envelope_type": envelope_type,
+                    "messenger_decision": messenger_decision,
+                    "message_id": msg.id,
+                },
+                member_id=origin_member_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit rm.dispatched: %s", exc)
+
         return DispatchResult(
             ok=True, message_id=msg.id,
             conversation_id=conv_id, state=msg.state,
@@ -400,6 +436,25 @@ class RelationalDispatcher:
                         "relational_message.delivered",
                         f"id={msg.id} path=next_turn addressee={member_id}",
                     )
+                    # EVENT-STREAM-TO-SQLITE: delivery emission on the
+                    # unified timeline. Recipient member picked up the
+                    # envelope on their next turn.
+                    try:
+                        from kernos.kernel import event_stream
+                        await event_stream.emit(
+                            instance_id, "rm.delivered",
+                            {
+                                "message_id": msg.id,
+                                "from": msg.origin_member_id,
+                                "to": member_id,
+                                "intent": msg.intent,
+                                "envelope_type": msg.envelope_type,
+                            },
+                            member_id=member_id,
+                            space_id=active_space_id,
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to emit rm.delivered: %s", exc)
                 else:
                     # Raced with immediate-push or another collect; reload.
                     reloaded = await self.state.get_relational_message(

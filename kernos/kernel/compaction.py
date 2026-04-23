@@ -1125,6 +1125,22 @@ class CompactionService:
         space_dir = self._space_dir(instance_id, space_id, member_id)
         space_dir.mkdir(parents=True, exist_ok=True)
 
+        # EVENT-STREAM-TO-SQLITE: compaction trigger emission.
+        try:
+            from kernos.kernel import event_stream
+            await event_stream.emit(
+                instance_id, "compaction.triggered",
+                {
+                    "source_log": source_log_number,
+                    "log_bytes": len(log_text),
+                    "space_name": space.name,
+                },
+                member_id=member_id or None,
+                space_id=space_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit compaction.triggered: %s", exc)
+
         # Load existing compaction document
         active_doc_path = space_dir / "active_document.md"
         existing_doc = (
@@ -1235,6 +1251,21 @@ class CompactionService:
             space_id, member_id or "(unscoped)", source_log_number,
             comp_state.global_compaction_number,
         )
+
+        # EVENT-STREAM-TO-SQLITE: compaction completion emission.
+        try:
+            from kernos.kernel import event_stream
+            await event_stream.emit(
+                instance_id, "compaction.completed",
+                {
+                    "source_log": source_log_number,
+                    "compaction_number": comp_state.global_compaction_number,
+                },
+                member_id=member_id or None,
+                space_id=space_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit compaction.completed: %s", exc)
 
         return comp_state
 

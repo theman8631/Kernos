@@ -276,6 +276,16 @@ async def on_ready():
     except Exception as exc:
         logger.warning("Instance DB init failed (non-fatal): %s", exc)
 
+    # EVENT-STREAM-TO-SQLITE: start the background writer. Fire-and-forget
+    # emissions from six instrumented subsystems batch-flush to
+    # data/instance.db every 2s or when the queue hits 100 events.
+    try:
+        from kernos.kernel import event_stream
+        await event_stream.start_writer(data_dir)
+        logger.info("EVENT_STREAM: writer started (data_dir=%s)", data_dir)
+    except Exception as exc:
+        logger.warning("EVENT_STREAM_START_FAILED: %s", exc)
+
     try:
         await emit_event(
             events, EventType.SYSTEM_STARTED, "system", "server", payload={}

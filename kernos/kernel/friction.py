@@ -142,7 +142,7 @@ class FrictionObserver:
         if sig:
             signals.append(sig)
 
-        # Write reports
+        # Write reports + emit to unified timeline
         for signal in signals:
             logger.warning(
                 "FRICTION: type=%s desc=%s",
@@ -152,6 +152,20 @@ class FrictionObserver:
                 await self._write_report(signal, instance_id)
             except Exception as exc:
                 logger.warning("FRICTION: failed to write report: %s", exc)
+            # EVENT-STREAM-TO-SQLITE: friction observation emission.
+            try:
+                from kernos.kernel import event_stream
+                await event_stream.emit(
+                    instance_id, "friction.observed",
+                    {
+                        "signal_type": signal.signal_type,
+                        "description": signal.description[:200],
+                        "heuristic": signal.heuristic,
+                    },
+                    space_id=active_space_id or None,
+                )
+            except Exception as exc:
+                logger.debug("Failed to emit friction.observed: %s", exc)
 
         return signals
 

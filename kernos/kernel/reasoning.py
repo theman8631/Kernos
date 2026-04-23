@@ -906,6 +906,27 @@ class ReasoningService:
             except Exception as exc:
                 logger.warning("Failed to emit dispatch.gate: %s", exc)
 
+            # EVENT-STREAM-TO-SQLITE: unified-timeline emission. Coexists
+            # with the older emit_event above during the transition.
+            try:
+                from kernos.kernel import event_stream
+                _turn_id = getattr(getattr(request, "trace", None), "turn_id", None)
+                await event_stream.emit(
+                    request.instance_id, "gate.verdict",
+                    {
+                        "tool": block.name,
+                        "effect": tool_effect,
+                        "verdict": gate_result.reason,
+                        "allowed": gate_result.allowed,
+                        "method": gate_result.method,
+                    },
+                    member_id=request.member_id or None,
+                    space_id=request.active_space_id or None,
+                    correlation_id=_turn_id,
+                )
+            except Exception as exc:
+                logger.warning("Failed to emit gate.verdict: %s", exc)
+
             self._trace(request, "info" if gate_result.allowed else "warning",
                 "gate", "GATE",
                 f"tool={block.name} effect={tool_effect} allowed={gate_result.allowed} "
@@ -983,6 +1004,23 @@ class ReasoningService:
             )
         except Exception as exc:
             logger.warning("Failed to emit tool.called: %s", exc)
+
+        # EVENT-STREAM-TO-SQLITE: unified-timeline emission.
+        try:
+            from kernos.kernel import event_stream
+            _turn_id = getattr(getattr(request, "trace", None), "turn_id", None)
+            await event_stream.emit(
+                request.instance_id, "tool.called",
+                {
+                    "name": block.name,
+                    "args_keys": sorted((tool_input or {}).keys()),
+                },
+                member_id=request.member_id or None,
+                space_id=request.active_space_id or None,
+                correlation_id=_turn_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit tool.called (unified): %s", exc)
 
         await self._audit.log(
             request.instance_id,
@@ -1626,6 +1664,28 @@ class ReasoningService:
             "success": not is_error,
             "result_preview": result[:200] if isinstance(result, str) else str(result)[:200],
         })
+
+        # EVENT-STREAM-TO-SQLITE: one emission per tool invocation
+        # (tool.returned on success, tool.failed on error). The inputs'
+        # shape — not the inputs themselves — is captured so the payload
+        # stays small and doesn't leak sensitive arguments.
+        try:
+            from kernos.kernel import event_stream
+            _turn_id = getattr(getattr(request, "trace", None), "turn_id", None)
+            _event_type = "tool.failed" if is_error else "tool.returned"
+            await event_stream.emit(
+                request.instance_id, _event_type,
+                {
+                    "name": block.name,
+                    "args_keys": sorted((tool_input or {}).keys()),
+                    "result_preview_len": len(str(result)[:200]) if result else 0,
+                },
+                member_id=request.member_id or None,
+                space_id=request.active_space_id or None,
+                correlation_id=_turn_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit tool event: %s", exc)
 
         return {
             "type": "tool_result",
