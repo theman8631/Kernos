@@ -5502,50 +5502,17 @@ class MessageHandler:
         return {"role": "user", "content": "\n".join(lines)}
 
     async def _phase_provision(self, ctx: TurnContext) -> None:
-        """Phase 1: Ensure tenant, soul, MCP config, covenants, evaluator ready."""
-        instance_id = ctx.instance_id
-        message = ctx.message
-        await self.tenants.get_or_create(instance_id)
-        await self._ensureinstance_state(instance_id, message)
-        ctx.soul = await self._get_or_init_soul(instance_id)
-        # Load member profile from instance.db
-        if ctx.member_id and hasattr(self, '_instance_db') and self._instance_db:
-            ctx.member_profile = await self._instance_db.get_member_profile(ctx.member_id)
-            if not ctx.member_profile:
-                # First turn for this member — create profile from members table
-                member = await self._instance_db.get_member(ctx.member_id)
-                if member:
-                    await self._instance_db.upsert_member_profile(ctx.member_id, {
-                        "display_name": member.get("display_name", ""),
-                    })
-                    ctx.member_profile = await self._instance_db.get_member_profile(ctx.member_id)
-            # One-time migration: copy Soul per-user fields to owner's profile
-            if ctx.member_profile and ctx.soul:
-                soul_fields = {
-                    "user_name": ctx.soul.user_name,
-                    "timezone": ctx.soul.timezone,
-                    "communication_style": ctx.soul.communication_style,
-                    "interaction_count": ctx.soul.interaction_count,
-                    "bootstrap_graduated": ctx.soul.bootstrap_graduated,
-                    "bootstrap_graduated_at": ctx.soul.bootstrap_graduated_at,
-                    # Soul identity fields (Soul Revision)
-                    "agent_name": ctx.soul.agent_name,
-                    "emoji": ctx.soul.emoji,
-                    "personality_notes": ctx.soul.personality_notes,
-                    "hatched": ctx.soul.hatched,
-                    "hatched_at": ctx.soul.hatched_at,
-                }
-                if any(soul_fields.values()):
-                    await self._instance_db.migrate_soul_to_member_profile(
-                        ctx.member_id, soul_fields)
-                    # Reload profile after migration
-                    ctx.member_profile = await self._instance_db.get_member_profile(ctx.member_id)
-        # Ensure member has their own default space
-        if ctx.member_id:
-            await self._ensure_member_default_space(instance_id, ctx.member_id)
-        await self._maybe_load_mcp_config(instance_id)
-        await self._maybe_run_covenant_cleanup(instance_id)
-        await self._maybe_start_evaluator(instance_id)
+        """Phase 1: Ensure tenant, soul, MCP config, covenants, evaluator ready.
+
+        HANDLER-PIPELINE-DECOMPOSE: delegates to phases/provision.py.
+        Kept as a shim for back-compat with callers that still invoke the
+        method directly (slash commands, tests). Removed when the pipeline
+        flip retires the method.
+        """
+        from kernos.messages.phases import provision
+        if ctx.handler is None:
+            ctx.handler = self
+        await provision.run(ctx)
 
     async def _phase_route(self, ctx: TurnContext) -> None:
         """Phase 2: Determine context space, handle space switching, file uploads."""
