@@ -129,6 +129,7 @@ class RelationalDispatcher:
         reply_to_id: str = "",
         envelope_type: str = "message",
         parcel_id: str = "",
+        canvas_id: str = "",
     ) -> DispatchResult:
         """Validate + create + route. Returns DispatchResult with outcome."""
         # Basic enum validation
@@ -304,6 +305,7 @@ class RelationalDispatcher:
             reply_to_id=reply_to_id or "",
             envelope_type=envelope_type,
             parcel_id=parcel_id,
+            canvas_id=canvas_id,
         )
         await self.state.add_relational_message(msg)
         self._emit(

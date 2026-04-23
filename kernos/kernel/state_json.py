@@ -1063,6 +1063,7 @@ class JsonStateStore(StateStore):
             reply_to_id=d.get("reply_to_id", ""),
             envelope_type=d.get("envelope_type", "message"),
             parcel_id=d.get("parcel_id", ""),
+            canvas_id=d.get("canvas_id", ""),
         )
 
     async def add_relational_message(self, message) -> None:

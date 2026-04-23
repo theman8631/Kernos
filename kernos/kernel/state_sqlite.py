@@ -259,6 +259,7 @@ CREATE TABLE IF NOT EXISTS relational_messages (
     reply_to_id             TEXT DEFAULT '',
     envelope_type           TEXT DEFAULT 'message',
     parcel_id               TEXT DEFAULT '',
+    canvas_id               TEXT DEFAULT '',
     PRIMARY KEY (instance_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_rm_addressee
@@ -342,6 +343,7 @@ class SqliteStateStore(StateStore):
                 "ALTER TABLE covenants ADD COLUMN member_id TEXT DEFAULT ''",
                 "ALTER TABLE relational_messages ADD COLUMN envelope_type TEXT DEFAULT 'message'",
                 "ALTER TABLE relational_messages ADD COLUMN parcel_id TEXT DEFAULT ''",
+                "ALTER TABLE relational_messages ADD COLUMN canvas_id TEXT DEFAULT ''",
             ]:
                 try:
                     await conn.execute(_alt)
@@ -1139,8 +1141,8 @@ class SqliteStateStore(StateStore):
             "addressee_member_id, intent, content, urgency, conversation_id, "
             "state, created_at, target_space_hint, delivered_at, surfaced_at, "
             "resolved_at, expired_at, resolution_reason, reply_to_id, "
-            "envelope_type, parcel_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "envelope_type, parcel_id, canvas_id"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 message.id, message.instance_id, message.origin_member_id,
                 message.origin_agent_identity, message.addressee_member_id,
@@ -1151,6 +1153,7 @@ class SqliteStateStore(StateStore):
                 message.resolution_reason, message.reply_to_id,
                 getattr(message, "envelope_type", "message") or "message",
                 getattr(message, "parcel_id", "") or "",
+                getattr(message, "canvas_id", "") or "",
             ),
         )
         await db.commit()
@@ -1169,6 +1172,10 @@ class SqliteStateStore(StateStore):
             parcel_id = row["parcel_id"] or ""
         except (IndexError, KeyError):
             parcel_id = ""
+        try:
+            canvas_id = row["canvas_id"] or ""
+        except (IndexError, KeyError):
+            canvas_id = ""
         return RelationalMessage(
             id=row["id"], instance_id=row["instance_id"],
             origin_member_id=row["origin_member_id"],
@@ -1186,6 +1193,7 @@ class SqliteStateStore(StateStore):
             reply_to_id=row["reply_to_id"] or "",
             envelope_type=envelope_type,
             parcel_id=parcel_id,
+            canvas_id=canvas_id,
         )
 
     async def get_relational_message(self, instance_id, message_id):

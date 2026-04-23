@@ -1375,9 +1375,25 @@ class MessageHandler:
         if idb is None:
             return None
         from kernos.kernel.canvas import CanvasService
+        from kernos.kernel.events import emit_event
+
+        async def _canvas_emit(instance_id, event_type, payload, *, member_id=""):
+            # Best-effort event-stream emission — never raises.
+            stream = getattr(self, "_events", None) or getattr(self, "events", None)
+            if stream is None:
+                return
+            try:
+                meta = {"member_id": member_id} if member_id else {}
+                await emit_event(
+                    stream, event_type, instance_id, "canvas", payload, meta,
+                )
+            except Exception as exc:
+                logger.debug("CANVAS_EMIT_FAILED: %s %s", event_type, exc)
+
         self._canvas = CanvasService(
             instance_db=idb,
             data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
+            event_emit=_canvas_emit,
         )
         # Keep the reasoning service in sync so tool dispatch can reach it.
         try:

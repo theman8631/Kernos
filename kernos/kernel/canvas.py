@@ -268,11 +268,27 @@ class CanvasService:
         self,
         instance_db: Any,
         data_dir: str = "./data",
+        event_emit: Any = None,
     ) -> None:
         self._db = instance_db
         self._data_dir = data_dir
+        #: Optional ``async (instance_id, event_type, payload, *, member_id)``
+        #: callable for event-stream emission. Best-effort: every emit is
+        #: wrapped in try/except — canvas ops never break on event failure.
+        self._event_emit = event_emit
         # Page-frontmatter cache keyed on absolute path; invalidated on write
         self._fm_cache: dict[str, tuple[float, dict, str]] = {}
+
+    async def _emit(self, instance_id: str, event_type: str, payload: dict,
+                    member_id: str = "") -> None:
+        if not self._event_emit:
+            return
+        try:
+            await self._event_emit(
+                instance_id, event_type, payload, member_id=member_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never break canvas on event
+            logger.debug("CANVAS_EVENT_EMIT_FAILED: %s %s", event_type, exc)
 
     # ---- Create ----------------------------------------------------------
 
@@ -374,9 +390,32 @@ class CanvasService:
             "CANVAS_CREATED: instance=%s canvas=%s scope=%s owner=%s",
             instance_id, canvas_id, scope, creator_member_id,
         )
+
+        # Notify members = everyone with access except the creator.
+        # For team scope we cannot enumerate "all future members"; callers
+        # should resolve to current instance members at notify time.
+        if scope == "specific":
+            notify = [m for m in (members or []) if m and m != creator_member_id]
+        elif scope == "team":
+            notify = ["__team__"]  # sentinel: dispatcher resolves to instance members
+        else:
+            notify = []
+
+        await self._emit(
+            instance_id, "canvas.created",
+            {
+                "canvas_id": canvas_id,
+                "name": canvas.name,
+                "scope": scope,
+                "owner_member_id": creator_member_id,
+                "notify": notify,
+            },
+            member_id=creator_member_id,
+        )
+
         return CanvasOpResult(
             ok=True, canvas_id=canvas_id,
-            extra={"name": canvas.name, "scope": scope},
+            extra={"name": canvas.name, "scope": scope, "notify": notify},
         )
 
     # ---- Page read -------------------------------------------------------
@@ -490,14 +529,70 @@ class CanvasService:
             canvas_id, page_slug, writer_member_id, declared_type,
             new_state or "(none)", prev_state or "(none)",
         )
+
+        is_new = not existing_fm
+        state_changed = bool(new_state and new_state != prev_state)
+
+        # Event emission: distinct event per lifecycle stage.
+        if is_new:
+            await self._emit(
+                instance_id, "canvas.page.created",
+                {
+                    "canvas_id": canvas_id,
+                    "page_path": page_slug,
+                    "type": declared_type,
+                    "state": new_state,
+                    "writer_member_id": writer_member_id,
+                },
+                member_id=writer_member_id,
+            )
+        else:
+            await self._emit(
+                instance_id, "canvas.page.changed",
+                {
+                    "canvas_id": canvas_id,
+                    "page_path": page_slug,
+                    "type": declared_type,
+                    "state": new_state,
+                    "prev_state": prev_state,
+                    "writer_member_id": writer_member_id,
+                },
+                member_id=writer_member_id,
+            )
+            if state_changed:
+                await self._emit(
+                    instance_id, "canvas.page.state_changed",
+                    {
+                        "canvas_id": canvas_id,
+                        "page_path": page_slug,
+                        "type": declared_type,
+                        "prev_state": prev_state,
+                        "new_state": new_state,
+                        "writer_member_id": writer_member_id,
+                    },
+                    member_id=writer_member_id,
+                )
+                if new_state == "archived":
+                    await self._emit(
+                        instance_id, "canvas.page.archived",
+                        {
+                            "canvas_id": canvas_id,
+                            "page_path": page_slug,
+                            "writer_member_id": writer_member_id,
+                        },
+                        member_id=writer_member_id,
+                    )
+
         return CanvasOpResult(
             ok=True, canvas_id=canvas_id, page_path=page_slug,
             extra={
                 "type": declared_type,
                 "state": new_state,
                 "prev_state": prev_state,
-                "state_changed": bool(new_state and new_state != prev_state),
+                "state_changed": state_changed,
+                "is_new": is_new,
                 "type_recognized": type_ok,
+                "watchers": list(new_fm.get("watchers") or []),
                 "frontmatter": new_fm,
             },
         )

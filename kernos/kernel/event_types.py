@@ -92,3 +92,15 @@ class EventType(str, Enum):
     PROACTIVE_INSIGHT = "proactive.insight"
     # Payload: whisper_id, insight_text, delivery_class, source_space_id,
     #          target_space_id, knowledge_entry_id, reasoning_trace
+
+    # --- CANVAS-V1 ---
+    CANVAS_CREATED = "canvas.created"
+    # Payload: canvas_id, name, scope, owner_member_id, member_ids
+    CANVAS_PAGE_CREATED = "canvas.page.created"
+    # Payload: canvas_id, page_path, type, state, writer_member_id
+    CANVAS_PAGE_CHANGED = "canvas.page.changed"
+    # Payload: canvas_id, page_path, type, state, prev_state, writer_member_id
+    CANVAS_PAGE_STATE_CHANGED = "canvas.page.state_changed"
+    # Payload: canvas_id, page_path, type, prev_state, new_state, writer_member_id
+    CANVAS_PAGE_ARCHIVED = "canvas.page.archived"
+    # Payload: canvas_id, page_path, writer_member_id

@@ -1927,6 +1927,15 @@ class ReasoningService:
                 default_page_type=tool_input.get("default_page_type", "note"),
                 pinned_to_spaces=tool_input.get("pinned_to_spaces") or [],
             )
+            if result.ok:
+                await self._dispatch_canvas_offer(
+                    request=request,
+                    creator_member_id=member_id,
+                    canvas_id=result.canvas_id,
+                    canvas_name=result.extra.get("name", ""),
+                    scope=result.extra.get("scope", ""),
+                    notify=result.extra.get("notify") or [],
+                )
             return _json.dumps(result.to_dict(), default=str)
 
         if tool_name == "page_read":
@@ -2022,9 +2031,150 @@ class ReasoningService:
                 page_type=tool_input.get("page_type"),
                 state=tool_input.get("state"),
             )
+            if result.ok:
+                await self._notify_canvas_watchers(
+                    request=request,
+                    writer_member_id=member_id,
+                    canvas_id=canvas_id,
+                    page_path=page_slug,
+                    watchers=result.extra.get("watchers") or [],
+                    state_changed=bool(result.extra.get("state_changed")),
+                    new_state=result.extra.get("state", ""),
+                    prev_state=result.extra.get("prev_state", ""),
+                )
             return _json.dumps(result.to_dict(), default=str)
 
         return f"Canvas tool {tool_name!r} not dispatched."
+
+    async def _dispatch_canvas_offer(
+        self, *, request: "ReasoningRequest",
+        creator_member_id: str, canvas_id: str, canvas_name: str,
+        scope: str, notify: list[str],
+    ) -> None:
+        """Send ``canvas_offer`` relational messages to target members.
+
+        Best-effort: each addressee is an independent send; one failure does
+        not block the others. The ``__team__`` sentinel expands to all
+        instance members except the creator.
+        """
+        if not notify:
+            return
+        dispatcher = None
+        if self._handler and hasattr(self._handler, "_get_relational_dispatcher"):
+            dispatcher = self._handler._get_relational_dispatcher()
+        if not dispatcher:
+            return
+
+        idb = getattr(self._handler, "_instance_db", None) if self._handler else None
+        resolved: list[str] = []
+        for m in notify:
+            if m == "__team__" and idb is not None:
+                try:
+                    members = await idb.list_members()
+                    for row in members:
+                        mid = row.get("member_id") if isinstance(row, dict) else None
+                        if mid and mid != creator_member_id and mid not in resolved:
+                            resolved.append(mid)
+                except Exception as exc:
+                    logger.debug("CANVAS_TEAM_RESOLVE_FAILED: %s", exc)
+            elif m and m != creator_member_id and m not in resolved:
+                resolved.append(m)
+
+        identity = ""
+        if idb is not None:
+            try:
+                prof = await idb.get_member_profile(creator_member_id)
+                if prof:
+                    identity = prof.get("agent_name") or prof.get("display_name") or ""
+            except Exception:
+                pass
+
+        content = (
+            f"A new {scope} canvas '{canvas_name}' was created "
+            f"and you have access. (canvas_id: {canvas_id})"
+        )
+        for addressee in resolved:
+            try:
+                await dispatcher.send(
+                    instance_id=request.instance_id,
+                    origin_member_id=creator_member_id,
+                    origin_agent_identity=identity,
+                    addressee=addressee,
+                    intent="inform",
+                    content=content,
+                    urgency="normal",
+                    envelope_type="canvas_offer",
+                    canvas_id=canvas_id,
+                )
+            except Exception as exc:
+                logger.debug("CANVAS_OFFER_SEND_FAILED: to=%s %s", addressee, exc)
+
+    async def _notify_canvas_watchers(
+        self, *, request: "ReasoningRequest",
+        writer_member_id: str, canvas_id: str, page_path: str,
+        watchers: list[str], state_changed: bool, new_state: str,
+        prev_state: str,
+    ) -> None:
+        """Send whisper-style notifications to page watchers on state change.
+
+        v1 semantics (spec Pillar 4): watcher whispers fire only on
+        ``state_changed`` and are coalesced by (canvas_id, page_path,
+        watcher_member_id) within a 10-minute window. Plain body edits do
+        not wake a watcher — state changes do.
+
+        Coalescing is in-process (per reasoning service). If the process
+        restarts the window resets — acceptable for v1; persistent
+        coalescing would require a new table and isn't in scope.
+        """
+        if not watchers or not state_changed:
+            return
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        window = timedelta(minutes=10)
+        if not hasattr(self, "_canvas_watcher_last"):
+            self._canvas_watcher_last: dict[tuple[str, str, str], datetime] = {}
+
+        dispatcher = None
+        if self._handler and hasattr(self._handler, "_get_relational_dispatcher"):
+            dispatcher = self._handler._get_relational_dispatcher()
+        idb = getattr(self._handler, "_instance_db", None) if self._handler else None
+        identity = ""
+        if idb is not None:
+            try:
+                prof = await idb.get_member_profile(writer_member_id)
+                if prof:
+                    identity = prof.get("agent_name") or prof.get("display_name") or ""
+            except Exception:
+                pass
+
+        for watcher in watchers:
+            if not watcher or watcher == writer_member_id:
+                continue
+            key = (canvas_id, page_path, watcher)
+            last = self._canvas_watcher_last.get(key)
+            if last and (now - last) < window:
+                continue
+            self._canvas_watcher_last[key] = now
+            if not dispatcher:
+                continue
+            content = (
+                f"Canvas page '{page_path}' state changed from "
+                f"{prev_state or '(none)'} → {new_state or '(none)'}."
+            )
+            try:
+                await dispatcher.send(
+                    instance_id=request.instance_id,
+                    origin_member_id=writer_member_id,
+                    origin_agent_identity=identity,
+                    addressee=watcher,
+                    intent="inform",
+                    content=content,
+                    urgency="normal",
+                    envelope_type="canvas_watch",
+                    canvas_id=canvas_id,
+                )
+            except Exception as exc:
+                logger.debug("CANVAS_WATCH_SEND_FAILED: to=%s %s", watcher, exc)
 
     async def _handle_dismiss_whisper(
         self, instance_id: str, whisper_id: str, reason: str = "user_dismissed"

@@ -94,6 +94,9 @@ class RelationalMessage:
     envelope_type: str = "message"
     #: Optional back-reference to a parcel when envelope_type='parcel_offer'.
     parcel_id: str = ""
+    #: CANVAS-V1 back-reference when envelope_type in {'canvas_offer',
+    #: 'route_fire'}. Empty for non-canvas envelopes.
+    canvas_id: str = ""
 
 
 def generate_message_id() -> str:
