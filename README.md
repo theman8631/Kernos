@@ -1,171 +1,124 @@
-# KERNOS
+# Kernos
 
-<img width="350" height="350" alt="Kernos Logo" src="https://github.com/user-attachments/assets/121632b6-9811-4c8e-8126-4f44f2f1ca9f" />
+<img width="180" height="180" alt="Kernos" src="https://github.com/user-attachments/assets/121632b6-9811-4c8e-8126-4f44f2f1ca9f" align="right" />
 
-*Kernel for Extensible Runtime, Networked Orchestration Services*
+**A personal agent that works around the clock and earns its keep one correct small action at a time.**
 
-A personal intelligence that lives in the cloud, works 24/7, is reachable by
-text message, and earns trust through thousands of correct small actions. Built
-for non-technical users first, with kernel-level safety, memory, and
-orchestration under the hood.
+<br clear="right"/>
 
-**Status:** 1773 tests passing. Core architecture shipped. Active development:
-multi-member identity, deep memory, universal connections.
+---
 
-## What Kernos Does
+## What Kernos is
 
-- **Works across channels** — Discord and SMS share one brain. Switch channels mid-conversation without losing context
-- **Manages your time** — Google Calendar integration, scheduled reminders, proactive awareness ("your dentist appointment is in 30 minutes")
-- **Respects boundaries** — behavioral contracts (covenants) that the user defines and the system enforces. "Never send emails without asking" is infrastructure, not a suggestion
-- **Builds long-term memory** — structured memory with entity resolution, fact dedup, and two-tier recall
-- **Learns your preferences** — extracts behavioral patterns from conversation and adapts
-- **Searches and browses** — web search and full page browsing built in
-- **Schedules and reminds** — "Remind me to check on Henderson in 2 hours" just works
-- **Self-improves** — behavioral pattern detection, friction observer, runtime diagnostics, structured spec proposals
-- **Executes plans autonomously** — multi-step research, builds, and synthesis with budget ceilings and user interrupts
-- **Builds tools on demand** — workspace code execution, tool registration, workspace manifests
-- **Tracks commitments** — implicit obligations extracted from compaction, auto-trigger creation
-- **Supports multiple members** — invite code registration, per-member context, knowledge scoping by visibility
+Kernos is a personal agent runtime built around a simple promise: talk to it in plain language, and it frames your request against an awareness of context that goes far back chronologically, with attention tightly scoped to the domain you're in. The relevant context arrives when it's needed, the right tool is already at hand, and the things worth remembering are remembered without you curating them. When the job gets technical, Kernos writes the code, finds the API, wires the integration, and files the result — all within the same conversation.
 
-## Architecture
+Most agent harnesses (OpenClaw, Hermes, the typical LangChain or CrewAI assembly) run a single agent loop where every system concern competes for the agent's attention inline: memory retrieval, safety checks, tool routing, multi-member disclosure, skill selection. Every turn, everything pours into the same context. Kernos splits that. One principal agent handles the conversation. A half-dozen bounded **cohort agents** — specialized LLM workers for routing, gating, fact extraction, cross-member disclosure judgment, friction observation — run around it without ever appearing in its context. Judgment work runs on LLMs; state work runs in Python.
 
-Kernos is built on five primitives: **Memory** (knowledge graph + entity resolution + Bjork dual-strength decay), **Context Spaces** (topic-based conversation routing with hierarchical inheritance), **Behavioral Contracts** (covenants the user defines, including a "spirit" type that renders before rules), **Capabilities** (MCP-based tool integration with three-tier surfacing), and **Awareness** (proactive signals, whispers, follow-up tracking).
+The point of this shape is cognitive focus. The principal agent receives a curated, orchestrated context each turn and spends its full attention producing the best possible response — never disoriented by meta-concerns about which tool to look up, which policy applies, or whether disclosure is warranted. What sticks in the principal's thread is a cohesive, relevant conversation. Cohorts leverage small, specialized units of judgment to surface what's critical and keep what isn't out of the way. The principal agent never sees the cohorts, and the cohorts never see each other.
 
-The agent thinks freely. The kernel enforces safety. Tool calls go through a dispatch gate. Covenants and validation layers shape what the agent is allowed to do and say. The system prompt creates a confident agent — infrastructure handles the guardrails.
+The pieces you'd normally wire together in an agent framework — orchestration, retrieval, safety enforcement, tool routing, disclosure logic — are not surfaced elements here. Neither the user nor the agent needs to learn a syntax or invocation pattern to access them. The only systems that surface are the ones relevant to the cognitive conversation. Everything else happens around that conversation, not inside it.
 
-**Storage:** SQLite with WAL mode (one database per instance + shared instance.db). **Execution:** Self-directed plans with three-tier resilience and provider fallback chains. **Improvement Loop:** Friction detection → behavioral patterns → covenant/procedure proposals → runtime diagnostics → structured spec generation.
+---
 
-### Key Design Principles
+## One agent, many domains
 
-- **Memory as the moat** — persistent, structured, evolving knowledge with dual-strength decay
-- **Ambient, not demanding** — works without requiring user presence
-- **No destructive deletions** — shadow archive architecture
-- **Multi-instance from day one** — every state piece keyed to `instance_id`
-- **Provider-flexible** — supports Anthropic (Claude), OpenAI Codex, Ollama (Gemma 4, GLM-5.1) with automatic fallback chains
-- **Personality via principles, not traits** — "Your personality is the shape of your attention"
+A typical agent session is one conversation thread that grows until it breaks. Spin up a second thread and you have two agents who don't know each other. Kernos runs **multiple parallel context spaces** per member — work, personal, a specific project, a research sprint — each with its own ledger, its own facts, its own promoted tool set, its own compaction rhythm.
 
-## Current State
+The magic is that neither you nor the agent ever sees this happening. You keep one continuous conversation; the agent delicately weaves it into whichever specialized domain the topic belongs to. A single endless conversation, routed across many specialist threads, invisibly. The router does this work before the agent sees the turn.
 
-Kernos is functional and under active development. The full architecture — memory,
-context spaces, self-directed execution, behavioral contracts, scheduling,
-proactive awareness, improvement loop, member identity, and cross-channel
-communication — is shipped and live-tested. Current work: multi-member messaging,
-voice integration, and deep memory enhancements.
+Switching between domains doesn't mean starting over. Move from the work space to the personal space mid-conversation, come back an hour later, pick up where you left off — the agent holds the thread on both sides. The moment in most tools where you say *"I just talked about that, did you forget?"* doesn't happen here. It gets it.
 
-## Documentation
+Each space becomes a specialist in its own domain — a deep-memory thread tuned for that domain's work, a tool set promoted by that domain's patterns — while the agent underneath remains one continuous identity that knows everything is *yours*.
 
-| Document | Purpose |
-|---|---|
-| [DECISIONS.md](DECISIONS.md) | Current project status and active decisions |
-| [docs/TECHNICAL-ARCHITECTURE.md](docs/TECHNICAL-ARCHITECTURE.md) | As-built architecture — what exists in code right now |
-| [docs/KERNEL-ARCHITECTURE-OUTLINE.md](docs/KERNEL-ARCHITECTURE-OUTLINE.md) | Kernel design: five primitives, three operational modes |
-| [docs/](docs/) | Self-documentation system — capabilities, behaviors, architecture, identity |
+The practical effect: **100 domains in Kernos is better than 100 chat threads with one model.** 100 chat threads forget you and forget each other. Kernos specializes the cognition surface per-domain without siloing the person behind it.
 
-### Historical Reference
+---
 
-| Document | Purpose |
-|---|---|
-| [docs/BLUEPRINT.md](docs/BLUEPRINT.md) | Original vision document (Feb 2026) — vision is current, implementation details evolved |
-| [docs/ARCHITECTURE-NOTEBOOK.md](docs/ARCHITECTURE-NOTEBOOK.md) | Design rationale from Phases 1A–2 — some sections current, some superseded |
+## Architectural contributions
 
-## What's Shipped
+|  |  |
+| --- | --- |
+| **Cohort architecture** | One principal agent surrounded by bounded specialist LLM workers — routing, gating, fact extraction, disclosure judgment, friction observation — that run around the agent without ever appearing in its context. Judgment work on LLMs; state work in Python. Most harnesses run one agent loop with every system concern competing for attention inline; Kernos splits that so the principal agent keeps its full attention on the conversation. |
+| **Context spaces** | Multiple parallel context spaces per member, each with its own memory, tool promotion, and compaction boundary. Invisible to the user and the agent — a single conversation routes transparently across specialist domains. See [One agent, many domains](#one-agent-many-domains) above. |
+| **Dual memory: Ledger + Facts** | Two stores, two jobs. **Ledger** holds the conversational arc, compressed at compaction boundaries rather than summarized turn-by-turn. **Facts** holds structured knowledge, reconciled in a single LLM call against the existing store rather than extracted per-turn and deduplicated after the fact. Lossless narrative retrieval and deduplicated fact supersession, both at once. |
+| **Multi-member disclosure layering** | One hatched agent per member, not per install. A relationship matrix declares permissions between members; a Messenger cohort sits above permissions and evaluates whether a response serves the disclosing member's welfare. Your spouse *can* see your calendar, but Kernos still makes a judgment about the therapy appointment. |
+| **Infrastructure-level safety** | Most agent systems gate what the agent can reach. Kernos gates what the agent does, under which covenant, under which initiator context. Every tool call passes through a gate that classifies effect (`read` / `soft_write` / `hard_write`) and evaluates it against user-declared covenants. Reactive soft-writes pass. Hard-writes gate. Non-reactive paths gate. Covenant violations surface as conflicts the agent must resolve — not as silent denials. Safety as behavioral shaping, not access control. |
+| **Cognitive UI grammar** | The system prompt as a typed document with named zones — RULES, ACTIONS, NOW, STATE, RESULTS, PROCEDURES, MEMORY — cacheable prefix, and provenance tags on every knowledge fragment. The runtime refreshes zones selectively without rebuilding the prompt. The agent knows where every piece of context came from. |
 
-**Phase 1 — Foundation:**
-SMS gateway, Discord adapter, Google Calendar MCP, basic persistence, event stream, reasoning service, capability graph, task engine, tenant isolation, memory projectors.
+---
 
-**Phase 2 — Memory + Context Intelligence:**
-Entity resolution + fact dedup, context space routing (LLM router), compaction (Ledger + Living State), active retrieval + NL contract parser.
+## Capability surface
 
-**Phase 3 — Agent Workspace + Safety Infrastructure:**
-Per-space file system, tool scoping + MCP installation, proactive awareness, dispatch gate, self-documentation, covenants, scheduler, cross-channel instance identity, lazy tool loading, and per-space conversation logs.
+|  |  |
+| --- | --- |
+| **Multi-channel presence** | Discord, SMS via Twilio, Telegram. One handler, one identity across channels. Adding a new platform is ~150 lines. |
+| **Agentic workspace** | The agent writes Python in a sandboxed subprocess, exercises it live, and registers it as a first-class tool in the universal catalog. The discipline: build the smallest durable handle that removes recurring friction. 50-line helpers, not frameworks. |
+| **Self-directed execution** | `manage_plan` creates multi-phase plans with budget ceilings. Each step runs the full turn pipeline with three-tier resilience — provider failover, step retries with exponential backoff, and hourly slow-poll after fast retries exhaust. Plans survive restarts; active plans rediscover themselves on startup. |
+| **Friction-driven improvement** | A friction observer watches the turn trace. When patterns emerge — repeated failures, recurring confusions, missing primitives — the system proposes covenant changes, new procedures, and concrete spec drafts grounded in live evidence. |
+| **Provider flexibility** | Anthropic, OpenAI Codex, or Ollama behind a `Provider` ABC. Three named fallback chains — `primary` / `simple` / `cheap` — built by a single chain builder. Swap providers without touching the agent. |
 
-**Phase 4 — Hardening + Preferences:**
-Runtime hardening, preference system (6A), friction observer, prompt-contract reduction.
+---
 
-**Phase 5 — Context Intelligence:**
-Context spaces (hierarchy, migration), tool surfacing redesign, agentic workspace, tool window, procedural knowledge, cohort optimization.
+## Quick install
 
-**Phase 6 — Self-Directed Execution + Improvement Loop:**
-Plan management (create/continue/pause), three-tier plan resilience, provider fallback chains (Codex → GLM → MiniMax → Gemma), behavioral pattern detection, covenant selective injection, follow-up tracking, runtime trace, diagnostic tools.
-
-**Phase 7 — Infrastructure + Identity:**
-SQLite state migration (WAL mode), instance.db, Bjork dual-strength memory activation, instance_id rename, member identity & resolution (invite codes, manage_members).
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.11+
-- Node.js (required for MCP servers that run via `npx`)
-
-### 1. Clone and install
-
-```bash
+```
 git clone https://github.com/theman8631/Kernos.git
 cd Kernos
-python -m venv .venv
-source .venv/bin/activate
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e .
-```
-
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in your credentials. See `.env.example` for the full
-list of supported variables.
-
-Key variables:
-
-| Variable | Purpose |
-|---|---|
-| `KERNOS_LLM_PROVIDER` | `anthropic` (default) or `openai-codex` |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) — required if using Anthropic |
-| `DISCORD_BOT_TOKEN` | [Discord Developer Portal](https://discord.com/developers/applications) |
-| `KERNOS_INSTANCE_ID` | Instance identifier for cross-channel identity (e.g., `discord:YOUR_ID`) |
-| `TWILIO_ACCOUNT_SID` | Twilio Console (optional — SMS adapter) |
-| `TWILIO_AUTH_TOKEN` | Twilio Console (optional — SMS adapter) |
-| `TWILIO_PHONE_NUMBER` | Twilio Console (optional — SMS adapter) |
-
-### 3. Run
-
-```bash
-# Kernos server (Discord + SMS + awareness)
+cp .env.example .env   # fill in API keys
 python kernos/server.py
 ```
 
-## CLI Usage
+Requires Python 3.11+, an LLM API key (Anthropic, OpenAI/Codex, or Ollama), and at least one messaging adapter credential (Discord token, Twilio, or Telegram bot token). Node.js is required for MCP servers that run via `npx`.
 
-The `./kernos-cli` wrapper runs CLI commands without needing to activate the venv.
+**[Full install guide →](docs/install.md)**
 
-```bash
-./kernos-cli tenants                          # List all known tenants
-./kernos-cli events <instance_id>               # View recent events
-./kernos-cli profile <instance_id>              # View tenant profile
-./kernos-cli soul <instance_id>                 # Inspect agent soul
-./kernos-cli knowledge <instance_id>            # View knowledge entries
-./kernos-cli contracts <instance_id>            # View behavioral contract rules
-./kernos-cli capabilities                     # View capability registry
-./kernos-cli costs <instance_id>                # View cost/token summary
-./kernos-cli tasks <instance_id>                # View task lifecycle
-```
+---
 
-Each subcommand supports `--help` for full options.
+## Architecture
 
-## Google Calendar Setup
+- **[Cohort architecture](docs/architecture/cohort-and-judgment.md)** — judgment-vs-plumbing discipline, the principal-never-sees-cohorts rule
+- **[Context spaces](docs/architecture/context-spaces.md)** — parallel domain threads with routed turn assignment
+- **[Memory: Ledger and Facts](docs/architecture/memory.md)** — two stores reconciled at compaction boundaries
+- **[Multi-member disclosure layering](docs/architecture/disclosure-and-messenger.md)** — welfare-first cross-member exchange
+- **[Infrastructure-level safety](docs/architecture/safety-and-gate.md)** — behavioral contracts at the kernel
+- **[Cognitive UI grammar](docs/architecture/cognitive-ui.md)** — the system prompt as a typed document
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project and enable the **Google Calendar API**
-3. Create **OAuth client ID** (Desktop app) and download the JSON file
-4. Set `GOOGLE_OAUTH_CREDENTIALS_PATH` in `.env` to that file's path
-5. Run auth once:
-   ```bash
-   GOOGLE_OAUTH_CREDENTIALS=/path/to/gcp-oauth.keys.json npx @cocal/google-calendar-mcp auth
-   ```
-6. Authorize in browser. Tokens saved locally for future use.
+**[Full architecture →](docs/architecture/overview.md)** · **[Pipeline reference →](docs/architecture/pipeline-reference.md)** · **[Primitives →](docs/architecture/primitives-reference.md)**
+
+---
+
+## Design frames
+
+Three load-bearing patterns that recur across the codebase.
+
+**The Skill Model.** The universal tool catalog is one registry merging kernel tools, MCP tools, and workspace-built tools. Three-tier surfacing: common check per turn (no LLM call), LLM catalog scan on miss, promotion on successful use. The agent never browses its toolbox — it gets a budgeted window of the tools that matter right now.
+
+**Judgment-vs-Plumbing.** Judgment work — semantic understanding, contextual evaluation, disclosure decisions — runs as bounded cohorts. Plumbing — lookups, serialization, dispatch, state mutation — runs as Python and never enters an LLM context. The principal agent never sees a cohort; cohorts never see each other.
+
+**The Action Loop.** Every turn is six phases: Provision, Route, Assemble, Reason, Consequence, Persist. Tool calls go through the dispatch gate with effect classification. Completed actions leave receipts the agent reads on the next turn. The loop is uniform across reactive, proactive, and self-directed work.
+
+**[Full design frames →](docs/design-frames/)**
+
+---
+
+## V2 direction
+
+V1 is a reactive runtime with ambient extensions. V2 inverts the shape: a continuous **Cognition Kernel** running per member, maintaining a structured **World Model** across fused streams (conversation, calendar, email, location, plan state), running idle-cycle reflection and projection passes, and surfacing through a single aggressive relevance filter. Turns become privileged consumers of a running process rather than the engine itself.
+
+V1's covenant system, dispatch gate, Messenger cohort, sensitivity classification, and stewardship are precisely the alignment fabric a continuous-cognition layer needs to stay trustworthy. **V1 is the alignment substrate; V2 is the cognition layer built on it.**
+
+**[V2 direction →](docs/v2/direction.md)** · **[Alignment substrate →](docs/v2/alignment-substrate.md)** · **[Roadmap →](docs/roadmap.md)**
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Built by [@theman8631](https://github.com/theman8631).
+
+<sub>Status — 1,980 tests · 52 eval scenarios · production-shaped runtime, self-hosted single-process.</sub>
+
+---
+
+*The agent thinks. The kernel remembers, notices, routes, and protects.*
