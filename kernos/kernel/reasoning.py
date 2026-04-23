@@ -2042,6 +2042,17 @@ class ReasoningService:
                     new_state=result.extra.get("state", ""),
                     prev_state=result.extra.get("prev_state", ""),
                 )
+                await self._fire_canvas_routes(
+                    request=request,
+                    writer_member_id=member_id,
+                    canvas_id=canvas_id,
+                    page_path=page_slug,
+                    state_changed=bool(result.extra.get("state_changed")),
+                    new_state=result.extra.get("state", ""),
+                    prev_state=result.extra.get("prev_state", ""),
+                    route_targets=result.extra.get("route_targets") or [],
+                    consult_operator=bool(result.extra.get("consult_operator")),
+                )
             return _json.dumps(result.to_dict(), default=str)
 
         return f"Canvas tool {tool_name!r} not dispatched."
@@ -2175,6 +2186,108 @@ class ReasoningService:
                 )
             except Exception as exc:
                 logger.debug("CANVAS_WATCH_SEND_FAILED: to=%s %s", watcher, exc)
+
+    async def _fire_canvas_routes(
+        self, *, request: "ReasoningRequest",
+        writer_member_id: str, canvas_id: str, page_path: str,
+        state_changed: bool, new_state: str, prev_state: str,
+        route_targets: list[str], consult_operator: bool,
+    ) -> None:
+        """Fire routes-lite on a state-changed page_write.
+
+        Targets:
+          - ``operator`` — the canvas owner (the member who created the canvas)
+          - ``member:<id>`` — a specific member
+          - ``space:<id>`` — NOT SUPPORTED in v1; logged as
+            ``route_target_not_supported_in_v1`` and skipped.
+
+        Operator precedence: if ``consult_operator`` resolved true via the
+        consult_operator_at inheritance chain (instance → canvas → page,
+        replacing), the operator is added to the target set regardless of
+        whether the page's ``routes`` declared them. This is the
+        "non-bypassable operator precedence" in the spec.
+        """
+        if not state_changed:
+            return
+        from kernos.kernel.canvas import classify_route_target
+
+        dispatcher = None
+        if self._handler and hasattr(self._handler, "_get_relational_dispatcher"):
+            dispatcher = self._handler._get_relational_dispatcher()
+        idb = getattr(self._handler, "_instance_db", None) if self._handler else None
+
+        resolved_targets: list[tuple[str, str]] = []
+        for t in route_targets:
+            kind, arg = classify_route_target(t)
+            if kind == "space":
+                logger.info(
+                    "CANVAS_ROUTE_TARGET_NOT_SUPPORTED_IN_V1: canvas=%s page=%s target=%s",
+                    canvas_id, page_path, t,
+                )
+                continue
+            if kind == "unknown":
+                logger.debug("CANVAS_ROUTE_TARGET_UNKNOWN: %r", t)
+                continue
+            resolved_targets.append((kind, arg))
+
+        # Non-bypassable operator precedence (consult_operator_at).
+        if consult_operator and not any(k == "operator" for k, _ in resolved_targets):
+            resolved_targets.append(("operator", ""))
+
+        if not resolved_targets:
+            return
+
+        # Resolve operator → canvas owner
+        owner_member_id = ""
+        if idb is not None:
+            try:
+                row = await idb.get_canvas(canvas_id)
+                owner_member_id = (row or {}).get("owner_member_id", "") or ""
+            except Exception:
+                pass
+
+        identity = ""
+        if idb is not None:
+            try:
+                prof = await idb.get_member_profile(writer_member_id)
+                if prof:
+                    identity = prof.get("agent_name") or prof.get("display_name") or ""
+            except Exception:
+                pass
+
+        # Dedup + final addressee list
+        addressees: list[str] = []
+        for kind, arg in resolved_targets:
+            if kind == "operator":
+                if owner_member_id and owner_member_id not in addressees:
+                    addressees.append(owner_member_id)
+            elif kind == "member":
+                if arg and arg not in addressees:
+                    addressees.append(arg)
+
+        content = (
+            f"Canvas page '{page_path}' state changed "
+            f"{prev_state or '(none)'} → {new_state or '(none)'}."
+        )
+        for addressee in addressees:
+            if addressee == writer_member_id:
+                continue
+            if not dispatcher:
+                break
+            try:
+                await dispatcher.send(
+                    instance_id=request.instance_id,
+                    origin_member_id=writer_member_id,
+                    origin_agent_identity=identity,
+                    addressee=addressee,
+                    intent="inform",
+                    content=content,
+                    urgency="normal",
+                    envelope_type="route_fire",
+                    canvas_id=canvas_id,
+                )
+            except Exception as exc:
+                logger.debug("CANVAS_ROUTE_FIRE_FAILED: to=%s %s", addressee, exc)
 
     async def _handle_dismiss_whisper(
         self, instance_id: str, whisper_id: str, reason: str = "user_dismissed"

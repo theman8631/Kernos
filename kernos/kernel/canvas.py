@@ -66,6 +66,71 @@ DEFAULT_CONSULT_OPERATOR_AT = ("shipped", "on_conflict")
 
 
 # ---------------------------------------------------------------------------
+# Routes-lite (Pillar 5)
+# ---------------------------------------------------------------------------
+#: Target prefixes the routes engine understands. Space targets
+#: ("space:foo") are parsed but return a structured
+#: ``route_target_not_supported_in_v1`` marker — deferred to v2.
+ROUTE_TARGET_OPERATOR = "operator"
+ROUTE_TARGET_MEMBER_PREFIX = "member:"
+ROUTE_TARGET_SPACE_PREFIX = "space:"
+
+
+def resolve_consult_operator_at(
+    page_value: Any, canvas_default: Any, instance_default: tuple[str, ...] = DEFAULT_CONSULT_OPERATOR_AT,
+) -> list[str]:
+    """Shallow inheritance for consult_operator_at.
+
+    Resolution order (first non-None wins, replacing — never merged):
+        1. ``page_value``      — explicit page-level ``consult_operator_at``
+        2. ``canvas_default``  — canvas-level default from canvas.yaml
+        3. ``instance_default``— module constant
+
+    None means "unset"; an empty list ``[]`` means "never consult" and is a
+    valid explicit override. That's why we can't fall back on falsy.
+    """
+    for candidate in (page_value, canvas_default):
+        if candidate is None:
+            continue
+        if isinstance(candidate, (list, tuple)):
+            return [str(x) for x in candidate]
+        if isinstance(candidate, str):
+            return [candidate]
+    return list(instance_default)
+
+
+def parse_route_targets(routes: Any, state: str) -> list[str]:
+    """Pull the target list for a given state out of a routes dict.
+
+    Accepts string or list forms: ``{'ratified': 'operator'}`` or
+    ``{'ratified': ['operator', 'member:abc']}``. Unknown or missing state
+    returns an empty list.
+    """
+    if not isinstance(routes, dict) or not state:
+        return []
+    val = routes.get(state)
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [val]
+    if isinstance(val, (list, tuple)):
+        return [str(x) for x in val]
+    return []
+
+
+def classify_route_target(target: str) -> tuple[str, str]:
+    """Return ``(kind, arg)`` where kind ∈ {operator, member, space, unknown}."""
+    t = (target or "").strip()
+    if t == ROUTE_TARGET_OPERATOR:
+        return ("operator", "")
+    if t.startswith(ROUTE_TARGET_MEMBER_PREFIX):
+        return ("member", t[len(ROUTE_TARGET_MEMBER_PREFIX):])
+    if t.startswith(ROUTE_TARGET_SPACE_PREFIX):
+        return ("space", t[len(ROUTE_TARGET_SPACE_PREFIX):])
+    return ("unknown", t)
+
+
+# ---------------------------------------------------------------------------
 # Frontmatter parse + serialize
 # ---------------------------------------------------------------------------
 
@@ -418,6 +483,24 @@ class CanvasService:
             extra={"name": canvas.name, "scope": scope, "notify": notify},
         )
 
+    # ---- Canvas-level defaults (for route resolution) -------------------
+
+    async def _canvas_defaults(
+        self, instance_id: str, canvas_id: str,
+    ) -> dict:
+        """Read canvas.yaml for defaults — returns empty dict on any error."""
+        root = canvas_dir(self._data_dir, instance_id, canvas_id)
+        yaml_path = root / "canvas.yaml"
+        if not yaml_path.is_file():
+            return {}
+        try:
+            parsed = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            if isinstance(parsed, dict):
+                return parsed
+        except yaml.YAMLError as exc:
+            logger.warning("CANVAS_YAML_PARSE_FAILED: %s", exc)
+        return {}
+
     # ---- Page read -------------------------------------------------------
 
     async def page_read(
@@ -533,6 +616,15 @@ class CanvasService:
         is_new = not existing_fm
         state_changed = bool(new_state and new_state != prev_state)
 
+        # Routes + consult_operator_at resolution (Pillar 5).
+        canvas_defaults = await self._canvas_defaults(instance_id, canvas_id)
+        resolved_consult_at = resolve_consult_operator_at(
+            page_value=new_fm.get("consult_operator_at"),
+            canvas_default=canvas_defaults.get("default_consult_operator_at"),
+        )
+        route_targets = parse_route_targets(new_fm.get("routes"), new_state)
+        consult_operator = state_changed and new_state in (resolved_consult_at or [])
+
         # Event emission: distinct event per lifecycle stage.
         if is_new:
             await self._emit(
@@ -594,6 +686,9 @@ class CanvasService:
                 "type_recognized": type_ok,
                 "watchers": list(new_fm.get("watchers") or []),
                 "frontmatter": new_fm,
+                "route_targets": route_targets,
+                "consult_operator_at": resolved_consult_at,
+                "consult_operator": consult_operator,
             },
         )
 
