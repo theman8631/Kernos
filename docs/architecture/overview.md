@@ -1,74 +1,131 @@
 # Architecture Overview
 
-Kernos is a three-layer system: adapters, handler, and kernel.
+> Three layers, one principal agent, six cohorts, six-phase turn pipeline. The rest of the architecture documentation fans out from here.
 
-## Adapters
+## The three layers
 
-Adapters convert platform-specific messages into a `NormalizedMessage` — a common format with sender ID, content, platform name, conversation ID, and auth level. Currently shipped:
+Kernos separates its runtime into three layers. Each has one job; the boundaries between them are enforced by imports (the handler never imports from adapters; adapters never import from the handler — they share only `NormalizedMessage`).
 
-- **Kernos server** (`kernos/server.py`) — main entry point. Runs Discord adapter, SMS polling, awareness evaluator, channel registry, and full handler stack.
-- **SMS adapter** (`kernos/messages/adapters/twilio_adapter.py`) — receives Twilio webhooks, normalizes SMS messages.
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Adapters                                                    │
+│   Discord · SMS/Twilio · Telegram · HTTP · (pluggable)      │
+│   Job: normalize inbound platform messages into             │
+│   NormalizedMessage; deliver outbound responses.            │
+├─────────────────────────────────────────────────────────────┤
+│ Handler (kernos/messages/handler.py)                        │
+│   Job: the six-phase turn pipeline. Receives a              │
+│   NormalizedMessage, produces a response string. Manages    │
+│   conversation history, event bookends, persistence.        │
+├─────────────────────────────────────────────────────────────┤
+│ Kernel (kernos/kernel/)                                     │
+│   Event Stream, State Store, Reasoning Service, Dispatch    │
+│   Gate, Router, Messenger, Fact Harvester, Compaction,      │
+│   Friction Observer, Capability Registry, Plan Execution.   │
+│   Job: state, reasoning, cohorts, primitives.               │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Adapters know nothing about the handler or kernel. The handler knows nothing about adapters. They share only the `NormalizedMessage` model. This isolation is an architectural constraint — never violated.
+The handler is the turn engine. The kernel is everything the turn engine calls into. The adapters are the pluggable I/O surface. Adding a platform (Discord, SMS, Telegram) is an adapter implementation; it doesn't touch the handler or the kernel.
 
-## Message Handler
+## The six-phase turn pipeline
 
-The handler (`kernos/messages/handler.py`) is the orchestration layer. It receives a `NormalizedMessage` and runs a 12-step process:
+Every turn — reactive (user message), proactive (whisper, awareness), or self-directed (plan step) — runs the same six phases:
 
-1. **Secure input intercept** — if the system is waiting for a credential, the next message is captured as a secret (never enters LLM context).
-2. **Provision & soul init** — create tenant profile if new, load soul, load MCP config from system space.
-3. **LLM routing** — a lightweight Haiku call assigns the message to the right context space.
-4. **Space switch detection** — emit events if the active space changed.
-5. **Gate 1 topic tracking** — accumulate topic hints for organic space creation (15-message threshold).
-6. **Load active space** — update `last_active_at`, load space metadata.
-7. **File uploads** — store any attached text files in the active space.
-8. **Assemble space context** — build compaction index + cross-domain injections + compaction document + recent messages.
-9. **Emit `message.received`** event.
-10. **Build system prompt** — 8-layer construction (principles, identity, posture, user knowledge, platform, auth, covenants, capabilities, bootstrap).
-11. **Reasoning** — call the reasoning service with the full tool-use loop.
-12. **Post-response** — soul updates, memory extraction (projectors), compaction tracking, conversation summary.
+```
+1. PROVISION    Resolve instance, member, platform; ensure per-member
+                state (spaces, profiles, permissions) exists.
+2. ROUTE        The router cohort reads the message and picks the focus
+                space. Every downstream phase is scoped to that space.
+3. ASSEMBLE     Build the Cognitive UI zones (RULES, ACTIONS, NOW, STATE,
+                RESULTS, PROCEDURES, MEMORY). Load the scoped tool catalog.
+4. REASON       Call the principal agent with the assembled context. Run
+                the tool-use loop: each tool call passes through the
+                dispatch gate; every cross-member message passes through
+                the Messenger.
+5. CONSEQUENCE  Apply the effects of the turn: outbound delivery,
+                receipts, tool-call persistence.
+6. PERSIST      Update conversation logs; emit events; run boundary-
+                triggered cohorts (fact harvest, compaction) if the
+                boundary was crossed; run friction observer post-turn.
+```
 
-## Kernel
+The same pipeline runs regardless of the origin. A self-directed plan step is a synthetic inbound message from the kernel itself (`sender="self_directed"`); it goes through the same six phases, including the gate and the Messenger, as any user-originated turn.
 
-The kernel (`kernos/kernel/`) owns all state and intelligence infrastructure:
+See [Pipeline reference](pipeline-reference.md) for a per-phase breakdown with inputs, outputs, and invariants.
 
-- **Events** — append-only audit trail of everything that happens.
-- **State Store** — runtime query surface for souls, knowledge, covenants, spaces, entities, pending actions.
-- **Reasoning Service** — LLM abstraction with tool-use loop, dispatch gate, and kernel tool handling.
-- **Memory** — two-stage knowledge extraction (Tier 1 pattern match, Tier 2 LLM), entity resolution, fact deduplication.
-- **Compaction** — structured history preservation replacing naive truncation.
-- **Files** — per-space persistent file storage with shadow archive.
-- **Capabilities** — MCP tool integration with per-space scoping and runtime install/uninstall.
-- **Awareness** — background evaluator surfacing time-sensitive signals as whispers.
-- **Covenant Management** — behavioral rule validation and lifecycle management.
+## The principal and the cohorts
 
-## Key Design Principles
+One LLM handles the conversation. Six LLM cohorts run around it:
 
-- **Event emission is best-effort.** Every `emit()` is wrapped in try/except. Event logging failures never break the user's message flow.
-- **State Store is the query surface.** Runtime lookups go to the State Store, not the Event Stream. The Event Stream is for append, replay, and audit.
-- **instance_id from day one.** Every piece of state is keyed to a `instance_id`. No code assumes a single user.
-- **No destructive deletions.** Every "delete" relocates to a shadow archive. No operation permanently destroys data.
-- **Graceful errors.** Every failure mode produces a friendly user-facing response.
-- **Prompt caching.** The Anthropic provider applies `cache_control: ephemeral` to the system prompt and tool definitions. After the first turn, these are served from cache at 1/10th token cost, dramatically reducing rate limit pressure.
-- **Developer mode error surfacing.** When `developer_mode` is on, WARNING/ERROR logs from `kernos.*` are collected and injected into the system prompt so the agent can see and discuss them.
-- **State mutation logging.** Every state write (soul, knowledge, covenants, capabilities) logs with `source` and `trigger` at INFO level. Prefixes: `SOUL_WRITE:`, `KNOW_WRITE:`, `COVENANT_WRITE:`, `CAP_WRITE:`.
-- **NL extraction pattern.** Complex tools (>3-4 fields) accept a natural language description. A Haiku call extracts structured parameters. This reduces hallucination by making the tool call trivial for the agent. Used by: `manage_schedule create`.
+| Cohort | Where it runs | What it does |
+|---|---|---|
+| Router | Phase 2, before ASSEMBLE | Picks the focus space; tags the turn |
+| Gate | Phase 4, per tool call | Approves, confirms, conflicts, or clarifies |
+| Messenger | Phase 4 or 5, per cross-member exchange | Judges whether the response serves the disclosing member's welfare |
+| Fact harvester | Phase 6, at compaction boundaries | Extracts durable facts with single-call reconciliation |
+| Compaction | Phase 6, at compaction boundaries | Rewrites Living State; appends archive block |
+| Friction observer | Phase 6, post-turn | Detects patterns where the system works against the user |
 
-## Instance Identity
+Cohorts never appear in the principal agent's context. Their outputs are consumed by the kernel, not injected into the next prompt. See [Cohort architecture](cohort-and-judgment.md) for the full discipline and [Primitives reference](primitives-reference.md) for each cohort's entry point.
 
-All adapters resolve to the same instance via `KERNOS_INSTANCE_ID` env var. When set, every adapter (Discord, SMS, CLI) uses it as the `instance_id` — same soul, same knowledge, same spaces regardless of which channel the message arrives on. Without it, each adapter derives its own instance_id (backward compatible but creates separate instances per channel).
+## The five architectural contributions
 
-## Code Locations
+The README lists five load-bearing architectural choices. Each gets its own page:
 
-| Component | Path |
-|-----------|------|
-| Message Handler | `kernos/messages/handler.py` |
-| Kernos Server | `kernos/server.py` |
-| SMS Adapter | `kernos/messages/adapters/twilio_adapter.py` |
-| Reasoning Service | `kernos/kernel/reasoning.py` |
-| Event Stream | `kernos/kernel/events.py`, `kernos/kernel/event_types.py` |
-| State Store | `kernos/kernel/state.py`, `kernos/kernel/state_json.py` |
-| Spaces | `kernos/kernel/spaces.py` |
-| Soul | `kernos/kernel/soul.py` |
-| Template | `kernos/kernel/template.py` |
-| Capabilities | `kernos/capability/registry.py`, `kernos/capability/client.py`, `kernos/capability/known.py` |
+### [Cohort architecture →](cohort-and-judgment.md)
+
+One principal agent surrounded by bounded specialist LLM workers. Judgment work on LLMs; state work in Python. The principal keeps its full attention on the conversation; cohorts handle routing, gating, fact extraction, disclosure judgment, and friction observation without ever appearing in the agent's context.
+
+### [Context spaces →](context-spaces.md)
+
+Multiple parallel memory threads per member, each with its own ledger, facts, and promoted tool set. Invisible to the user and the agent — a single continuous conversation routes transparently across specialist domains. The router picks the focus; the agent receives the turn pre-scoped.
+
+### [Memory: Ledger and Facts →](memory.md)
+
+Two stores, two jobs. Ledger holds the conversational arc, compressed at boundaries rather than summarized turn-by-turn. Facts holds structured knowledge, reconciled in a single LLM call against the existing store rather than extracted per-turn and deduplicated after the fact.
+
+### [Multi-member disclosure layering →](disclosure-and-messenger.md)
+
+One hatched agent per member. A permission matrix declares relationships; a Messenger cohort sits above the matrix and judges whether the response as written serves the disclosing member's welfare. The `send_relational_message` tool is excluded from the gate because the Messenger takes over there unconditionally.
+
+### [Infrastructure-level safety →](safety-and-gate.md)
+
+Every tool call passes through a dispatch gate that classifies effect (read / soft_write / hard_write), evaluates the initiator context (reactive / proactive), and consults user-declared covenants. Verdicts are APPROVE, CONFIRM, CONFLICT, or CLARIFY — each with its own downstream behavior. Safety as behavioral shaping, not access control.
+
+### [Cognitive UI grammar →](cognitive-ui.md)
+
+The system prompt as a typed document with named zones — RULES, ACTIONS, NOW, STATE, RESULTS, PROCEDURES, MEMORY — cacheable prefix, provenance tags on knowledge fragments. The runtime refreshes zones selectively without rebuilding the prompt.
+
+*(This is six, not five. The sixth — Cognitive UI grammar — is the structural companion to the other five; it's how the cohort-produced context actually lands in the agent's prompt.)*
+
+## Hard invariants
+
+These are enforced at the code-architecture level. Violating any of them is a build failure regardless of what a feature spec says.
+
+| Invariant | Location | Enforcement |
+|---|---|---|
+| Adapter/handler isolation | Import graph | Handler never imports adapters; adapters never import handler; shared surface is `NormalizedMessage` only |
+| `instance_id` from day one | Every state-writing code path | No code ever assumes a single user; all state is keyed to `instance_id` |
+| MCP for capabilities | All capability integrations | Tools and data go through MCP; no direct API integrations that bypass the capability abstraction |
+| Graceful errors | Every failure mode | Every failure produces a friendly user-facing response; never a silent crash, never a raw exception |
+| Event emission is best-effort | `kernos/kernel/events.py` | Every `emit()` is wrapped in try/except; event-logging failures never break the user's message flow |
+| State Store is the query surface | Runtime reads | Runtime lookups go to the State Store, not the Event Stream |
+| Shadow archive on removal | State mutations | No method permanently deletes data; "removal" sets `active: false` |
+| Per-member first-class | All agent-facing code paths | Every member has their own profile, ledger, facts, relationships; the Soul dataclass is deprecated for identity |
+
+## Reference documents
+
+- **[Pipeline reference](pipeline-reference.md)** — per-phase inputs, outputs, code entries, and invariants for the six-phase turn
+- **[Primitives reference](primitives-reference.md)** — the kernel primitives (RM dispatcher, fact harvest, compaction, awareness loop, gate, plan execution) with code pointers
+
+## Related depth
+
+For the design thinking behind specific choices, see `/docs/reference/`:
+
+- `kernel-architecture-outline.md` — the Phase 1B design document that shaped the kernel
+- `design-ledger-vs-facts.md` — the dual-memory design rationale
+- `design-build-the-missing-handle.md` — the workspace-discipline design frame
+- `design-tool-execution-mediation.md` — the safety-and-tool design frame
+- `architecture-notebook.md` — the reasoning behind the primitives (historical, still informative)
+- `blueprint-original-vision.md` — the original founder vision (historical)
