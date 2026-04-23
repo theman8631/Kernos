@@ -11,6 +11,7 @@ Current backends:
 """
 from __future__ import annotations
 
+from kernos.kernel.builders.aider import AiderBuilder
 from kernos.kernel.builders.base import (
     BUILDER_TIER,
     VALID_BUILDERS,
@@ -37,12 +38,15 @@ def get_builder(name: str) -> BuilderBackend:
         )
     if name == "native":
         return NativeBuilder()
+    if name == "aider":
+        return AiderBuilder()
     return ExternalStubBuilder(name=name)
 
 
 __all__ = [
     "BUILDER_TIER",
     "VALID_BUILDERS",
+    "AiderBuilder",
     "BuildResult",
     "BuilderBackend",
     "ExternalStubBuilder",

@@ -41,9 +41,11 @@ class TestGetBuilder:
         assert isinstance(b, NativeBuilder)
         assert b.name == "native"
 
-    def test_aider_returns_stub(self):
+    def test_aider_returns_real_backend(self):
+        from kernos.kernel.builders import AiderBuilder
+
         b = get_builder("aider")
-        assert isinstance(b, ExternalStubBuilder)
+        assert isinstance(b, AiderBuilder)
         assert b.name == "aider"
 
     def test_claude_code_returns_stub(self):
@@ -108,15 +110,22 @@ class TestExecuteCodeDispatch:
         assert result["success"] is True
         assert "ok" in result["stdout"]
 
-    async def test_aider_returns_not_implemented_without_crashing(
+    async def test_aider_dispatch_reaches_backend(
         self, tmp_path, monkeypatch,
     ):
+        """Aider routes to the real backend. Without credentials configured,
+        the adapter returns a structured credential error rather than the
+        ExternalStub's not-implemented response (that happened in the
+        previous batch before the Aider backend shipped)."""
         monkeypatch.setenv("KERNOS_BUILDER", "aider")
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "anthropic")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         result = await execute_code(
             "t1", "sp1", 'print("hi")', data_dir=str(tmp_path),
         )
         assert result["success"] is False
-        assert "not yet implemented" in result.get("error", "")
+        # Expect credential error, not not-yet-implemented
+        assert "ANTHROPIC_API_KEY" in result.get("error", "")
 
     async def test_claude_code_returns_not_implemented(
         self, tmp_path, monkeypatch,

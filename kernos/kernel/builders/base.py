@@ -42,6 +42,12 @@ class BuildResult:
     stderr: str = ""
     exit_code: int = 0
     error: str = ""
+    #: Relative paths (inside the space directory) of files the backend
+    #: created or modified during this build. Used by adapters that can
+    #: track file changes (e.g. Aider's pre/post mtime snapshot). Backends
+    #: that don't track this leave the list empty; callers should treat
+    #: empty as "unknown" rather than "no changes."
+    files_modified: list[str] = field(default_factory=list)
     # Backend-specific extras (e.g. stdout_truncated flag from the native
     # path). Kept open so backends can attach useful detail without growing
     # the main dataclass.
@@ -57,6 +63,8 @@ class BuildResult:
         }
         if self.error:
             out["error"] = self.error
+        if self.files_modified:
+            out["files_modified"] = list(self.files_modified)
         for k, v in self.extra.items():
             out[k] = v
         return out

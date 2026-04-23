@@ -157,7 +157,20 @@ Use this for: single-user operator setups where the agent is an extension of you
 
 Kernos's own sandboxed Python subprocess. No external dependencies.
 
-### `aider`, `claude-code`, `codex`
+### `aider`
+
+Hand workspace build tasks to [Aider](https://aider.chat), an open-source AI pair-programming tool. Aider ships as a Kernos dependency — no separate install required.
+
+Aider uses the same LLM credentials Kernos is configured with:
+
+- With `KERNOS_LLM_PROVIDER=anthropic`, Aider uses your `ANTHROPIC_API_KEY` automatically, defaulting to Anthropic's Sonnet model.
+- With `KERNOS_LLM_PROVIDER=openai-codex` or `=ollama`, Aider needs separate configuration because those providers use non-standard credentials. Set `AIDER_MODEL` (e.g. `gpt-4o`, `ollama_chat/llama3`) and `AIDER_API_KEY` (for cloud models) in your `.env`.
+
+Optional override: `AIDER_MODEL` works regardless of provider if you want Aider on a different model than Kernos's primary chain.
+
+Aider is a scoped backend — it respects `KERNOS_WORKSPACE_SCOPE=isolated`. An isolated-mode Aider invocation cannot read or write outside the active space.
+
+### `claude-code`, `codex`
 
 Planned integrations for hand-off to external builder agents. Config is accepted but dispatch currently returns not-yet-implemented. Adapters ship as follow-on work.
 
