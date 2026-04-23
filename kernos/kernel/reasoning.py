@@ -607,7 +607,18 @@ class ReasoningService:
             elif tool_name == "register_tool":
                 if self._workspace:
                     _desc_file = tool_input.get("descriptor_file", "") or tool_input
-                    return await self._workspace.register_tool(request.instance_id, request.active_space_id, _desc_file)
+                    _register_msg = await self._workspace.register_tool(
+                        request.instance_id, request.active_space_id, _desc_file,
+                    )
+                    # SYSTEM-REFERENCE-CANVAS-SEED Pillar 2: append a page to
+                    # the member's My Tools canvas. Best-effort — never
+                    # breaks registration. Only runs when the registration
+                    # actually succeeded.
+                    if "Registered tool" in _register_msg:
+                        await self._populate_my_tools_page(
+                            request=request, descriptor_file=_desc_file,
+                        )
+                    return _register_msg
                 return "Workspace manager is not available."
             elif tool_name == "manage_plan":
                 if hasattr(self, '_handler') and self._handler:
@@ -2186,6 +2197,59 @@ class ReasoningService:
                 )
             except Exception as exc:
                 logger.debug("CANVAS_WATCH_SEND_FAILED: to=%s %s", watcher, exc)
+
+    async def _populate_my_tools_page(
+        self, *, request: "ReasoningRequest", descriptor_file: str,
+    ) -> None:
+        """Observer on successful register_tool → write page to My Tools.
+
+        Reads the descriptor file the workspace just validated (same path
+        convention as WorkspaceManager.register_tool) and appends a
+        structured page to the member's My Tools canvas. Silent on every
+        failure path — tool registration has already succeeded and must
+        not be reversed by a canvas-write hiccup.
+        """
+        if not self._handler or not hasattr(self._handler, "_instance_db"):
+            return
+        try:
+            from pathlib import Path
+            import json as _json
+            from kernos.utils import _safe_name
+            from kernos.setup.seed_canvases import append_my_tools_page
+
+            canvas_svc = None
+            if hasattr(self._handler, "_get_canvas_service"):
+                canvas_svc = self._handler._get_canvas_service()
+            if canvas_svc is None:
+                return
+
+            data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
+            space_dir = (
+                Path(data_dir) / _safe_name(request.instance_id)
+                / "spaces" / request.active_space_id
+            )
+            desc_path = space_dir / descriptor_file
+            if not desc_path.is_file():
+                return
+            descriptor = _json.loads(desc_path.read_text(encoding="utf-8"))
+            tool_name = descriptor.get("name", "")
+            if not tool_name:
+                return
+
+            member_id = getattr(request, "member_id", "") or ""
+            if not member_id:
+                return
+
+            await append_my_tools_page(
+                instance_id=request.instance_id,
+                member_id=member_id,
+                tool_name=tool_name,
+                descriptor=descriptor,
+                canvas_service=canvas_svc,
+                instance_db=self._handler._instance_db,
+            )
+        except Exception as exc:
+            logger.debug("MY_TOOLS_PAGE_POPULATE_FAILED: %s", exc)
 
     async def _fire_canvas_routes(
         self, *, request: "ReasoningRequest",

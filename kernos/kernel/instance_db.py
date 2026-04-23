@@ -1220,6 +1220,38 @@ class InstanceDB:
         rows = await cur.fetchall()
         return [r[0] for r in rows]
 
+    async def find_canvas_by_name(
+        self, *, name: str, scope: str = "",
+        owner_member_id: str = "",
+    ) -> dict | None:
+        """Idempotency helper for seeders.
+
+        Matches on (name, scope) with an optional owner_member_id filter
+        for personal-scope canvases. Returns the first matching active
+        canvas, or None. Used by the first-boot seeder so re-seeding is a
+        no-op when the canvas already exists.
+        """
+        if not self._conn:
+            return None
+        clauses = ["name=?", "status!='archived'"]
+        params: list = [name]
+        if scope:
+            clauses.append("scope=?")
+            params.append(scope)
+        if owner_member_id:
+            clauses.append("owner_member_id=?")
+            params.append(owner_member_id)
+        cur = await self._conn.execute(
+            f"SELECT * FROM shared_spaces WHERE {' AND '.join(clauses)} LIMIT 1",
+            tuple(params),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["canvas_id"] = data.get("space_id", "")
+        return data
+
     async def archive_canvas(self, canvas_id: str) -> bool:
         """Soft-delete: set status='archived'. Row preserved."""
         if not self._conn:

@@ -228,6 +228,20 @@ Kernos has no database server requirement (SQLite is embedded) and no external o
 
 Do not run Kernos behind a public HTTP endpoint without careful consideration — adapters like Discord and Telegram are designed for authenticated-user messaging, not public HTTP surfaces. The current architecture assumes the server process is reachable by its message adapters, not by arbitrary internet traffic.
 
+## First-boot canvases
+
+On the first boot after a CANVAS-V1 install, Kernos seeds three canvases:
+
+- **System Reference** (team scope, unpinned) — populated from the shipped `/docs/architecture/*.md` files plus an auto-generated kernel-tool index. Gives the agent an authoritative source for Kernos-internal questions (*what's a context space*, *how does the gate work*).
+- **Our Procedures** (team scope, unpinned) — starts empty except for an index page. Team-wide procedures land here as they emerge.
+- **My Tools** (personal scope, one per member) — created when a member finishes onboarding (`bootstrap_graduated=True`). Workspace tools the member registers via `register_tool` get auto-appended as pages.
+
+Seeding is idempotent — canvases already present at boot are skipped. Delete a canvas (archive it) to trigger re-seeding on the next restart.
+
+**Deployment-shape note.** System Reference seeding reads from `docs/architecture/` on disk. Source checkouts have it; pip-installed or container deployments where `docs/` is stripped will skip the System Reference canvas with a warning — Our Procedures and per-member My Tools still seed. The warning is logged as `CANVAS_SEED_WARNING` on startup. To populate System Reference on such deployments, either copy the docs into the expected path before boot, or author the pages via `page_write` post-boot.
+
+**No auto-sync.** Once seeded, Kernos does not refresh System Reference from later repo updates — the canvas is now member-editable state. A `reseed_system_reference` tool is parked for future work.
+
 ## Troubleshooting
 
 **Import errors on first run.** Confirm the virtual environment is activated and `pip install -e .` completed without errors. On some systems, Python 3.11 isn't the default; use `python3.11` explicitly.

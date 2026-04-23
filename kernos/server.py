@@ -390,6 +390,40 @@ async def on_ready():
 
     logger.info("MessageHandler ready (data_dir=%s)", data_dir)
 
+    # SYSTEM-REFERENCE-CANVAS-SEED: idempotent first-boot seeding of
+    # System Reference + Our Procedures canvases. Safe to call on every
+    # boot; skips canvases that already exist. Per-member My Tools seed
+    # runs at bootstrap-graduation time, not here.
+    try:
+        _seed_instance_id = os.getenv("KERNOS_INSTANCE_ID", "")
+        if _seed_instance_id:
+            from kernos.setup.seed_canvases import seed_canvases_on_first_boot
+            from kernos.kernel.scheduler import resolve_owner_member_id
+            _canvas_svc = handler._get_canvas_service()
+            if _canvas_svc is not None:
+                _seed_result = await seed_canvases_on_first_boot(
+                    _seed_instance_id,
+                    canvas_service=_canvas_svc,
+                    instance_db=instance_db,
+                    operator_member_id=resolve_owner_member_id(_seed_instance_id),
+                    tool_catalog=handler._tool_catalog,
+                )
+                logger.info(
+                    "CANVAS_SEED_BOOT: instance=%s seeded=%s skipped=%s pages=%d warnings=%d",
+                    _seed_instance_id, _seed_result.seeded_canvases,
+                    _seed_result.skipped_canvases, _seed_result.pages_written,
+                    len(_seed_result.warnings),
+                )
+                for _w in _seed_result.warnings:
+                    logger.warning("CANVAS_SEED_WARNING: %s", _w)
+        else:
+            logger.info(
+                "CANVAS_SEED_BOOT: KERNOS_INSTANCE_ID unset — seeding deferred "
+                "to per-adapter instance resolution (not implemented in v1)."
+            )
+    except Exception as exc:
+        logger.warning("CANVAS_SEED_BOOT_FAILED: %s", exc)
+
     # Register adapters and channels for outbound messaging
     adapter.set_client(client)
     handler.register_adapter("discord", adapter)

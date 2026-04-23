@@ -501,6 +501,29 @@ class CanvasService:
             logger.warning("CANVAS_YAML_PARSE_FAILED: %s", exc)
         return {}
 
+    # ---- Narrow helpers for internal seeders -----------------------------
+
+    async def create_personal_canvas(
+        self, *,
+        instance_id: str,
+        member_id: str,
+        name: str,
+        description: str = "",
+        default_page_type: str = DEFAULT_PAGE_TYPE,
+    ) -> CanvasOpResult:
+        """Auto-create a personal canvas for a member.
+
+        Narrower than :meth:`create` — no scope/members arguments, no
+        notification fanout (personal scope notifies nobody). Intended for
+        internal seeders (e.g. My Tools on onboarding) rather than the
+        agent-facing ``canvas_create`` tool path.
+        """
+        return await self.create(
+            instance_id=instance_id, creator_member_id=member_id,
+            name=name, scope="personal",
+            description=description, default_page_type=default_page_type,
+        )
+
     # ---- Page read -------------------------------------------------------
 
     async def page_read(

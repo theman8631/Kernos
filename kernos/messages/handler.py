@@ -2603,6 +2603,26 @@ class MessageHandler:
                         "Member bootstrap graduated: member=%s instance=%s (interactions: %d)",
                         member_id, soul.instance_id, new_count,
                     )
+                    # SYSTEM-REFERENCE-CANVAS-SEED Pillar 2: seed this
+                    # member's personal My Tools canvas on onboarding
+                    # completion. Best-effort — never breaks graduation.
+                    try:
+                        from kernos.setup.seed_canvases import (
+                            seed_my_tools_canvas_for_member,
+                        )
+                        canvas_svc = self._get_canvas_service()
+                        if canvas_svc is not None:
+                            await seed_my_tools_canvas_for_member(
+                                instance_id=soul.instance_id,
+                                member_id=member_id,
+                                canvas_service=canvas_svc,
+                                instance_db=self._instance_db,
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "SEED_MY_TOOLS_ON_GRADUATION_FAILED: member=%s %s",
+                            member_id, exc,
+                        )
         else:
             # Legacy path: no member_id/instance_db, update soul directly
             if not soul.hatched:
@@ -2779,6 +2799,38 @@ class MessageHandler:
                             _pspace = await self.state.get_context_space(instance_id, sid)
                             _pname = _pspace.name if _pspace else sid
                             proc_parts.append(f"[From {_pname}]\n{content}")
+                # SYSTEM-REFERENCE-CANVAS-SEED Pillar 3: fold Our Procedures
+                # canvas pages (team-scoped) into the PROCEDURES block so they
+                # sit alongside per-space _procedures.md. Advisory only — same
+                # discipline as file-based procedures.
+                try:
+                    canvas_svc = self._get_canvas_service()
+                    if canvas_svc is not None and self._instance_db is not None:
+                        ours = await self._instance_db.find_canvas_by_name(
+                            name="Our Procedures", scope="team",
+                        )
+                        if ours:
+                            our_pages = await canvas_svc.page_list(
+                                instance_id=instance_id,
+                                canvas_id=ours["canvas_id"],
+                            )
+                            for pg in our_pages:
+                                if pg.get("path") == "index.md":
+                                    continue
+                                pr = await canvas_svc.page_read(
+                                    instance_id=instance_id,
+                                    canvas_id=ours["canvas_id"],
+                                    page_slug=pg["path"],
+                                )
+                                if pr.ok:
+                                    body = pr.extra.get("body", "")
+                                    if body.strip():
+                                        proc_parts.append(
+                                            f"[From Our Procedures: {pg.get('title') or pg['path']}]\n{body}"
+                                        )
+                except Exception as exc:
+                    logger.debug("OUR_PROCEDURES_LOAD_FAILED: %s", exc)
+
                 if proc_parts:
                     procedures_prefix = "\n\n".join(proc_parts)
             except Exception as exc:
