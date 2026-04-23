@@ -160,6 +160,14 @@ class TurnContext:
     # Runtime trace collector — structured events for diagnostic visibility
     trace: Any = None  # TurnEventCollector, set at turn start
 
+    # HANDLER-PIPELINE-DECOMPOSE: back-reference to the orchestrating
+    # MessageHandler so phase modules can reach kernel services
+    # (state, reasoning, instance_db, registry, etc.) without modules
+    # importing from handler.py directly. Populated when ``process()``
+    # constructs the ctx. Typed as Any to avoid the circular import the
+    # type "MessageHandler" would create.
+    handler: Any = None
+
     # RELATIONAL-MESSAGING v5: messages collected for this turn's recipient.
     # Populated by the relational-dispatcher pickup in _phase_assemble; the
     # persist phase walks these to mark delivered → surfaced (unless the
@@ -4089,6 +4097,9 @@ class MessageHandler:
         from kernos.kernel.runtime_trace import TurnEventCollector, generate_turn_id
         ctx = TurnContext(message=message)
         ctx.trace = TurnEventCollector(generate_turn_id())
+        # HANDLER-PIPELINE-DECOMPOSE: phase modules reach services
+        # (state, reasoning, instance_db, etc.) through ctx.handler.
+        ctx.handler = self
 
         # Early return paths (secure input)
         early = await self._check_early_return(ctx)
