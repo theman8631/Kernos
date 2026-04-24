@@ -101,6 +101,12 @@ class HeuristicDecl:
     status: str
     coalesce: dict = field(default_factory=dict)
     scope: dict = field(default_factory=dict)       # optional — narrows which events match
+    #: CANVAS-GARDENER-PREFERENCE-CAPTURE: optional preference-awareness
+    #: fields. When a canvas carries a matching confirmed preference, the
+    #: heuristic either suppresses entirely (truthy preference value) or
+    #: uses the preference value as its threshold override.
+    suppressed_by_preference: str = ""
+    threshold_preference: str = ""
 
     @property
     def is_active(self) -> bool:
@@ -238,6 +244,8 @@ def _decl_from_dict(d: dict) -> HeuristicDecl:
         status=status,
         coalesce=dict(d.get("coalesce") or {}),
         scope=dict(d.get("scope") or {}),
+        suppressed_by_preference=str(d.get("suppressed_by_preference") or "").strip(),
+        threshold_preference=str(d.get("threshold_preference") or "").strip(),
     )
 
 
@@ -263,6 +271,12 @@ class CanvasEvaluationState:
     event_type: str = ""
     event_payload: dict = field(default_factory=dict)
     canvas_anchors: dict = field(default_factory=dict)       # e.g. {"event_date": "2026-06-01"}
+    #: Confirmed member-captured preferences on the canvas
+    #: (CANVAS-GARDENER-PREFERENCE-CAPTURE). Consulted by
+    #: ``suppressed_by_preference`` + ``threshold_preference`` gates on
+    #: active declarations. Empty dict = no overrides, default
+    #: thresholds apply.
+    preferences: dict = field(default_factory=dict)
 
 
 def trigger_matches_event(decl: HeuristicDecl, event_type: str, event_payload: dict) -> bool:
@@ -314,11 +328,37 @@ def evaluate_declaration(
     Reference-count and page-reference-added paths are blocked on a
     cross-page index that isn't built yet. They return None with a log
     so the dispatch layer can surface them as known-deferred.
+
+    Preference-awareness (CANVAS-GARDENER-PREFERENCE-CAPTURE):
+      - ``suppressed_by_preference``: if the named preference exists on
+        the canvas with any truthy value, the heuristic doesn't fire.
+      - ``threshold_preference``: if set AND the named preference exists,
+        the preference value OVERRIDES the declaration's
+        ``signal.params.threshold`` (or ``threshold_days`` for
+        duration-since-write) at evaluation time.
     """
     if not decl.is_active:
         return None
     if not _scope_matches(decl, state.page_path):
         return None
+
+    # Suppression gate: preference with truthy value skips evaluation.
+    if decl.suppressed_by_preference:
+        value = (state.preferences or {}).get(decl.suppressed_by_preference)
+        if value:
+            logger.debug(
+                "PATTERN_HEURISTIC_SUPPRESSED_BY_PREF: id=%s pref=%s",
+                decl.id, decl.suppressed_by_preference,
+            )
+            return None
+
+    # Threshold override: preference value replaces the declared threshold.
+    # Mutation applied to a COPY of the decl so we don't mutate the cached
+    # declaration on the pattern body.
+    if decl.threshold_preference:
+        override_value = (state.preferences or {}).get(decl.threshold_preference)
+        if override_value is not None:
+            decl = _decl_with_threshold_override(decl, override_value)
 
     if decl.is_semantic:
         return HeuristicMatch(
@@ -353,6 +393,43 @@ def evaluate_declaration(
 # ---------------------------------------------------------------------------
 # Deterministic check handlers
 # ---------------------------------------------------------------------------
+
+
+def _decl_with_threshold_override(
+    decl: HeuristicDecl, override_value: Any,
+) -> HeuristicDecl:
+    """Return a shallow copy of ``decl`` with signal.params threshold replaced.
+
+    Handles the two threshold keys used by the v1 deterministic handlers:
+    ``threshold`` (page-count, page-size-lines) and ``threshold_days``
+    (duration-since-write). Preferences override whichever the original
+    declaration carried. Returns the original when neither key is present
+    in params — the override is silently dropped rather than raising.
+    """
+    signal = dict(decl.signal or {})
+    params = dict(signal.get("params") or {})
+    changed = False
+    if "threshold" in params:
+        params["threshold"] = override_value
+        changed = True
+    if "threshold_days" in params:
+        params["threshold_days"] = override_value
+        changed = True
+    if not changed:
+        return decl
+    signal["params"] = params
+    return HeuristicDecl(
+        id=decl.id,
+        trigger=decl.trigger,
+        signal=signal,
+        action=decl.action,
+        confidence=decl.confidence,
+        status=decl.status,
+        coalesce=decl.coalesce,
+        scope=decl.scope,
+        suppressed_by_preference=decl.suppressed_by_preference,
+        threshold_preference=decl.threshold_preference,
+    )
 
 
 def _check_page_count(

@@ -1010,6 +1010,16 @@ class GardenerService:
             return decisions
 
         # Build the evaluation state once; handlers read from it.
+        # Preferences pulled once per dispatch and passed into the evaluator
+        # so suppressed_by_preference + threshold_preference gates apply
+        # (CANVAS-GARDENER-PREFERENCE-CAPTURE).
+        try:
+            canvas_preferences = await self._canvas.get_preferences(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+        except Exception:
+            canvas_preferences = {}
+
         eval_state = CanvasEvaluationState(
             canvas_id=canvas_id,
             page_index=await self._build_page_index(instance_id, canvas_id),
@@ -1019,6 +1029,7 @@ class GardenerService:
             event_type=event_type,
             event_payload=event_payload,
             canvas_anchors=self._extract_canvas_anchors(canvas_defaults),
+            preferences=canvas_preferences,
         )
 
         for decl in declarations:
