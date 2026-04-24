@@ -216,6 +216,55 @@ async def env(tmp_path):
     await idb.close()
 
 
+async def test_index_updated_before_event_emission(env):
+    """Load-bearing ordering invariant: the reference index reflects the new
+    outbound edge BEFORE canvas.page.* events fire — the Gardener's
+    ``asyncio.create_task`` dispatch queries the index, so events firing on
+    stale state would race.
+
+    Mechanism: replace ``canvas_service._emit`` with a wrapper that, at each
+    emission, reads the current in-memory index state and captures it. After
+    a page_write completes, every captured canvas.page.* emission should
+    show the new outbound edge already present.
+    """
+    svc, idb, tmp_path = env
+    c = await svc.create(
+        instance_id=INSTANCE, creator_member_id=OPERATOR,
+        name="T", scope="personal",
+    )
+    original_emit = svc._emit
+    captured: list[dict] = []
+
+    async def capturing_emit(instance_id, event_type, payload, *, member_id=""):
+        # Snapshot index state at the exact moment the event fires.
+        idx = await svc.get_reference_index(
+            instance_id=instance_id, canvas_id=c.canvas_id,
+        )
+        captured.append({
+            "event_type": event_type,
+            "outbound_at_emission": dict(idx.outbound),
+        })
+        await original_emit(instance_id, event_type, payload, member_id=member_id)
+
+    svc._emit = capturing_emit
+
+    await svc.page_write(
+        instance_id=INSTANCE, canvas_id=c.canvas_id,
+        page_slug="page-a.md",
+        body="Refers to [[charter]] and [[architecture]].",
+        writer_member_id=OPERATOR,
+    )
+
+    page_events = [e for e in captured if e["event_type"].startswith("canvas.page.")]
+    assert page_events, "at least one canvas.page.* event should have emitted"
+    for e in page_events:
+        outbound = e["outbound_at_emission"]
+        assert outbound.get("page-a") == ["charter", "architecture"], (
+            f"{e['event_type']} fired before reference index was updated — "
+            f"ordering invariant violated. Captured outbound state: {outbound}"
+        )
+
+
 async def test_page_write_updates_index(env):
     svc, idb, tmp_path = env
     c = await svc.create(
