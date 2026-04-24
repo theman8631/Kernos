@@ -40,7 +40,10 @@ class OpenAICodexProvider(Provider):
         self._credential = credential
         self.main_model = model or os.getenv("OPENAI_CODEX_MODEL", "gpt-5.5")
         self.simple_model = os.getenv("OPENAI_CODEX_SIMPLE_MODEL", self.main_model)
-        self.cheap_model = os.getenv("OPENAI_CODEX_CHEAP_MODEL", "gpt-5.5-nano")
+        # Cheap tier: no gpt-5.5-{mini,nano} exists in the Codex ChatGPT
+        # catalog (per OpenAI's published model list). The 5.x mini tier
+        # currently tops out at gpt-5.4-mini.
+        self.cheap_model = os.getenv("OPENAI_CODEX_CHEAP_MODEL", "gpt-5.4-mini")
         self._base_url = os.getenv(
             "OPENAI_CODEX_BASE_URL", "https://chatgpt.com/backend-api"
         )
