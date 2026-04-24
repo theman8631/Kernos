@@ -254,10 +254,11 @@ async def test_audit_log_creates_entry(tmp_path):
         },
     )
 
-    # Find the audit file
+    # Find the audit file. filelock leaves a persistent `.lock` sentinel
+    # in the same directory, so match on the .json suffix explicitly.
     import json
     audit_dir = tmp_path / "discord_123456" / "audit"
-    audit_files = list(audit_dir.iterdir())
+    audit_files = list(audit_dir.glob("*.json"))
     assert len(audit_files) == 1
     with open(audit_files[0]) as f:
         entries = json.load(f)
@@ -275,7 +276,7 @@ async def test_audit_log_appends_multiple_entries(tmp_path):
 
     import json
     audit_dir = tmp_path / "t1" / "audit"
-    audit_files = list(audit_dir.iterdir())
+    audit_files = list(audit_dir.glob("*.json"))
     with open(audit_files[0]) as f:
         entries = json.load(f)
     assert len(entries) == 2
