@@ -30,7 +30,11 @@ CANVAS_CREATE_TOOL = {
         "YAML frontmatter. Three scopes: 'personal' (caller only), "
         "'specific' (an explicit member list), 'team' (all instance "
         "members current and future). Caller becomes owner. "
-        "For scope='specific', the members list is required."
+        "For scope='specific', the members list is required. "
+        "If 'intent' is provided, the Gardener cohort will asynchronously "
+        "match the intent to a workflow pattern and instantiate that "
+        "pattern's initial pages — the canvas is returned immediately "
+        "while pages populate in the background."
     ),
     "input_schema": {
         "type": "object",
@@ -68,6 +72,23 @@ CANVAS_CREATE_TOOL = {
                     "Optional list of space_ids. If set, the canvas appears "
                     "in the Available Canvases zone ONLY when operating in "
                     "those spaces. Unset = universal visibility."
+                ),
+            },
+            "intent": {
+                "type": "string",
+                "description": (
+                    "Natural-language description of what the canvas is for. "
+                    "Used by the Gardener to match against workflow patterns "
+                    "for initial-shape instantiation. Optional; omit to skip "
+                    "Gardener matching and create a minimal canvas."
+                ),
+            },
+            "pattern": {
+                "type": "string",
+                "description": (
+                    "Optional explicit pattern name (e.g. 'software-development', "
+                    "'long-form-campaign') that bypasses Gardener matching. Use "
+                    "when you already know which pattern fits the work."
                 ),
             },
         },

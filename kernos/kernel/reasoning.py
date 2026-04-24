@@ -1947,6 +1947,22 @@ class ReasoningService:
                     scope=result.extra.get("scope", ""),
                     notify=result.extra.get("notify") or [],
                 )
+                # SECTION-MARKERS + GARDENER Pillar 3: kick off initial-shape
+                # application asynchronously so canvas_create returns
+                # immediately and the member's agent can keep moving while
+                # the Gardener picks a pattern + instantiates pages.
+                intent = tool_input.get("intent") or ""
+                explicit_pattern = tool_input.get("pattern") or ""
+                if intent or explicit_pattern:
+                    await self._schedule_gardener_initial_shape(
+                        request=request,
+                        canvas_id=result.canvas_id,
+                        canvas_name=result.extra.get("name", ""),
+                        scope=result.extra.get("scope", ""),
+                        creator_member_id=member_id,
+                        intent=intent,
+                        explicit_pattern=explicit_pattern,
+                    )
             return _json.dumps(result.to_dict(), default=str)
 
         if tool_name == "page_read":
@@ -2250,6 +2266,48 @@ class ReasoningService:
             )
         except Exception as exc:
             logger.debug("MY_TOOLS_PAGE_POPULATE_FAILED: %s", exc)
+
+    async def _schedule_gardener_initial_shape(
+        self,
+        *,
+        request: "ReasoningRequest",
+        canvas_id: str,
+        canvas_name: str,
+        scope: str,
+        creator_member_id: str,
+        intent: str,
+        explicit_pattern: str,
+    ) -> None:
+        """Schedule Gardener initial-shape application in the background.
+
+        Spec Pillar 3: canvas_create returns immediately; the Gardener
+        picks a pattern and instantiates its declared pages asynchronously.
+        Swallows all errors — pattern application is a best-effort
+        enrichment of a canvas that already exists.
+        """
+        gardener = None
+        if self._handler and hasattr(self._handler, "_get_gardener_service"):
+            gardener = self._handler._get_gardener_service()
+        if gardener is None:
+            return
+
+        import asyncio as _asyncio
+
+        async def _run():
+            try:
+                await gardener.apply_initial_shape(
+                    instance_id=request.instance_id,
+                    canvas_id=canvas_id,
+                    canvas_name=canvas_name,
+                    scope=scope,
+                    creator_member_id=creator_member_id,
+                    intent=intent,
+                    explicit_pattern=explicit_pattern,
+                )
+            except Exception as exc:
+                logger.debug("GARDENER_APPLY_INITIAL_SHAPE_FAILED: %s", exc)
+
+        _asyncio.create_task(_run(), name=f"gardener_initial_shape_{canvas_id}")
 
     async def _fire_canvas_routes(
         self, *, request: "ReasoningRequest",

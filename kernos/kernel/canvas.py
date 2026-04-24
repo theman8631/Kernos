@@ -256,6 +256,79 @@ def maybe_refresh_section_tokens(body: str, last_updated: str = "") -> str:
     return render_sections(preamble, sections)
 
 
+_INITIAL_SHAPE_RE = re.compile(
+    r"^##\s+Initial canvas shape\s*\n(?P<body>.*?)(?=\n##\s+|\Z)",
+    re.DOTALL | re.MULTILINE | re.IGNORECASE,
+)
+_SHAPE_BULLET_RE = re.compile(
+    r"^-\s+"                         # bullet marker
+    r"`(?P<path>[^`]+)`"             # `path` in backticks
+    r"(?:\s*\((?P<meta>[^)]*)\))?"   # optional (meta) — type, scope, etc.
+    r"(?:\s*[—-]+\s*(?P<desc>.+))?"  # optional — description
+    r"\s*$",
+    re.MULTILINE,
+)
+_VALID_PAGE_TYPES = {"note", "decision", "log"}
+_VALID_SCOPES_FOR_PARSE = {"personal", "specific", "team"}
+
+
+def parse_initial_shape(pattern_body: str) -> list[dict]:
+    """Extract the pattern's "Initial canvas shape" section into page specs.
+
+    Each returned dict has ``path``, ``type`` (defaults to ``note``),
+    ``scope`` (defaults to ``team``), and ``description``. Sub-bullets
+    (those starting with additional indentation) are attached to their
+    parent as ``sub_bullets`` but not recursively parsed — v1 creates
+    parent pages only; sub-templates can be added by the Gardener or
+    the member post-creation.
+
+    Returns an empty list when the pattern has no Initial canvas shape
+    section — callers fall back to a minimal canvas.
+    """
+    if not pattern_body:
+        return []
+    section_match = _INITIAL_SHAPE_RE.search(pattern_body)
+    if not section_match:
+        return []
+    section_body = section_match.group("body")
+
+    out: list[dict] = []
+    # Parse only top-level bullets (those starting with "- " at line-start).
+    # Trailing bullets (sub-bullets) are indented and skipped.
+    for m in _SHAPE_BULLET_RE.finditer(section_body):
+        path = (m.group("path") or "").strip()
+        if not path:
+            continue
+        # Skip "subdirectory" placeholders — e.g. `specs/` without an .md suffix
+        # and no explicit file indicator. Pattern-declared subdirs are hints,
+        # not concrete initial pages.
+        if path.endswith("/"):
+            continue
+        meta_raw = (m.group("meta") or "").strip()
+        desc = (m.group("desc") or "").strip()
+        page_type = "note"
+        scope = "team"
+        flags: list[str] = []
+        if meta_raw:
+            for token in (t.strip().lower() for t in meta_raw.split(",")):
+                if token in _VALID_PAGE_TYPES:
+                    page_type = token
+                elif token in _VALID_SCOPES_FOR_PARSE:
+                    scope = token
+                elif token:
+                    flags.append(token)
+        entry = {
+            "path": path if path.endswith(".md") else f"{path}.md",
+            "type": page_type,
+            "scope": scope,
+            "description": desc,
+        }
+        if flags:
+            entry["flags"] = flags
+        out.append(entry)
+    return out
+
+
 def replace_section_body(body: str, slug: str, new_body: str,
                           last_updated: str = "") -> tuple[str, bool]:
     """Surgically replace one section's body in an existing page body.
@@ -695,6 +768,40 @@ class CanvasService:
             ok=True, canvas_id=canvas_id,
             extra={"name": canvas.name, "scope": scope, "notify": notify},
         )
+
+    # ---- Canvas-level mutation (post-create) -----------------------------
+
+    async def set_canvas_pattern(
+        self, *, instance_id: str, canvas_id: str, pattern: str,
+    ) -> bool:
+        """Record ``pattern: <name>`` in the canvas's canvas.yaml on disk.
+
+        Used by the Gardener after picking an initial shape (Pillar 3).
+        Returns True on success, False on any IO or parse failure. Fails
+        soft — an unrecorded pattern means the canvas keeps working; only
+        the Gardener's future consultations lose the pattern hint.
+        """
+        try:
+            root = canvas_dir(self._data_dir, instance_id, canvas_id)
+            yaml_path = root / "canvas.yaml"
+            if not yaml_path.is_file():
+                return False
+            parsed = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(parsed, dict):
+                return False
+            parsed["pattern"] = pattern
+            yaml_path.write_text(
+                yaml.safe_dump(parsed, sort_keys=False, default_flow_style=False),
+                encoding="utf-8",
+            )
+            logger.info(
+                "CANVAS_PATTERN_SET: canvas=%s pattern=%s",
+                canvas_id, pattern,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CANVAS_PATTERN_SET_FAILED: %s", exc)
+            return False
 
     # ---- Canvas-level defaults (for route resolution) -------------------
 

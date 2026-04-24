@@ -261,6 +261,9 @@ class GardenerService:
         """Pillar 3 entry — pick a pattern for a new canvas."""
         await self._ensure_patterns_loaded(ctx.instance_id)
         ctx.available_patterns = self._patterns.all_summaries()
+        if not ctx.available_patterns:
+            logger.info("GARDENER_NO_PATTERNS_AVAILABLE: canvas=%s", ctx.canvas_id)
+            return None
         try:
             return await judge_initial_shape(
                 ctx, reasoning_service=self._reasoning,
@@ -271,6 +274,188 @@ class GardenerService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("GARDENER_INITIAL_SHAPE_FAILED: %s", exc)
             return None
+
+    async def apply_initial_shape(
+        self,
+        *,
+        instance_id: str,
+        canvas_id: str,
+        canvas_name: str,
+        scope: str,
+        creator_member_id: str,
+        intent: str = "",
+        explicit_pattern: str = "",
+    ) -> dict:
+        """Orchestrate Pillar 3 — pick a pattern, instantiate pages, record it.
+
+        Flow:
+          1. If ``explicit_pattern`` is set, skip consultation and use it.
+          2. Otherwise consult the LLM to pick a pattern from the catalog.
+          3. If a pattern is picked, instantiate its "Initial canvas shape"
+             pages and record ``pattern: <name>`` in canvas.yaml.
+          4. If nothing matches (or consult fails), record
+             ``pattern: unmatched`` so follow-on evolution judgments know
+             no pattern-specific heuristics apply.
+
+        Returns a dict with keys: ``pattern`` (name applied or ``unmatched``),
+        ``pages_created`` (int), ``source`` (``explicit`` / ``gardener`` /
+        ``fallback``). Always succeeds-or-logs; never raises — canvas
+        creation already succeeded upstream; pattern application is a
+        best-effort enrichment.
+        """
+        result = {"pattern": "unmatched", "pages_created": 0, "source": "fallback"}
+
+        # 1. Explicit pattern bypass (escape hatch for known-pattern cases).
+        if explicit_pattern:
+            pattern_name = explicit_pattern.strip()
+            await self._ensure_patterns_loaded(instance_id)
+            if self._patterns.get(pattern_name) is None:
+                logger.warning(
+                    "GARDENER_EXPLICIT_PATTERN_UNKNOWN: pattern=%s", pattern_name,
+                )
+            else:
+                pages = await self._instantiate_pattern(
+                    instance_id=instance_id, canvas_id=canvas_id,
+                    pattern_name=pattern_name,
+                    creator_member_id=creator_member_id,
+                )
+                await self._canvas.set_canvas_pattern(
+                    instance_id=instance_id, canvas_id=canvas_id,
+                    pattern=pattern_name,
+                )
+                result.update({
+                    "pattern": pattern_name,
+                    "pages_created": pages,
+                    "source": "explicit",
+                })
+                await self._emit(
+                    instance_id, "canvas.pattern_applied",
+                    {
+                        "canvas_id": canvas_id,
+                        "pattern": pattern_name,
+                        "pages_created": pages,
+                        "source": "explicit",
+                    },
+                    member_id=creator_member_id,
+                )
+                return result
+
+        # 2. Consult the Gardener to pick.
+        ctx = InitialShapeContext(
+            instance_id=instance_id,
+            canvas_id=canvas_id,
+            canvas_name=canvas_name,
+            scope=scope,
+            creator_member_id=creator_member_id,
+            intent=intent,
+        )
+        decision = await self.consult_initial_shape(ctx)
+        picked: str = ""
+        if decision and decision.action == "pick_pattern" and decision.pattern:
+            picked = decision.pattern.strip()
+
+        # 3. Apply if the pick matches a known pattern.
+        if picked and self._patterns.get(picked) is not None:
+            pages = await self._instantiate_pattern(
+                instance_id=instance_id, canvas_id=canvas_id,
+                pattern_name=picked,
+                creator_member_id=creator_member_id,
+            )
+            await self._canvas.set_canvas_pattern(
+                instance_id=instance_id, canvas_id=canvas_id, pattern=picked,
+            )
+            result.update({
+                "pattern": picked,
+                "pages_created": pages,
+                "source": "gardener",
+            })
+            await self._emit(
+                instance_id, "canvas.pattern_applied",
+                {
+                    "canvas_id": canvas_id, "pattern": picked,
+                    "pages_created": pages, "source": "gardener",
+                },
+                member_id=creator_member_id,
+            )
+            return result
+
+        # 4. Fallback — unmatched.
+        await self._canvas.set_canvas_pattern(
+            instance_id=instance_id, canvas_id=canvas_id, pattern="unmatched",
+        )
+        await self._emit(
+            instance_id, "canvas.pattern_applied",
+            {
+                "canvas_id": canvas_id, "pattern": "unmatched",
+                "pages_created": 0, "source": "fallback",
+            },
+            member_id=creator_member_id,
+        )
+        logger.info(
+            "GARDENER_PATTERN_UNMATCHED: canvas=%s intent=%r",
+            canvas_id, (intent or "")[:80],
+        )
+        return result
+
+    async def _instantiate_pattern(
+        self, *, instance_id: str, canvas_id: str, pattern_name: str,
+        creator_member_id: str,
+    ) -> int:
+        """Create the pages a pattern declares in its Initial canvas shape.
+
+        Pages are seeded empty except for a short boilerplate line derived
+        from the pattern's description of that page. The member fills in
+        content; Gardener does not generate substantive body content.
+        Skips pages that already exist (idempotent safety).
+        """
+        from kernos.kernel.canvas import parse_initial_shape
+
+        cached = self._patterns.get(pattern_name)
+        if cached is None:
+            return 0
+        page_specs = parse_initial_shape(cached.body)
+        if not page_specs:
+            return 0
+
+        pages_created = 0
+        for spec in page_specs:
+            path = spec.get("path", "")
+            if not path:
+                continue
+            # Skip existing pages — pattern instantiation is idempotent.
+            existing = await self._canvas.page_read(
+                instance_id=instance_id, canvas_id=canvas_id, page_slug=path,
+            )
+            if existing.ok:
+                continue
+            body = self._scaffold_body_from_spec(spec)
+            write_result = await self._canvas.page_write(
+                instance_id=instance_id, canvas_id=canvas_id,
+                page_slug=path, body=body,
+                writer_member_id=creator_member_id,
+                title=spec.get("path", path).split("/")[-1].rsplit(".", 1)[0].replace("-", " ").title(),
+                page_type=spec.get("type", "note"),
+                state="drafted",
+            )
+            if write_result.ok:
+                pages_created += 1
+        logger.info(
+            "GARDENER_PATTERN_INSTANTIATED: canvas=%s pattern=%s pages=%d",
+            canvas_id, pattern_name, pages_created,
+        )
+        return pages_created
+
+    @staticmethod
+    def _scaffold_body_from_spec(spec: dict) -> str:
+        """Short boilerplate body from the pattern's page description."""
+        title = spec.get("path", "").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        description = spec.get("description", "").strip()
+        lines = [f"# {title.replace('-', ' ').title()}"]
+        if description:
+            lines.append("")
+            lines.append(f"_{description}_")
+        lines.append("")
+        return "\n".join(lines)
 
     async def consult_evolution(
         self, ctx: EvolutionContext,
