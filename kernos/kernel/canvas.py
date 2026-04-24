@@ -629,6 +629,10 @@ class CanvasService:
         self._event_emit = event_emit
         # Page-frontmatter cache keyed on absolute path; invalidated on write
         self._fm_cache: dict[str, tuple[float, dict, str]] = {}
+        #: Per-canvas reference index (CANVAS-CROSS-PAGE-INDEX). Loaded
+        #: lazily on first read/write; rebuilt from pages on cold start
+        #: (missing or malformed on-disk file).
+        self._ref_indexes: dict[str, Any] = {}
 
     async def _emit(self, instance_id: str, event_type: str, payload: dict,
                     member_id: str = "") -> None:
@@ -768,6 +772,84 @@ class CanvasService:
             ok=True, canvas_id=canvas_id,
             extra={"name": canvas.name, "scope": scope, "notify": notify},
         )
+
+    # ---- Reference index (CANVAS-CROSS-PAGE-INDEX) -----------------------
+
+    async def get_reference_index(
+        self, *, instance_id: str, canvas_id: str,
+    ) -> Any:
+        """Return the canvas's ReferenceIndex — cold-start rebuild on miss.
+
+        Lazy: first call for a canvas loads ``references.json`` if present
+        or rebuilds from canvas pages. Subsequent calls return the
+        cached instance. Gardener heuristics consuming reference counts
+        get their queries answered in memory.
+        """
+        from kernos.kernel.canvas_reference_index import (
+            load_or_empty, rebuild_from_canvas, save,
+        )
+        cache_key = f"{instance_id}::{canvas_id}"
+        cached = self._ref_indexes.get(cache_key)
+        if cached is not None:
+            return cached
+        index = load_or_empty(self._data_dir, instance_id, canvas_id)
+        # Cold-start rebuild: if the on-disk file is missing OR empty but
+        # the canvas has pages with potential links, walk and populate.
+        if not index.outbound:
+            try:
+                root = canvas_dir(self._data_dir, instance_id, canvas_id)
+                if root.is_dir():
+                    # Only pay rebuild cost when on-disk file doesn't exist.
+                    from kernos.kernel.canvas_reference_index import index_path
+                    if not index_path(self._data_dir, instance_id, canvas_id).is_file():
+                        index = await rebuild_from_canvas(
+                            canvas_service=self, instance_id=instance_id,
+                            canvas_id=canvas_id,
+                        )
+                        save(index, self._data_dir, instance_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("CANVAS_REF_INDEX_LAZY_REBUILD_FAILED: %s", exc)
+        self._ref_indexes[cache_key] = index
+        return index
+
+    async def _update_reference_index_for_write(
+        self, *, instance_id: str, canvas_id: str, page_slug: str,
+        new_body: str,
+    ) -> list[Any]:
+        """Update the reference index for the just-written page.
+
+        Returns the list of BrokenReference findings for this write so
+        the Gardener dispatch can surface them. Never raises — index
+        failures log and degrade to empty findings.
+        """
+        from kernos.kernel.canvas_reference_index import (
+            parse_wiki_links, save,
+        )
+        try:
+            index = await self.get_reference_index(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+            targets = parse_wiki_links(new_body or "")
+            index.update_page(page_slug, targets)
+            save(index, self._data_dir, instance_id)
+            # Broken-reference detection — only check THIS source's targets
+            # (not the whole canvas) to keep the hot path bounded.
+            known_pages = await self.page_list(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+            known_slugs = {p.get("path", "") for p in known_pages if p.get("path")}
+            all_broken = index.find_broken_references(known_slugs)
+            # Filter to this source only so we don't re-surface every
+            # canvas-wide broken ref on every single write.
+            from kernos.kernel.canvas_reference_index import slug_from_path
+            this_source = slug_from_path(page_slug)
+            return [b for b in all_broken if b.source_slug == this_source]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "CANVAS_REF_INDEX_UPDATE_FAILED: canvas=%s page=%s reason=%s",
+                canvas_id, page_slug, exc,
+            )
+            return []
 
     # ---- Canvas-level mutation (post-create) -----------------------------
 
@@ -1070,6 +1152,16 @@ class CanvasService:
         route_targets = parse_route_targets(new_fm.get("routes"), new_state)
         consult_operator = state_changed and new_state in (resolved_consult_at or [])
 
+        # CANVAS-CROSS-PAGE-INDEX: refresh the reference index for this
+        # source BEFORE events fire — the Gardener's on_canvas_event
+        # schedules background dispatch that queries the index, and we
+        # want that dispatch to see the current post-write state, not
+        # the pre-write state.
+        broken_refs = await self._update_reference_index_for_write(
+            instance_id=instance_id, canvas_id=canvas_id,
+            page_slug=page_slug, new_body=new_body,
+        )
+
         # Event emission: distinct event per lifecycle stage.
         if is_new:
             await self._emit(
@@ -1134,6 +1226,11 @@ class CanvasService:
                 "route_targets": route_targets,
                 "consult_operator_at": resolved_consult_at,
                 "consult_operator": consult_operator,
+                "broken_references": [
+                    {"source": b.source_slug, "target": b.target_slug,
+                     "count": b.count, "reason": b.reason}
+                    for b in broken_refs
+                ],
             },
         )
 

@@ -125,7 +125,14 @@ PAGE_WRITE_TOOL = {
         "retained as '{slug}.v{N}.md' files. For cross-member canvases, "
         "a page_write to a shared (non-log) page without confirmed=true "
         "returns requires_confirmation=true and does NOT write — the "
-        "agent must surface to the user and re-call with confirmed=true."
+        "agent must surface to the user and re-call with confirmed=true.\n\n"
+        "Cross-page references: when your page body mentions another page "
+        "in the same canvas, use explicit wiki-link syntax [[page-path]] "
+        "(without the .md extension, e.g. [[specs/launch]] or [[charter]]). "
+        "These links feed the canvas's reference index, which drives "
+        "structural heuristics (back-reference-based index-hub promotion, "
+        "broken-link detection). Bare prose mentions of a page name are "
+        "not recognized — be explicit."
     ),
     "input_schema": {
         "type": "object",

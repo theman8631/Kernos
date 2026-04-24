@@ -243,7 +243,11 @@ AVAILABLE CANVASES block in context lists the canvases you can see. \
 Writing to a shared canvas page (not logs) asks for explicit user \
 confirmation — surface the proposed edit, then re-call with confirmed=true. \
 Decision pages support routes — declaring ``routes: {ratified: [operator]}`` \
-in frontmatter causes a route to fire when the page reaches that state.
+in frontmatter causes a route to fire when the page reaches that state. \
+When a page body mentions another page in the same canvas, use the explicit \
+wiki-link form ``[[page-path]]`` (without ``.md``, e.g. ``[[specs/launch]]`` \
+or ``[[charter]]``). These links feed the canvas's reference index; bare \
+prose mentions aren't recognized as links.
 
 SELF-DIRECTED EXECUTION. You can take on complex multi-step tasks autonomously. \
 When deciding whether to use a plan: if the task involves multiple sources, \

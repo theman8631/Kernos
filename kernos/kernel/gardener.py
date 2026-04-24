@@ -86,6 +86,9 @@ CONSENT_MODES = (
 #: check the section-boundary choice before disk mutations happen).
 NON_DESTRUCTIVE_ACTIONS = {"regenerate_summary"}
 
+#: Pattern 00's back-reference-promotion threshold (CANVAS-CROSS-PAGE-INDEX).
+BACK_REFERENCE_PROMOTION_THRESHOLD = 3
+
 #: Flags that are advisory only — never auto-apply, always surface.
 ADVISORY_ACTIONS = {
     "flag_stale", "flag_scope_mismatch",
@@ -93,6 +96,8 @@ ADVISORY_ACTIONS = {
     "flag", "whisper", "alarm", "flag_library_upgrade",
     "propose_subdivide", "propose_promote",
     "propose_archive", "propose_transition",
+    # Reference-index outputs (CANVAS-CROSS-PAGE-INDEX)
+    "flag_broken_reference", "propose_back_reference_index",
 }
 
 
@@ -596,8 +601,11 @@ class GardenerService:
         page_fm = page_read.extra.get("frontmatter", {}) or {}
         page_body = page_read.extra.get("body", "") or ""
 
-        # Run the three Pattern 00 heuristics. Each returns an Optional
-        # GardenerDecision with confidence; only HIGH confidence surfaces.
+        # Run the Pattern 00 cross-pattern heuristics. Each returns an
+        # Optional GardenerDecision with confidence; only HIGH confidence
+        # surfaces. split/staleness/scope-mismatch are synchronous pure
+        # checks; back-reference-promotion reads the canvas's reference
+        # index and is async.
         proposals: list[GardenerDecision] = []
         for check in (
             self._heuristic_split,
@@ -626,6 +634,29 @@ class GardenerService:
                 )
                 continue
             proposals.append(decision)
+
+        # Pattern 00 back-reference-promotion (CANVAS-CROSS-PAGE-INDEX smoke
+        # activation). Page that has accumulated BACK_REFERENCE_PROMOTION_THRESHOLD+
+        # inbound references → propose promotion to a link-hub/index page.
+        back_ref_decision = await self._heuristic_back_reference_promotion(
+            instance_id=instance_id,
+            canvas_id=canvas_id,
+            page_path=page_path,
+        )
+        if back_ref_decision is not None and back_ref_decision.surfaces:
+            proposals.append(back_ref_decision)
+
+        # Broken-reference findings (CANVAS-CROSS-PAGE-INDEX). Query the
+        # index directly at dispatch time rather than relying on the
+        # event payload — keeps the event shape unchanged and lets the
+        # Gardener be the single source for broken-ref surfacing.
+        broken_for_source = await self._collect_broken_references_for_page(
+            instance_id=instance_id, canvas_id=canvas_id, page_path=page_path,
+        )
+        for br in broken_for_source:
+            proposals.append(self._make_broken_reference_decision(
+                page_path=page_path, broken=br,
+            ))
 
         # Pattern-specific heuristics (CANVAS-GARDENER-PATTERN-HEURISTICS).
         # Runs only when the canvas declares a pattern. Adds to the same
@@ -766,6 +797,108 @@ class GardenerService:
                 },
             )
         return None
+
+    # ---- Pattern 00 back-reference-promotion + broken-reference ----------
+
+    async def _heuristic_back_reference_promotion(
+        self, *, instance_id: str, canvas_id: str, page_path: str,
+    ) -> GardenerDecision | None:
+        """Page accumulates N+ inbound wiki-links → propose promotion.
+
+        Uses the per-canvas ReferenceIndex. Pattern 00 cross-pattern
+        heuristic — applies to every canvas regardless of declared
+        pattern. Deterministic: count comparison only, no LLM.
+        """
+        if not page_path:
+            return None
+        try:
+            index = await self._canvas.get_reference_index(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("GARDENER_BACK_REF_INDEX_READ_FAILED: %s", exc)
+            return None
+        inbound = index.count_inbound(page_path)
+        if inbound < BACK_REFERENCE_PROMOTION_THRESHOLD:
+            return None
+        by_source = index.count_inbound_by_source(page_path)
+        return GardenerDecision(
+            action="propose_back_reference_index",
+            confidence="high",
+            rationale=(
+                f"Page {page_path!r} has {inbound} inbound references from "
+                f"{len(by_source)} source pages — candidate for promotion "
+                f"to a link-hub or index page."
+            ),
+            affected_pages=[page_path] + sorted(by_source.keys())[:10],
+            payload={
+                "page_path": page_path,
+                "inbound_count": inbound,
+                "threshold": BACK_REFERENCE_PROMOTION_THRESHOLD,
+                "sources": by_source,
+            },
+        )
+
+    async def _collect_broken_references_for_page(
+        self, *, instance_id: str, canvas_id: str, page_path: str,
+    ) -> list[dict]:
+        """Dict form of :class:`BrokenReference` for a single source page.
+
+        Queries the canvas's ReferenceIndex + page list; filters to
+        this source only so we don't re-surface every canvas-wide broken
+        ref on every single write.
+        """
+        if not page_path:
+            return []
+        from kernos.kernel.canvas_reference_index import slug_from_path
+        try:
+            index = await self._canvas.get_reference_index(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+            pages = await self._canvas.page_list(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("GARDENER_BROKEN_REF_FETCH_FAILED: %s", exc)
+            return []
+        known = {p.get("path", "") for p in pages if p.get("path")}
+        this_source = slug_from_path(page_path)
+        broken = index.find_broken_references(known)
+        return [
+            {"source": b.source_slug, "target": b.target_slug,
+             "count": b.count, "reason": b.reason}
+            for b in broken if b.source_slug == this_source
+        ]
+
+    @staticmethod
+    def _make_broken_reference_decision(
+        *, page_path: str, broken: dict,
+    ) -> GardenerDecision:
+        """Emit a broken-reference finding with repair-grade provenance.
+
+        Payload carries source page, target slug, count, and reason —
+        "target_missing" in v1 since rename-vs-delete distinction needs
+        a rename operation we don't ship yet. Spec's "when known"
+        qualifier covers this.
+        """
+        target = broken.get("target", "")
+        count = int(broken.get("count", 1))
+        return GardenerDecision(
+            action="flag_broken_reference",
+            confidence="high",
+            rationale=(
+                f"Page {page_path!r} contains {count} broken "
+                f"reference{'s' if count != 1 else ''} to [[{target}]] — "
+                f"target page does not exist in this canvas."
+            ),
+            affected_pages=[page_path],
+            payload={
+                "source_page": broken.get("source", page_path),
+                "target_slug": target,
+                "count": count,
+                "reason": broken.get("reason", "target_missing"),
+            },
+        )
 
     # ---- Pattern-specific heuristics (CANVAS-GARDENER-PATTERN-HEURISTICS) -
 
