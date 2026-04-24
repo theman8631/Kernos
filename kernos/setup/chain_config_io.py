@@ -1,8 +1,19 @@
-"""Read/write ``ChainConfig`` to a persistent on-disk source of truth.
+"""Read/write ``ChainConfig`` — setup-wizard bookkeeping for ``kernos setup llm``.
 
-Setup writes to ``config/llm_chains.yml``. ``build_chains_from_yaml(path)``
-in ``kernos.providers.chains`` reads from it. Env vars still override for
-dev flows.
+**Setup-wizard state, not runtime authority.** This YAML records what
+the interactive wizard chose so subsequent ``kernos setup llm`` runs
+can show current picks. The runtime chain builder
+(:func:`kernos.providers.chains.build_chains_from_env`) does **not** read
+this file — it reads ``KERNOS_LLM_PROVIDER`` / ``KERNOS_LLM_FALLBACK``
+and each provider's env-var chain. Startup's "will this run?" gate
+asks the runtime via :func:`kernos.providers.chains.can_build_chains_from_env`,
+not this file. Drift between the YAML and runtime reality doesn't
+block startup; it just means the wizard will show stale suggestions
+until the operator re-runs it.
+
+The eventual consolidation (wizard + runtime collapsing onto one
+source of truth) belongs to MODEL-SELECTION-MODULE. Until then this
+file is authoritative for the wizard's UX state and nothing else.
 
 Schema (YAML):
 
@@ -15,9 +26,9 @@ Schema (YAML):
       simple:
         - {provider: anthropic, model: claude-haiku-4-5}
 
-Order inside each list is the fallback order. The first entry is the
-primary pick; subsequent entries are fallbacks for chain-exhaustion
-purposes.
+Order inside each list is the fallback order for display purposes. The
+first entry is the primary pick; subsequent entries are what the wizard
+will pre-select as fallbacks the next time it runs.
 
 **Zero-LLM-call:** file IO only. No LLM imports.
 """

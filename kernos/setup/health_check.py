@@ -1,15 +1,20 @@
 """Startup binary health check.
 
-For each named chain declared in the on-disk chain config, is there at
-least one provider with a stored credential?
+Asks the runtime chain-builder whether it will actually build. The setup-
+time YAML at ``config/llm_chains.yml`` is no longer the source of truth
+here — it's wizard bookkeeping for ``kernos setup llm``, not a startup
+gate (previous version of this module treated it as one and that gate
+drifted from runtime reality; see MODEL-SELECTION-MODULE follow-on).
 
-**Binary** in the precise sense: file IO only, no network, no LLM calls,
-no credential-freshness validation. Pure config-read.
+The check itself is side-effect-free: class imports and pure credential
+resolvers only. No provider clients instantiated, no network calls,
+no auth pings — so a flaky provider's init path can't break startup
+for unrelated providers.
 
-This is called from ``kernos start`` (and the other top-level entry points)
-before any provider or LLM client is instantiated. Exit code 1 on any
-failure. The agent never starts from a "no chain works" state — the user
-has to run ``kernos setup llm`` first.
+Called from ``kernos start`` and other top-level entry points before
+any provider client spins up. Exit 1 on failure. The agent never
+starts from a "no chain works" state — the operator has to fix the
+env-var chain or credential situation first.
 """
 from __future__ import annotations
 
@@ -17,101 +22,74 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernos.setup.chain_config_io import load_chain_config
-from kernos.setup.provider_registry import get_provider
-from kernos.setup.storage_backend import active_backend
+from kernos.providers.chains import CanBuildResult, can_build_chains_from_env
 
 logger = logging.getLogger(__name__)
-
-_EXPECTED_CHAINS = ("primary", "simple", "cheap")
 
 
 @dataclass(frozen=True)
 class HealthCheckResult:
     ok: bool
-    failing_chains: tuple[str, ...]
     reason: str
+    primary_spec: str = ""
+    resolved: tuple[str, ...] = ()
+    unresolved: tuple[tuple[str, str], ...] = ()
 
 
-def check_llm_chain_health(
-    *,
-    chain_config_path: Path | None = None,
-    storage_config_path: Path | None = None,
-) -> HealthCheckResult:
-    """Binary config-read. No network, no LLM, no credential validation."""
-    cfg = load_chain_config(chain_config_path or Path("config/llm_chains.yml"))
-    backend = active_backend(storage_config_path or Path("config/storage_backend.yml"))
+def check_llm_chain_health() -> HealthCheckResult:
+    """Binary "will the runtime build a working chain?" check.
 
-    if not cfg:
-        return HealthCheckResult(
-            ok=False,
-            failing_chains=_EXPECTED_CHAINS,
-            reason=(
-                "No LLM chain configured. "
-                "Run `kernos setup llm` to configure providers."
-            ),
-        )
-
-    failing: list[str] = []
-    for chain_name in _EXPECTED_CHAINS:
-        entries = cfg.get(chain_name, [])
-        if not entries:
-            failing.append(chain_name)
-            continue
-        # At least one entry with a stored credential passes this chain.
-        chain_ok = False
-        for entry in entries:
-            provider = get_provider(entry.provider)
-            if provider is None:
-                continue
-            if not provider.requires_key:
-                # Ollama — presence in the chain is sufficient.
-                chain_ok = True
-                break
-            if backend is None:
-                continue
-            if backend.has_secret(provider.key_env_var):
-                chain_ok = True
-                break
-        if not chain_ok:
-            failing.append(chain_name)
-
-    if failing:
-        msg = (
-            f"Chain '{failing[0]}' has no providers configured. "
-            f"Run `kernos setup llm` to configure it."
-        )
-        if len(failing) > 1:
-            msg = (
-                f"Chains {failing} have no providers configured. "
-                f"Run `kernos setup llm`."
-            )
-        return HealthCheckResult(
-            ok=False, failing_chains=tuple(failing), reason=msg,
-        )
-
-    return HealthCheckResult(ok=True, failing_chains=(), reason="")
+    Thin wrapper over :func:`can_build_chains_from_env` that packages
+    the dry-run result into the module's existing ``HealthCheckResult``
+    shape so callers outside this module don't see the surface change.
+    """
+    dry: CanBuildResult = can_build_chains_from_env()
+    return HealthCheckResult(
+        ok=dry.ok,
+        reason=dry.reason,
+        primary_spec=dry.primary_spec,
+        resolved=dry.resolved,
+        unresolved=dry.unresolved,
+    )
 
 
 def enforce_or_exit() -> None:
-    """Binary health check + secret loading. Call from entry points.
+    """Health check + secret loading. Call from entry points.
 
-    1. Binary config check — must pass, else exit 1.
-    2. Load secrets from the active storage backend into ``os.environ`` so the
-       existing ``build_chains_from_env()`` path finds them.
+    1. Best-effort: pull secrets from the active storage backend into
+       ``os.environ`` so the runtime chain builder finds them.
+       Tolerant of missing storage config — users with a plaintext
+       ``.env`` skip this layer entirely.
+    2. Dry-run ``build_chains_from_env`` for a "will this run?" answer.
+       Exit 1 with a structured reason on failure.
 
-    Step 2 is not part of the "health check" itself (which is binary, no IO
-    beyond the config files) — it's the adjacent startup step that reads the
-    stored credentials. Kept in one entrypoint for convenience.
+    Ordering matters: secrets-first so keychain-stored creds populate
+    ``os.environ`` before the dry-run probes env vars.
     """
+    # Step 1: best-effort secret hydration (keychain users need this;
+    # plaintext-.env users already have secrets in os.environ).
+    try:
+        from kernos.setup.env_loader import load_secrets_into_env
+        load_secrets_into_env()
+    except Exception as exc:  # noqa: BLE001 — pre-check, never fatal on its own
+        logger.debug("SECRET_HYDRATION_SKIPPED: %s", exc)
+
+    # Step 2: runtime-authoritative dry-run.
     result = check_llm_chain_health()
     if not result.ok:
         import sys
 
         print("Kernos startup: LLM chain configuration check failed.")
         print(f"  {result.reason}")
+        if result.unresolved:
+            print("  Details:")
+            for spec, reason in result.unresolved:
+                print(f"    - {spec}: {reason}")
         sys.exit(1)
-    # Binary check passed — now pull secrets into the environment.
-    from kernos.setup.env_loader import load_secrets_into_env
 
-    load_secrets_into_env()
+    # Log what resolved for operator visibility.
+    logger.info(
+        "LLM_HEALTH_OK: primary=%s resolved=%s fallback_skipped=%s",
+        result.primary_spec, list(result.resolved),
+        [spec for spec, _ in result.unresolved],
+    )

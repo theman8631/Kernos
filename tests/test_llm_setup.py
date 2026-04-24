@@ -404,66 +404,145 @@ class TestStorageBackendSwitch:
 
 
 class TestHealthCheck:
-    def test_missing_config_fails_gracefully(self, tmp_path):
-        result = check_llm_chain_health(
-            chain_config_path=tmp_path / "missing.yml",
-            storage_config_path=tmp_path / "missing_storage.yml",
-        )
+    """Runtime-source-of-truth dry-run — no YAML, no storage-backend gating.
+
+    ``check_llm_chain_health`` now delegates to
+    :func:`kernos.providers.chains.can_build_chains_from_env`, which asks
+    the runtime chain builder whether it would resolve. See
+    ``chain_config_io`` docstring for why the YAML stopped being the gate.
+    """
+
+    def _clear_env(self, monkeypatch):
+        """Scrub LLM env vars so each test starts from a known state."""
+        for name in (
+            "KERNOS_LLM_PROVIDER", "KERNOS_LLM_FALLBACK",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN",
+            "OPENAI_CODEX_ACCESS_TOKEN", "OPENAI_CODEX_REFRESH_TOKEN",
+            "OPENAI_CODEX_EXPIRES", "OPENAI_CODEX_ACCOUNT_ID",
+            "OPENAI_CODEX_CREDS_PATH",
+            "OPENCLAW_AUTH_PROFILES_PATH",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_empty_primary_provider_fails(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "")
+        # Force anthropic creds path to hit no-home fallback
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = check_llm_chain_health()
         assert result.ok is False
-        assert "No LLM chain" in result.reason or "configured" in result.reason
+        # Empty string falls through the default to "anthropic"; without
+        # any anthropic credential the check reports the credential gap.
+        assert "anthropic" in result.reason.lower() or "provider" in result.reason.lower()
 
-    def test_configured_chain_without_key_fails(self, tmp_path):
-        cfg_path = tmp_path / "llm_chains.yml"
-        storage_path = tmp_path / "storage_backend.yml"
-        # Write a chain config but no storage backend → no credentials.
-        cfg = add_provider_to_chains(
-            {}, provider_id="anthropic",
-            primary_model="claude-opus-4-7", cheap_model="claude-haiku-4-5",
-        )
-        save_chain_config(cfg, path=cfg_path)
-        result = check_llm_chain_health(
-            chain_config_path=cfg_path, storage_config_path=storage_path,
-        )
+    def test_unknown_primary_provider_fails(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "bogus-provider")
+        result = check_llm_chain_health()
         assert result.ok is False
+        assert "bogus-provider" in result.reason
 
-    def test_configured_chain_with_key_passes(self, tmp_path, monkeypatch):
-        cfg_path = tmp_path / "llm_chains.yml"
-        storage_path = tmp_path / "storage_backend.yml"
-        env_path = tmp_path / ".env.hardened"
-        cfg = add_provider_to_chains(
-            {}, provider_id="anthropic",
-            primary_model="claude-opus-4-7", cheap_model="claude-haiku-4-5",
-        )
-        save_chain_config(cfg, path=cfg_path)
-        set_active_backend_name("env_hardened", storage_path)
-
-        hardened = HardenedEnvBackend(env_path=env_path)
-        hardened.write_secret("ANTHROPIC_API_KEY", "sk-a")
-
-        def _fake(name):
-            return hardened
-
-        monkeypatch.setattr("kernos.setup.storage_backend.get_backend", _fake)
-
-        result = check_llm_chain_health(
-            chain_config_path=cfg_path, storage_config_path=storage_path,
-        )
+    def test_anthropic_primary_with_api_key_passes(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+        result = check_llm_chain_health()
         assert result.ok is True, result.reason
+        assert result.primary_spec == "anthropic"
+        assert "anthropic" in result.resolved
 
-    def test_ollama_presence_passes_without_credential(self, tmp_path):
-        """Ollama has no credential — presence in the chain is sufficient."""
-        cfg_path = tmp_path / "llm_chains.yml"
-        storage_path = tmp_path / "storage_backend.yml"
-        cfg = add_provider_to_chains(
-            {}, provider_id="ollama",
-            primary_model="llama3.1:70b", cheap_model="llama3.1:8b",
-        )
-        save_chain_config(cfg, path=cfg_path)
-        # No backend set — Ollama doesn't need one.
-        result = check_llm_chain_health(
-            chain_config_path=cfg_path, storage_config_path=storage_path,
-        )
+    def test_anthropic_primary_without_credential_fails(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "anthropic")
+        # Point HOME at an empty dir so Claude CLI creds resolver misses.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = check_llm_chain_health()
+        assert result.ok is False
+        assert "anthropic" in result.reason.lower()
+
+    def test_ollama_primary_needs_no_credential(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "ollama")
+        result = check_llm_chain_health()
         assert result.ok is True, result.reason
+        assert result.primary_spec == "ollama"
+
+    def test_openai_codex_primary_with_env_creds_passes(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "openai-codex")
+        monkeypatch.setenv("OPENAI_CODEX_ACCESS_TOKEN", "access-x")
+        monkeypatch.setenv("OPENAI_CODEX_REFRESH_TOKEN", "refresh-x")
+        monkeypatch.setenv("OPENAI_CODEX_EXPIRES", "0")
+        monkeypatch.setenv("OPENAI_CODEX_ACCOUNT_ID", "acct-x")
+        result = check_llm_chain_health()
+        assert result.ok is True, result.reason
+        assert result.primary_spec == "openai-codex"
+
+    def test_openai_codex_without_creds_fails(self, monkeypatch, tmp_path):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "openai-codex")
+        # Redirect the codex creds-file path at a nonexistent location.
+        monkeypatch.setenv("OPENAI_CODEX_CREDS_PATH", str(tmp_path / "missing.json"))
+        result = check_llm_chain_health()
+        assert result.ok is False
+        assert "openai-codex" in result.reason
+
+    def test_fallback_failure_does_not_block_primary_success(self, monkeypatch, tmp_path):
+        """Fallback probing mirrors runtime tolerance — skipped, not fatal."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        # Fallback: a provider spec with no credentials configured.
+        monkeypatch.setenv("KERNOS_LLM_FALLBACK", "openai-codex")
+        monkeypatch.setenv("OPENAI_CODEX_CREDS_PATH", str(tmp_path / "nope.json"))
+        result = check_llm_chain_health()
+        assert result.ok is True
+        assert "anthropic" in result.resolved
+        # The failed fallback is reported without blocking.
+        assert any(spec == "openai-codex" for spec, _ in result.unresolved)
+
+    def test_dry_run_does_not_instantiate_providers(self, monkeypatch):
+        """Side-effect invariant: no Provider subclass constructed.
+
+        We patch each provider class's ``__init__`` and assert zero
+        calls. If a future contributor accidentally routes the dry-run
+        through ``_instantiate_provider``, this test catches it.
+        """
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("KERNOS_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+        from kernos.providers import anthropic_provider, codex_provider, ollama_provider
+
+        constructor_calls: list[str] = []
+
+        def _trap_anthropic(self, *a, **kw):
+            constructor_calls.append("anthropic")
+            raise AssertionError("AnthropicProvider must not be constructed in dry-run")
+
+        def _trap_codex(self, *a, **kw):
+            constructor_calls.append("codex")
+            raise AssertionError("OpenAICodexProvider must not be constructed in dry-run")
+
+        def _trap_ollama(self, *a, **kw):
+            constructor_calls.append("ollama")
+            raise AssertionError("OllamaProvider must not be constructed in dry-run")
+
+        monkeypatch.setattr(
+            anthropic_provider.AnthropicProvider, "__init__", _trap_anthropic,
+        )
+        monkeypatch.setattr(
+            codex_provider.OpenAICodexProvider, "__init__", _trap_codex,
+        )
+        monkeypatch.setattr(
+            ollama_provider.OllamaProvider, "__init__", _trap_ollama,
+        )
+
+        result = check_llm_chain_health()
+        assert result.ok is True, result.reason
+        assert constructor_calls == [], (
+            f"dry-run instantiated a provider: {constructor_calls}"
+        )
 
 
 # ---------------------------------------------------------------------------
