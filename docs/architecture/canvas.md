@@ -136,6 +136,13 @@ A world-building canvas pinned to the "Valencia campaign" space doesn't clutter 
 - **Not covenants.** Covenants are short behavioral rules; canvases are bodies of content. The agent asks "is this a rule (covenant) or a workflow (procedure) or a body of work (canvas)?" at instruction time.
 - **Not parcels.** A parcel is a one-shot file transfer between member spaces. A canvas is a durable shared artifact.
 
+## Section markers and the Gardener
+
+Canvas v1 shipped the primitive. A follow-on batch (CANVAS-SECTION-MARKERS + GARDENER) layered two pieces on top:
+
+- **Section markers** make individual pages legible as content accumulates. Sections are H2-delimited with HTML-comment metadata (`summary`, `tokens`, `last_updated`) that stays invisible in Markdown renderers. `page_read` gains `mode=summary|section` for navigable outlines and targeted reads; `page_write` can target a single section surgically.
+- **The Gardener cohort** makes canvases stay well-shaped over their whole life. It picks initial patterns at creation time by consulting the Workflow Patterns library, and runs continuous-evolution heuristics on page events. See [Gardener architecture →](gardener.md) for the full discipline.
+
 ## Scope deliberately deferred
 
 - **Friction Observer canvas-opportunity signal** — detection of the shape "this is a canvas-worthy accumulation" is left to a follow-on batch. V1 ships only the default canvas-recognition procedure in the agent template.

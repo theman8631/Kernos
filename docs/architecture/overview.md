@@ -99,7 +99,11 @@ The system prompt as a typed document with named zones — RULES, ACTIONS, NOW, 
 
 ### [Canvases →](canvas.md)
 
-Scoped directories of markdown pages — personal / specific-members / team — that accumulate structured content across turns and members. Page types (note / decision / log) are advisory; state transitions fire routes and can consult the operator; canvas creation dispatches `canvas_offer` envelopes to declared members.
+Scoped directories of markdown pages — personal / specific-members / team — that accumulate structured content across turns and members. Page types (note / decision / log) are advisory; state transitions fire routes and can consult the operator; canvas creation dispatches `canvas_offer` envelopes to declared members. Section markers layer HTML-comment metadata under H2 headings for navigable reads of large pages.
+
+### [The Gardener →](gardener.md)
+
+The third cohort — bounded canvas-shape authority. Picks the initial pattern at `canvas_create` time by consulting the Workflow Patterns library; runs continuous-evolution heuristics on page events; surfaces reshape proposals with confidence-floor + 24-hour coalescing discipline so members see proposals at most once or twice a week per canvas.
 
 *(This is six, not five. The sixth — Cognitive UI grammar — is the structural companion to the other five; it's how the cohort-produced context actually lands in the agent's prompt.)*
 
