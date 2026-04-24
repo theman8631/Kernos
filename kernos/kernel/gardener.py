@@ -55,6 +55,32 @@ GARDENER_SOURCE = "gardener"
 #: Name of the team canvas that stores the judgment-input library.
 WORKFLOW_PATTERNS_CANVAS_NAME = "Workflow Patterns"
 
+#: Pattern 00 cross-pattern heuristic thresholds. Conservative defaults;
+#: per-canvas overrides land with preference-capture (deferred Pillar 5).
+STALENESS_DAYS = 90                  # page last_updated older than this → flag
+SPLIT_SECTION_COUNT_THRESHOLD = 3    # sections exceeding the line threshold
+SPLIT_SECTION_LINE_THRESHOLD = 80    # per-section line count
+
+#: Valid gardener_consent modes (canvas-level frontmatter field).
+CONSENT_MODES = (
+    "propose-all",
+    "auto-non-destructive",
+    "auto-all",
+    "propose-critical-only",
+)
+
+
+#: Actions classified non-destructive → eligible for auto-apply under the
+#: auto-non-destructive / auto-all consent modes. ``propose_split`` and
+#: ``propose_merge`` are NOT in this set — they're proposal-class even
+#: under ``auto-all`` in v1 (spec Pillar 4: "all reshapes except deletions
+#: auto-apply"; v1 keeps split/merge as proposal-class to let the human
+#: check the section-boundary choice before disk mutations happen).
+NON_DESTRUCTIVE_ACTIONS = {"regenerate_summary"}
+
+#: Flags that are advisory only — never auto-apply, always surface.
+ADVISORY_ACTIONS = {"flag_stale", "flag_scope_mismatch"}
+
 
 # ---------------------------------------------------------------------------
 # Coalescing
@@ -505,14 +531,264 @@ class GardenerService:
     async def _dispatch(
         self, instance_id: str, event_type: str, payload: dict,
     ) -> None:
-        """Route an event to the right judgment surface. Pillar 4 wires this."""
-        # Pillar 2 scaffolding — concrete routing lands with Pillars 3 and 4.
-        # This method exists so the event-subscription path is live; it
-        # just logs for now and is overridden at wiring time.
-        logger.debug(
-            "GARDENER_DISPATCH: instance=%s event=%s payload_keys=%s",
-            instance_id, event_type, sorted((payload or {}).keys()),
+        """Route a canvas event through Pattern 00 cross-pattern heuristics.
+
+        Pillar 4 implementation. Ships only the Pattern-00 heuristics
+        that are tractable deterministically:
+          - staleness (page last_updated older than STALENESS_DAYS)
+          - split (3+ sections each exceeding SPLIT_SECTION_LINE_THRESHOLD)
+          - scope-mismatch (basic check — member-authored personal page
+            on a team canvas, or vice versa)
+
+        Merge (40%+ content overlap) and back-reference promotion are
+        deferred — they require cross-page analysis and a cross-page
+        link-graph index that doesn't exist yet.
+
+        Pattern-specific heuristics (spec Pillar 4 fallback) are
+        NOT run in this batch. A follow-on batch composes them with
+        Pattern 00's cross-pattern set.
+        """
+        if not isinstance(payload, dict):
+            return
+        if event_type not in (
+            "canvas.page.created", "canvas.page.changed",
+            "canvas.page.state_changed",
+        ):
+            return
+        canvas_id = payload.get("canvas_id", "")
+        page_path = payload.get("page_path", "")
+        if not canvas_id or not page_path:
+            return
+
+        # Pull canvas context: canvas.yaml (for scope + gardener_consent),
+        # the target page's frontmatter + body, and the cross-page index.
+        try:
+            canvas_row = await self._db.get_canvas(canvas_id)
+        except Exception:
+            canvas_row = None
+        if not canvas_row:
+            return
+        canvas_scope = (canvas_row or {}).get("scope", "team")
+        defaults = await self._load_canvas_yaml(instance_id, canvas_id)
+        consent_mode = (defaults.get("gardener_consent") or "propose-all").strip()
+        if consent_mode not in CONSENT_MODES:
+            consent_mode = "propose-all"
+
+        page_read = await self._canvas.page_read(
+            instance_id=instance_id, canvas_id=canvas_id, page_slug=page_path,
         )
+        if not page_read.ok:
+            return
+        page_fm = page_read.extra.get("frontmatter", {}) or {}
+        page_body = page_read.extra.get("body", "") or ""
+
+        # Run the three Pattern 00 heuristics. Each returns an Optional
+        # GardenerDecision with confidence; only HIGH confidence surfaces.
+        proposals: list[GardenerDecision] = []
+        for check in (
+            self._heuristic_split,
+            self._heuristic_staleness,
+            self._heuristic_scope_mismatch,
+        ):
+            try:
+                decision = check(
+                    canvas_scope=canvas_scope,
+                    page_path=page_path,
+                    page_fm=page_fm,
+                    page_body=page_body,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("GARDENER_HEURISTIC_FAILED: %s", exc)
+                continue
+            if decision is None:
+                continue
+            if not decision.surfaces:
+                # Low/medium confidence logs for pattern tuning but
+                # doesn't wake members. Still useful audit trail.
+                logger.info(
+                    "GARDENER_HEURISTIC_LOW_CONFIDENCE: canvas=%s page=%s "
+                    "action=%s confidence=%s",
+                    canvas_id, page_path, decision.action, decision.confidence,
+                )
+                continue
+            proposals.append(decision)
+
+        if not proposals:
+            return
+
+        # Bucket proposals by consent mode: some auto-apply, some propose.
+        for decision in proposals:
+            should_auto = self._is_auto_apply(decision, consent_mode)
+            if should_auto:
+                await self._auto_apply(
+                    instance_id=instance_id, canvas_id=canvas_id,
+                    page_path=page_path, decision=decision,
+                )
+            else:
+                self._coalescer.add(PendingProposal(
+                    canvas_id=canvas_id,
+                    action=decision.action,
+                    confidence=decision.confidence,
+                    rationale=decision.rationale,
+                    affected_pages=decision.affected_pages or [page_path],
+                    captured_at=datetime.now(timezone.utc),
+                    payload=decision.payload,
+                ))
+
+    # ---- Heuristics (Pattern 00 cross-pattern) ---------------------------
+
+    @staticmethod
+    def _heuristic_split(
+        *, canvas_scope: str, page_path: str, page_fm: dict, page_body: str,
+    ) -> GardenerDecision | None:
+        """3+ sections each exceeding ~80 lines → propose_split."""
+        from kernos.kernel.canvas import parse_sections
+        _, sections = parse_sections(page_body)
+        big_sections = [
+            s for s in sections
+            if s.body.count("\n") >= SPLIT_SECTION_LINE_THRESHOLD
+        ]
+        if len(big_sections) < SPLIT_SECTION_COUNT_THRESHOLD:
+            return None
+        return GardenerDecision(
+            action="propose_split",
+            confidence="high",
+            rationale=(
+                f"{len(big_sections)} sections each exceed "
+                f"{SPLIT_SECTION_LINE_THRESHOLD} lines — page could split."
+            ),
+            affected_pages=[page_path],
+            payload={
+                "section_slugs": [s.slug for s in big_sections],
+                "line_threshold": SPLIT_SECTION_LINE_THRESHOLD,
+            },
+        )
+
+    @staticmethod
+    def _heuristic_staleness(
+        *, canvas_scope: str, page_path: str, page_fm: dict, page_body: str,
+    ) -> GardenerDecision | None:
+        """Page last_updated older than STALENESS_DAYS → flag for review."""
+        last = (page_fm.get("last_updated") or "").strip()
+        if not last:
+            return None
+        try:
+            when = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - when).days
+        if age_days < STALENESS_DAYS:
+            return None
+        return GardenerDecision(
+            action="flag_stale",
+            confidence="high",
+            rationale=(
+                f"Page {page_path} last updated {age_days} days ago; "
+                f"Pattern 00 staleness threshold is {STALENESS_DAYS} days."
+            ),
+            affected_pages=[page_path],
+            payload={"age_days": age_days},
+        )
+
+    @staticmethod
+    def _heuristic_scope_mismatch(
+        *, canvas_scope: str, page_path: str, page_fm: dict, page_body: str,
+    ) -> GardenerDecision | None:
+        """Basic scope-mismatch check — personal scope declared on a team canvas.
+
+        The frontmatter ``scope`` field on a page contradicts its canvas's
+        scope. Narrow check: a page declaring ``scope: personal`` sitting
+        inside a canvas with ``scope: team`` is the clearest mismatch and
+        the easiest to flag; subtler detections (content cues, reference
+        patterns) are deferred to future heuristics.
+        """
+        page_scope = (page_fm.get("scope") or "").strip().lower()
+        if not page_scope or page_scope == canvas_scope:
+            return None
+        if canvas_scope == "team" and page_scope == "personal":
+            return GardenerDecision(
+                action="flag_scope_mismatch",
+                confidence="high",
+                rationale=(
+                    f"Page {page_path} declares scope={page_scope!r} "
+                    f"but canvas is scope={canvas_scope!r}."
+                ),
+                affected_pages=[page_path],
+                payload={
+                    "page_scope": page_scope, "canvas_scope": canvas_scope,
+                },
+            )
+        return None
+
+    # ---- Consent routing -------------------------------------------------
+
+    @staticmethod
+    def _is_auto_apply(decision: GardenerDecision, consent_mode: str) -> bool:
+        """Decide whether a high-confidence decision auto-applies.
+
+        v1 keeps split/merge proposal-class under every mode (the
+        ``propose_split`` action is never auto even under ``auto-all``)
+        because reorganizing page structure is the kind of change
+        where human-in-the-loop serves the outcome better than speed.
+        Summary regeneration is auto-eligible where declared.
+        """
+        if decision.action in ADVISORY_ACTIONS:
+            # Advisory flags never auto — they're surface-only signals.
+            return False
+        if decision.action in NON_DESTRUCTIVE_ACTIONS:
+            return consent_mode in ("auto-non-destructive", "auto-all")
+        return False
+
+    async def _auto_apply(
+        self, *, instance_id: str, canvas_id: str, page_path: str,
+        decision: GardenerDecision,
+    ) -> None:
+        """Execute a non-destructive action immediately + emit audit event."""
+        # v1 ships auto-apply as a thin wrapper that emits the audit event.
+        # The concrete on-disk mutation for summary regeneration ships with
+        # the cohort-prompt round (Pillar 6 + follow-on). For this batch
+        # the path is live so tests can verify the routing; the actual
+        # in-place summary rewrite is a no-op placeholder until the
+        # cohort LLM roundtrip is wired in a follow-on.
+        logger.info(
+            "GARDENER_AUTO_APPLY: canvas=%s page=%s action=%s",
+            canvas_id, page_path, decision.action,
+        )
+        await self._emit(
+            instance_id, "canvas.reshaped",
+            {
+                "canvas_id": canvas_id,
+                "page_path": page_path,
+                "action": decision.action,
+                "confidence": decision.confidence,
+                "rationale": decision.rationale,
+                "applied": True,
+            },
+        )
+
+    # ---- Proposal drain (coalesced surface) ------------------------------
+
+    async def drain_proposals(
+        self, *, canvas_id: str,
+    ) -> list[PendingProposal]:
+        """Drain buffered proposals for a canvas if the window has elapsed.
+
+        Returns the drained list for the caller (typically the whisper-
+        dispatch layer) to turn into a single coalesced whisper. Returns
+        ``[]`` when the window hasn't elapsed yet.
+        """
+        if not self._coalescer.should_surface(canvas_id):
+            return []
+        return self._coalescer.drain(canvas_id)
+
+    async def _load_canvas_yaml(self, instance_id: str, canvas_id: str) -> dict:
+        """Best-effort read of canvas.yaml for canvas-level defaults."""
+        try:
+            return await self._canvas._canvas_defaults(instance_id, canvas_id)
+        except Exception:
+            return {}
 
     async def _ensure_patterns_loaded(self, instance_id: str) -> None:
         """Lazy-load the Workflow Patterns canvas into the pattern cache."""
