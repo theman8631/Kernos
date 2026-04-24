@@ -39,11 +39,20 @@ class OpenAICodexProvider(Provider):
     ) -> None:
         self._credential = credential
         self.main_model = model or os.getenv("OPENAI_CODEX_MODEL", "gpt-5.5")
+        # Two-tier: primary (main_model) + lightweight. Env var resolution
+        # prefers OPENAI_CODEX_LIGHTWEIGHT_MODEL; falls back to the legacy
+        # OPENAI_CODEX_CHEAP_MODEL so existing .env files keep working;
+        # default gpt-5.4-mini because no gpt-5.5-{mini,nano} exists in
+        # the Codex ChatGPT catalog (OpenAI's 5.x mini tier tops out at
+        # gpt-5.4-mini per published model list).
+        self.lightweight_model = (
+            os.getenv("OPENAI_CODEX_LIGHTWEIGHT_MODEL")
+            or os.getenv("OPENAI_CODEX_CHEAP_MODEL")
+            or "gpt-5.4-mini"
+        )
+        # Legacy aliases retained for external readers.
         self.simple_model = os.getenv("OPENAI_CODEX_SIMPLE_MODEL", self.main_model)
-        # Cheap tier: no gpt-5.5-{mini,nano} exists in the Codex ChatGPT
-        # catalog (per OpenAI's published model list). The 5.x mini tier
-        # currently tops out at gpt-5.4-mini.
-        self.cheap_model = os.getenv("OPENAI_CODEX_CHEAP_MODEL", "gpt-5.4-mini")
+        self.cheap_model = self.lightweight_model
         self._base_url = os.getenv(
             "OPENAI_CODEX_BASE_URL", "https://chatgpt.com/backend-api"
         )

@@ -135,18 +135,19 @@ class TestDecisionParsing:
 
 class TestJudgeExchange:
     @pytest.mark.asyncio
-    async def test_calls_cheap_chain(self):
+    async def test_calls_lightweight_chain(self):
+        """Messenger routes through the lightweight chain (bounded judgment)."""
         stub = _StubReasoning(response='{"outcome":"none"}')
         await judge_exchange(_ctx(), reasoning_service=stub)
         assert stub.call_count == 1
-        assert stub.last_kwargs["chain"] == "cheap"
+        assert stub.last_kwargs["chain"] == "lightweight"
 
     @pytest.mark.asyncio
     async def test_exhaustion_maps_to_domain_exception(self):
         stub = _StubReasoning(response=RuntimeError("all providers failed"))
         with pytest.raises(MessengerExhausted) as exc:
             await judge_exchange(_ctx(), reasoning_service=stub)
-        assert exc.value.chain_name == "cheap"
+        assert exc.value.chain_name == "lightweight"
 
 
 # ---------------------------------------------------------------------------

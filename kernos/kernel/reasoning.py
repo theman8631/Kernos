@@ -163,10 +163,13 @@ def _build_chains_from_legacy(
         fallbacks.append(fallback_provider)
 
     all_providers = [provider] + fallbacks
+    # Two-tier chain model: primary + lightweight. Legacy code that
+    # passed positional provider args picks up both tiers here. Providers
+    # still expose the old ``simple_model`` / ``cheap_model`` attributes
+    # as aliases (see AnthropicProvider + ollama/codex providers).
     return {
         "primary": [ChainEntry(provider=p, model=getattr(p, "main_model", "unknown")) for p in all_providers],
-        "simple": [ChainEntry(provider=p, model=getattr(p, "simple_model", _SIMPLE_MODEL)) for p in all_providers],
-        "cheap": [ChainEntry(provider=p, model=getattr(p, "cheap_model", _CHEAP_MODEL)) for p in all_providers],
+        "lightweight": [ChainEntry(provider=p, model=getattr(p, "lightweight_model", getattr(p, "cheap_model", _CHEAP_MODEL))) for p in all_providers],
     }
 
 
@@ -449,8 +452,28 @@ class ReasoningService:
         (constrained decoding). Schema compliance is guaranteed by the API — no
         json.loads() retry logic needed. Returns "{}" on truncation or refusal.
         """
-        chain_name = chain or ("cheap" if prefer_cheap else "simple")
-        entries = self._chains.get(chain_name, self._chains.get("simple", []))
+        # Two-chain model: "primary" + "lightweight". The legacy
+        # three-chain names ("simple" / "cheap") map to "lightweight"
+        # with a deprecation log so external callers keep working. The
+        # old ``prefer_cheap`` parameter is now a no-op selector into
+        # the same lightweight chain — kept for back-compat.
+        _LEGACY_ALIASES = {"cheap": "lightweight", "simple": "lightweight"}
+        if chain is None:
+            chain_name = "lightweight"
+        elif chain in _LEGACY_ALIASES:
+            chain_name = _LEGACY_ALIASES[chain]
+            logger.debug(
+                "complete_simple: legacy chain name %r remapped to %r "
+                "(consolidate to 'lightweight' at the call site)",
+                chain, chain_name,
+            )
+        else:
+            chain_name = chain
+        if prefer_cheap and chain is None:
+            # prefer_cheap=True historically selected "cheap"; that chain
+            # is now "lightweight" (the default), so this is a no-op.
+            pass
+        entries = self._chains.get(chain_name, self._chains.get("primary", []))
         messages = [{"role": "user", "content": user_content}]
 
         # Walk the chain until one provider succeeds

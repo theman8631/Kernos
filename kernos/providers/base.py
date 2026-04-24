@@ -34,7 +34,10 @@ class ChainEntry:
     model: str
 
 
-# Chain name → ordered list of entries to try. Standard keys: "primary", "simple", "cheap".
+# Chain name → ordered list of entries to try. Standard keys: "primary",
+# "lightweight". Legacy names "simple" / "cheap" are accepted as deprecation-
+# aliased inputs by ReasoningService.complete_simple; both resolve to
+# "lightweight" at dispatch time.
 ChainConfig = dict[str, list[ChainEntry]]
 
 

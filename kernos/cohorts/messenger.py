@@ -108,7 +108,7 @@ class MessengerExhausted(Exception):
     even on full chain failure.
     """
 
-    def __init__(self, chain_name: str = "cheap", reason: str = "") -> None:
+    def __init__(self, chain_name: str = "lightweight", reason: str = "") -> None:
         self.chain_name = chain_name
         self.reason = reason
         super().__init__(
@@ -195,13 +195,14 @@ async def judge_exchange(
     """
     system_prompt, user_content = build_judge_prompt(ctx)
 
-    # Cheap chain by design. The ``cheap`` chain name is the one routing key
-    # we care about — ReasoningService looks it up in its ChainConfig.
+    # Lightweight chain by design — Messenger's judgment is bounded and
+    # doesn't need expensive reasoning. ReasoningService looks up this
+    # routing key in its ChainConfig.
     try:
         raw = await reasoning_service.complete_simple(
             system_prompt=system_prompt,
             user_content=user_content,
-            chain="cheap",
+            chain="lightweight",
             output_schema=MESSENGER_OUTPUT_SCHEMA,
             max_tokens=max_tokens,
         )
@@ -210,7 +211,7 @@ async def judge_exchange(
         # on full chain failure. Translate to our domain exception so the
         # dispatcher can distinguish "Messenger can't judge this turn" from
         # other upstream errors.
-        raise MessengerExhausted(chain_name="cheap", reason=str(exc)[:200]) from exc
+        raise MessengerExhausted(chain_name="lightweight", reason=str(exc)[:200]) from exc
 
     return _parse_decision(raw, ctx)
 

@@ -38,8 +38,17 @@ class OllamaProvider(Provider):
         ).rstrip("/")
         self._api_key = api_key or os.getenv("OLLAMA_API_KEY", "")
         self.main_model = model or os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud")
+        # Two-tier: primary (main_model) + lightweight. Defaults to the same
+        # model as primary — most local-Ollama users want one model
+        # handling both tiers. OLLAMA_LIGHTWEIGHT_MODEL / legacy
+        # OLLAMA_CHEAP_MODEL override when a distinct small model is configured.
+        self.lightweight_model = (
+            os.getenv("OLLAMA_LIGHTWEIGHT_MODEL")
+            or os.getenv("OLLAMA_CHEAP_MODEL")
+            or self.main_model
+        )
         self.simple_model = os.getenv("OLLAMA_SIMPLE_MODEL", self.main_model)
-        self.cheap_model = os.getenv("OLLAMA_CHEAP_MODEL", self.main_model)
+        self.cheap_model = self.lightweight_model
         self._http: Any = None
         self.on_retry_notify: Any = None
 

@@ -144,12 +144,12 @@ class GardenerDecision:
 
 
 class GardenerExhausted(Exception):
-    """Raised when the cheap chain can't serve a Gardener consultation.
+    """Raised when the lightweight chain can't serve a Gardener consultation.
 
     Mirrors ``MessengerExhausted`` semantics — the caller swallows this
     and treats the consultation as a no-op rather than propagating.
     """
-    def __init__(self, *, chain_name: str = "cheap", reason: str = "") -> None:
+    def __init__(self, *, chain_name: str = "lightweight", reason: str = "") -> None:
         super().__init__(f"Gardener exhausted on chain={chain_name}: {reason}")
         self.chain_name = chain_name
         self.reason = reason
@@ -216,12 +216,12 @@ async def judge_initial_shape(
         raw = await reasoning_service.complete_simple(
             system_prompt=system_prompt,
             user_content=user_content,
-            chain="cheap",
+            chain="lightweight",
             output_schema=GARDENER_OUTPUT_SCHEMA,
             max_tokens=max_tokens,
         )
     except Exception as exc:
-        raise GardenerExhausted(chain_name="cheap", reason=str(exc)[:200]) from exc
+        raise GardenerExhausted(chain_name="lightweight", reason=str(exc)[:200]) from exc
     return _parse_decision(raw)
 
 
@@ -243,12 +243,12 @@ async def judge_evolution(
         raw = await reasoning_service.complete_simple(
             system_prompt=system_prompt,
             user_content=user_content,
-            chain="cheap",
+            chain="lightweight",
             output_schema=GARDENER_OUTPUT_SCHEMA,
             max_tokens=max_tokens,
         )
     except Exception as exc:
-        raise GardenerExhausted(chain_name="cheap", reason=str(exc)[:200]) from exc
+        raise GardenerExhausted(chain_name="lightweight", reason=str(exc)[:200]) from exc
     return _parse_decision(raw)
 
 
@@ -269,10 +269,10 @@ async def judge_section_management(
         raw = await reasoning_service.complete_simple(
             system_prompt=system_prompt,
             user_content=user_content,
-            chain="cheap",
+            chain="lightweight",
             output_schema=GARDENER_OUTPUT_SCHEMA,
             max_tokens=max_tokens,
         )
     except Exception as exc:
-        raise GardenerExhausted(chain_name="cheap", reason=str(exc)[:200]) from exc
+        raise GardenerExhausted(chain_name="lightweight", reason=str(exc)[:200]) from exc
     return _parse_decision(raw)

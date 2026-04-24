@@ -598,8 +598,11 @@ SET_CHAIN_MODEL_TOOL = {
         "properties": {
             "chain": {
                 "type": "string",
-                "enum": ["primary", "simple", "cheap"],
-                "description": "The chain tier to change.",
+                "enum": ["primary", "lightweight", "simple", "cheap"],
+                "description": (
+                    "The chain tier to change. 'simple' and 'cheap' are "
+                    "deprecated aliases for 'lightweight'."
+                ),
             },
             "provider_id": {
                 "type": "string",

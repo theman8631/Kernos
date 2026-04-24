@@ -83,11 +83,15 @@ def build_chains_from_env() -> tuple[ChainConfig, Provider]:
             except Exception as exc:
                 logger.warning("Failed to init fallback provider %s: %s", entry, exc)
 
-    # Build three chains from the ordered provider list
+    # Two chains: primary (main model) + lightweight (fast/cheap tier).
+    # Legacy three-chain split ("primary" / "simple" / "cheap") was
+    # muddled — "simple" defaulted to main_model on every provider, so
+    # it was a de-facto clone of "primary" for everyone's deployments.
+    # ReasoningService still accepts the legacy chain names at the
+    # dispatch site and maps them to "lightweight" with a deprecation log.
     chains: ChainConfig = {
         "primary": _build_chain_entries(all_providers, "main_model", "unknown"),
-        "simple": _build_chain_entries(all_providers, "simple_model", "unknown"),
-        "cheap": _build_chain_entries(all_providers, "cheap_model", "unknown"),
+        "lightweight": _build_chain_entries(all_providers, "lightweight_model", "unknown"),
     }
 
     for name, entries in chains.items():

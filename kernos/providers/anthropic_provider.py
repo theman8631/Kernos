@@ -12,17 +12,22 @@ from kernos.kernel.exceptions import (
 )
 from kernos.providers.base import ContentBlock, Provider, ProviderResponse
 
-_SIMPLE_MODEL = "claude-sonnet-4-6"
-_CHEAP_MODEL = "claude-haiku-4-5-20251001"
+_MAIN_MODEL = "claude-sonnet-4-6"
+_LIGHTWEIGHT_MODEL = "claude-haiku-4-5-20251001"
 
 
 class AnthropicProvider(Provider):
     """Wraps the Anthropic SDK. Maps SDK exceptions to KERNOS exceptions."""
 
     provider_name = "anthropic"
-    main_model = _SIMPLE_MODEL
-    simple_model = _SIMPLE_MODEL
-    cheap_model = _CHEAP_MODEL
+    main_model = _MAIN_MODEL
+    #: Two-tier chain: primary (main_model) + lightweight. Legacy
+    #: ``simple_model`` / ``cheap_model`` attributes retained as aliases
+    #: for any external reader that still reaches for them; new code
+    #: uses ``lightweight_model``.
+    lightweight_model = _LIGHTWEIGHT_MODEL
+    simple_model = _MAIN_MODEL      # legacy alias — simple used to default to main
+    cheap_model = _LIGHTWEIGHT_MODEL  # legacy alias
 
     def __init__(self, api_key: str) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
