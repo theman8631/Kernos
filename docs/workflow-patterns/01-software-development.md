@@ -144,6 +144,10 @@ heuristics:
     confidence: deterministic-high
     coalesce:
       key: phase-stale
+    # Member "don't spam me on every ledger entry" → weekly-digest mode
+    # suppresses per-event staleness prompts; members who prefer batch
+    # curation don't want individual phase-stale pings.
+    suppressed_by_preference: ledger-routing
     status: active
 
   - id: manifest-sync-lag
@@ -162,6 +166,10 @@ heuristics:
     confidence: deterministic-high
     coalesce:
       key: manifest-sync
+    # Member "don't let the plan fall behind the code" →
+    # preferences.manifest-drift-alarm: 14-days overrides the 28-day
+    # default. Maps to the pattern's declared intent hook verbatim.
+    threshold_preference: manifest-drift-alarm
     status: active
 
   - id: spec-missing-pillar

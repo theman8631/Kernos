@@ -125,6 +125,10 @@ heuristics:
     confidence: deterministic-high
     coalesce:
       key: location-archive
+    # Member "don't let Gardener propose location archives" suppresses this
+    # class — common preference for sandbox / lore-heavy campaigns where
+    # members revisit locations freely and don't want archival prompts.
+    suppressed_by_preference: location-archival-mute
     status: active
 
   - id: arc-stagnation
@@ -144,6 +148,9 @@ heuristics:
     confidence: deterministic-high
     coalesce:
       key: arc-stagnation
+    # Member "arc pace for this campaign is slower" → preferences.arc-
+    # stagnation-days: 84 (or any int) overrides the 42-day default.
+    threshold_preference: arc-stagnation-days
     status: active
 
   # --- Disabled: blocked on CANVAS-CROSS-PAGE-INDEX ---------------------
@@ -198,6 +205,8 @@ heuristics:
 - "Prep for next session" → Gardener produces a brief: current arc state, open threads, last session's cliffhanger, NPCs likely to appear
 - "Summarize what happened while I was gone" → Gardener produces bounded summary of sessions between the player's last attended session and now
 - "Don't contradict what we established" → `preferences.canon-strictness: strict` — Gardener flags pre-canonization any agent-generated content that conflicts with existing canon
+- "Don't let Gardener propose location archives" → `preferences.location-archival-mute: true` — suppresses the `location-archive-stale` heuristic for campaigns where members revisit locations freely (sandbox / lore-heavy)
+- "Arc pace for this campaign is slower" → `preferences.arc-stagnation-days: <n>` — overrides the default 42-day stagnation threshold on `arc-current.md`; set higher for slower-paced campaigns
 
 ## Special handling
 

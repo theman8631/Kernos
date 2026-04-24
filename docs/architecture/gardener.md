@@ -110,6 +110,53 @@ The Gardener reads the Workflow Patterns canvas on demand and caches the parsed 
 
 This is the v1 resolution for Hazard A (library-load latency).
 
+## Preferences — persistent member-intent capture
+
+Preferences are the Gardener's **canvas-scoped** memory for how a specific canvas should behave. A covenant says *"always share your thought process"* — a universal rule of engagement across all contexts. A preference says *"on this canvas, don't surface drafts unprompted"* or *"staleness for this one is 180 days"* — guideline-force, scoped to the canvas, shaping Gardener dispatch rather than binding the agent.
+
+The two systems are **layered, not separated**. Covenants execute agent-side (dispatch gate, system-prompt injection, tool-call validation). Preferences execute Gardener-side (pre-heuristic-fire check on the `suppressed_by_preference` / `threshold_preference` fields of heuristic declarations). When a single utterance produces both a covenant candidate and a preference candidate, both can persist — different execution surfaces, no runtime race.
+
+### Subject-matter validation
+
+Preferences are strictly about **canvas behavior**: suppression of a heuristic class, overriding a declared threshold. Anything else the Gardener's preference-extraction consultation classifies as `effect_kind: other` and **does not capture** — the utterance falls through to the normal covenant / standing-order path without a confirmation whisper. This is load-bearing: members never see a confirmation for a preference that wouldn't do anything, because the trust contract depends on every surfaced proposal being actionable.
+
+Two effect kinds are wired in v1:
+
+- **`suppressed_by_preference: <name>`** — when a truthy confirmed preference exists under `<name>`, the heuristic doesn't fire
+- **`threshold_preference: <name>`** — when a confirmed preference exists under `<name>`, its value overrides the declaration's `threshold` or `threshold_days` at evaluation time
+
+Other effect kinds (routing-override, scope-modifier, authority-delegation) ship their own extraction activation in follow-on batches (`CANVAS-PREFERENCE-ROUTING`, `CANVAS-PREFERENCE-SCOPE`, `CANVAS-PREFERENCE-AUTHORITY`). Capturing without wiring is the trust hazard; extraction stays silent until the effect is real.
+
+### Confirmation discipline
+
+Preferences are **opt-in, not opt-out**. Even on a canvas set to `auto-all` or `auto-non-destructive`, preference capture requires explicit member confirmation — this is the one Gardener path that auto-apply consent modes do not extend to. Preferences are interpretive; auto-capture with no member in the loop is exactly where social noise lives.
+
+The flow:
+
+1. Agent calls `canvas_preference_extract(canvas_id, utterance)` with the member's verbatim words
+2. Consultation runs on the lightweight chain, validates subject matter, applies novel-preference downgrade if the extracted name isn't in the pattern's intent-hook vocabulary
+3. High-confidence + wired-effect match lands in `canvas.yaml`'s `pending_preferences` with a 24h TTL
+4. Agent surfaces to the member, gets a clear yes/no
+5. Agent calls `canvas_preference_confirm(canvas_id, preference_name, action)` — `confirm` promotes to `preferences`, `discard` moves to `declined_preferences` for audit
+
+Pending preferences the member never engages with auto-expire at 24h on the next Gardener dispatch. Confirmation whispers coalesce per canvas per 24h window, matching the Pillar 4 reshape-proposal discipline.
+
+### Canvas-layer storage
+
+`canvas.yaml` carries three preference-related keys:
+
+| Key | Purpose |
+|---|---|
+| `preferences:` | Confirmed member-captured preferences, the source heuristic dispatch reads from |
+| `pending_preferences:` | Awaiting confirmation, 24h TTL, populated by extraction |
+| `declined_preferences:` | Audit trail of rejected preferences with evidence, consulted to avoid re-offering recently-declined utterance shapes |
+
+Preferences are plaintext. An operator can edit `canvas.yaml` directly to set, rename, or remove them; there's no dedicated UI.
+
+### The trust contract
+
+The Gardener holds itself to one hard commitment about preference capture: **no captured-but-unapplied preferences**. If the effect isn't wired, the extraction silently no-ops; if the confidence is low, it logs for audit but doesn't surface; if the preference is novel (not in the pattern's declared intent-hook vocabulary), the confidence downgrades one tier before the surface-or-not gate applies. Everything members see as a proposed preference actually does something.
+
 ## Relationship to other cohorts
 
 The Gardener is the third cohort to land, alongside the Messenger (disclosure-time welfare judgment on cross-member messages) and the Friction Observer (post-turn diagnostic). Each cohort holds a bounded judgment space:
