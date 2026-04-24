@@ -122,6 +122,7 @@ These are enforced at the code-architecture level. Violating any of them is a bu
 
 - **[Pipeline reference](pipeline-reference.md)** — per-phase inputs, outputs, code entries, and invariants for the six-phase turn
 - **[Primitives reference](primitives-reference.md)** — the kernel primitives (RM dispatcher, fact harvest, compaction, awareness loop, gate, plan execution) with code pointers
+- **Workflow Patterns** — see `/docs/workflow-patterns/` for the Gardener's judgment library (18 domain patterns plus a meta-contract; seeded into the Workflow Patterns canvas on first boot)
 
 ## Related depth
 

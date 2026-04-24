@@ -230,15 +230,16 @@ Do not run Kernos behind a public HTTP endpoint without careful consideration �
 
 ## First-boot canvases
 
-On the first boot after a CANVAS-V1 install, Kernos seeds three canvases:
+On the first boot after a CANVAS-V1 install, Kernos seeds four canvases:
 
 - **System Reference** (team scope, unpinned) — populated from the shipped `/docs/architecture/*.md` files plus an auto-generated kernel-tool index. Gives the agent an authoritative source for Kernos-internal questions (*what's a context space*, *how does the gate work*).
+- **Workflow Patterns** (team scope, unpinned) — seeded from `/docs/workflow-patterns/`. Pattern 00 (`library-meta`) plus 18 domain patterns (software development, long-form campaign, legal case, household management, …). Judgment-input substrate for the future Gardener cohort, which will consult these patterns at canvas creation and during continuous canvas evolution. Members do not interact with this canvas directly — they see canvases shaped by its patterns.
 - **Our Procedures** (team scope, unpinned) — starts empty except for an index page. Team-wide procedures land here as they emerge.
 - **My Tools** (personal scope, one per member) — created when a member finishes onboarding (`bootstrap_graduated=True`). Workspace tools the member registers via `register_tool` get auto-appended as pages.
 
 Seeding is idempotent — canvases already present at boot are skipped. Delete a canvas (archive it) to trigger re-seeding on the next restart.
 
-**Deployment-shape note.** System Reference seeding reads from `docs/architecture/` on disk. Source checkouts have it; pip-installed or container deployments where `docs/` is stripped will skip the System Reference canvas with a warning — Our Procedures and per-member My Tools still seed. The warning is logged as `CANVAS_SEED_WARNING` on startup. To populate System Reference on such deployments, either copy the docs into the expected path before boot, or author the pages via `page_write` post-boot.
+**Deployment-shape note.** System Reference and Workflow Patterns seeding read from `docs/architecture/` and `docs/workflow-patterns/` on disk respectively. Source checkouts have both; pip-installed or container deployments where `docs/` is stripped will skip those canvases with warnings — Our Procedures and per-member My Tools still seed. Warnings are logged as `CANVAS_SEED_WARNING` on startup. To populate on such deployments, either copy the docs into the expected paths before boot, or author the pages via `page_write` post-boot.
 
 **No auto-sync.** Once seeded, Kernos does not refresh System Reference from later repo updates — the canvas is now member-editable state. A `reseed_system_reference` tool is parked for future work.
 

@@ -245,6 +245,57 @@ async def seed_canvases_on_first_boot(
                 "SEED_DONE: canvas=%r pages=%d", "System Reference", pages_written,
             )
 
+    # --- Workflow Patterns (team) ---
+    # Seed order per WORKFLOW-PATTERNS-LIBRARY-AND-SEED spec:
+    # System Reference → Workflow Patterns → Our Procedures.
+    # The Gardener cohort (future batch) reads from this canvas as its
+    # judgment-input substrate; seeding here so it's available in-instance
+    # before any Gardener work lands.
+    patterns = await instance_db.find_canvas_by_name(
+        name="Workflow Patterns", scope="team",
+    )
+    if patterns:
+        result.skipped_canvases.append("Workflow Patterns")
+        logger.info(
+            "SEED_SKIP: canvas=%r already present (id=%s)",
+            "Workflow Patterns", patterns.get("canvas_id"),
+        )
+    else:
+        wp_root = repo_root or _default_repo_root()
+        # Same deployment-shape check as System Reference: if the repo's
+        # docs/workflow-patterns/ directory isn't on disk, skip with a
+        # structured warning rather than fail the boot.
+        if wp_root is not None and not (
+            wp_root / "docs" / "workflow-patterns"
+        ).is_dir():
+            wp_root = None
+        if wp_root is None:
+            result.warnings.append(
+                "Workflow Patterns canvas skipped: docs/workflow-patterns/ not "
+                "on disk. This deployment shape (non-source install) does not "
+                "carry the pattern library. Seed a copy manually via page_write "
+                "if needed."
+            )
+            logger.warning(
+                "SEED_SKIP: Workflow Patterns — docs/workflow-patterns/ not found",
+            )
+        else:
+            pages_written = await _seed_workflow_patterns(
+                instance_id=instance_id,
+                canvas_service=canvas_service,
+                operator_member_id=operator_member_id,
+                repo_root=wp_root,
+            )
+            result.seeded_canvases.append("Workflow Patterns")
+            result.pages_written += pages_written
+            await _safe_emit(
+                event_emit, instance_id, "canvas.seeded",
+                {"name": "Workflow Patterns", "pages": pages_written},
+            )
+            logger.info(
+                "SEED_DONE: canvas=%r pages=%d", "Workflow Patterns", pages_written,
+            )
+
     # --- Our Procedures (team) ---
     ours = await instance_db.find_canvas_by_name(
         name="Our Procedures", scope="team",
@@ -463,6 +514,129 @@ async def _seed_system_reference(
     pages_written += 1
 
     return pages_written
+
+
+async def _seed_workflow_patterns(
+    *,
+    instance_id: str,
+    canvas_service: CanvasService,
+    operator_member_id: str,
+    repo_root: Path,
+) -> int:
+    """Create the Workflow Patterns canvas and seed pattern pages.
+
+    Reads every ``.md`` file from ``docs/workflow-patterns/`` and writes
+    each as a canvas page. Files already carry YAML frontmatter (scope /
+    type / pattern / consumer) — ``parse_frontmatter`` in canvas.py
+    extracts it at read time; we preserve the body verbatim here and let
+    ``page_write`` layer its own system fields (``last_updated``,
+    ``last_updated_by``) over the authored frontmatter.
+
+    Like System Reference: created with the operator as writer then
+    owner-flipped to the reserved ``system`` value so ownership ops
+    require operator approval.
+    """
+    create_result = await canvas_service.create(
+        instance_id=instance_id,
+        creator_member_id=operator_member_id,
+        name="Workflow Patterns",
+        scope="team",
+        description="Gardener judgment-input library.",
+        default_page_type="note",
+    )
+    if not create_result.ok:
+        raise RuntimeError(
+            f"Workflow Patterns canvas creation failed: {create_result.error}"
+        )
+    canvas_id = create_result.canvas_id
+
+    # Flip owner to 'system' — same convention as System Reference.
+    await canvas_service._db.save_canvas({
+        "canvas_id": canvas_id,
+        "name": "Workflow Patterns",
+        "description": "Gardener judgment-input library.",
+        "status": "active",
+        "created_at": utc_now(),
+        "scope": "team",
+        "owner_member_id": SYSTEM_OWNER,
+        "pinned_to_spaces": "[]",
+        "canvas_yaml_path": "",
+    })
+
+    # Index page describing what lives here.
+    index_body = (
+        "# Workflow Patterns\n\n"
+        "Gardener judgment-input library. Each page is a workflow pattern "
+        "the Gardener consults at canvas creation and during continuous "
+        "evolution. Members do not interact with this canvas directly; "
+        "they see canvases shaped by its patterns.\n\n"
+        "Pattern 00 (`library-meta`) is the Gardener contract — the three "
+        "dials (charter volatility, actor count, time horizon), the six "
+        "artifact types, and the cross-pattern evolution heuristics. "
+        "Patterns 01-18 are domain-specific pattern definitions.\n\n"
+        "This canvas is seeded from the repo's `docs/workflow-patterns/` "
+        "directory on first boot. After seeding it is member-editable "
+        "state; Kernos does not auto-sync from repo updates.\n"
+    )
+    await canvas_service.page_write(
+        instance_id=instance_id, canvas_id=canvas_id,
+        page_slug="index.md", body=index_body,
+        writer_member_id=operator_member_id, title="Workflow Patterns",
+        page_type="note", state="current",
+        frontmatter_overrides={"last_updated_by": SYSTEM_OWNER},
+    )
+    pages_written = 1
+
+    # Pattern files — seed in numeric order (00, 01, ..., 18).
+    import datetime as _dt
+    patterns_dir = repo_root / "docs" / "workflow-patterns"
+    pattern_files = sorted(
+        p for p in patterns_dir.glob("*.md") if p.name != "index.md"
+    )
+    for pf in pattern_files:
+        try:
+            raw = pf.read_text(encoding="utf-8")
+            mtime = _dt.datetime.fromtimestamp(
+                pf.stat().st_mtime, tz=_dt.timezone.utc,
+            ).isoformat()
+        except OSError as exc:
+            logger.warning(
+                "SEED_WORKFLOW_PATTERN_READ_FAILED: %s: %s", pf.name, exc,
+            )
+            continue
+
+        # Split authored frontmatter from body so page_write can apply its
+        # own system fields without double-fenced YAML.
+        from kernos.kernel.canvas import parse_frontmatter
+        authored_fm, body = parse_frontmatter(raw)
+
+        # Preserve authored fields (scope, type, pattern, consumer) as
+        # frontmatter_overrides; page_write lays last_updated / last_updated_by
+        # on top. The page's ``type`` field stays whatever the author declared.
+        overrides: dict = dict(authored_fm) if authored_fm else {}
+        overrides.setdefault("last_updated_by", SYSTEM_OWNER)
+        overrides["source_file"] = f"docs/workflow-patterns/{pf.name}"
+        overrides["source_mtime"] = mtime
+
+        await canvas_service.page_write(
+            instance_id=instance_id, canvas_id=canvas_id,
+            page_slug=pf.name, body=body or raw,
+            writer_member_id=operator_member_id,
+            title=_title_from_pattern_file(pf.name, authored_fm),
+            page_type=authored_fm.get("type", "note") if authored_fm else "note",
+            state="current",
+            frontmatter_overrides=overrides,
+        )
+        pages_written += 1
+
+    return pages_written
+
+
+def _title_from_pattern_file(filename: str, fm: dict | None) -> str:
+    """Prefer the authored ``pattern`` field; fall back to the filename stem."""
+    if fm and fm.get("pattern"):
+        return str(fm["pattern"]).replace("-", " ").title()
+    return _title_from_target(filename)
 
 
 async def _seed_our_procedures(
