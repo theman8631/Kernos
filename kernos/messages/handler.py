@@ -875,6 +875,7 @@ class MessageHandler:
         # Canvas primitive (CANVAS-V1). Lazy-bind the instance_db — server.py
         # attaches it after construction, same pattern as _relational_dispatcher.
         self._canvas = None  # set on first call via _get_canvas_service()
+        self._gardener = None  # set on first call via _get_gardener_service()
 
         # Wire up retrieval service for the `remember` kernel tool
         self._retrieval = None
@@ -1387,15 +1388,26 @@ class MessageHandler:
         async def _canvas_emit(instance_id, event_type, payload, *, member_id=""):
             # Best-effort event-stream emission — never raises.
             stream = getattr(self, "_events", None) or getattr(self, "events", None)
-            if stream is None:
-                return
-            try:
-                meta = {"member_id": member_id} if member_id else {}
-                await emit_event(
-                    stream, event_type, instance_id, "canvas", payload, meta,
-                )
-            except Exception as exc:
-                logger.debug("CANVAS_EMIT_FAILED: %s %s", event_type, exc)
+            if stream is not None:
+                try:
+                    meta = {"member_id": member_id} if member_id else {}
+                    await emit_event(
+                        stream, event_type, instance_id, "canvas", payload, meta,
+                    )
+                except Exception as exc:
+                    logger.debug("CANVAS_EMIT_FAILED: %s %s", event_type, exc)
+
+            # Fan out to the Gardener cohort if live. Gardener's on_canvas_event
+            # is non-blocking (schedules background dispatch), so this does not
+            # slow the canvas write path.
+            gardener = self._get_gardener_service()
+            if gardener is not None:
+                try:
+                    await gardener.on_canvas_event(
+                        instance_id, event_type, payload, member_id=member_id,
+                    )
+                except Exception as exc:
+                    logger.debug("GARDENER_DISPATCH_FAILED: %s %s", event_type, exc)
 
         self._canvas = CanvasService(
             instance_db=idb,
@@ -1408,6 +1420,31 @@ class MessageHandler:
         except Exception:
             pass
         return self._canvas
+
+    def _get_gardener_service(self):
+        """Lazy-init the GardenerService (CANVAS-SECTION-MARKERS + GARDENER).
+
+        Depends on CanvasService and InstanceDB being live; without them the
+        Gardener can't read the Workflow Patterns library or issue reshape
+        proposals, so we return None and the canvas pipeline behaves as if
+        no Gardener is installed.
+        """
+        if self._gardener is not None:
+            return self._gardener
+        canvas = self._canvas
+        idb = getattr(self, "_instance_db", None)
+        reasoning = getattr(self, "reasoning", None)
+        if canvas is None or idb is None or reasoning is None:
+            return None
+        from kernos.kernel.gardener import GardenerService
+
+        self._gardener = GardenerService(
+            canvas_service=canvas,
+            instance_db=idb,
+            reasoning_service=reasoning,
+        )
+        logger.info("GARDENER_SERVICE_INITIALIZED")
+        return self._gardener
 
     def _get_relational_dispatcher(self):
         """Lazy-init the relational dispatcher.
