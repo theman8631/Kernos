@@ -6,6 +6,7 @@ handling that kernos/browser/extractors.py performs post-Playwright.
 
 from kernos.browser.extractors import (
     INTERACTIVE_ROLES,
+    cdp_ax_nodes_to_tree,
     collect_interactive_elements,
     extract_links,
     extract_structured_data,
@@ -119,3 +120,113 @@ def test_interactive_roles_covers_common_forms():
     assert "checkbox" in INTERACTIVE_ROLES
     assert "radio" in INTERACTIVE_ROLES
     assert "link" in INTERACTIVE_ROLES
+
+
+def test_cdp_ax_nodes_to_tree_rebuilds_hierarchy():
+    # CDP's Accessibility.getFullAXTree returns a flat list with childIds;
+    # cdp_ax_nodes_to_tree should reassemble the nested structure.
+    nodes = [
+        {
+            "nodeId": "1",
+            "role": {"value": "RootWebArea"},
+            "name": {"value": "Test Page"},
+            "childIds": ["2", "3"],
+        },
+        {
+            "nodeId": "2",
+            "role": {"value": "heading"},
+            "name": {"value": "Title"},
+            "properties": [{"name": "level", "value": {"value": 1}}],
+            "parentId": "1",
+            "childIds": [],
+        },
+        {
+            "nodeId": "3",
+            "role": {"value": "button"},
+            "name": {"value": "Save"},
+            "parentId": "1",
+            "childIds": [],
+            "properties": [{"name": "focusable", "value": {"value": True}}],
+        },
+    ]
+    tree = cdp_ax_nodes_to_tree(nodes)
+    assert tree["role"] == "RootWebArea"
+    assert tree["name"] == "Test Page"
+    assert len(tree["children"]) == 2
+    heading = tree["children"][0]
+    assert heading["role"] == "heading"
+    assert heading["name"] == "Title"
+    assert heading["level"] == 1
+    button = tree["children"][1]
+    assert button["role"] == "button"
+    assert button["focusable"] is True
+
+
+def test_cdp_ax_nodes_to_tree_handles_empty_and_missing_children():
+    # Missing child IDs shouldn't crash — they get skipped.
+    nodes = [
+        {
+            "nodeId": "1",
+            "role": {"value": "RootWebArea"},
+            "name": {"value": "Page"},
+            "childIds": ["missing", "2"],
+        },
+        {
+            "nodeId": "2",
+            "role": {"value": "paragraph"},
+            "name": {"value": "Hello"},
+            "parentId": "1",
+        },
+    ]
+    tree = cdp_ax_nodes_to_tree(nodes)
+    assert len(tree["children"]) == 1
+    assert tree["children"][0]["role"] == "paragraph"
+
+    assert cdp_ax_nodes_to_tree([]) is None
+
+
+def test_cdp_ax_nodes_to_tree_collapses_ignored_nodes():
+    # `Ignored` nodes hoist their children up to the next visible ancestor.
+    nodes = [
+        {
+            "nodeId": "1",
+            "role": {"value": "RootWebArea"},
+            "name": {"value": "Page"},
+            "childIds": ["2"],
+        },
+        {
+            "nodeId": "2",
+            "role": {"value": "Ignored"},
+            "name": {"value": ""},
+            "parentId": "1",
+            "childIds": ["3"],
+        },
+        {
+            "nodeId": "3",
+            "role": {"value": "link"},
+            "name": {"value": "Click"},
+            "parentId": "2",
+        },
+    ]
+    tree = cdp_ax_nodes_to_tree(nodes)
+    assert tree["role"] == "RootWebArea"
+    assert len(tree["children"]) == 1
+    assert tree["children"][0]["role"] == "link"
+    assert tree["children"][0]["name"] == "Click"
+
+
+def test_collect_interactive_elements_excludes_root_webarea():
+    # RootWebArea is technically "focusable" in the AX tree, but it's not
+    # a user-interactive element. The filter must exclude it.
+    tree = {
+        "role": "RootWebArea",
+        "name": "Page",
+        "focusable": True,
+        "children": [
+            {"role": "button", "name": "Save", "focusable": True},
+        ],
+    }
+    elements = collect_interactive_elements(tree)
+    roles = [e["role"] for e in elements]
+    assert "RootWebArea" not in roles
+    assert "button" in roles

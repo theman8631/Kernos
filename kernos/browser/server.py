@@ -43,6 +43,7 @@ from playwright.async_api import (
 )
 
 from kernos.browser.extractors import (
+    cdp_ax_nodes_to_tree,
     collect_interactive_elements,
     extract_links,
     extract_structured_data,
@@ -64,7 +65,10 @@ class BrowserSession:
     """Singleton-style holder for the Playwright browser + active page.
 
     One Chromium instance per MCP process; one page, reused across calls,
-    so that goto semantics match what Lightpanda gave callers.
+    so that goto semantics match what Lightpanda gave callers. A CDP
+    session is attached to the page so we can query the accessibility
+    tree via DevTools Protocol — Playwright 1.58 removed the
+    `page.accessibility` shortcut, so CDP is now the canonical path.
     """
 
     def __init__(self) -> None:
@@ -72,6 +76,7 @@ class BrowserSession:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+        self._cdp = None
         self._lock = asyncio.Lock()
 
     async def ensure_page(self) -> Page:
@@ -98,10 +103,23 @@ class BrowserSession:
                     viewport={"width": 1280, "height": 900},
                 )
             self._page = await self._context.new_page()
+            self._cdp = await self._context.new_cdp_session(self._page)
+            try:
+                await self._cdp.send("Accessibility.enable")
+            except Exception:
+                # Best-effort — getFullAXTree also works without explicit
+                # enable on current Chromium; we log and continue.
+                logger.debug("CDP Accessibility.enable failed; continuing")
             return self._page
+
+    async def cdp(self):
+        """Return the CDP session bound to the active page."""
+        await self.ensure_page()
+        return self._cdp
 
     async def close(self) -> None:
         async with self._lock:
+            self._cdp = None
             if self._page and not self._page.is_closed():
                 try:
                     await self._page.close()
@@ -236,9 +254,11 @@ async def links(url: str | None = None, timeout_ms: int | None = None) -> list[d
 async def semantic_tree(
     url: str | None = None, timeout_ms: int | None = None
 ) -> dict[str, Any] | None:
-    async with _prepare_page(url, timeout_ms) as page:
-        snapshot = await page.accessibility.snapshot()
-    return simplify_accessibility_tree(snapshot)
+    async with _prepare_page(url, timeout_ms) as page:  # noqa: F841 — ensures page loaded
+        cdp = await _session.cdp()
+        ax = await cdp.send("Accessibility.getFullAXTree")
+    tree = cdp_ax_nodes_to_tree(ax.get("nodes") or [])
+    return simplify_accessibility_tree(tree)
 
 
 @mcp.tool(
@@ -250,9 +270,11 @@ async def semantic_tree(
 async def interactiveElements(
     url: str | None = None, timeout_ms: int | None = None
 ) -> list[dict[str, Any]]:
-    async with _prepare_page(url, timeout_ms) as page:
-        snapshot = await page.accessibility.snapshot()
-    return collect_interactive_elements(snapshot)
+    async with _prepare_page(url, timeout_ms) as page:  # noqa: F841 — ensures page loaded
+        cdp = await _session.cdp()
+        ax = await cdp.send("Accessibility.getFullAXTree")
+    tree = cdp_ax_nodes_to_tree(ax.get("nodes") or [])
+    return collect_interactive_elements(tree)
 
 
 @mcp.tool(

@@ -104,6 +104,99 @@ def extract_structured_data(html: str) -> dict[str, Any]:
     }
 
 
+_PROPERTY_PASSTHROUGH = {"focusable", "focused", "disabled", "level", "checked"}
+
+
+def cdp_ax_nodes_to_tree(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Reconstruct a nested accessibility tree from CDP's flat node list.
+
+    The Chrome DevTools Protocol `Accessibility.getFullAXTree` call returns
+    a flat list where each entry carries `nodeId`, `role.value`, `name.value`,
+    optional `value.value`, `properties[]`, and `childIds[]`. We walk from
+    the root (no `parentId`) and produce the nested `{role, name, children, ...}`
+    shape the existing simplifier and interactive-element collector expect.
+
+    Ignored nodes (`role.value == 'Ignored'`) are skipped transparently —
+    their children hoist up to whatever ancestor is next in the chain.
+    """
+    if not nodes:
+        return None
+    by_id: dict[str, dict[str, Any]] = {n["nodeId"]: n for n in nodes}
+
+    # Identify roots — CDP sometimes emits more than one top-level tree
+    # (e.g., iframe subtrees). Use the first node with no parentId in
+    # the map; fall back to the first entry.
+    root: dict[str, Any] | None = None
+    for n in nodes:
+        pid = n.get("parentId")
+        if pid is None or pid not in by_id:
+            root = n
+            break
+    if root is None:
+        root = nodes[0]
+
+    def _walk(node: dict[str, Any]) -> dict[str, Any] | None:
+        role = ((node.get("role") or {}).get("value") or "").strip()
+        if role.lower() == "ignored":
+            # Collapse ignored nodes by returning a placeholder wrapper
+            # whose children will be hoisted one level up in the caller.
+            children: list[dict[str, Any]] = []
+            for cid in node.get("childIds") or []:
+                child = by_id.get(cid)
+                if child is None:
+                    continue
+                walked = _walk(child)
+                if walked is None:
+                    continue
+                # Flatten a single ignored wrapper's hoisted children
+                if walked.get("role") == "__ignored_group__":
+                    children.extend(walked.get("children") or [])
+                else:
+                    children.append(walked)
+            return {"role": "__ignored_group__", "children": children} if children else None
+
+        name = ((node.get("name") or {}).get("value") or "").strip()
+        value = ((node.get("value") or {}).get("value") or "") if node.get("value") else ""
+
+        out: dict[str, Any] = {"role": role or "generic"}
+        if name:
+            out["name"] = name
+        if value:
+            out["value"] = value
+
+        for prop in node.get("properties") or []:
+            pname = prop.get("name")
+            if pname not in _PROPERTY_PASSTHROUGH:
+                continue
+            pvalue = (prop.get("value") or {}).get("value")
+            if pvalue is None or pvalue is False:
+                continue
+            out[pname] = pvalue
+
+        children: list[dict[str, Any]] = []
+        for cid in node.get("childIds") or []:
+            child = by_id.get(cid)
+            if child is None:
+                continue
+            walked = _walk(child)
+            if walked is None:
+                continue
+            if walked.get("role") == "__ignored_group__":
+                children.extend(walked.get("children") or [])
+            else:
+                children.append(walked)
+        if children:
+            out["children"] = children
+        return out
+
+    tree = _walk(root)
+    # Unwrap any accidental __ignored_group__ at the top.
+    if tree and tree.get("role") == "__ignored_group__":
+        inner = tree.get("children") or []
+        return inner[0] if len(inner) == 1 else {"role": "document", "children": inner}
+    return tree
+
+
 def simplify_accessibility_tree(node: dict[str, Any] | None) -> dict[str, Any] | None:
     """Trim Playwright's accessibility snapshot to fields an LLM cares about.
 
@@ -158,7 +251,11 @@ def collect_interactive_elements(
         return out
     role = node.get("role") or ""
     focusable = bool(node.get("focusable")) or bool(node.get("focused"))
-    if role in INTERACTIVE_ROLES or (focusable and role not in {"generic", "none", ""}):
+    if role in INTERACTIVE_ROLES or (
+        focusable
+        and role
+        not in {"generic", "none", "", "RootWebArea", "WebArea", "window", "document"}
+    ):
         entry: dict[str, Any] = {"role": role or "generic"}
         name = (node.get("name") or "").strip()
         if name:
