@@ -37,9 +37,14 @@ from kernos.cohorts.gardener import (
     GardenerDecision,
     GardenerExhausted,
     InitialShapeContext,
+    PreferenceExtractionContext,
+    PreferenceExtractionExhausted,
+    PreferenceExtractionResult,
     SectionContext,
+    detect_explicit_phrases,
     judge_evolution,
     judge_initial_shape,
+    judge_preference_extraction,
     judge_section_management,
 )
 from kernos.kernel.pattern_heuristics import (
@@ -516,6 +521,32 @@ class GardenerService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("GARDENER_EVOLUTION_FAILED: %s", exc)
             return None
+
+    async def consult_preference_extraction(
+        self, ctx: PreferenceExtractionContext,
+    ) -> PreferenceExtractionResult:
+        """Pillar 5 entry — run preference-extraction consultation.
+
+        Caller provides the member utterance + canvas pattern; the
+        consultation returns a structured result the caller routes into
+        the confirmation flow (see :meth:`capture_canvas_preference`
+        tool in the reasoning dispatch).
+
+        Returns ``PreferenceExtractionResult(matched=False)`` on any
+        exception — never raises. Callers should gate surfacing on
+        ``result.should_surface``, which composes the confirmation
+        floor (high-confidence + wired effect_kind).
+        """
+        try:
+            return await judge_preference_extraction(
+                ctx, reasoning_service=self._reasoning,
+            )
+        except PreferenceExtractionExhausted as exc:
+            logger.info("GARDENER_PREF_EXTRACTION_EXHAUSTED: %s", exc.reason)
+            return PreferenceExtractionResult(matched=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GARDENER_PREF_EXTRACTION_FAILED: %s", exc)
+            return PreferenceExtractionResult(matched=False)
 
     async def consult_section(
         self, ctx: SectionContext,

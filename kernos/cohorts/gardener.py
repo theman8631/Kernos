@@ -252,6 +252,201 @@ async def judge_evolution(
     return _parse_decision(raw)
 
 
+#: Phrases that bypass the cheap-chain pre-filter and route directly to
+#: full extraction (still subject-matter-validated — Kit revision #1).
+#: Surface-level string match, not semantic. Case-insensitive.
+EXPLICIT_PREFERENCE_PHRASES: tuple[str, ...] = (
+    "remember that",
+    "from now on",
+    "always",
+    "never",
+    "don't let me",
+    "keep ",            # keep [X] private
+    "this canvas is ",  # this canvas is [category]
+)
+
+
+def detect_explicit_phrases(utterance: str) -> bool:
+    """Return True when the utterance carries a preference-explicit phrase.
+
+    Surface-level only — no LLM. Callers use this to short-circuit the
+    cheap-chain pre-filter: an explicit-phrase utterance goes straight to
+    full extraction. Full extraction still performs subject-matter
+    validation, so a covenant-shaped utterance with an explicit phrase
+    (e.g. "remember that I always share my thought process") still lands
+    with covenants, not preferences.
+    """
+    if not utterance:
+        return False
+    lower = utterance.lower()
+    return any(phrase in lower for phrase in EXPLICIT_PREFERENCE_PHRASES)
+
+
+#: Effect kinds wired in v1. Kit revision #2: if the LLM returns any
+#: other ``effect_kind``, the extraction is forced ``matched=false`` so
+#: no confirmation whisper surfaces for a preference that wouldn't do
+#: anything. Follow-on batches extend this set as new effects wire.
+WIRED_EFFECT_KINDS = {"suppression", "threshold"}
+
+
+PREFERENCE_EXTRACTION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "matched": {"type": "boolean"},
+        "preference_name": {"type": "string"},
+        "preference_value": {},
+        "evidence": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "supersedes": {"type": ["string", "null"]},
+        "effect_kind": {
+            "type": "string",
+            "enum": ["suppression", "threshold", "other"],
+        },
+    },
+    "required": ["matched", "confidence"],
+    "additionalProperties": True,
+}
+
+
+@dataclass
+class PreferenceExtractionContext:
+    """Context passed into :func:`judge_preference_extraction`."""
+    instance_id: str
+    canvas_id: str
+    canvas_pattern: str
+    utterance: str
+    #: Pattern-declared intent-hook names the extraction treats as the
+    #: accepted preference vocabulary. Preferences whose name isn't in
+    #: this set have their confidence downgraded one tier (high→medium→low).
+    known_intent_hook_names: list[str] = field(default_factory=list)
+    #: Current confirmed preferences on the canvas, used to detect
+    #: supersession (new value replacing an existing one).
+    current_preferences: dict = field(default_factory=dict)
+    #: Names previously declined on this canvas — extraction should avoid
+    #: re-offering these within a short window, but v1 leaves the declined
+    #: check to the caller (consult_preference_extraction filters).
+    declined_preference_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PreferenceExtractionResult:
+    """Parsed + validated output of a preference-extraction consultation."""
+    matched: bool
+    preference_name: str = ""
+    preference_value: Any = None
+    evidence: str = ""
+    confidence: str = "low"            # low | medium | high
+    supersedes: str | None = None
+    effect_kind: str = ""              # suppression | threshold | "" when matched=false
+
+    @property
+    def should_surface(self) -> bool:
+        """High-confidence, matched, effect kind is wired — fit for confirmation."""
+        return self.matched and self.confidence == "high" and self.effect_kind in WIRED_EFFECT_KINDS
+
+
+class PreferenceExtractionExhausted(Exception):
+    """Raised when the lightweight chain can't serve the extraction call."""
+    def __init__(self, *, chain_name: str = "lightweight", reason: str = "") -> None:
+        super().__init__(f"PreferenceExtraction exhausted on chain={chain_name}: {reason}")
+        self.chain_name = chain_name
+        self.reason = reason
+
+
+def _parse_preference_extraction(
+    raw: str, ctx: PreferenceExtractionContext,
+) -> PreferenceExtractionResult:
+    """Parse LLM output + apply subject-matter validation + novel downgrade.
+
+    Kit revision #2 enforcement: effect_kind must be in WIRED_EFFECT_KINDS
+    or the result is forced matched=false. The extraction layer never
+    surfaces a preference whose effect isn't wired — no confirmation
+    whisper fires for a preference that wouldn't do anything.
+
+    Novel-preference handling: if the extracted preference_name isn't in
+    the pattern's declared intent-hook names, confidence downgrades one
+    tier (high → medium → low). Prevents Gardener-invented vocabulary
+    from reaching member confirmation.
+    """
+    if not raw or not raw.strip():
+        return PreferenceExtractionResult(matched=False)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("PREF_EXTRACTION_PARSE_FAILED: raw=%r", raw[:200])
+        return PreferenceExtractionResult(matched=False)
+    if not isinstance(data, dict):
+        return PreferenceExtractionResult(matched=False)
+
+    matched = bool(data.get("matched", False))
+    if not matched:
+        return PreferenceExtractionResult(matched=False)
+
+    effect_kind = (data.get("effect_kind") or "").strip().lower()
+    # Kit revision #2: force matched=false when effect isn't wired in v1.
+    if effect_kind not in WIRED_EFFECT_KINDS:
+        logger.info(
+            "PREF_EXTRACTION_EFFECT_NOT_WIRED: effect_kind=%r — rejecting as v1 no-op",
+            effect_kind,
+        )
+        return PreferenceExtractionResult(matched=False)
+
+    confidence = (data.get("confidence") or "").strip().lower()
+    if confidence not in ("low", "medium", "high"):
+        confidence = "low"
+
+    preference_name = (data.get("preference_name") or "").strip()
+    # Novel-preference downgrade: extraction matched a name the pattern
+    # doesn't declare in its intent-hook vocabulary.
+    if preference_name and ctx.known_intent_hook_names:
+        known = {h.strip() for h in ctx.known_intent_hook_names if h}
+        if preference_name not in known:
+            confidence = {"high": "medium", "medium": "low", "low": "low"}[confidence]
+
+    supersedes_raw = data.get("supersedes")
+    supersedes = supersedes_raw if isinstance(supersedes_raw, str) and supersedes_raw else None
+
+    return PreferenceExtractionResult(
+        matched=True,
+        preference_name=preference_name,
+        preference_value=data.get("preference_value"),
+        evidence=(data.get("evidence") or "").strip(),
+        confidence=confidence,
+        supersedes=supersedes,
+        effect_kind=effect_kind,
+    )
+
+
+async def judge_preference_extraction(
+    ctx: PreferenceExtractionContext,
+    *,
+    reasoning_service: Any,
+    max_tokens: int = 512,
+) -> PreferenceExtractionResult:
+    """Run preference extraction on one member utterance.
+
+    Returns a PreferenceExtractionResult. Caller decides whether to
+    surface based on ``result.should_surface``. Raises
+    PreferenceExtractionExhausted on cheap-chain failure — caller
+    should catch and treat as no-op.
+    """
+    from kernos.cohorts.gardener_prompts import build_preference_extraction_prompt
+    system_prompt, user_content = build_preference_extraction_prompt(ctx)
+    try:
+        raw = await reasoning_service.complete_simple(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            chain="lightweight",
+            output_schema=PREFERENCE_EXTRACTION_SCHEMA,
+            max_tokens=max_tokens,
+        )
+    except Exception as exc:
+        raise PreferenceExtractionExhausted(
+            chain_name="lightweight", reason=str(exc)[:200],
+        ) from exc
+    return _parse_preference_extraction(raw, ctx)
+
+
 async def judge_section_management(
     ctx: SectionContext,
     *,

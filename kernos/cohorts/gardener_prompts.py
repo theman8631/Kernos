@@ -79,6 +79,83 @@ def build_evolution_prompt(ctx) -> tuple[str, str]:
     return _ROLE, user_content
 
 
+def build_preference_extraction_prompt(ctx) -> tuple[str, str]:
+    """CANVAS-GARDENER-PREFERENCE-CAPTURE — extract a canvas-behavior preference
+    from a member utterance.
+
+    The prompt is strictly scoped to canvas-behavior preferences. The
+    subject-matter validation is both prompt-side (explicit instructions
+    + known effect kinds) and post-parse (force matched=false on any
+    unknown effect_kind — see ``_parse_preference_extraction``). Kit
+    revisions #1 + #2 are guarded at both layers.
+    """
+    from kernos.cohorts.gardener import PreferenceExtractionContext
+
+    assert isinstance(ctx, PreferenceExtractionContext)
+    intent_hooks_block = (
+        "\n".join(f"  - {name}" for name in ctx.known_intent_hook_names)
+        if ctx.known_intent_hook_names else "  (no intent-hook vocabulary known)"
+    )
+    current_prefs_block = (
+        "\n".join(f"  - {k}: {v!r}" for k, v in (ctx.current_preferences or {}).items())
+        if ctx.current_preferences else "  (no confirmed preferences yet)"
+    )
+    declined_block = (
+        ", ".join(ctx.declined_preference_names)
+        if ctx.declined_preference_names else "(none)"
+    )
+
+    system_prompt = (
+        "You are the Gardener's preference-extraction consultant.\n"
+        "Your job: decide whether a member utterance expresses a canvas-\n"
+        "behavior preference, and if so, name it using the pattern's\n"
+        "declared intent-hook vocabulary.\n\n"
+        "A preference is about HOW THE GARDENER BEHAVES on a specific\n"
+        "canvas. Examples of in-scope preferences:\n"
+        "  - Suppression: \"don't ping me on every RSVP\" (suppress a dispatch)\n"
+        "  - Thresholds: \"staleness for this one is 180 days\" (override a count)\n\n"
+        "OUT OF SCOPE — reject these with matched=false:\n"
+        "  - Agent behavior rules across all contexts (\"always explain\")\n"
+        "    — those are covenants, not preferences\n"
+        "  - Project management / member-authored content decisions\n"
+        "  - Cross-canvas rules\n"
+        "  - Anything not tied to a Gardener dispatch action\n\n"
+        "REQUIRED output fields:\n"
+        "  - matched (bool)\n"
+        "  - preference_name (string; lowercase-hyphenated)\n"
+        "  - preference_value (any; the configured value)\n"
+        "  - evidence (short excerpt from the utterance showing the signal)\n"
+        "  - confidence: high | medium | low\n"
+        "    - high: unambiguous match to a declared intent-hook with a\n"
+        "      clear value\n"
+        "    - medium: probable match but novel or value-ambiguous\n"
+        "    - low: weak signal; log-only\n"
+        "  - supersedes: existing preference name being replaced, or null\n"
+        "  - effect_kind: suppression | threshold | other\n"
+        "    - suppression: turns off a heuristic class\n"
+        "    - threshold: overrides a declared count/duration threshold\n"
+        "    - other: any other effect (scope-modifier, routing-override,\n"
+        "      authority-delegation). If you pick 'other', the system will\n"
+        "      silently no-op — use it ONLY when the preference is valid\n"
+        "      but its effect isn't yet wired.\n\n"
+        "If the utterance does not map cleanly to canvas behavior OR\n"
+        "the effect isn't suppression/threshold, return matched=false."
+    )
+    user_content = (
+        f"UTTERANCE\n{ctx.utterance}\n\n"
+        f"CANVAS PATTERN: {ctx.canvas_pattern}\n\n"
+        f"DECLARED INTENT-HOOK VOCABULARY (prefer these names when matched)\n"
+        f"{intent_hooks_block}\n\n"
+        f"CURRENT CONFIRMED PREFERENCES (flag supersessions)\n"
+        f"{current_prefs_block}\n\n"
+        f"PREVIOUSLY DECLINED: {declined_block}\n\n"
+        "Produce the structured output. If the utterance is ambiguous or "
+        "the subject isn't canvas behavior, return matched=false with "
+        "confidence=low."
+    )
+    return system_prompt, user_content
+
+
 def build_section_prompt(ctx) -> tuple[str, str]:
     """Pillar 4 sub-judgment — section management on a single page."""
     from kernos.cohorts.gardener import SectionContext
