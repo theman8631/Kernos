@@ -66,6 +66,219 @@ DEFAULT_CONSULT_OPERATOR_AT = ("shipped", "on_conflict")
 
 
 # ---------------------------------------------------------------------------
+# Section markers (SECTION-MARKERS-AND-GARDENER Pillar 1)
+# ---------------------------------------------------------------------------
+#: Marker comment carries summary / tokens / last_updated as quoted/plain
+#: key=value pairs. Invisible to Markdown renderers (Obsidian, GitHub,
+#: VSCode preview) because it's a standard HTML comment. Sections are
+#: H2 (``## ``) boundaries; anything above the first H2 is top-level
+#: page content and lives outside any section.
+_SECTION_HEADING_RE = re.compile(r"^(##\s+)(.+?)\s*$", re.MULTILINE)
+_SECTION_MARKER_RE = re.compile(
+    r"<!--\s*section:\s*(?P<fields>.*?)\s*-->", re.DOTALL,
+)
+_MARKER_FIELD_RE = re.compile(
+    r'(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|(\S+))',
+)
+
+
+def _slugify_heading(text: str) -> str:
+    """Lowercase, hyphen-joined, punctuation-stripped heading slug."""
+    s = re.sub(r"[^\w\s-]", "", text.lower()).strip()
+    s = re.sub(r"[\s_-]+", "-", s)
+    return s.strip("-")
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap token approximation. Not exact — that's fine for marker display.
+
+    Whitespace-tokenize; charge ~1.3 tokens per word to roughly match
+    subword tokenizer behavior on English text. Caller reads this as a
+    budget-planning hint, not a billing-grade count.
+    """
+    if not text:
+        return 0
+    words = len(text.split())
+    return int(words * 1.3) + 1
+
+
+@dataclass
+class Section:
+    """One page section — heading + optional marker + body (until next H2)."""
+    slug: str
+    heading: str             # the heading text (without the leading "## ")
+    body: str                # everything between heading/marker and next H2
+    marker_summary: str = ""
+    marker_tokens: int = 0
+    marker_last_updated: str = ""
+    has_marker: bool = False
+
+
+def _parse_marker(comment: str) -> dict:
+    """Parse ``summary="x" tokens=430 last_updated=2026-04-19`` field pairs."""
+    out: dict = {}
+    for match in _MARKER_FIELD_RE.finditer(comment or ""):
+        key = match.group(1)
+        raw_quoted = match.group(2)
+        raw_plain = match.group(3)
+        if raw_quoted is not None:
+            out[key] = raw_quoted.replace('\\"', '"').replace("\\\\", "\\")
+        else:
+            out[key] = raw_plain
+    return out
+
+
+def _render_marker(summary: str, tokens: int, last_updated: str) -> str:
+    """Render a ``<!-- section: ... -->`` comment. Escapes quotes in summary."""
+    safe_summary = (summary or "").replace("\\", "\\\\").replace('"', '\\"')
+    parts = [f'summary="{safe_summary}"', f"tokens={tokens}"]
+    if last_updated:
+        parts.append(f"last_updated={last_updated}")
+    return f"<!-- section: {' '.join(parts)} -->"
+
+
+def parse_sections(body: str) -> tuple[str, list[Section]]:
+    """Split a page body into (preamble, sections).
+
+    ``preamble`` is the text above the first H2 heading. Each ``Section``
+    covers heading through the char before the next H2 (or end of body).
+    Returns ``(body, [])`` unchanged when no H2 headings exist — this is
+    the backward-compat guarantee for pre-section-markers pages.
+    """
+    if not body:
+        return "", []
+    matches = list(_SECTION_HEADING_RE.finditer(body))
+    if not matches:
+        return body, []
+
+    preamble = body[:matches[0].start()].rstrip("\n")
+
+    sections: list[Section] = []
+    for i, m in enumerate(matches):
+        heading_text = m.group(2).strip()
+        slug = _slugify_heading(heading_text)
+        section_start = m.end()
+        section_end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        section_body_raw = body[section_start:section_end]
+
+        # Extract an optional marker comment from the first few lines.
+        marker_match = _SECTION_MARKER_RE.search(section_body_raw[:1024])
+        if marker_match and marker_match.start() < 200:
+            fields = _parse_marker(marker_match.group("fields"))
+            # Strip the marker (and surrounding blank line) from the body.
+            body_text = (
+                section_body_raw[:marker_match.start()]
+                + section_body_raw[marker_match.end():]
+            )
+            # Normalize leading blank lines
+            body_text = body_text.lstrip("\n")
+            body_text = body_text.rstrip("\n")
+            sections.append(Section(
+                slug=slug, heading=heading_text,
+                body=body_text,
+                marker_summary=fields.get("summary", ""),
+                marker_tokens=int(fields.get("tokens") or 0),
+                marker_last_updated=fields.get("last_updated", ""),
+                has_marker=True,
+            ))
+        else:
+            sections.append(Section(
+                slug=slug, heading=heading_text,
+                body=section_body_raw.lstrip("\n").rstrip("\n"),
+            ))
+    return preamble, sections
+
+
+def render_sections(preamble: str, sections: list[Section]) -> str:
+    """Reassemble body from preamble + sections, preserving markers."""
+    parts: list[str] = []
+    if preamble:
+        parts.append(preamble.rstrip("\n"))
+    for s in sections:
+        chunks = [f"## {s.heading}"]
+        if s.has_marker:
+            chunks.append(
+                _render_marker(s.marker_summary, s.marker_tokens, s.marker_last_updated)
+            )
+        if s.body:
+            chunks.append(s.body.rstrip("\n"))
+        parts.append("\n".join(chunks))
+    return "\n\n".join(p for p in parts if p) + ("\n" if parts else "")
+
+
+def render_summary_view(preamble: str, sections: list[Section]) -> str:
+    """TOC-style outline: preamble + heading + marker summary per section.
+
+    Body content of each section is omitted. Intended for large pages
+    where the agent wants a navigable outline without spending the
+    context budget on full bodies.
+    """
+    parts: list[str] = []
+    if preamble:
+        parts.append(preamble.rstrip("\n"))
+    for s in sections:
+        line = f"## {s.heading}"
+        if s.marker_summary:
+            line += f"\n> {s.marker_summary}"
+        elif s.has_marker:
+            line += "\n> _(summary marker present but empty)_"
+        else:
+            tokens_approx = _estimate_tokens(s.body)
+            line += f"\n> _(no summary; ~{tokens_approx} tokens in body)_"
+        parts.append(line)
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
+def maybe_refresh_section_tokens(body: str, last_updated: str = "") -> str:
+    """Recompute every section's ``tokens`` marker and return the new body.
+
+    ``last_updated`` (when non-empty) is stamped on every section whose
+    body differs from what the existing marker implies. Sections without
+    markers stay without markers — we don't add markers implicitly; the
+    agent or Gardener opts in by declaring markers.
+    """
+    preamble, sections = parse_sections(body)
+    if not sections:
+        return body
+    changed = False
+    for s in sections:
+        if not s.has_marker:
+            continue
+        new_tokens = _estimate_tokens(s.body)
+        if new_tokens != s.marker_tokens:
+            s.marker_tokens = new_tokens
+            changed = True
+        if last_updated and not s.marker_last_updated:
+            s.marker_last_updated = last_updated
+            changed = True
+    if not changed:
+        return body
+    return render_sections(preamble, sections)
+
+
+def replace_section_body(body: str, slug: str, new_body: str,
+                          last_updated: str = "") -> tuple[str, bool]:
+    """Surgically replace one section's body in an existing page body.
+
+    Returns ``(new_body, replaced)``. Non-existent slug returns the
+    original body with ``replaced=False``. Used by ``page_write`` when
+    the caller passes a ``section=`` argument.
+    """
+    preamble, sections = parse_sections(body)
+    if not sections:
+        return body, False
+    for s in sections:
+        if s.slug == slug:
+            s.body = (new_body or "").rstrip("\n")
+            if s.has_marker:
+                s.marker_tokens = _estimate_tokens(s.body)
+                if last_updated:
+                    s.marker_last_updated = last_updated
+            return render_sections(preamble, sections), True
+    return body, False
+
+
+# ---------------------------------------------------------------------------
 # Routes-lite (Pillar 5)
 # ---------------------------------------------------------------------------
 #: Target prefixes the routes engine understands. Space targets
@@ -528,7 +741,21 @@ class CanvasService:
 
     async def page_read(
         self, *, instance_id: str, canvas_id: str, page_slug: str,
+        mode: str = "full", section: str = "",
     ) -> CanvasOpResult:
+        """Read a page. Modes (SECTION-MARKERS Pillar 1):
+
+        - ``full`` (default): whole body + frontmatter. V1 behavior.
+        - ``summary``: frontmatter + preamble + per-section headings and
+          marker summaries (section bodies omitted). Large pages become
+          navigable outlines.
+        - ``section``: requires ``section`` (slug); returns just that
+          section's body + its marker metadata. Unknown slug = error.
+
+        Pages without H2 headings have no sections — ``summary`` falls
+        back to the full body, ``section`` errors with an informative
+        message. Backward-compat for all pages predating this feature.
+        """
         root = canvas_dir(self._data_dir, instance_id, canvas_id)
         try:
             page_path = _page_path_in_canvas(root, page_slug)
@@ -540,9 +767,56 @@ class CanvasService:
                 error=f"Page not found: {page_slug!r}",
             )
         frontmatter, body = self._read_page_cached(page_path)
+
+        mode = (mode or "full").lower()
+        if mode == "full":
+            return CanvasOpResult(
+                ok=True, canvas_id=canvas_id, page_path=page_slug,
+                extra={"frontmatter": frontmatter, "body": body, "mode": "full"},
+            )
+        if mode == "summary":
+            preamble, sections = parse_sections(body)
+            view = render_summary_view(preamble, sections)
+            return CanvasOpResult(
+                ok=True, canvas_id=canvas_id, page_path=page_slug,
+                extra={
+                    "frontmatter": frontmatter,
+                    "body": view,
+                    "mode": "summary",
+                    "section_count": len(sections),
+                    "section_slugs": [s.slug for s in sections],
+                },
+            )
+        if mode == "section":
+            if not section:
+                return CanvasOpResult(
+                    ok=False, page_path=page_slug,
+                    error="section mode requires a section slug",
+                )
+            _, sections = parse_sections(body)
+            for s in sections:
+                if s.slug == section:
+                    return CanvasOpResult(
+                        ok=True, canvas_id=canvas_id, page_path=page_slug,
+                        extra={
+                            "frontmatter": frontmatter,
+                            "body": s.body,
+                            "mode": "section",
+                            "section": s.slug,
+                            "heading": s.heading,
+                            "marker_summary": s.marker_summary,
+                            "marker_tokens": s.marker_tokens,
+                            "marker_last_updated": s.marker_last_updated,
+                            "has_marker": s.has_marker,
+                        },
+                    )
+            return CanvasOpResult(
+                ok=False, page_path=page_slug,
+                error=f"Section not found: {section!r}",
+            )
         return CanvasOpResult(
-            ok=True, canvas_id=canvas_id, page_path=page_slug,
-            extra={"frontmatter": frontmatter, "body": body},
+            ok=False, page_path=page_slug,
+            error=f"Unknown read mode: {mode!r}",
         )
 
     def _read_page_cached(self, page_path: Path) -> tuple[dict, str]:
@@ -574,7 +848,18 @@ class CanvasService:
         page_type: str | None = None,
         state: str | None = None,
         frontmatter_overrides: dict | None = None,
+        section: str = "",
     ) -> CanvasOpResult:
+        """Write a page (or one section of a page).
+
+        When ``section`` is empty, ``body`` replaces the full page body
+        (v1 behavior). When ``section=<slug>`` is passed, ``body`` replaces
+        just that section's body — the rest of the page is preserved,
+        and the section's marker metadata is updated (tokens +
+        last_updated). Section-targeted writes on pages that have no
+        matching slug return a structured error without modifying the
+        file.
+        """
         root = canvas_dir(self._data_dir, instance_id, canvas_id)
         root.mkdir(parents=True, exist_ok=True)
         try:
@@ -585,8 +870,9 @@ class CanvasService:
         # Preserve existing frontmatter when updating
         existing_fm: dict = {}
         prev_state: str = ""
+        existing_body: str = ""
         if page_path.is_file():
-            existing_fm, _ = self._read_page_cached(page_path)
+            existing_fm, existing_body = self._read_page_cached(page_path)
             prev_state = (existing_fm.get("state") or "").strip()
             # Version retention: copy old to .v{N}.md before overwrite
             version_num = 1
@@ -619,7 +905,36 @@ class CanvasService:
         new_fm["last_updated"] = utc_now()
         new_fm["last_updated_by"] = writer_member_id
 
-        rendered = serialize_frontmatter(new_fm, body or "")
+        # Resolve the new body. Section-targeted writes replace one
+        # section in the existing body; full writes use ``body`` as-is.
+        if section:
+            if not existing_body:
+                return CanvasOpResult(
+                    ok=False, page_path=page_slug,
+                    error=(
+                        f"Section-targeted write to {page_slug!r} but page has "
+                        "no existing body (or no sections parsed)."
+                    ),
+                )
+            new_body, replaced = replace_section_body(
+                existing_body, section, body or "",
+                last_updated=new_fm["last_updated"],
+            )
+            if not replaced:
+                return CanvasOpResult(
+                    ok=False, page_path=page_slug,
+                    error=f"Section not found: {section!r}",
+                )
+        else:
+            new_body = body or ""
+
+        # Refresh section tokens markers for all marker-bearing sections.
+        # Cheap pass; no-op on pages without markers.
+        new_body = maybe_refresh_section_tokens(
+            new_body, last_updated=new_fm["last_updated"],
+        )
+
+        rendered = serialize_frontmatter(new_fm, new_body)
         page_path.write_text(rendered, encoding="utf-8")
 
         # Invalidate cache entry
