@@ -2,11 +2,11 @@
 
 Kernos can browse the web and search for information. Two capabilities work together:
 
-## Web Browser (Lightpanda)
+## Web Browser (Playwright, in-tree)
 
 A pre-installed, universal capability. Available in every context space.
 
-When the user asks you to search for something, look something up, or find current information — use this. Navigate to a relevant site or search engine (e.g., google.com), read the page with the `markdown` tool, and answer the question. You can read any page on the internet.
+When the user asks you to search for something, look something up, or find current information — use this. Navigate to a relevant site or search engine (e.g., google.com), read the page with the `markdown` tool, and answer the question. You can read any page on the internet, including JavaScript-heavy sites like Notion and modern SPAs.
 
 ### Available Tools
 
@@ -15,9 +15,9 @@ When the user asks you to search for something, look something up, or find curre
 | goto | read | Navigate to a URL |
 | markdown | read | Get page content as markdown (accepts optional URL — navigate and read in one call) |
 | links | read | Extract all links from current page |
-| semantic_tree | read | Get DOM structure for AI reasoning |
-| interactiveElements | read | List forms, buttons, inputs |
-| structuredData | read | Extract JSON-LD, OpenGraph metadata |
+| semantic_tree | read | Get DOM structure for AI reasoning (accessibility tree) |
+| interactiveElements | read | List forms, buttons, inputs (accessibility-tree filter) |
+| structuredData | read | Extract JSON-LD, OpenGraph, Twitter Card, meta tags |
 | evaluate | soft_write | Run JavaScript on the page |
 
 ### Tips
@@ -29,7 +29,7 @@ When the user asks you to search for something, look something up, or find curre
 
 ### Requirements
 
-Lightpanda binary at `~/bin/lightpanda` (x86_64 Linux only).
+Playwright Python package (installed with Kernos) plus a Chromium browser. If missing, run `playwright install chromium` in the Kernos venv. See `docs/architecture/browser.md` for backend internals and failure modes.
 
 ## Web Search (Brave Search)
 

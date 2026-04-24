@@ -522,7 +522,7 @@ When setup instructions surface for a paste-capable platform, the agent is given
 
 - **google-calendar** — 13 tools (all preloaded with full schemas)
 - **brave-search** — 2 tools (brave_web_search, brave_local_search)
-- **lightpanda** — 7 tools (browser: goto, markdown, links, evaluate, semantic_tree, interactiveElements, structuredData)
+- **web-browser** — 7 tools (in-tree Playwright-backed: goto, markdown, links, evaluate, semantic_tree, interactiveElements, structuredData; see `docs/architecture/browser.md`)
 
 ### Capability Registry
 

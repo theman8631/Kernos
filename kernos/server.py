@@ -345,21 +345,13 @@ async def on_ready():
     else:
         logger.warning("BRAVE_API_KEY not set — web search tools unavailable")
 
-    lightpanda_path = os.getenv("LIGHTPANDA_PATH", os.path.expanduser("~/bin/lightpanda"))
-    if Path(lightpanda_path).is_file():
-        mcp_manager.register_server(
-            "lightpanda",
-            StdioServerParameters(
-                command=lightpanda_path,
-                args=["mcp"],
-            ),
-        )
-    else:
-        logger.warning(
-            "Lightpanda binary not found at %s — web browser tools unavailable. "
-            "Set LIGHTPANDA_PATH or install to ~/bin/lightpanda",
-            lightpanda_path,
-        )
+    mcp_manager.register_server(
+        "web-browser",
+        StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "kernos.browser"],
+        ),
+    )
 
     await mcp_manager.connect_all()
 

@@ -96,12 +96,15 @@ async def build_handler():
             ),
         )
 
-    lightpanda_path = os.getenv("LIGHTPANDA_PATH", os.path.expanduser("~/bin/lightpanda"))
-    if Path(lightpanda_path).is_file():
-        mcp_manager.register_server(
-            "lightpanda",
-            StdioServerParameters(command=lightpanda_path, args=["mcp"]),
-        )
+    import sys
+
+    mcp_manager.register_server(
+        "web-browser",
+        StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "kernos.browser"],
+        ),
+    )
 
     await mcp_manager.connect_all()
 

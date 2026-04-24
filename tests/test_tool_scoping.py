@@ -631,9 +631,9 @@ class TestLazyToolStubs:
         mcp = MagicMock()
         tool_list = [{"name": "evaluate", "description": "Run JavaScript on current page"}]
         mcp.get_tools.return_value = tool_list
-        mcp.get_tool_definitions.return_value = {"lightpanda": tool_list}
+        mcp.get_tool_definitions.return_value = {"web-browser": tool_list}
         cap = make_cap("web-browser", universal=True)
-        cap.server_name = "lightpanda"
+        cap.server_name = "web-browser"
         cap.tool_hints = {"evaluate": "run JS"}
         registry = make_registry(mcp=mcp)
         registry.register(cap)

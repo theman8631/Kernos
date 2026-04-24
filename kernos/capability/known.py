@@ -110,11 +110,9 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         },
         universal=True,
     ),
-    # Lightpanda: open-source headless browser with native MCP server.
-    # Binary: ~/bin/lightpanda (or LIGHTPANDA_PATH env var).
-    # Architecture: x86_64 Linux only. If deploying to ARM (Pi, Graviton),
-    # this MCP will need a different browser backend.
-    # GitHub: https://github.com/lightpanda-io/browser
+    # In-tree Playwright-backed MCP server (kernos/browser/).
+    # Replaces Lightpanda (weak JS execution). Requires a chromium install
+    # alongside the playwright Python package — see docs/architecture/browser.md.
     CapabilityInfo(
         name="web-browser",
         display_name="Web Browser",
@@ -129,7 +127,7 @@ KNOWN_CAPABILITIES: list[CapabilityInfo] = [
         status=CapabilityStatus.AVAILABLE,
         setup_hint="I can browse the web for you — no setup needed.",
         setup_requires=[],
-        server_name="lightpanda",
+        server_name="web-browser",
         tool_effects={
             "goto": "read",
             "markdown": "read",
