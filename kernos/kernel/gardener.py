@@ -42,6 +42,14 @@ from kernos.cohorts.gardener import (
     judge_initial_shape,
     judge_section_management,
 )
+from kernos.kernel.pattern_heuristics import (
+    CanvasEvaluationState,
+    HeuristicDecl,
+    HeuristicMatch,
+    evaluate_declaration,
+    parse_heuristic_declarations,
+    trigger_matches_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +87,13 @@ CONSENT_MODES = (
 NON_DESTRUCTIVE_ACTIONS = {"regenerate_summary"}
 
 #: Flags that are advisory only — never auto-apply, always surface.
-ADVISORY_ACTIONS = {"flag_stale", "flag_scope_mismatch"}
+ADVISORY_ACTIONS = {
+    "flag_stale", "flag_scope_mismatch",
+    # Pattern-heuristic-dispatch outputs (CANVAS-GARDENER-PATTERN-HEURISTICS)
+    "flag", "whisper", "alarm", "flag_library_upgrade",
+    "propose_subdivide", "propose_promote",
+    "propose_archive", "propose_transition",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +627,37 @@ class GardenerService:
                 continue
             proposals.append(decision)
 
+        # Pattern-specific heuristics (CANVAS-GARDENER-PATTERN-HEURISTICS).
+        # Runs only when the canvas declares a pattern. Adds to the same
+        # ``proposals`` bucket so confidence floor + coalescing + consent
+        # routing apply uniformly — Pattern 00 + pattern-declared use the
+        # same surface infrastructure.
+        pattern_name = (defaults.get("pattern") or "").strip()
+        if pattern_name and pattern_name != "unmatched":
+            await self._ensure_patterns_loaded(instance_id)
+            pattern_proposals = await self._evaluate_pattern_heuristics(
+                instance_id=instance_id,
+                canvas_id=canvas_id,
+                canvas_scope=canvas_scope,
+                canvas_defaults=defaults,
+                pattern_name=pattern_name,
+                event_type=event_type,
+                event_payload=payload,
+                page_path=page_path,
+                page_fm=page_fm,
+                page_body=page_body,
+            )
+            for decision in pattern_proposals:
+                if decision.surfaces:
+                    proposals.append(decision)
+                else:
+                    logger.info(
+                        "GARDENER_PATTERN_HEURISTIC_LOW_CONFIDENCE: "
+                        "canvas=%s pattern=%s action=%s confidence=%s",
+                        canvas_id, pattern_name, decision.action,
+                        decision.confidence,
+                    )
+
         if not proposals:
             return
 
@@ -721,6 +766,255 @@ class GardenerService:
                 },
             )
         return None
+
+    # ---- Pattern-specific heuristics (CANVAS-GARDENER-PATTERN-HEURISTICS) -
+
+    async def _evaluate_pattern_heuristics(
+        self,
+        *,
+        instance_id: str,
+        canvas_id: str,
+        canvas_scope: str,
+        canvas_defaults: dict,
+        pattern_name: str,
+        event_type: str,
+        event_payload: dict,
+        page_path: str,
+        page_fm: dict,
+        page_body: str,
+    ) -> list[GardenerDecision]:
+        """Dispatch the declared pattern's heuristics against a canvas event.
+
+        Pulls the pattern page from the PatternCache, parses its fenced
+        YAML declarations, filters to active + trigger-matching entries,
+        and evaluates deterministic heuristics inline. Semantic heuristics
+        (when active) route through the existing Gardener consultation
+        path — per spec, no new prompt infrastructure is introduced.
+
+        Emits the upgrade-finding path (``flag_library_upgrade``) when the
+        pattern page exists but carries no structured declaration block —
+        seeded canvases lagging the library become visibly less capable
+        rather than silently-Pattern-00-only.
+
+        Always returns a list (possibly empty). Errors are logged and
+        swallowed — a bad declaration must not break canvas ops.
+        """
+        decisions: list[GardenerDecision] = []
+        cached = self._patterns.get(pattern_name)
+        if cached is None:
+            # Pattern named on canvas but not in the library cache — the
+            # library may be missing pages. Surface as upgrade finding so
+            # the operator investigates rather than silent downgrade.
+            decisions.append(self._make_upgrade_finding_decision(
+                canvas_id=canvas_id,
+                pattern_name=pattern_name,
+                reason=f"pattern {pattern_name!r} not found in Workflow Patterns canvas",
+            ))
+            return decisions
+
+        declarations = parse_heuristic_declarations(cached.body)
+        if not declarations:
+            # Pattern page exists but has no structured block — pre-batch
+            # pattern. Emit upgrade finding once per canvas event; the
+            # coalescer dedupes repeated emissions across the window.
+            decisions.append(self._make_upgrade_finding_decision(
+                canvas_id=canvas_id,
+                pattern_name=pattern_name,
+                reason=(
+                    f"pattern {pattern_name!r} in library has no structured "
+                    "heuristics block; seeded before CANVAS-GARDENER-PATTERN-"
+                    "HEURISTICS and reads as pre-batch. Edit the library page "
+                    "or re-seed to gain pattern-specific dispatch."
+                ),
+            ))
+            return decisions
+
+        # Build the evaluation state once; handlers read from it.
+        eval_state = CanvasEvaluationState(
+            canvas_id=canvas_id,
+            page_index=await self._build_page_index(instance_id, canvas_id),
+            page_path=page_path,
+            page_body=page_body,
+            page_frontmatter=page_fm,
+            event_type=event_type,
+            event_payload=event_payload,
+            canvas_anchors=self._extract_canvas_anchors(canvas_defaults),
+        )
+
+        for decl in declarations:
+            if not decl.is_active:
+                continue
+            if not trigger_matches_event(decl, event_type, event_payload):
+                continue
+
+            if decl.is_semantic:
+                # Semantic declarations route through the existing Gardener
+                # consultation path. Per spec, Pattern 01's two semantic
+                # heuristics ship with status=disabled by default; this
+                # branch fires only when a pattern author opts in.
+                semantic_decision = await self._evaluate_semantic_declaration(
+                    instance_id=instance_id, canvas_id=canvas_id,
+                    pattern_name=pattern_name, decl=decl,
+                    eval_state=eval_state,
+                )
+                if semantic_decision is not None:
+                    decisions.append(semantic_decision)
+                continue
+
+            match = evaluate_declaration(decl, eval_state)
+            if match is None or not match.fired:
+                continue
+            decisions.append(self._match_to_decision(decl, match))
+
+        return decisions
+
+    @staticmethod
+    def _make_upgrade_finding_decision(
+        *, canvas_id: str, pattern_name: str, reason: str,
+    ) -> GardenerDecision:
+        """Upgrade-finding surface for pre-batch pattern pages (acceptance criterion 11)."""
+        return GardenerDecision(
+            action="flag_library_upgrade",
+            confidence="high",
+            rationale=(
+                f"Canvas uses pattern {pattern_name!r} but its library page "
+                f"is missing structured heuristic declarations — falling back "
+                f"to Pattern 00 cross-pattern rules only. {reason}"
+            ),
+            affected_pages=[],
+            payload={
+                "pattern": pattern_name,
+                "canvas_id": canvas_id,
+                "upgrade_required": True,
+            },
+        )
+
+    @staticmethod
+    def _match_to_decision(
+        decl: HeuristicDecl, match: HeuristicMatch,
+    ) -> GardenerDecision:
+        """Convert a HeuristicMatch into a GardenerDecision for surfacing.
+
+        The declaration's ``confidence`` vocabulary (``deterministic-high``
+        / ``llm-judgment``) doesn't map 1:1 to GardenerDecision's
+        ``confidence`` (``low`` / ``medium`` / ``high``). The mapping:
+
+          - ``deterministic-high`` → ``high`` (threshold clearly met by
+            construction — otherwise the deterministic check would have
+            returned None before reaching here)
+          - ``llm-judgment`` → inherits the LLM output's own confidence;
+            if the match carries a raw ``low``/``medium``/``high``, pass
+            through, else default to ``high`` for a fired semantic match
+
+        Keeps the declaration-layer vocabulary separate from the internal
+        surface-or-not gate so the two can evolve independently.
+        """
+        raw = match.confidence
+        if raw == "deterministic-high":
+            surface_conf = "high"
+        elif raw in ("low", "medium", "high"):
+            surface_conf = raw
+        else:
+            # llm-judgment without a clamped inner confidence — treat as
+            # surfacing by default (the match fired, the LLM was decisive).
+            surface_conf = "high"
+        return GardenerDecision(
+            action=decl.action.get("kind", "flag"),
+            confidence=surface_conf,
+            rationale=match.rationale,
+            affected_pages=list(match.affected_pages),
+            payload={
+                "declaration_id": decl.id,
+                "declared_confidence": raw,
+                **(match.payload or {}),
+            },
+        )
+
+    async def _build_page_index(
+        self, instance_id: str, canvas_id: str,
+    ) -> list[dict]:
+        try:
+            return await self._canvas.page_list(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("PATTERN_HEURISTICS_PAGE_INDEX_FAILED: %s", exc)
+            return []
+
+    @staticmethod
+    def _extract_canvas_anchors(canvas_defaults: dict) -> dict:
+        """Named date anchors on the canvas — used by date-relative-window.
+
+        Pattern 05 (time-bounded-event) expects canvas.yaml to carry an
+        ``event_date`` field; generic extraction pattern here so future
+        patterns can add their own named anchors without code changes.
+        """
+        anchors: dict = {}
+        for key in ("event_date", "launch_date", "anchor_date"):
+            value = canvas_defaults.get(key)
+            if value:
+                anchors[key] = value
+        return anchors
+
+    async def _evaluate_semantic_declaration(
+        self, *, instance_id: str, canvas_id: str, pattern_name: str,
+        decl: HeuristicDecl, eval_state: CanvasEvaluationState,
+    ) -> GardenerDecision | None:
+        """Route a semantic declaration through the existing consultation path.
+
+        Per spec acceptance criterion 5: no new prompt infrastructure.
+        We build an EvolutionContext around the declaration + eval state
+        and let ``consult_evolution`` produce a judgment. The declared
+        action kind wins over whatever the LLM proposes; confidence is
+        clamped by the declaration's declared ``llm-judgment`` level
+        combined with the LLM's own confidence output.
+
+        Pattern 01 ships its two semantic heuristics with
+        ``status: disabled`` by default; this branch fires only when a
+        library author has enabled one. Minimal-viable wiring — the
+        MODEL-SELECTION-MODULE / future prompt-registry batch would
+        harden this further.
+        """
+        try:
+            ctx = EvolutionContext(
+                instance_id=instance_id,
+                canvas_id=canvas_id,
+                canvas_pattern=pattern_name,
+                event_type=eval_state.event_type,
+                page_path=eval_state.page_path,
+                page_summary=eval_state.page_body[:2000],
+                canvas_pages_index=eval_state.page_index,
+                cross_pattern_heuristics=self._patterns.cross_pattern_body(),
+                pattern_heuristics=(
+                    f"Heuristic id: {decl.id}\n"
+                    f"Prompt key: {decl.signal.get('prompt_key')}\n"
+                    f"Declared action on match: {decl.action.get('kind')}\n"
+                    f"Inputs available: {sorted((decl.signal.get('inputs') or {}).keys())}"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("GARDENER_SEMANTIC_CTX_BUILD_FAILED: %s", exc)
+            return None
+
+        llm_decision = await self.consult_evolution(ctx)
+        if llm_decision is None or llm_decision.action == "none":
+            return None
+        # Clamp to the declaration's action kind — declaration authority
+        # trumps the LLM's action selection (LLM provides the judgment,
+        # not the taxonomy).
+        return GardenerDecision(
+            action=decl.action.get("kind", llm_decision.action),
+            confidence=llm_decision.confidence,
+            rationale=(
+                f"[{decl.id}] {llm_decision.rationale or 'semantic heuristic fired'}"
+            ),
+            affected_pages=llm_decision.affected_pages or [eval_state.page_path],
+            payload={
+                "declaration_id": decl.id,
+                "source": "semantic",
+                **(llm_decision.payload or {}),
+            },
+        )
 
     # ---- Consent routing -------------------------------------------------
 

@@ -84,6 +84,193 @@ Status transitions are routable targets. `status: approved` can route to a conte
 - Monthly: Gardener proposes Architecture Map review — any primitives added, any relationships changed, any deprecations due
 - Per-phase-close: Gardener proposes phase archival and new phase authoring
 
+```yaml
+# Structured declarations of the heuristics described in the prose above.
+# The Gardener dispatches from this block; the prose remains the
+# authoritative human-readable source. Disabled entries exist for
+# library-maintenance audit but do not fire until their blockers clear
+# (noted inline).
+heuristics:
+  - id: spec-count-subdivision
+    trigger: page-created
+    scope:
+      path_glob: "specs/*.md"
+    signal:
+      type: deterministic
+      check: page-count
+      params:
+        path_glob: "specs/*.md"
+        threshold: 12
+    action:
+      kind: propose_subdivide
+      params:
+        target: "specs/<subsystem>/"
+    confidence: deterministic-high
+    coalesce:
+      key: spec-count
+    status: active
+
+  - id: spec-size-split
+    trigger: page-changed
+    scope:
+      path_glob: "specs/*.md"
+    signal:
+      type: deterministic
+      check: page-size-lines
+      params:
+        threshold: 400
+    action:
+      kind: propose_split
+      params:
+        parent_keeps: [scope_declaration, pillar_tags]
+    confidence: deterministic-high
+    coalesce:
+      key: spec-size
+    status: active
+
+  - id: phase-focus-stale
+    trigger: page-changed
+    signal:
+      type: deterministic
+      check: duration-since-write
+      params:
+        page_path: "phase.md"
+        threshold_days: 21
+    action:
+      kind: propose_transition
+      params:
+        target: "phase.md"
+        note: "current focus unchanged for 3+ weeks"
+    confidence: deterministic-high
+    coalesce:
+      key: phase-stale
+    status: active
+
+  - id: manifest-sync-lag
+    trigger: page-changed
+    signal:
+      type: deterministic
+      check: duration-since-write
+      params:
+        page_path: "manifest.md"
+        threshold_days: 28
+    action:
+      kind: flag
+      params:
+        surface: implementer
+        note: "manifest untouched 4+ weeks while work continues"
+    confidence: deterministic-high
+    coalesce:
+      key: manifest-sync
+    status: active
+
+  - id: spec-missing-pillar
+    trigger: page-state-changed
+    scope:
+      path_glob: "specs/*.md"
+      to_state: approved
+    signal:
+      type: deterministic
+      check: missing-frontmatter-field
+      params:
+        field: pillar
+    action:
+      kind: flag
+      params:
+        surface: pre-approval-block
+        note: "spec cannot route to implementation without pillar declaration"
+    confidence: deterministic-high
+    coalesce:
+      key: missing-pillar
+    status: active
+
+  # --- Disabled: blocked on CANVAS-CROSS-PAGE-INDEX ---------------------
+  # These require a cross-page reference index that doesn't ship until a
+  # follow-on batch. Declarations live here so library authors can audit
+  # the full Pattern 01 heuristic set.
+
+  - id: deferred-promotion
+    trigger: page-changed
+    signal:
+      type: deterministic
+      check: reference-count
+      params:
+        target: "deferred-items"
+        threshold: 3
+    action:
+      kind: propose_promote
+      params:
+        target: "tracking-page-or-next-phase"
+    confidence: deterministic-high
+    coalesce:
+      key: deferred-promotion
+    status: disabled
+
+  - id: component-decision-pressure
+    trigger: page-changed
+    scope:
+      path_glob: "ledger.md"
+    signal:
+      type: deterministic
+      check: reference-count
+      params:
+        target: "component-tag"
+        threshold: 5
+    action:
+      kind: propose_promote
+      params:
+        target: "component-specific-decision-page"
+    confidence: deterministic-high
+    coalesce:
+      key: component-pressure
+    status: disabled
+
+  # --- Disabled: semantic heuristics ------------------------------------
+  # Per CANVAS-GARDENER-PATTERN-HEURISTICS spec: Pattern 01's two
+  # semantic heuristics ship declared but disabled by default. Enable
+  # requires confirming the Gardener consultation path handles the
+  # prompt_key inputs as described.
+
+  - id: pillar-conflict
+    trigger: page-state-changed
+    scope:
+      path_glob: "specs/*.md"
+      to_state: approved
+    signal:
+      type: semantic
+      prompt_key: pillar-conflict-detector
+      inputs:
+        new_spec_body: $PAGE_BODY
+        same_pillar_specs: $SAME_PILLAR_SPECS
+    action:
+      kind: flag
+      params:
+        surface: charter-level-resolution
+    confidence: llm-judgment
+    coalesce:
+      key: pillar-conflict
+    status: disabled
+
+  - id: primitive-overlap
+    trigger: page-changed
+    scope:
+      path_glob: "ledger.md"
+    signal:
+      type: semantic
+      prompt_key: primitive-overlap-detector
+      inputs:
+        recent_decisions: $RECENT_DECISIONS
+        architecture_body: $ARCHITECTURE_BODY
+    action:
+      kind: flag
+      params:
+        surface: architecture-level-disambiguation
+    confidence: llm-judgment
+    coalesce:
+      key: primitive-overlap
+    status: disabled
+```
+
 ## Member intent hooks
 
 Natural-language patterns the Gardener should translate into persistent preferences:

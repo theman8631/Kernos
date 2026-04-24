@@ -100,6 +100,91 @@ supersedes: <prior-canon-entry-if-retcon>
 - Per-arc-close: Gardener proposes arc archival + new arc authoring + open-thread disposition
 - Periodic: "Who did we meet" surface — Gardener can produce NPC-met list filtered by session-range on request
 
+```yaml
+# Smoke-migration block — proves the declaration format carries forward
+# from the reference pattern (01-software-development) to a second
+# pattern without format revision. Only a subset of Pattern 02's prose
+# heuristics is declared here; the rest await the per-pattern migration
+# batches. Every prose heuristic in the sections above remains
+# authoritative; declarations are additive.
+heuristics:
+  - id: location-archive-stale
+    trigger: page-changed
+    scope:
+      path_glob: "locations/*.md"
+    signal:
+      type: deterministic
+      check: duration-since-write
+      params:
+        threshold_days: 180
+    action:
+      kind: propose_archive
+      params:
+        target: "locations/archive/"
+        reversible: true
+    confidence: deterministic-high
+    coalesce:
+      key: location-archive
+    status: active
+
+  - id: arc-stagnation
+    trigger: page-changed
+    scope:
+      path_glob: "arc-current.md"
+    signal:
+      type: deterministic
+      check: duration-since-write
+      params:
+        page_path: "arc-current.md"
+        threshold_days: 42
+    action:
+      kind: propose_transition
+      params:
+        note: "arc-current unchanged for 6+ weeks; propose arc-close + new arc"
+    confidence: deterministic-high
+    coalesce:
+      key: arc-stagnation
+    status: active
+
+  # --- Disabled: blocked on CANVAS-CROSS-PAGE-INDEX ---------------------
+  - id: npc-promote-on-mention
+    trigger: page-reference-added
+    signal:
+      type: deterministic
+      check: reference-count
+      params:
+        target: "npc"
+        threshold: 3
+    action:
+      kind: propose_promote
+      params:
+        target: "npcs/<name>.md"
+    confidence: deterministic-high
+    coalesce:
+      key: npc-promote
+    status: disabled
+
+  # --- Disabled: semantic -----------------------------------------------
+  - id: session-npc-heavy
+    trigger: page-created
+    scope:
+      path_glob: "sessions/*.md"
+    signal:
+      type: semantic
+      prompt_key: session-npc-density-check
+      inputs:
+        session_body: $PAGE_BODY
+    action:
+      kind: whisper
+      params:
+        surface: gm
+        note: "session may be NPC-heavy; consider cast-list sidebar"
+    confidence: llm-judgment
+    coalesce:
+      key: npc-density
+    status: disabled
+```
+
 ## Member intent hooks
 
 - "Remember this is canon" → `preferences.canon-routing: immediate` — utterance triggers append to canon.md with `type: fact` or `type: ruling`
