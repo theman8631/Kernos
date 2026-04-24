@@ -773,6 +773,229 @@ class CanvasService:
             extra={"name": canvas.name, "scope": scope, "notify": notify},
         )
 
+    # ---- Preferences (CANVAS-GARDENER-PREFERENCE-CAPTURE) ----------------
+
+    async def get_preferences(
+        self, *, instance_id: str, canvas_id: str,
+    ) -> dict:
+        """Return confirmed preferences from canvas.yaml's ``preferences:`` map.
+
+        Empty dict when no preferences are set. Callers reading for
+        heuristic-dispatch consumption should treat missing keys as
+        "no override" rather than errors.
+        """
+        defaults = await self._canvas_defaults(instance_id, canvas_id)
+        prefs = defaults.get("preferences")
+        return dict(prefs) if isinstance(prefs, dict) else {}
+
+    async def set_preference(
+        self, *, instance_id: str, canvas_id: str,
+        name: str, value: Any,
+    ) -> bool:
+        """Persist a confirmed preference to canvas.yaml. Overwrites on match.
+
+        ``name`` is the preference key (e.g. ``rsvp-routing``). ``value`` is
+        any YAML-serializable scalar / list / dict — the string form a
+        heuristic's ``threshold_preference`` or ``suppressed_by_preference``
+        field will read.
+        """
+        return await self._mutate_canvas_yaml(
+            instance_id, canvas_id,
+            lambda data: data.setdefault("preferences", {}).__setitem__(name, value) or True,
+        )
+
+    async def remove_preference(
+        self, *, instance_id: str, canvas_id: str, name: str,
+    ) -> bool:
+        """Delete a confirmed preference. Idempotent — missing key is a no-op True."""
+        def _remove(data: dict) -> bool:
+            prefs = data.get("preferences") or {}
+            if isinstance(prefs, dict) and name in prefs:
+                del prefs[name]
+            return True
+        return await self._mutate_canvas_yaml(instance_id, canvas_id, _remove)
+
+    async def get_pending_preferences(
+        self, *, instance_id: str, canvas_id: str,
+    ) -> list[dict]:
+        """Return pending preferences (awaiting confirmation) from canvas.yaml.
+
+        Each entry: ``{name, value, effect_kind, evidence, surfaced_at,
+        confidence, supersedes?}``. Order matches insertion.
+        """
+        defaults = await self._canvas_defaults(instance_id, canvas_id)
+        pending = defaults.get("pending_preferences") or []
+        if not isinstance(pending, list):
+            return []
+        return [dict(p) for p in pending if isinstance(p, dict)]
+
+    async def add_pending_preference(
+        self, *, instance_id: str, canvas_id: str, preference: dict,
+    ) -> bool:
+        """Append a preference to the pending list. Stamps surfaced_at if absent.
+
+        Idempotent on preference name: if a pending preference with the
+        same name already exists, this replaces it rather than appending a
+        duplicate. Callers that want to superseded a prior confirmed
+        preference should set ``preference["supersedes"]`` to that name.
+        """
+        name = (preference.get("name") or "").strip()
+        if not name:
+            return False
+        entry = dict(preference)
+        entry["name"] = name
+        entry.setdefault("surfaced_at", utc_now())
+
+        def _add(data: dict) -> bool:
+            pending = data.get("pending_preferences")
+            if not isinstance(pending, list):
+                pending = []
+                data["pending_preferences"] = pending
+            # Replace-if-exists semantics.
+            filtered = [p for p in pending if not (isinstance(p, dict) and p.get("name") == name)]
+            filtered.append(entry)
+            data["pending_preferences"] = filtered
+            return True
+        return await self._mutate_canvas_yaml(instance_id, canvas_id, _add)
+
+    async def resolve_pending_preference(
+        self, *, instance_id: str, canvas_id: str,
+        name: str, action: str,
+    ) -> dict | None:
+        """Move a pending preference to confirmed (``action='confirm'``) or
+        declined (``action='discard'``).
+
+        Returns the resolved preference dict on success, or None when the
+        pending entry wasn't found or the action is invalid.
+
+        ``action='confirm'``: writes ``preferences[name] = value`` and
+        removes from pending.
+
+        ``action='discard'``: removes from pending and appends to
+        ``declined_preferences`` (timestamped) so extraction can avoid
+        re-proposing the same utterance shape within a decline window.
+        """
+        if action not in ("confirm", "discard"):
+            return None
+
+        resolved: dict | None = None
+
+        def _resolve(data: dict) -> bool:
+            nonlocal resolved
+            pending = data.get("pending_preferences") or []
+            if not isinstance(pending, list):
+                return False
+            remaining = []
+            found: dict | None = None
+            for entry in pending:
+                if isinstance(entry, dict) and entry.get("name") == name:
+                    found = entry
+                else:
+                    remaining.append(entry)
+            if found is None:
+                return False
+            data["pending_preferences"] = remaining
+            if action == "confirm":
+                prefs = data.setdefault("preferences", {})
+                if not isinstance(prefs, dict):
+                    prefs = {}
+                    data["preferences"] = prefs
+                prefs[name] = found.get("value")
+                resolved = {"action": "confirm", "name": name,
+                            "value": found.get("value")}
+            else:
+                declined = data.setdefault("declined_preferences", [])
+                if not isinstance(declined, list):
+                    declined = []
+                    data["declined_preferences"] = declined
+                declined.append({
+                    "name": name,
+                    "value": found.get("value"),
+                    "evidence": found.get("evidence", ""),
+                    "declined_at": utc_now(),
+                })
+                resolved = {"action": "discard", "name": name,
+                            "value": found.get("value")}
+            return True
+
+        ok = await self._mutate_canvas_yaml(instance_id, canvas_id, _resolve)
+        return resolved if ok else None
+
+    async def drop_expired_pending_preferences(
+        self, *, instance_id: str, canvas_id: str, ttl_hours: int = 24,
+    ) -> int:
+        """Remove pending preferences whose ``surfaced_at`` is older than ttl.
+
+        Returns the number of entries dropped. Called by the Gardener on
+        event dispatch so pending preferences auto-expire even when the
+        member never responds.
+        """
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        now = _dt.now(_tz.utc)
+        window = _td(hours=ttl_hours)
+        dropped_count = 0
+
+        def _drop(data: dict) -> bool:
+            nonlocal dropped_count
+            pending = data.get("pending_preferences") or []
+            if not isinstance(pending, list):
+                return False
+            kept: list[dict] = []
+            for entry in pending:
+                if not isinstance(entry, dict):
+                    continue
+                stamped = entry.get("surfaced_at")
+                if not stamped:
+                    kept.append(entry)
+                    continue
+                try:
+                    when = _dt.fromisoformat(str(stamped).replace("Z", "+00:00"))
+                except ValueError:
+                    kept.append(entry)
+                    continue
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=_tz.utc)
+                if (now - when) < window:
+                    kept.append(entry)
+                else:
+                    dropped_count += 1
+            if dropped_count:
+                data["pending_preferences"] = kept
+                return True
+            return False
+
+        await self._mutate_canvas_yaml(instance_id, canvas_id, _drop)
+        return dropped_count
+
+    async def _mutate_canvas_yaml(
+        self, instance_id: str, canvas_id: str,
+        mutator,
+    ) -> bool:
+        """Load canvas.yaml, run mutator(data) → bool, save if True.
+
+        Shared mutation helper for preference read/write. Fails soft —
+        missing file or parse error returns False rather than raising so
+        canvas ops stay non-breaking.
+        """
+        try:
+            root = canvas_dir(self._data_dir, instance_id, canvas_id)
+            yaml_path = root / "canvas.yaml"
+            if not yaml_path.is_file():
+                return False
+            parsed = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            if not isinstance(parsed, dict):
+                return False
+            if mutator(parsed):
+                yaml_path.write_text(
+                    yaml.safe_dump(parsed, sort_keys=False, default_flow_style=False),
+                    encoding="utf-8",
+                )
+                return True
+            return True  # mutator declined to change anything — still OK
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CANVAS_YAML_MUTATE_FAILED: %s", exc)
+            return False
+
     # ---- Reference index (CANVAS-CROSS-PAGE-INDEX) -----------------------
 
     async def get_reference_index(
