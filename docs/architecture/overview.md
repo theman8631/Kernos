@@ -103,7 +103,7 @@ Scoped directories of markdown pages — personal / specific-members / team — 
 
 ### [The Gardener →](gardener.md)
 
-The third cohort — bounded canvas-shape authority. Picks the initial pattern at `canvas_create` time by consulting the Workflow Patterns library; runs continuous-evolution heuristics on page events; surfaces reshape proposals with confidence-floor + 24-hour coalescing discipline so members see proposals at most once or twice a week per canvas.
+The third cohort — bounded canvas-shape authority. Picks the initial pattern at `canvas_create` time by consulting the Workflow Patterns library; runs continuous-evolution heuristics on page events; surfaces reshape proposals with confidence-floor + 24-hour coalescing discipline so members see proposals at most once or twice a week per canvas. **Every Gardener action except retrieval is fire-and-forget** — the primary agent never waits on Gardener work in the turn path.
 
 *(This is six, not five. The sixth — Cognitive UI grammar — is the structural companion to the other five; it's how the cohort-produced context actually lands in the agent's prompt.)*
 

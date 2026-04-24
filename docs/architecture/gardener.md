@@ -16,6 +16,20 @@ The gap is judgment: *what shape should this canvas have, given what the member 
 
 The Gardener is the piece of Kernos that picks.
 
+## Asynchrony invariant
+
+**Every Gardener action except retrieval is fire-and-forget from the primary agent.** A turn that triggers three Gardener actions costs the same end-to-end as the same turn with zero Gardener actions — the Gardener work completes in the background, not in the primary-agent path.
+
+The one synchronous exception is **retrieval**: when the primary agent explicitly asks the Gardener for context (e.g., a consultation surface that informs the primary's next move) and awaits the response. That's synchronous by necessity — the primary needs the answer to proceed.
+
+Three disciplines *compose* with the invariant; they don't replace it. Removing any one of them would erode turn-latency protection even while the invariant technically held:
+
+- **Cheap-chain routing** — cohort-primitive consultations run on the lightweight model tier, not the primary
+- **24-hour coalescing** — high-confidence proposals for a canvas coalesce into at most one surface per window, so proposal density stays sparse regardless of dispatch frequency
+- **High-confidence-only surfacing** — low and medium confidence matches log for pattern-tuning audit but don't wake members
+
+**Why this matters.** Gardener work scales with canvas count × event frequency × declared-heuristic count. Pattern migrations will increase declared heuristics; preference capture (deferred Pillar 5) will add new judgment surfaces; future pattern-library expansion will bring more canvases into the dispatch set. The async invariant is what lets that scaling stay invisible to per-turn latency. Any proposal to introduce a blocking Gardener call in the primary-agent path is a Charter-adjacent change and requires architect-level review — it's not just adding a feature, it's altering a load-bearing property of the agent experience.
+
 ## Bounded judgment
 
 The Gardener's authority is explicitly narrow:
