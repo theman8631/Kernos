@@ -9,7 +9,7 @@ Schema (YAML):
     chains:
       primary:
         - {provider: anthropic, model: claude-opus-4-7}
-        - {provider: openai,    model: gpt-5.3}
+        - {provider: openai,    model: gpt-5.5}
       cheap:
         - {provider: anthropic, model: claude-haiku-4-5}
       simple:
