@@ -7,6 +7,8 @@ Tool HANDLERS remain in ReasoningService for now (they need the full service con
 from kernos.kernel.tools.schemas import (
     CANVAS_CREATE_TOOL,
     CANVAS_LIST_TOOL,
+    CANVAS_PREFERENCE_CONFIRM_TOOL,
+    CANVAS_PREFERENCE_EXTRACT_TOOL,
     DIAGNOSE_LLM_CHAIN_TOOL,
     DIAGNOSE_MESSENGER_TOOL,
     INSPECT_PARCEL_TOOL,
@@ -34,6 +36,8 @@ from kernos.kernel.tools.schemas import (
 __all__ = [
     "CANVAS_CREATE_TOOL",
     "CANVAS_LIST_TOOL",
+    "CANVAS_PREFERENCE_CONFIRM_TOOL",
+    "CANVAS_PREFERENCE_EXTRACT_TOOL",
     "DIAGNOSE_LLM_CHAIN_TOOL",
     "DIAGNOSE_MESSENGER_TOOL",
     "INSPECT_PARCEL_TOOL",

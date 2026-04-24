@@ -183,6 +183,71 @@ PAGE_LIST_TOOL = {
 }
 
 
+CANVAS_PREFERENCE_EXTRACT_TOOL = {
+    "name": "canvas_preference_extract",
+    "description": (
+        "Extract a canvas-behavior preference from a member utterance on a "
+        "canvas that has a declared pattern. Runs the Gardener's "
+        "preference-extraction consultation; if the utterance maps cleanly "
+        "to a suppression-class or threshold-class effect at high confidence, "
+        "the preference lands in the canvas's pending_preferences list and "
+        "the tool returns the extracted shape for you to surface to the user "
+        "for explicit confirmation. Preferences whose effect isn't wired in "
+        "v1 (routing, scope, authority delegation) silently no-op — the "
+        "utterance flows through the normal covenant/standing-order path. "
+        "Also no-ops on a canvas without a declared pattern, or on neutral "
+        "utterances that don't match the pattern's intent-hook vocabulary."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "string"},
+            "utterance": {
+                "type": "string",
+                "description": (
+                    "The member's verbatim utterance — not a paraphrase. "
+                    "The consultation validates subject matter; passing a "
+                    "covenant-shaped utterance (agent-behavior-across-contexts) "
+                    "gets rejected at the extraction layer."
+                ),
+            },
+        },
+        "required": ["canvas_id", "utterance"],
+    },
+}
+
+
+CANVAS_PREFERENCE_CONFIRM_TOOL = {
+    "name": "canvas_preference_confirm",
+    "description": (
+        "Resolve a pending preference: either confirm it (promotes to the "
+        "canvas's confirmed preferences, where heuristic dispatch honors it) "
+        "or discard it (moves to declined_preferences for audit). Only the "
+        "member's explicit consent drives confirmation — never auto-apply, "
+        "even on a canvas with gardener_consent=auto-all. Pending preferences "
+        "older than 24 hours auto-expire on the next Gardener dispatch; this "
+        "tool returns an error if the named pending preference is already "
+        "gone."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "string"},
+            "preference_name": {
+                "type": "string",
+                "description": "Name of the pending preference, from canvas_preference_extract's output.",
+            },
+            "action": {
+                "type": "string",
+                "enum": ["confirm", "discard"],
+                "description": "confirm to persist; discard to drop with audit trail.",
+            },
+        },
+        "required": ["canvas_id", "preference_name", "action"],
+    },
+}
+
+
 PAGE_SEARCH_TOOL = {
     "name": "page_search",
     "description": (

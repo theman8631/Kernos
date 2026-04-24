@@ -106,6 +106,11 @@ class DispatchGate:
             # (creates a new shared-state primitive — classified separately
             # below so the model-check path applies).
             "page_write",
+            # CANVAS-GARDENER-PREFERENCE-CAPTURE: both preference tools
+            # mutate canvas.yaml (pending_preferences + confirmed preferences
+            # lists). Reversible — the confirm/discard action is explicit.
+            "canvas_preference_extract",
+            "canvas_preference_confirm",
         }
 
         if tool_name in _KERNEL_READS:

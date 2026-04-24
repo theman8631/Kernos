@@ -266,6 +266,39 @@ EXPLICIT_PREFERENCE_PHRASES: tuple[str, ...] = (
 )
 
 
+#: ``preferences.<name>:`` tokens in a pattern's Member-intent-hook prose.
+#: Used by the extraction tool to populate
+#: :attr:`PreferenceExtractionContext.known_intent_hook_names`.
+_INTENT_HOOK_NAME_RE = __import__("re").compile(r"preferences\.([\w-]+)\s*:")
+_INTENT_HOOK_SECTION_RE = __import__("re").compile(
+    r"##\s+Member intent hooks\s*\n(.*?)(?=\n##\s+|\Z)",
+    __import__("re").DOTALL | __import__("re").IGNORECASE,
+)
+
+
+def extract_intent_hook_names(pattern_body: str) -> list[str]:
+    """Parse ``preferences.<name>:`` tokens from a pattern's
+    ``## Member intent hooks`` section.
+
+    The pattern-library convention writes intent hooks as bullets:
+    ``"Track what's shipped" → `preferences.manifest-routing: operator-on-change` — ...``.
+    Every ``preferences.<name>:`` occurrence in the section is harvested
+    as a known preference vocabulary entry. Returns an empty list when
+    the section is absent.
+    """
+    if not pattern_body:
+        return []
+    section_match = _INTENT_HOOK_SECTION_RE.search(pattern_body)
+    if not section_match:
+        return []
+    seen: list[str] = []
+    for m in _INTENT_HOOK_NAME_RE.finditer(section_match.group(1)):
+        name = m.group(1)
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
 def detect_explicit_phrases(utterance: str) -> bool:
     """Return True when the utterance carries a preference-explicit phrase.
 

@@ -624,6 +624,22 @@ class GardenerService:
         if consent_mode not in CONSENT_MODES:
             consent_mode = "propose-all"
 
+        # CANVAS-GARDENER-PREFERENCE-CAPTURE: drop pending preferences that
+        # expired without member response (24h TTL). Runs before heuristic
+        # evaluation so current pending-state is accurate. Any drop mutates
+        # canvas.yaml, so re-fetch defaults afterwards if needed.
+        try:
+            dropped = await self._canvas.drop_expired_pending_preferences(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+            if dropped:
+                logger.info(
+                    "GARDENER_PENDING_PREFS_EXPIRED: canvas=%s dropped=%d",
+                    canvas_id, dropped,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("GARDENER_PREFS_TTL_FAILED: %s", exc)
+
         page_read = await self._canvas.page_read(
             instance_id=instance_id, canvas_id=canvas_id, page_slug=page_path,
         )

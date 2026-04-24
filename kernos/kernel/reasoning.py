@@ -521,7 +521,7 @@ class ReasoningService:
         return "".join(text_parts)
 
     # Kernel tools: intercepted before MCP, never passed through to external servers
-    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain", "diagnose_messenger", "canvas_list", "canvas_create", "page_read", "page_write", "page_list", "page_search"}
+    _KERNEL_TOOLS = {"remember", "remember_details", "write_file", "read_file", "list_files", "delete_file", "dismiss_whisper", "read_source", "read_doc", "read_soul", "update_soul", "manage_covenants", "manage_capabilities", "manage_channels", "send_to_channel", "manage_schedule", "inspect_state", "request_tool", "execute_code", "manage_workspace", "register_tool", "manage_plan", "read_runtime_trace", "diagnose_issue", "propose_fix", "submit_spec", "manage_members", "send_relational_message", "resolve_relational_message", "set_chain_model", "diagnose_llm_chain", "diagnose_messenger", "canvas_list", "canvas_create", "page_read", "page_write", "page_list", "page_search", "canvas_preference_extract", "canvas_preference_confirm"}
 
     # ---------------------------------------------------------------------------
     # Dispatch Gate (3D-HOTFIX)
@@ -865,7 +865,9 @@ class ReasoningService:
                     tool_input.get("description", ""),
                 )
             elif tool_name in ("canvas_list", "canvas_create", "page_read",
-                                "page_write", "page_list", "page_search"):
+                                "page_write", "page_list", "page_search",
+                                "canvas_preference_extract",
+                                "canvas_preference_confirm"):
                 return await self._handle_canvas_tool(tool_name, tool_input, request)
             else:
                 return f"Kernel tool '{tool_name}' not handled."
@@ -2105,7 +2107,171 @@ class ReasoningService:
                 )
             return _json.dumps(result.to_dict(), default=str)
 
+        if tool_name == "canvas_preference_extract":
+            canvas_id = tool_input.get("canvas_id", "")
+            utterance = (tool_input.get("utterance") or "").strip()
+            err = await _assert_access(canvas_id)
+            if err:
+                return err
+            if not utterance:
+                return _json.dumps({
+                    "ok": False,
+                    "error": "utterance is required (member's verbatim words)",
+                })
+            return await self._handle_canvas_preference_extract(
+                request=request, canvas=canvas, canvas_id=canvas_id,
+                utterance=utterance,
+            )
+
+        if tool_name == "canvas_preference_confirm":
+            canvas_id = tool_input.get("canvas_id", "")
+            err = await _assert_access(canvas_id)
+            if err:
+                return err
+            name = (tool_input.get("preference_name") or "").strip()
+            action = (tool_input.get("action") or "").strip().lower()
+            if not name or action not in ("confirm", "discard"):
+                return _json.dumps({
+                    "ok": False,
+                    "error": "preference_name required; action must be 'confirm' or 'discard'.",
+                })
+            resolved = await canvas.resolve_pending_preference(
+                instance_id=instance_id, canvas_id=canvas_id,
+                name=name, action=action,
+            )
+            if resolved is None:
+                return _json.dumps({
+                    "ok": False,
+                    "error": f"no pending preference named {name!r} (may have expired or been resolved already)",
+                })
+            return _json.dumps({"ok": True, "resolved": resolved})
+
         return f"Canvas tool {tool_name!r} not dispatched."
+
+    async def _handle_canvas_preference_extract(
+        self, *, request: "ReasoningRequest", canvas: Any, canvas_id: str,
+        utterance: str,
+    ) -> str:
+        """Run the Gardener's preference-extraction consultation.
+
+        Pref-Capture Commit 3 tool path. Reads the canvas's pattern,
+        pulls the pattern body from the Gardener's PatternCache to
+        harvest intent-hook vocabulary, runs ``consult_preference_extraction``,
+        and — if the result surfaces (high-confidence + wired effect_kind) —
+        writes the preference to ``pending_preferences`` for explicit
+        confirmation via ``canvas_preference_confirm``.
+
+        Returns a JSON dict the agent uses to decide whether to surface
+        the pending preference to the member.
+        """
+        import json as _json
+        from kernos.cohorts.gardener import (
+            PreferenceExtractionContext, extract_intent_hook_names,
+        )
+
+        instance_id = request.instance_id
+
+        # Canvas must exist and carry a declared pattern.
+        try:
+            defaults = await canvas._canvas_defaults(instance_id, canvas_id)
+        except Exception:
+            defaults = {}
+        pattern_name = (defaults.get("pattern") or "").strip()
+        if not pattern_name or pattern_name == "unmatched":
+            return _json.dumps({
+                "ok": True, "matched": False,
+                "reason": "canvas has no declared pattern; no intent-hook vocabulary available",
+            })
+
+        # Resolve pattern body via the Gardener's PatternCache so we can
+        # harvest intent-hook vocabulary. Gardener is the pattern-content
+        # authority; this keeps canvas.py out of library-layer concerns.
+        gardener = None
+        if self._handler and hasattr(self._handler, "_get_gardener_service"):
+            gardener = self._handler._get_gardener_service()
+        if gardener is None:
+            return _json.dumps({
+                "ok": False,
+                "error": "Gardener service is not available",
+            })
+        await gardener._ensure_patterns_loaded(instance_id)
+        cached = gardener.patterns.get(pattern_name)
+        if cached is None:
+            return _json.dumps({
+                "ok": True, "matched": False,
+                "reason": f"pattern {pattern_name!r} not in library — nothing to extract against",
+            })
+
+        intent_hooks = extract_intent_hook_names(cached.body)
+
+        # Preferences context — confirmed + declined.
+        try:
+            confirmed_prefs = await canvas.get_preferences(
+                instance_id=instance_id, canvas_id=canvas_id,
+            )
+        except Exception:
+            confirmed_prefs = {}
+        declined_raw = defaults.get("declined_preferences") or []
+        declined_names = [
+            d.get("name", "") for d in declined_raw if isinstance(d, dict)
+        ]
+
+        ctx = PreferenceExtractionContext(
+            instance_id=instance_id,
+            canvas_id=canvas_id,
+            canvas_pattern=pattern_name,
+            utterance=utterance,
+            known_intent_hook_names=intent_hooks,
+            current_preferences=dict(confirmed_prefs),
+            declined_preference_names=declined_names,
+        )
+        result = await gardener.consult_preference_extraction(ctx)
+
+        # Low/medium confidence or unwired effect kinds silently no-op —
+        # member never sees a confirmation for a preference that won't do
+        # anything (Kit revision #2).
+        if not result.should_surface:
+            return _json.dumps({
+                "ok": True,
+                "matched": result.matched,
+                "confidence": result.confidence,
+                "effect_kind": result.effect_kind,
+                "reason": (
+                    "extraction no-op: either unmatched, low confidence, "
+                    "or effect kind isn't wired in v1"
+                ),
+            })
+
+        # High-confidence + wired effect → move to pending_preferences.
+        pending_entry = {
+            "name": result.preference_name,
+            "value": result.preference_value,
+            "effect_kind": result.effect_kind,
+            "evidence": result.evidence,
+            "confidence": result.confidence,
+        }
+        if result.supersedes:
+            pending_entry["supersedes"] = result.supersedes
+        await canvas.add_pending_preference(
+            instance_id=instance_id, canvas_id=canvas_id,
+            preference=pending_entry,
+        )
+        return _json.dumps({
+            "ok": True,
+            "matched": True,
+            "needs_confirmation": True,
+            "preference_name": result.preference_name,
+            "preference_value": result.preference_value,
+            "effect_kind": result.effect_kind,
+            "evidence": result.evidence,
+            "supersedes": result.supersedes,
+            "confirmation_tool": "canvas_preference_confirm",
+            "note": (
+                "Preference is in pending_preferences awaiting explicit "
+                "member confirmation. Auto-apply consent modes do NOT "
+                "extend to preference capture. Expires in 24h if not resolved."
+            ),
+        })
 
     async def _dispatch_canvas_offer(
         self, *, request: "ReasoningRequest",
