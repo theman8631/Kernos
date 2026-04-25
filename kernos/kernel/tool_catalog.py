@@ -28,6 +28,12 @@ class CatalogEntry:
     service_id: str = ""             # bound external service, or "" for internal tools
     registration_hash: str = ""      # SHA-256 of (descriptor || impl) at registration
     force_registered: bool = False   # author bypassed authoring-pattern validation
+    # When set, the descriptor + implementation live at this absolute
+    # directory rather than under the per-(instance, space) workspace
+    # path. Used by stock connectors that ship tools in source. The
+    # dispatcher resolves desc_path = stock_dir/descriptor_file and
+    # impl_path = stock_dir/implementation when stock_dir is set.
+    stock_dir: str = ""
 
 
 # Token budget for tool schemas per reasoning call

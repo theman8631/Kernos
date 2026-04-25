@@ -946,6 +946,18 @@ class MessageHandler:
             # entries through the same store.
             audit_store=getattr(reasoning, "_audit", None),
         )
+        # Stock connector tools shipped in source (Notion, future
+        # Slack/GitHub/Gmail-upgrade/Drive). Each lives under
+        # kernos/kernel/integrations/<service>/ as a (.tool.json, .py)
+        # pair. The loader registers them into the catalog with an
+        # absolute stock_dir so the dispatcher resolves source paths
+        # at invocation time.
+        try:
+            _stock_tools_root = _Path(__file__).resolve().parent.parent / "kernel" / "integrations"
+            _tool_count = self._workspace.register_stock_tools(_stock_tools_root)
+            logger.info("STOCK_CONNECTOR_TOOLS: count=%d", _tool_count)
+        except Exception as _exc:
+            logger.warning("STOCK_CONNECTOR_TOOLS_LOAD_FAILED: %s", _exc)
         reasoning.set_workspace(self._workspace)
 
     def _register_kernel_tools_in_catalog(self) -> None:

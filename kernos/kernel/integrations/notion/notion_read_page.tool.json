@@ -1,0 +1,23 @@
+{
+  "name": "notion_read_page",
+  "description": "Read a Notion page as markdown given its page id. Reads from the workspace the invoking member's Notion integration token has access to.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "page_id": {
+        "type": "string",
+        "description": "Notion page identifier (with or without dashes)."
+      }
+    },
+    "required": ["page_id"]
+  },
+  "implementation": "notion_read_page.py",
+  "service_id": "notion",
+  "authority": ["read_pages"],
+  "operations": [
+    {"operation": "read_pages", "classification": "read"}
+  ],
+  "audit_category": "notion",
+  "domain_hints": ["notion", "knowledge", "documentation"],
+  "stateful": false
+}

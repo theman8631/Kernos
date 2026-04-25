@@ -567,13 +567,10 @@ class WorkspaceManager:
         if not entry or entry.source != "workspace":
             return json.dumps({"error": f"Unknown workspace tool: {tool_name}"})
 
-        home_space = getattr(entry, "home_space", "")
-        implementation = getattr(entry, "implementation", "")
-        if not home_space or not implementation:
-            return json.dumps({"error": f"Tool '{tool_name}' missing home_space or implementation"})
-
-        # Route service-bound tools through the primitive's dispatch
-        # path. Tools without service_id stay on the existing flow.
+        # Route service-bound tools (workspace or stock) through the
+        # primitive's dispatch path. Tools without service_id stay on
+        # the existing subprocess flow which requires home_space +
+        # implementation per the workspace model.
         if getattr(entry, "service_id", ""):
             if not member_id:
                 return json.dumps({
@@ -590,6 +587,11 @@ class WorkspaceManager:
                 member_id=member_id,
                 entry=entry,
             )
+
+        home_space = getattr(entry, "home_space", "")
+        implementation = getattr(entry, "implementation", "")
+        if not home_space or not implementation:
+            return json.dumps({"error": f"Tool '{tool_name}' missing home_space or implementation"})
 
         # Validate implementation filename
         if "/" in implementation or "\\" in implementation or ".." in implementation:
@@ -644,6 +646,107 @@ class WorkspaceManager:
             error = result.get("stderr", "") or result.get("error", "Execution failed")
             return json.dumps({"error": error[:500]})
 
+    # --- Stock-connector tool registration ---
+
+    def register_stock_tools(self, stock_root: Path | str) -> int:
+        """Auto-register tools that ship in source under stock_root.
+
+        Walks `stock_root/*/` for any `.tool.json` files. Each pair of
+        (descriptor, implementation) registers into the catalog the
+        same way workshop tools do — service_id cross-validation,
+        authoring-pattern check, registration hash. The catalog entry's
+        stock_dir is set to the file's directory so the dispatcher
+        resolves the source paths at invocation time.
+
+        Returns the count of tools registered.
+
+        Stock-tool authoring-pattern findings cause the loader to log
+        a warning and skip that tool rather than raising; a broken
+        stock tool should not take down boot.
+        """
+        root = Path(stock_root)
+        if not root.exists() or not root.is_dir():
+            return 0
+        loaded = 0
+        for descriptor_path in sorted(root.glob("*/*.tool.json")):
+            impl_dir = descriptor_path.parent
+            try:
+                self._register_stock_tool(descriptor_path, impl_dir)
+                loaded += 1
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.warning(
+                    "STOCK_TOOL_LOAD_FAILED: path=%s reason=%s",
+                    descriptor_path, exc,
+                )
+        logger.info("STOCK_TOOLS_REGISTERED: count=%d root=%s", loaded, root)
+        return loaded
+
+    def _register_stock_tool(self, descriptor_path: Path, impl_dir: Path) -> None:
+        """Validate + register one stock tool. Mirrors register_tool's
+        path but resolves files from impl_dir rather than a workspace.
+        """
+        if self._catalog is None:
+            return  # nothing to register against
+        try:
+            descriptor_dict = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON in {descriptor_path}: {exc}") from exc
+
+        service_lookup = self._services.get if self._services else None
+        descriptor = parse_tool_descriptor(
+            descriptor_dict, service_lookup=service_lookup,
+        )
+
+        impl_filename = descriptor.implementation
+        impl_path = impl_dir / impl_filename
+        if not impl_path.is_file():
+            raise FileNotFoundError(
+                f"stock tool implementation not found at {impl_path}"
+            )
+
+        # Authoring-pattern validation. Stock tools are committed
+        # source under our control, so findings here are programmer
+        # errors and should fail the load rather than be force-bypassed
+        # silently. Surface clearly.
+        validation = validate_tool_file(impl_path)
+        if not validation.is_clean:
+            raise RuntimeError(
+                f"stock tool {descriptor.name!r} authoring-pattern findings "
+                f"({len(validation.findings)} issues); fix the implementation. "
+                f"First finding: {validation.findings[0].code} at line "
+                f"{validation.findings[0].line}"
+            )
+
+        registration_hash = compute_registration_hash(
+            descriptor_path.read_bytes(), impl_path.read_bytes(),
+        )
+
+        # Refuse silent overrides of an existing workspace tool by name.
+        existing = self._catalog.get(descriptor.name)
+        if existing and existing.source != "workspace":
+            return  # already registered (e.g. earlier stock load)
+
+        self._catalog.register(
+            name=descriptor.name,
+            description=descriptor.description,
+            source="workspace",
+        )
+        entry = self._catalog.get(descriptor.name)
+        if entry is None:
+            return
+        entry.home_space = ""  # stock tools have no per-(instance, space) home
+        entry.implementation = impl_filename
+        entry.descriptor_file = descriptor_path.name
+        entry.service_id = descriptor.service_id
+        entry.registration_hash = registration_hash
+        entry.force_registered = False
+        entry.stock_dir = str(impl_dir)
+        entry.stateful = bool(descriptor.stateful)
+        logger.info(
+            "STOCK_TOOL_REGISTER: name=%s service=%s dir=%s",
+            descriptor.name, descriptor.service_id or "(internal)", impl_dir,
+        )
+
     # --- Service-bound tool dispatch (workshop external-service primitive) ---
 
     async def _execute_service_bound_tool(
@@ -678,7 +781,14 @@ class WorkspaceManager:
         import sys
         from datetime import datetime, timezone
 
-        space_dir = self._space_dir(instance_id, entry.home_space)
+        # Stock connectors set entry.stock_dir to the absolute source
+        # directory; workspace tools resolve paths from the per-
+        # (instance, space) workspace dir.
+        stock_dir = getattr(entry, "stock_dir", "") or ""
+        if stock_dir:
+            space_dir = Path(stock_dir)
+        else:
+            space_dir = self._space_dir(instance_id, entry.home_space)
         desc_path = space_dir / entry.descriptor_file
         impl_path = space_dir / entry.implementation
 
