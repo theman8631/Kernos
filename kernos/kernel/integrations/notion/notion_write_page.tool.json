@@ -1,0 +1,27 @@
+{
+  "name": "notion_write_page",
+  "description": "Append markdown content to a Notion page given its page id. Adds new blocks to the end of the page. Reads from and writes to the workspace the invoking member's Notion integration token has access to.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "page_id": {
+        "type": "string",
+        "description": "Notion page identifier (with or without dashes)."
+      },
+      "markdown": {
+        "type": "string",
+        "description": "Markdown content to append. Supports headings (#, ##, ###), paragraphs, bulleted/numbered lists, blockquotes, and fenced code blocks."
+      }
+    },
+    "required": ["page_id", "markdown"]
+  },
+  "implementation": "notion_write_page.py",
+  "service_id": "notion",
+  "authority": ["write_pages"],
+  "operations": [
+    {"operation": "write_pages", "classification": "hard_write"}
+  ],
+  "audit_category": "notion",
+  "domain_hints": ["notion", "knowledge", "documentation"],
+  "stateful": false
+}
