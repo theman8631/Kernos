@@ -1,0 +1,54 @@
+# Per-install overlay for the model registry.
+#
+# Copy this to data/models/overlay.yaml and edit per-model.
+# Only the fields you set override upstream; everything else defers
+# to the cached LiteLLM catalog.
+#
+# Each top-level key is a model name (must match the name your provider
+# emits, e.g. "gpt-5.5", "minimax-m2.7:cloud"). Per-model fields:
+#
+#   max_input_tokens: int                       # marketing context limit
+#   max_output_tokens: int
+#   input_cost_per_token: float
+#   output_cost_per_token: float
+#   supports_function_calling: bool
+#   supports_vision: bool
+#   supports_response_schema: bool
+#   supports_prompt_caching: bool
+#
+# Kernos-specific extras (not in upstream catalog):
+#
+#   kernos_notes: str                            # free-form note for humans
+#   kernos_effective_max_input_tokens: int       # the actual ceiling on
+#                                                # this install's endpoint,
+#                                                # often lower than marketing
+#   kernos_deprecated: bool                      # don't pick this in setup
+#
+# ---------------------------------------------------------------------------
+# Sample entries
+# ---------------------------------------------------------------------------
+
+# GPT-5.5 isn't in LiteLLM's catalog at the time of writing; this entry
+# synthesizes a card for it. Effective max input tokens is what the
+# chatgpt.com consumer backend actually accepts (probed empirically
+# 2026-04-25): 400,000 succeeded; 500,000 returned context_length_exceeded.
+# Marketing limit per OpenAI documentation is around 272,000-400,000
+# depending on the variant; we pin 400K as the conservative working ceiling.
+gpt-5.5:
+  max_input_tokens: 400000
+  max_output_tokens: 128000
+  supports_function_calling: true
+  supports_response_schema: true
+  supports_prompt_caching: true
+  kernos_effective_max_input_tokens: 400000
+  kernos_notes: |
+    chatgpt.com consumer backend. Wire shape requires prompt_cache_key
+    plus reasoning effort (medium) plus session correlation headers
+    or large payloads fail with mid-stream server_error well before
+    the actual context ceiling. See docs/architecture/codex-wire-shape.md.
+
+# Example: a model the user has decided is deprecated for this install.
+# The setup CLI will skip it when listing options.
+# example-deprecated-model:
+#   kernos_deprecated: true
+#   kernos_notes: "Replaced by example-v2 on 2026-03-15"

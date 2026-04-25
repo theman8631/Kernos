@@ -55,8 +55,65 @@ from kernos.setup.storage_backend import (
     switch_storage_backend,
 )
 from kernos.setup.validate import validate_key
+from kernos.models import ModelCard, load_catalog
 
 logger = logging.getLogger(__name__)
+
+
+def _load_model_catalog_for_setup() -> dict[str, ModelCard]:
+    """Load the merged model registry for setup-CLI display use.
+
+    Auto-refreshes if the cached catalog is stale. The intent: when
+    setup surfaces models for the user to pick, the list should include
+    models added upstream (LiteLLM) since the last refresh, so future
+    models we haven't built explicit support for are still discoverable
+    here. If refresh fails (offline, network blocked) we fall back to
+    the cached copy with a non-fatal warning.
+
+    Pinned auto-refresh-on-entry is the explicit design: see the
+    MODEL-REGISTRY spec acceptance criteria.
+    """
+    try:
+        result = load_catalog(auto_refresh_if_stale=True)
+        for w in result.warnings:
+            logger.info("MODEL_CATALOG_WARNING: %s", w)
+        return result.cards
+    except Exception as exc:
+        logger.warning("MODEL_CATALOG_LOAD_FAILED: %s", exc)
+        return {}
+
+
+def _annotate_model(name: str, catalog: dict[str, ModelCard]) -> str:
+    """Format a model option line with capability annotations from the catalog.
+
+    Returns just the name when the catalog has no card for it. Otherwise
+    appends a compact summary like "(ctx 128K, vision, fn-calling)".
+    """
+    card = catalog.get(name)
+    if card is None:
+        return name
+    bits: list[str] = []
+    eff = card.effective_max_input_tokens
+    if eff:
+        bits.append(f"ctx {_compact_int(eff)}")
+    if card.supports_vision:
+        bits.append("vision")
+    if card.supports_function_calling:
+        bits.append("fn-calling")
+    if card.supports_response_schema:
+        bits.append("schema")
+    if card.kernos_deprecated:
+        bits.append("deprecated")
+    return f"{name} ({', '.join(bits)})" if bits else name
+
+
+def _compact_int(n: int) -> str:
+    """Render large token counts compactly: 128000 -> '128K', 1000000 -> '1M'."""
+    if n >= 1_000_000:
+        return f"{n // 1_000_000}M"
+    if n >= 1_000:
+        return f"{n // 1_000}K"
+    return str(n)
 
 _SEPARATOR = "=" * 40
 
@@ -360,24 +417,42 @@ def _pick_models_for_chains(
     primary_rec = recs.get("primary", "")
     cheap_rec = recs.get("cheap", "")
 
+    # Auto-refresh-on-setup-entry: the catalog is fetched here once so
+    # the picker can annotate options with capability flags from
+    # LiteLLM (context window, vision, function-calling, schema). New
+    # upstream models become discoverable through the picker without
+    # a Kernos code change. See _load_model_catalog_for_setup.
+    catalog = _load_model_catalog_for_setup()
+
     # If the rec is in the available list, offer accept/override/skip.
     # If not, show the full list.
     primary = _pick_single_model(
-        "main intelligence", primary_rec, available_models,
+        "main intelligence", primary_rec, available_models, catalog=catalog,
     )
     cheap = _pick_single_model(
-        "fast / efficient", cheap_rec, available_models,
+        "fast / efficient", cheap_rec, available_models, catalog=catalog,
     )
     return primary, cheap
 
 
 def _pick_single_model(
-    label: str, recommendation: str, available: list[str],
+    label: str,
+    recommendation: str,
+    available: list[str],
+    *,
+    catalog: dict[str, ModelCard] | None = None,
 ) -> str:
-    """Prompt for a model, defaulting to ``recommendation`` if it's available."""
+    """Prompt for a model, defaulting to ``recommendation`` if it's available.
+
+    When `catalog` is supplied, list entries are annotated with
+    capability flags (context window, vision, function-calling, schema)
+    sourced from the model registry.
+    """
+    catalog = catalog or {}
     rec_available = recommendation and recommendation in available
     if rec_available:
-        _echo(f"Kernos recommends for {label}: {recommendation}")
+        rec_line = _annotate_model(recommendation, catalog)
+        _echo(f"Kernos recommends for {label}: {rec_line}")
         choice = _prompt(f"Accept {recommendation}? [Y/n/list] ").strip().lower()
         if choice in {"", "y", "yes"}:
             return recommendation
@@ -399,7 +474,7 @@ def _pick_single_model(
         return ""
     _echo(f"Available models for {label}:")
     for i, m in enumerate(available, start=1):
-        _echo(f"  {i}) {m}")
+        _echo(f"  {i}) {_annotate_model(m, catalog)}")
     _echo("  s) Skip (no model for this chain tier)")
     while True:
         raw = _prompt("> ").strip().lower()
