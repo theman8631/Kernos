@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -135,6 +136,59 @@ _SERVICE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
+class PkceMode(str, Enum):
+    """PKCE handling for OAuth device-code services (Q5).
+
+    Providers vary on PKCE acceptance for device flow:
+    - REQUIRED: provider rejects requests without code_verifier
+      (Google APIs).
+    - OPTIONAL: provider accepts code_verifier when present but does
+      not require it (Slack).
+    - OMIT: provider rejects code_verifier (legacy implementations).
+
+    The flag lives per-service in the descriptor's oauth section so
+    the connector author declares the right shape per provider rather
+    than the subsystem hardcoding a one-size choice.
+    """
+
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    OMIT = "omit"
+
+
+@dataclass(frozen=True)
+class OAuthDeviceCodeConfig:
+    """Per-service OAuth device-code endpoints + client config (Q1).
+
+    Belongs in the service descriptor when auth_type is
+    oauth_device_code. The auth-by-channel matrix already governs
+    which adapters can run device-code onboarding; this struct is the
+    service-specific endpoint and client information the device-code
+    client needs at runtime.
+
+    Fields:
+        device_authorization_uri: provider endpoint that issues
+            device_code + user_code (RFC 8628 §3.1).
+        token_uri: provider endpoint that exchanges device_code for
+            access_token (RFC 8628 §3.4 + RFC 6749 §6 for refresh).
+        client_id: literal client_id when the connector is an
+            OSS-public client (Slack, GitHub). Empty when the
+            operator supplies it via env var (closed-app cases like
+            Google APIs); see client_id_env.
+        client_id_env: name of the env var holding the client_id.
+            Empty when client_id is set literally. Exactly one of
+            client_id and client_id_env is populated; both empty is a
+            validation error.
+        pkce: PkceMode per Q5.
+    """
+
+    device_authorization_uri: str
+    token_uri: str
+    client_id: str = ""
+    client_id_env: str = ""
+    pkce: PkceMode = PkceMode.OPTIONAL
+
+
 @dataclass(frozen=True)
 class ServiceDescriptor:
     """One external service Kernos can bind to.
@@ -153,6 +207,10 @@ class ServiceDescriptor:
         required_scopes: scope strings the auth flow asks for at onboarding
             time (e.g. OAuth scopes). Free-form per-service.
         notes: free-form text that surfaces in inspect_state.
+        oauth: device-code endpoints + client config when auth_type is
+            oauth_device_code. None for api_token services. Validated
+            at parse time: required when auth_type is oauth_device_code,
+            rejected when auth_type is api_token.
     """
 
     service_id: str
@@ -162,6 +220,7 @@ class ServiceDescriptor:
     audit_category: str = ""
     required_scopes: tuple[str, ...] = ()
     notes: str = ""
+    oauth: OAuthDeviceCodeConfig | None = None
 
     def supports_operation(self, operation: str) -> bool:
         """True if this service declares the named operation."""
@@ -170,6 +229,41 @@ class ServiceDescriptor:
     def supported_channels(self) -> list[ChannelType]:
         """Channels through which auth onboarding for this service can run."""
         return channel_alternatives_for(self.auth_type)
+
+    def resolve_client_id(self) -> str:
+        """Return the OAuth client_id, reading the env var when applicable.
+
+        Raises ServiceDescriptorError when the descriptor expects an
+        env var (client_id_env) that isn't set. Callers needing to
+        distinguish "not configured yet" from a literal empty value
+        should call this directly rather than reading oauth.client_id.
+        """
+        if self.oauth is None:
+            raise ServiceDescriptorError(
+                f"Service {self.service_id!r} has no oauth config; "
+                f"resolve_client_id is only valid for oauth_device_code "
+                f"services."
+            )
+        if self.oauth.client_id:
+            return self.oauth.client_id
+        if self.oauth.client_id_env:
+            value = os.environ.get(self.oauth.client_id_env, "").strip()
+            if not value:
+                raise ServiceDescriptorError(
+                    f"Service {self.service_id!r} expects the OAuth "
+                    f"client_id in env var {self.oauth.client_id_env!r} "
+                    f"but it is not set or is empty. Set the env var "
+                    f"and retry."
+                )
+            return value
+        # parse_service_descriptor validates that exactly one is set;
+        # reaching here means the descriptor was constructed bypassing
+        # the parser, which is a programmer error.
+        raise ServiceDescriptorError(
+            f"Service {self.service_id!r}'s oauth config has no "
+            f"client_id and no client_id_env. Programmer error: do not "
+            f"construct OAuthDeviceCodeConfig with both empty."
+        )
 
 
 class ServiceDescriptorError(ValueError):
@@ -233,6 +327,9 @@ def parse_service_descriptor(data: dict[str, Any]) -> ServiceDescriptor:
     required_scopes = tuple(data.get("required_scopes") or ())
     notes = data.get("notes", "") or ""
 
+    oauth_section = data.get("oauth")
+    oauth = _parse_oauth_section(oauth_section, service_id, auth_type)
+
     return ServiceDescriptor(
         service_id=service_id,
         display_name=display_name,
@@ -241,6 +338,83 @@ def parse_service_descriptor(data: dict[str, Any]) -> ServiceDescriptor:
         audit_category=audit_category,
         required_scopes=required_scopes,
         notes=notes,
+        oauth=oauth,
+    )
+
+
+def _parse_oauth_section(
+    raw: Any, service_id: str, auth_type: AuthType,
+) -> OAuthDeviceCodeConfig | None:
+    """Parse + validate the oauth section.
+
+    Required when auth_type is oauth_device_code; rejected when
+    auth_type is something else.
+    """
+    if auth_type != AuthType.OAUTH_DEVICE_CODE:
+        if raw is not None:
+            raise ServiceDescriptorError(
+                f"Service {service_id!r} declares an oauth section but "
+                f"auth_type is {auth_type.value!r}. The oauth section is "
+                f"only valid for oauth_device_code services."
+            )
+        return None
+
+    if raw is None:
+        raise ServiceDescriptorError(
+            f"Service {service_id!r} has auth_type oauth_device_code "
+            f"but no oauth section. Required fields: "
+            f"device_authorization_uri, token_uri, and one of "
+            f"client_id or client_id_env."
+        )
+    if not isinstance(raw, dict):
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section must be a dict; "
+            f"got {type(raw).__name__}."
+        )
+
+    device_uri = (raw.get("device_authorization_uri") or "").strip()
+    token_uri = (raw.get("token_uri") or "").strip()
+    if not device_uri:
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section is missing "
+            f"device_authorization_uri."
+        )
+    if not token_uri:
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section is missing token_uri."
+        )
+
+    client_id = (raw.get("client_id") or "").strip()
+    client_id_env = (raw.get("client_id_env") or "").strip()
+    if client_id and client_id_env:
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section has both client_id "
+            f"and client_id_env set. Choose one: literal client_id for "
+            f"OSS-public clients, client_id_env naming an env var for "
+            f"closed-app clients (e.g. Google APIs)."
+        )
+    if not client_id and not client_id_env:
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section needs exactly one "
+            f"of client_id (literal) or client_id_env (env var name)."
+        )
+
+    pkce_raw = raw.get("pkce", "optional")
+    try:
+        pkce = PkceMode(pkce_raw)
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in PkceMode)
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section has unknown pkce "
+            f"value {pkce_raw!r}. Must be one of: {valid}."
+        ) from exc
+
+    return OAuthDeviceCodeConfig(
+        device_authorization_uri=device_uri,
+        token_uri=token_uri,
+        client_id=client_id,
+        client_id_env=client_id_env,
+        pkce=pkce,
     )
 
 
