@@ -283,8 +283,21 @@ class TestCodexHeaders:
         assert headers["Authorization"] == "Bearer token_abc"
         assert headers["chatgpt-account-id"] == "acct_123"
         assert headers["originator"] == "pi"
-        assert headers["User-Agent"] == "pi (python)"
+        # OS-aware UA matching openclaw's shape: "pi (<system> <release>; <machine>)".
+        assert headers["User-Agent"].startswith("pi (")
         assert headers["OpenAI-Beta"] == "responses=experimental"
+        # Without a session_id, the session-correlation headers are absent.
+        assert "session_id" not in headers
+        assert "x-client-request-id" not in headers
+
+    def test_headers_include_session_correlation_when_provided(self):
+        cred = OpenAICodexCredential(
+            access="token_abc", refresh="ref", expires=0, accountId="acct_123",
+        )
+        provider = OpenAICodexProvider(credential=cred)
+        headers = provider._headers(session_id="conv-42")
+        assert headers["session_id"] == "conv-42"
+        assert headers["x-client-request-id"] == "conv-42"
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +369,148 @@ class TestCodexNotChatCompletions:
         # Responses API uses typed items, not chat messages
         assert items[0]["type"] == "message"
         assert items[0]["content"][0]["type"] == "input_text"
+
+
+# ---------------------------------------------------------------------------
+# Provider: wire-shape repair fields
+# ---------------------------------------------------------------------------
+
+
+class TestCodexWireShape:
+    """Verify the body fields added in CODEX-WIRE-SHAPE-REPAIR (2026-04-25)."""
+
+    @staticmethod
+    def _stub_provider(monkeypatch, captured: dict):
+        """Build a provider whose http stream captures the body and returns a stub SSE."""
+        cred = OpenAICodexCredential(
+            access="tok", refresh="ref", expires=0, accountId="acct",
+        )
+        provider = OpenAICodexProvider(credential=cred)
+
+        async def fake_ensure_valid_token():
+            return None
+
+        provider._ensure_valid_token = fake_ensure_valid_token  # type: ignore[assignment]
+
+        from contextlib import asynccontextmanager
+
+        class FakeResp:
+            status_code = 200
+
+            async def aread(self):
+                return b""
+
+            @property
+            def text(self):
+                return ""
+
+        class FakeHttp:
+            @asynccontextmanager
+            async def stream(self_, method, url, *, headers, json):  # noqa: N805
+                captured["method"] = method
+                captured["url"] = url
+                captured["headers"] = dict(headers)
+                captured["body"] = json
+                yield FakeResp()
+
+        async def fake_ensure_http():
+            return FakeHttp()
+
+        async def fake_collect(resp):
+            return {"status": "completed", "output": [], "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+        provider._ensure_http = fake_ensure_http  # type: ignore[assignment]
+        provider._collect_sse_response = fake_collect  # type: ignore[assignment]
+        return provider
+
+    async def test_body_includes_prompt_cache_key_when_conversation_id_set(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        await provider.complete(
+            model="gpt-5.5",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+            conversation_id="conv-xyz",
+        )
+        assert captured["body"]["prompt_cache_key"] == "conv-xyz"
+        assert captured["headers"]["session_id"] == "conv-xyz"
+        assert captured["headers"]["x-client-request-id"] == "conv-xyz"
+
+    async def test_body_omits_prompt_cache_key_when_conversation_id_blank(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        await provider.complete(
+            model="gpt-5.5",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+        )
+        assert "prompt_cache_key" not in captured["body"]
+        assert "session_id" not in captured["headers"]
+
+    async def test_body_includes_reasoning_for_gpt5_models(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        await provider.complete(
+            model="gpt-5.5",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+        )
+        assert captured["body"]["reasoning"] == {"effort": "medium", "summary": "auto"}
+
+    async def test_body_omits_reasoning_for_non_gpt5_models(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        await provider.complete(
+            model="o3-mini",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+        )
+        assert "reasoning" not in captured["body"]
+
+    async def test_body_includes_reasoning_encrypted_content(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        await provider.complete(
+            model="gpt-5.5",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+        )
+        assert captured["body"]["include"] == ["reasoning.encrypted_content"]
+
+    async def test_body_sets_text_verbosity_for_freeform_responses(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        await provider.complete(
+            model="gpt-5.5",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+        )
+        assert captured["body"]["text"] == {"verbosity": "medium"}
+
+    async def test_body_uses_schema_format_when_output_schema_provided(self, monkeypatch):
+        captured: dict = {}
+        provider = self._stub_provider(monkeypatch, captured)
+        schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+        await provider.complete(
+            model="gpt-5.5",
+            system="rules",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            max_tokens=1024,
+            output_schema=schema,
+        )
+        # Schema mode wins; verbosity is not set when constrained decoding is on.
+        assert captured["body"]["text"]["format"]["type"] == "json_schema"
+        assert "verbosity" not in captured["body"]["text"]

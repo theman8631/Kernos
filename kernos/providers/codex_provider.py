@@ -23,11 +23,22 @@ _OPENAI_CHEAP_MODEL = "gpt-4o-mini"
 class OpenAICodexProvider(Provider):
     """ChatGPT Codex OAuth provider — uses chatgpt.com/backend-api/codex/responses.
 
-    NOT the standard OpenAI API. Mirrors OpenClaw's openai-codex-responses transport:
+    NOT the standard OpenAI API. Mirrors OpenClaw's openai-codex-responses transport.
+
+    Wire shape (aligned with OpenClaw 2026-04-25 to fix mid-stream server_error
+    on payloads above ~50KB):
     - Endpoint: https://chatgpt.com/backend-api/codex/responses
-    - Body: OpenAI Responses API format (instructions, input, tools)
-    - Headers: Bearer token, chatgpt-account-id, originator: pi, OpenAI-Beta
-    - Auth: ChatGPT OAuth credentials, not OPENAI_API_KEY
+    - Body: Responses API format with prompt_cache_key, reasoning effort/summary,
+      include reasoning encrypted_content, text verbosity for non-schema calls.
+    - Headers: Bearer token, chatgpt-account-id, originator pi, OpenAI-Beta,
+      session_id and x-client-request-id (when conversation_id provided),
+      OS-aware User-Agent.
+    - Auth: ChatGPT OAuth credentials, not OPENAI_API_KEY.
+
+    The prompt_cache_key + session correlation headers let the consumer
+    backend hit its prompt cache rather than recomputing attention from
+    scratch on every call. Without them, large payloads consistently hit
+    a per-request time budget and fail mid-stream.
     """
 
     provider_name = "openai-codex"
@@ -74,17 +85,40 @@ class OpenAICodexProvider(Provider):
         logger.info("CODEX_REFRESH: token expired or near expiry, refreshing")
         self._credential = await refresh_openai_codex_credential(self._credential)
 
-    def _headers(self) -> dict[str, str]:
-        """Build request headers matching OpenClaw's Codex wire contract."""
-        return {
+    def _headers(self, *, session_id: str = "") -> dict[str, str]:
+        """Build request headers matching OpenClaw's Codex wire contract.
+
+        When session_id is provided, also sets the session_id and
+        x-client-request-id headers so the backend can correlate calls
+        in the same conversation for routing and prompt-cache hits.
+        """
+        ua = self._user_agent()
+        headers = {
             "Authorization": f"Bearer {self._credential['access']}",
             "chatgpt-account-id": self._credential["accountId"],
             "originator": "pi",
-            "User-Agent": "pi (python)",
+            "User-Agent": ua,
             "Content-Type": "application/json",
             "OpenAI-Beta": "responses=experimental",
             "accept": "application/json",
         }
+        if session_id:
+            headers["session_id"] = session_id
+            headers["x-client-request-id"] = session_id
+        return headers
+
+    @staticmethod
+    def _user_agent() -> str:
+        """OS-aware User-Agent matching OpenClaw's shape: 'pi (<system> <release>; <machine>)'."""
+        try:
+            import platform
+            system = platform.system().lower() or "unknown"
+            release = platform.release() or ""
+            machine = platform.machine() or ""
+            details = "; ".join(p for p in (release, machine) if p)
+            return f"pi ({system} {details})".strip()
+        except Exception:
+            return "pi (python)"
 
     @staticmethod
     @staticmethod
@@ -264,6 +298,7 @@ class OpenAICodexProvider(Provider):
         tools: list[dict],
         max_tokens: int,
         output_schema: dict | None = None,
+        conversation_id: str = "",
     ) -> ProviderResponse:
         await self._ensure_valid_token()
         http = await self._ensure_http()
@@ -317,7 +352,22 @@ class OpenAICodexProvider(Provider):
             "stream": True,
             "tool_choice": "auto",
             "parallel_tool_calls": True,
+            "include": ["reasoning.encrypted_content"],
         }
+        # Session correlation. The consumer backend uses this for prompt-cache
+        # routing; without it, large payloads recompute attention from scratch
+        # and reliably fail mid-stream.
+        if conversation_id:
+            body["prompt_cache_key"] = conversation_id
+        # Reasoning configuration for GPT-5.x. An explicit effort + summary
+        # makes the backend's behaviour predictable; without it the backend
+        # picks one which on big payloads drifts toward "high" and blows the
+        # per-request time budget.
+        if model.startswith("gpt-5"):
+            body["reasoning"] = {
+                "effort": os.getenv("OPENAI_CODEX_REASONING_EFFORT", "medium"),
+                "summary": "auto",
+            }
         if tools:
             body["tools"] = self._translate_tools(tools)
         if output_schema:
@@ -328,6 +378,10 @@ class OpenAICodexProvider(Provider):
                     "schema": output_schema,
                 }
             }
+        else:
+            # Verbosity is only meaningful when output is free-form text.
+            # When a JSON schema is set, the backend already constrains output.
+            body["text"] = {"verbosity": "medium"}
 
         # Log actual request payload size for debugging API limits
         _payload_bytes = len(json.dumps(body))
@@ -337,7 +391,7 @@ class OpenAICodexProvider(Provider):
             _payload_bytes // 1024, _tool_count, _tool_bytes // 1024, len(body.get("input", [])))
 
         url = self._resolve_url()
-        headers = self._headers()
+        headers = self._headers(session_id=conversation_id)
         headers["accept"] = "text/event-stream"
 
         _max_retries = int(os.environ.get("KERNOS_CODEX_MAX_RETRIES", "3"))

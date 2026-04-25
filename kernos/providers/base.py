@@ -53,6 +53,7 @@ class Provider(ABC):
         tools: list[dict],
         max_tokens: int,
         output_schema: dict | None = None,
+        conversation_id: str = "",
     ) -> ProviderResponse:
         """Send a completion request and return a KERNOS-native response.
 
@@ -61,5 +62,9 @@ class Provider(ABC):
         prefix, subsequent entries are dynamic per-turn content.  Providers that
         support prompt caching should apply cache_control to the static prefix.
         Providers that don't can concatenate all entries.
+
+        conversation_id, when provided, lets providers correlate calls in the
+        same conversation for backend prompt-cache hits and session routing.
+        Providers that don't have a use for it can ignore it.
         """
         ...

@@ -40,7 +40,11 @@ class AnthropicProvider(Provider):
         tools: list[dict],
         max_tokens: int,
         output_schema: dict | None = None,
+        conversation_id: str = "",
     ) -> ProviderResponse:
+        # conversation_id unused: Anthropic's prompt caching is keyed on the
+        # static system-prompt prefix, not a session token.
+        del conversation_id
         # Apply prompt caching with cache boundary support.
         # If system is a list of dicts (static + dynamic split), apply
         # cache_control only to the static prefix for real cache hits.

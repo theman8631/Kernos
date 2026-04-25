@@ -377,6 +377,7 @@ class ReasoningService:
                     messages=messages,
                     tools=tools,
                     max_tokens=max_tokens,
+                    conversation_id=request.conversation_id if request else "",
                 )
                 if i > 0 and request:
                     # Partial fallback succeeded — silent per the

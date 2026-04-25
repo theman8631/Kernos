@@ -196,7 +196,9 @@ class OllamaProvider(Provider):
         tools: list[dict],
         max_tokens: int,
         output_schema: dict | None = None,
+        conversation_id: str = "",
     ) -> ProviderResponse:
+        del conversation_id  # Ollama's API has no equivalent session/cache key.
         http = await self._ensure_http()
 
         ollama_messages = self._build_messages(system, messages)
