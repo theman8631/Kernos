@@ -18,12 +18,14 @@ from typing import Any
 from kernos.kernel.event_types import EventType
 from kernos.kernel.events import EventStream, emit_event, estimate_cost
 from kernos.kernel.exceptions import (
+    ChainPayloadTooLarge,
     LLMChainExhausted,
     ReasoningConnectionError,
     ReasoningProviderError,
     ReasoningRateLimitError,
     ReasoningTimeoutError,
 )
+from kernos.kernel.token_estimator import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -224,12 +226,71 @@ class ReasoningService:
         self._turn_tool_trace: list[dict] = []
         # Hybrid token counting: real input_tokens from last principal reasoning call per-instance
         self._last_real_input_tokens: dict[str, int] = {}  # instance_id → tokens
+        # Pre-flight chain-skip support — lazily-loaded model registry
+        # cards keyed by model name. Loaded once per ReasoningService
+        # lifetime; refreshes happen out-of-process via `python -m
+        # kernos.models`. Empty dict marks "tried and failed/empty".
+        self._catalog_cards: dict[str, Any] | None = None
+        # Track unknown-model warnings so we log each at most once per
+        # ReasoningService process to avoid log spam.
+        self._unknown_model_warned: set[str] = set()
 
     @staticmethod
     def _trace(request: "ReasoningRequest", level: str, source: str, event: str, detail: str, **kw: Any) -> None:
         """Record a trace event if collector is available."""
         if request and getattr(request, 'trace', None):
             request.trace.record(level, source, event, detail, **kw)
+
+    def _get_catalog_cards(self) -> dict[str, Any]:
+        """Return the lazily-loaded model registry cards, keyed by name.
+
+        Returns an empty dict if the registry could not be loaded or is
+        empty. Catalog load failures are non-fatal: chain dispatch
+        falls back to the existing tolerant behaviour for any model
+        without a card.
+        """
+        if self._catalog_cards is not None:
+            return self._catalog_cards
+        try:
+            from kernos.models import load_catalog
+            result = load_catalog()
+            self._catalog_cards = dict(result.cards)
+            for w in result.warnings:
+                logger.info("MODEL_CATALOG_WARNING: %s", w)
+        except Exception as exc:
+            logger.warning("MODEL_CATALOG_LOAD_FAILED: %s", exc)
+            self._catalog_cards = {}
+        return self._catalog_cards
+
+    @staticmethod
+    def _context_safety_margin() -> float:
+        """Per-call safety margin applied to each entry's effective ceiling.
+
+        Default ten percent. Set KERNOS_CONTEXT_SAFETY_MARGIN to a
+        float between 0 and 1 to override. Values outside that range
+        are ignored and the default is used.
+        """
+        import os
+        raw = os.environ.get("KERNOS_CONTEXT_SAFETY_MARGIN", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            return 0.10
+        if 0.0 <= value < 1.0:
+            return value
+        return 0.10
+
+    def _warn_unknown_model_once(self, model: str) -> None:
+        """Log once-per-process for a configured model with no catalog card."""
+        if model in self._unknown_model_warned:
+            return
+        self._unknown_model_warned.add(model)
+        logger.info(
+            "MODEL_NOT_IN_CATALOG: %s — pre-flight context-window skip "
+            "is disabled for this model. Add an entry to the overlay "
+            "file at data/models/overlay.yaml to enable it.",
+            model,
+        )
 
     def _get_gate(self) -> DispatchGate:
         """Lazy gate creation — registry/state set after construction."""
@@ -362,15 +423,61 @@ class ReasoningService:
         # failure message and diagnostic tools.
         attempts: list[tuple[str, str, str]] = []
 
+        # Pre-flight payload estimate — the chain dispatcher uses this
+        # to skip entries whose effective context window cannot fit the
+        # request, before any model is called. Estimator is biased high;
+        # combined with a per-call safety margin, the decisions tolerate
+        # the heuristic's inaccuracy without false-positively passing.
+        est_tokens = estimate_tokens(system=system, messages=messages, tools=tools)
+        catalog = self._get_catalog_cards()
+        safety_margin = self._context_safety_margin()
+        called_count = 0
+        skipped_count = 0
+        largest_ceiling: int | None = None
+
         for i, entry in enumerate(entries):
             model = request_model if (i == 0 and request_model) else entry.model
             pname = getattr(entry.provider, "provider_name", "unknown")
+
+            # Pre-flight context-window skip. Tolerant on unknown models:
+            # if the catalog has no card, fall through and route normally
+            # so existing behaviour is preserved for anything not in the
+            # registry. The first-time-unknown warning logs once per
+            # process at info level.
+            card = catalog.get(model) if catalog else None
+            if card is not None and card.effective_max_input_tokens:
+                ceiling = card.effective_max_input_tokens
+                if largest_ceiling is None or ceiling > largest_ceiling:
+                    largest_ceiling = ceiling
+                threshold = int(ceiling * (1.0 - safety_margin))
+                if est_tokens > threshold:
+                    skipped_count += 1
+                    skip_reason = (
+                        f"skipped: payload {est_tokens} tokens exceeds "
+                        f"threshold {threshold} (ceiling {ceiling}, "
+                        f"margin {safety_margin:.0%})"
+                    )
+                    if request:
+                        self._trace(
+                            request, "info", "reasoning", "CHAIN_SKIP",
+                            f"chain={chain_name} entry={pname} model={model} "
+                            f"estimated_tokens={est_tokens} threshold={threshold}",
+                        )
+                    logger.info(
+                        "CHAIN[%s]: skip %s/%s — %s",
+                        chain_name, pname, model, skip_reason,
+                    )
+                    attempts.append((pname, model, skip_reason))
+                    continue
+            elif card is None and model:
+                self._warn_unknown_model_once(model)
 
             # Thread trace to provider for internal event capture
             if hasattr(entry.provider, "_trace"):
                 entry.provider._trace = getattr(request, "trace", None) if request else None
 
             try:
+                called_count += 1
                 response = await entry.provider.complete(
                     model=model,
                     system=system,
@@ -396,6 +503,31 @@ class ReasoningService:
                 last_exc = exc
                 attempts.append((pname, model, str(exc)))
                 continue
+
+        # If every entry was skipped because the payload could not fit,
+        # raise the distinct ChainPayloadTooLarge so the handler can
+        # surface a clear "trim or compact" message rather than report
+        # a transient-error retry chain. The estimated-vs-ceiling
+        # numbers are part of the exception so diagnostic surfaces can
+        # render them.
+        if called_count == 0 and skipped_count > 0:
+            if request:
+                self._trace(
+                    request, "error", "reasoning", "CHAIN_PAYLOAD_TOO_LARGE",
+                    f"chain={chain_name} estimated_tokens={est_tokens} "
+                    f"largest_ceiling={largest_ceiling} skipped={skipped_count}",
+                )
+            logger.error(
+                "CHAIN[%s]: payload too large for any entry "
+                "(estimated=%d, largest_ceiling=%s)",
+                chain_name, est_tokens, largest_ceiling,
+            )
+            raise ChainPayloadTooLarge(
+                chain_name=chain_name,
+                estimated_tokens=est_tokens,
+                largest_ceiling=largest_ceiling,
+                attempts=attempts,
+            )
 
         # All entries exhausted — raise the specific chain-exhaustion
         # exception the handler catches to deliver a pre-rendered failure

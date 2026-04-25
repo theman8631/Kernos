@@ -597,6 +597,11 @@ class TestChainExhaustion:
         }
         svc._trace = lambda *a, **kw: None
         svc._handler = None
+        # Pre-flight skip support — empty catalog disables skip; both
+        # entries route normally and the fail-after-call path still
+        # raises LLMChainExhausted.
+        svc._catalog_cards = {}
+        svc._unknown_model_warned = set()
 
         with pytest.raises(LLMChainExhausted) as excinfo:
             await svc._call_chain(

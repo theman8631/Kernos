@@ -28,6 +28,49 @@ class ReasoningTransientError(ReasoningError):
     """Transient server-side error that should be retried."""
 
 
+class ChainPayloadTooLarge(ReasoningError):
+    """Every chain entry's effective context window is smaller than the
+    estimated payload, so no model in the chain can fit the request.
+
+    Distinct from LLMChainExhausted: this fires before any model is
+    called, and signals that the request itself is too big for the
+    configured chain rather than that the upstream providers are
+    unhappy. Handler should surface a clear "payload too large; trim
+    or compact" message rather than a transient-error retry message.
+
+    Attributes:
+        chain_name:        The named chain that was tried.
+        estimated_tokens:  The pre-flight estimate that triggered skips.
+        largest_ceiling:   The largest effective_max_input_tokens
+                           observed across the chain's entries (after
+                           safety margin applied), or None if no entry
+                           had a known ceiling.
+        attempts:          Per-entry skip records:
+                           (provider_name, model, "skipped: <reason>").
+    """
+
+    def __init__(
+        self,
+        chain_name: str,
+        estimated_tokens: int,
+        largest_ceiling: int | None,
+        attempts: list[tuple[str, str, str]],
+    ) -> None:
+        self.chain_name = chain_name
+        self.estimated_tokens = int(estimated_tokens)
+        self.largest_ceiling = largest_ceiling
+        self.attempts = list(attempts)
+        ceiling_str = (
+            f"{largest_ceiling}" if largest_ceiling is not None else "unknown"
+        )
+        super().__init__(
+            f"Chain '{chain_name}' cannot fit payload: "
+            f"estimated {estimated_tokens} input tokens, "
+            f"largest available ceiling {ceiling_str}. "
+            "Trim the payload or run a compaction pass."
+        )
+
+
 class LLMChainExhausted(ReasoningError):
     """Every provider in a named chain failed on this turn.
 
