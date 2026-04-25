@@ -43,7 +43,17 @@ The profile directory lives at `data/browser-profile/` by default. Override with
 
 **Channel selection.** `kernos/browser/server.py::_resolve_chrome_channel` looks for a real Chrome / Chromium / Edge / Brave install on the host. When present, Playwright launches via `channel="chrome"` and the underlying Chrome binary is used directly. When absent, Playwright falls back to its bundled Chromium build. Set `KERNOS_BROWSER_FORCE_CHROMIUM=1` to opt out of real-Chrome detection (operators who need bundled Chromium for portability or reproducibility).
 
-**Headful login flow.** `python -m kernos.browser login --url <url>` opens a non-headless persistent context against the same profile directory. The operator authenticates manually; closing the window persists cookies and session state into the next regular Kernos run automatically. Use this once per site that requires login.
+**Headful login flow (workstation deployments only).** `python -m kernos.browser login --url <url>` opens a non-headless persistent context against the same profile directory. The operator authenticates manually; closing the window persists cookies and session state into the next regular Kernos run automatically.
+
+This path **only fits workstation deployments** — an operator with shell access to the host and a desktop environment to display the browser window. Kernos's typical topology is the opposite: a server (VPS, headless box, Pi) where users live behind chat adapters (Discord, SMS, Telegram) and never touch the host directly. For server deployments, a manual headful login is structurally unavailable — there is no operator to drive the window.
+
+The supported paths for server deployments, in order of fit:
+
+1. **Service-specific tokens / API integrations.** When the target site has an API and an integration model (Notion, GitHub, Google services, Slack), register a capability that uses an API token rather than scraping an authenticated browser. Tokens arrive via adapter chat as a one-time setup step. This is the canonical path for sites with usable APIs and is preferred over browser-based authentication for any work that has an API alternative.
+2. **Cookie upload via adapter (planned, not shipped today).** For sites without a usable API. The user runs a Chrome extension on their own device, exports cookies for the target domain, sends the file via Discord DM (or any adapter that supports attachments). Kernos imports the cookies into the persistent profile. Friction lives on the user's local browser; the server never needs interactive login.
+3. **OAuth device-code flow (planned, not shipped today).** For sites that support it. Kernos initiates an OAuth flow, surfaces the device code through the adapter, the user confirms on their phone or laptop. Standard, secure, no shared cookie file required.
+
+The persistent profile + real Chrome shipped here removes the bot-detection failure mode (ERR_ABORTED on Notion-style sites) without any login at all — public-readable pages now work cleanly. Login only matters when the destination requires it for the specific data being read or written, and for that case the three paths above are the right shape rather than headful login.
 
 **Threat surface — read this before logging in.** The profile directory holds session cookies and local storage for every site the operator authenticates against in that browser. Anyone with read access to the profile directory has read access to those authenticated sessions, equivalently to having the operator's logged-in browser. Implications:
 
