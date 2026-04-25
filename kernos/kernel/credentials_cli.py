@@ -128,19 +128,188 @@ def _command_onboard(args: argparse.Namespace) -> int:
         return 0
 
     if service.auth_type == AuthType.OAUTH_DEVICE_CODE:
-        print(
-            f"ERROR: {service.display_name} uses OAuth device-code, which is "
-            f"not yet implemented as a CLI flow. The next batch wires this "
-            f"up. For now use the api_token flow on services that support it.",
-            file=sys.stderr,
-        )
-        return 2
+        return _run_device_code_onboard(service, args)
 
     print(
         f"ERROR: auth type {service.auth_type.value!r} not handled by this CLI.",
         file=sys.stderr,
     )
     return 2
+
+
+def _run_device_code_onboard(service, args: argparse.Namespace) -> int:
+    """RFC 8628 device authorization flow as a synchronous CLI command.
+
+    Posts to the service's device-authorization endpoint, prints the
+    user_code + verification_uri prominently, blocks while polling the
+    token endpoint at the service-supplied interval, stores the
+    resulting credential when the user completes verification.
+    """
+    import time
+
+    from kernos.kernel.oauth_device_code import (
+        AuthorizationDeclined,
+        AuthorizationExpired,
+        DeviceCodeError,
+        DeviceCodeNetworkError,
+        TokenEndpointError,
+        poll_for_token,
+        start_device_flow,
+    )
+    from kernos.kernel.services import ServiceDescriptorError
+
+    try:
+        start = start_device_flow(service)
+    except ServiceDescriptorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except DeviceCodeError as exc:
+        print(f"ERROR: device authorization failed: {exc}", file=sys.stderr)
+        return 2
+
+    # Surface the user code + verification URI prominently. The
+    # verification_uri_complete (when present) embeds the code, so a
+    # supportive operator can click directly without re-typing.
+    print()
+    print(f"  Open this URL on a device you can sign in on:")
+    print(f"    {start.verification_uri}")
+    if start.verification_uri_complete:
+        print(f"  Or click here to skip the code entry step:")
+        print(f"    {start.verification_uri_complete}")
+    print()
+    print(f"  Enter this code: {start.user_code}")
+    print()
+    print(
+        f"  Waiting for completion (expires in "
+        f"{start.expires_in} seconds, polling every "
+        f"{start.interval} seconds)..."
+    )
+    print()
+
+    # Polling progress: print a dot per tick so the operator sees the
+    # CLI is alive. The on_tick callback fires once per poll loop.
+    def _tick(elapsed: float) -> None:
+        # Round-up so ticks read as integer seconds.
+        sys.stdout.write(".")
+        sys.stdout.flush()
+
+    try:
+        bundle = poll_for_token(service, start, on_tick=_tick)
+    except AuthorizationDeclined as exc:
+        print()
+        print(f"ERROR: authorization declined: {exc}", file=sys.stderr)
+        return 2
+    except AuthorizationExpired as exc:
+        print()
+        print(f"ERROR: device code expired: {exc}", file=sys.stderr)
+        return 2
+    except TokenEndpointError as exc:
+        print()
+        print(f"ERROR: token endpoint error: {exc}", file=sys.stderr)
+        return 2
+    except DeviceCodeNetworkError as exc:
+        print()
+        print(f"ERROR: network error during polling: {exc}", file=sys.stderr)
+        return 2
+
+    print()
+    print()
+    data_dir = _resolve_data_dir(args)
+    instance_id = _resolve_instance_id(args)
+    store = MemberCredentialStore(data_dir, instance_id)
+
+    expires_at = (
+        int(time.time()) + bundle.expires_in
+        if bundle.expires_in > 0 else None
+    )
+    store.add(
+        member_id=args.member,
+        service_id=service.service_id,
+        token=bundle.access_token,
+        refresh_token=bundle.refresh_token,
+        expires_at=expires_at,
+        scopes=tuple(bundle.scope.split()) if bundle.scope else (),
+        metadata={
+            "display_name": service.display_name,
+            "token_type": bundle.token_type,
+        },
+    )
+    print(
+        f"OK: stored {service.display_name} credential for "
+        f"member={args.member} instance={instance_id}."
+    )
+    return 0
+
+
+def _command_refresh(args: argparse.Namespace) -> int:
+    """Refresh an OAuth credential by consuming its stored refresh_token.
+
+    Only valid for oauth_device_code services. api_token services
+    have no refresh mechanism — the token is the credential, full
+    stop. The CLI surfaces a clear error for that case.
+    """
+    from kernos.kernel.credentials_member import MemberCredentialNotFound
+    from kernos.kernel.oauth_device_code import (
+        DeviceCodeError,
+        DeviceCodeNetworkError,
+        TokenEndpointError,
+        refresh_credential,
+    )
+
+    registry = _load_service_registry()
+    service = registry.get(args.service)
+    if service is None:
+        valid = ", ".join(d.service_id for d in registry.list_services()) or "(none)"
+        print(
+            f"ERROR: service {args.service!r} is not registered. "
+            f"Stock services: {valid}",
+            file=sys.stderr,
+        )
+        return 2
+    if service.auth_type != AuthType.OAUTH_DEVICE_CODE:
+        print(
+            f"ERROR: refresh is only valid for oauth_device_code services. "
+            f"Service {args.service!r} uses {service.auth_type.value!r}; "
+            f"there is no refresh mechanism for that auth type. To rotate "
+            f"an api_token credential, run `revoke` then `onboard` again.",
+            file=sys.stderr,
+        )
+        return 2
+
+    data_dir = _resolve_data_dir(args)
+    instance_id = _resolve_instance_id(args)
+    store = MemberCredentialStore(data_dir, instance_id)
+
+    try:
+        rotated = refresh_credential(
+            service=service, member_id=args.member, store=store,
+        )
+    except MemberCredentialNotFound:
+        print(
+            f"ERROR: no credential stored for member={args.member} "
+            f"service={args.service}. Run `onboard` first.",
+            file=sys.stderr,
+        )
+        return 2
+    except TokenEndpointError as exc:
+        print(f"ERROR: refresh rejected by token endpoint: {exc}", file=sys.stderr)
+        return 2
+    except DeviceCodeNetworkError as exc:
+        print(f"ERROR: network error during refresh: {exc}", file=sys.stderr)
+        return 2
+    except DeviceCodeError as exc:
+        print(f"ERROR: refresh failed: {exc}", file=sys.stderr)
+        return 2
+
+    expires_msg = (
+        f"expires_at={rotated.expires_at}"
+        if rotated.expires_at else "no expiry returned"
+    )
+    print(
+        f"OK: refreshed {service.display_name} credential for "
+        f"member={args.member} instance={instance_id} ({expires_msg})."
+    )
+    return 0
 
 
 def _command_revoke(args: argparse.Namespace) -> int:
@@ -262,6 +431,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_revoke.add_argument("--service", required=True)
 
+    p_refresh = sub.add_parser(
+        "refresh",
+        parents=[common],
+        help=(
+            "Refresh an OAuth credential by consuming its stored "
+            "refresh_token. Only valid for oauth_device_code services."
+        ),
+    )
+    p_refresh.add_argument("--service", required=True)
+
     sub.add_parser(
         "list",
         parents=[common],
@@ -287,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "onboard": _command_onboard,
         "revoke": _command_revoke,
+        "refresh": _command_refresh,
         "list": _command_list,
         "info": _command_info,
     }
