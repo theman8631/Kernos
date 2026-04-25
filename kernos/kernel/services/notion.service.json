@@ -1,0 +1,17 @@
+{
+  "service_id": "notion",
+  "display_name": "Notion",
+  "auth_type": "api_token",
+  "operations": [
+    "read_pages",
+    "write_pages",
+    "read_databases",
+    "query_databases",
+    "create_pages",
+    "update_pages",
+    "create_comments"
+  ],
+  "audit_category": "notion",
+  "required_scopes": [],
+  "notes": "Notion's integration-token model. The member creates an integration in their Notion workspace, shares the relevant pages or databases with it, and pastes the integration token via the api_token auth flow on CLI. Token paste is CLI-only per the auth-by-channel matrix."
+}
