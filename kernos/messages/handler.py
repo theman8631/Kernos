@@ -921,11 +921,30 @@ class MessageHandler:
         self._tool_catalog = ToolCatalog()
         self._register_kernel_tools_in_catalog()
 
+        # Service registry — stock external-service descriptors loaded
+        # at boot. The workshop external-service primitive consults this
+        # for service_id validation at register_tool and at invocation
+        # time. Stock service descriptors live next to the registry.
+        from kernos.kernel.services import ServiceRegistry
+        from pathlib import Path as _Path
+        self._service_registry = ServiceRegistry()
+        _stock_services_dir = _Path(__file__).resolve().parent.parent / "kernel" / "services"
+        try:
+            _loaded = self._service_registry.load_stock_dir(_stock_services_dir)
+            logger.info("STOCK_SERVICES_LOADED: count=%d dir=%s", _loaded, _stock_services_dir)
+        except Exception as _exc:
+            logger.warning("STOCK_SERVICES_LOAD_FAILED: %s", _exc)
+
         # Workspace manager — artifact lifecycle, tool registration, lazy manifest loading
         from kernos.kernel.workspace import WorkspaceManager
         self._workspace = WorkspaceManager(
             data_dir=os.getenv("KERNOS_DATA_DIR", "./data"),
             catalog=self._tool_catalog,
+            service_registry=self._service_registry,
+            # Audit store is owned by the ReasoningService; the workshop
+            # primitive's service-bound dispatch path writes audit
+            # entries through the same store.
+            audit_store=getattr(reasoning, "_audit", None),
         )
         reasoning.set_workspace(self._workspace)
 

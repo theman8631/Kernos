@@ -18,6 +18,22 @@ from pathlib import Path
 from typing import Any
 
 from kernos.utils import utc_now, _safe_name
+from kernos.kernel.credentials_member import MemberCredentialStore
+from kernos.kernel.services import ServiceRegistry
+from kernos.kernel.tool_audit import build_audit_entry
+from kernos.kernel.tool_descriptor import (
+    ToolDescriptor,
+    ToolDescriptorError,
+    parse_tool_descriptor,
+)
+from kernos.kernel.tool_runtime import build_runtime_context
+from kernos.kernel.tool_runtime_enforcement import (
+    EnforcementInputs,
+    RuntimeEnforcementError,
+    compute_registration_hash,
+    enforce_invocation,
+)
+from kernos.kernel.tool_validation import validate_tool_file
 
 logger = logging.getLogger(__name__)
 
@@ -130,14 +146,51 @@ class WorkspaceManager:
     no boot-time scan, no cost for unvisited spaces.
     """
 
-    def __init__(self, data_dir: str, catalog: Any = None) -> None:
+    def __init__(
+        self,
+        data_dir: str,
+        catalog: Any = None,
+        service_registry: ServiceRegistry | None = None,
+        audit_store: Any = None,
+    ) -> None:
         self._data_dir = Path(data_dir)
         self._catalog = catalog  # ToolCatalog reference
         self._loaded_manifests: dict[str, WorkspaceManifest] = {}  # "tenant:space" → manifest
+        self._services = service_registry
+        self._audit = audit_store
+        # Per-instance credential stores cached on first use. Each
+        # store is bound to one (data_dir, instance_id) pair.
+        self._credential_stores: dict[str, MemberCredentialStore] = {}
 
     def set_catalog(self, catalog: Any) -> None:
         """Set the ToolCatalog reference (called after construction)."""
         self._catalog = catalog
+
+    def set_service_registry(self, registry: ServiceRegistry) -> None:
+        """Set the ServiceRegistry (called after construction).
+
+        When set, register_tool consults it to validate service_id and
+        authority for service-bound tool descriptors per the workshop
+        external-service primitive.
+        """
+        self._services = registry
+
+    def set_audit_store(self, audit_store: Any) -> None:
+        """Set the AuditStore (called after construction).
+
+        When set, service-bound tool invocations emit audit entries
+        with the workshop primitive's payload-digest + normalized-
+        category shape.
+        """
+        self._audit = audit_store
+
+    def _credential_store_for(self, instance_id: str) -> MemberCredentialStore:
+        """Return (or construct) the per-instance credential store."""
+        if instance_id not in self._credential_stores:
+            self._credential_stores[instance_id] = MemberCredentialStore(
+                self._data_dir, instance_id,
+            )
+        return self._credential_stores[instance_id]
 
     # --- Path helpers ---
 
@@ -303,12 +356,27 @@ class WorkspaceManager:
     # --- Tool Registration ---
 
     async def register_tool(
-        self, instance_id: str, space_id: str, descriptor_file: str | dict,
+        self,
+        instance_id: str,
+        space_id: str,
+        descriptor_file: str | dict,
+        *,
+        force: bool = False,
     ) -> str:
         """Validate a descriptor and register the tool in the catalog.
 
         The descriptor (.tool.json) is the source of truth. The catalog
         reads from it. The manifest tracks it.
+
+        Per WORKSHOP-EXTERNAL-SERVICE-PRIMITIVE, descriptors may declare
+        extension fields (service_id, authority, gate_classification,
+        per-operation classifications, audit_category, domain_hints,
+        aggregation). Those are parsed and validated against the
+        ServiceRegistry when the WorkspaceManager has one. The
+        implementation source is scanned for unsafe authoring patterns;
+        findings reject registration unless force=True. A registration
+        hash of (descriptor || impl) is stored on the catalog entry so
+        runtime enforcement can detect post-registration edits.
         """
         # Guard: LLM may send a dict instead of a string
         if isinstance(descriptor_file, dict):
@@ -377,6 +445,48 @@ class WorkspaceManager:
         if not isinstance(schema, dict) or "type" not in schema:
             return "input_schema must be a valid JSON Schema object with a 'type' field."
 
+        # 6b. Parse the extended descriptor (workshop external-service
+        # primitive). Pre-existing tools without extension fields parse
+        # cleanly with all extensions defaulted; tools that declare
+        # service_id are cross-validated against the ServiceRegistry
+        # (when one is wired in).
+        try:
+            service_lookup = self._services.get if self._services else None
+            extended_descriptor = parse_tool_descriptor(
+                descriptor, service_lookup=service_lookup,
+            )
+        except ToolDescriptorError as exc:
+            return f"Tool descriptor validation failed: {exc}"
+
+        # 6c. Authoring-pattern validation. Heuristic regex pass over
+        # the implementation source; findings reject registration unless
+        # force=True. Force-registered tools surface only to the author
+        # at invocation time; runtime enforcement still applies to them.
+        validation = validate_tool_file(impl_path)
+        if not validation.is_clean and not force:
+            return (
+                "Authoring-pattern validation rejected the tool. "
+                "Either fix the findings or pass force=True (which "
+                "limits the tool's surfacing to its author). "
+                f"Findings:\n{validation.render()}"
+            )
+        if force and not validation.is_clean:
+            logger.warning(
+                "TOOL_REGISTER_FORCE: name=%s space=%s findings=%d "
+                "(force-registered; tool surfaces only to its author)",
+                name, space_id, len(validation.findings),
+            )
+
+        # 6d. Compute registration hash of (descriptor || impl) for the
+        # runtime enforcement check.
+        try:
+            registration_hash = compute_registration_hash(
+                desc_path.read_bytes(),
+                impl_path.read_bytes(),
+            )
+        except OSError as exc:
+            return f"Failed to read tool source for registration hash: {exc}"
+
         # 7. Register in catalog
         if self._catalog:
             self._catalog.register(
@@ -390,8 +500,20 @@ class WorkspaceManager:
                 entry.home_space = space_id
                 entry.implementation = impl
                 entry.stateful = descriptor.get("stateful", True)
+                # Workshop primitive metadata.
+                entry.descriptor_file = descriptor_file
+                entry.service_id = extended_descriptor.service_id
+                entry.registration_hash = registration_hash
+                entry.force_registered = bool(force and not validation.is_clean)
 
-        logger.info("TOOL_REGISTER: name=%s space=%s source=workspace", name, space_id)
+        logger.info(
+            "TOOL_REGISTER: name=%s space=%s source=workspace "
+            "service=%s hash=%s force=%s",
+            name, space_id,
+            extended_descriptor.service_id or "(internal)",
+            registration_hash[:12],
+            entry.force_registered if self._catalog and entry else False,
+        )
 
         # 8. Auto-add to manifest if not already tracked
         manifest = await self.load_manifest(instance_id, space_id)
@@ -418,9 +540,26 @@ class WorkspaceManager:
     # --- Workspace Tool Execution ---
 
     async def execute_workspace_tool(
-        self, instance_id: str, tool_name: str, tool_input: dict, data_dir: str,
+        self,
+        instance_id: str,
+        tool_name: str,
+        tool_input: dict,
+        data_dir: str,
+        *,
+        member_id: str = "",
     ) -> str:
-        """Execute a workspace-built tool by calling its implementation."""
+        """Execute a workspace-built tool by calling its implementation.
+
+        When the catalog entry has a service_id (workshop external-
+        service primitive), execution routes through
+        _execute_service_bound_tool, which runs the four runtime checks,
+        builds the per-member runtime context, calls the tool's
+        execute(input_data, context), and emits an audit entry.
+
+        Tools without service_id continue through the existing
+        subprocess path; this preserves back-compat for the workshop's
+        original self-contained tool model.
+        """
         if not self._catalog:
             return json.dumps({"error": "Catalog not available"})
 
@@ -432,6 +571,25 @@ class WorkspaceManager:
         implementation = getattr(entry, "implementation", "")
         if not home_space or not implementation:
             return json.dumps({"error": f"Tool '{tool_name}' missing home_space or implementation"})
+
+        # Route service-bound tools through the primitive's dispatch
+        # path. Tools without service_id stay on the existing flow.
+        if getattr(entry, "service_id", ""):
+            if not member_id:
+                return json.dumps({
+                    "error": (
+                        f"Service-bound tool '{tool_name}' requires "
+                        f"member_id at invocation time. The dispatcher "
+                        f"must thread the invoking member's identity."
+                    ),
+                })
+            return await self._execute_service_bound_tool(
+                instance_id=instance_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                member_id=member_id,
+                entry=entry,
+            )
 
         # Validate implementation filename
         if "/" in implementation or "\\" in implementation or ".." in implementation:
@@ -485,6 +643,199 @@ class WorkspaceManager:
         else:
             error = result.get("stderr", "") or result.get("error", "Execution failed")
             return json.dumps({"error": error[:500]})
+
+    # --- Service-bound tool dispatch (workshop external-service primitive) ---
+
+    async def _execute_service_bound_tool(
+        self,
+        *,
+        instance_id: str,
+        tool_name: str,
+        tool_input: dict,
+        member_id: str,
+        entry: Any,
+    ) -> str:
+        """Service-bound tool execution path per WORKSHOP-EXTERNAL-SERVICE-PRIMITIVE.
+
+        Six steps in order:
+        1. Re-parse the descriptor from disk (so any registered hash
+           still matches the current bytes; runtime enforcement
+           verifies this in step 2).
+        2. Run the four invocation-time checks (hash, operation
+           authority, credential scope, sandbox readiness) via
+           enforce_invocation. Failures raise specific subclasses of
+           RuntimeEnforcementError; the dispatcher catches and surfaces
+           clean errors.
+        3. Build the runtime context (per-member data_dir, scoped
+           credentials, member_id) with the invoking member's identity.
+        4. Import the implementation module and invoke
+           execute(input_data, context).
+        5. Build an audit entry with the workshop primitive's payload
+           digest + normalized category and write it to the audit log.
+        6. Return the result as JSON.
+        """
+        import importlib
+        import sys
+        from datetime import datetime, timezone
+
+        space_dir = self._space_dir(instance_id, entry.home_space)
+        desc_path = space_dir / entry.descriptor_file
+        impl_path = space_dir / entry.implementation
+
+        # Step 1: re-parse descriptor (services + extended fields).
+        try:
+            descriptor_dict = json.loads(desc_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return json.dumps({
+                "error": f"Failed to load descriptor: {exc}",
+            })
+        try:
+            service_lookup = self._services.get if self._services else None
+            descriptor = parse_tool_descriptor(
+                descriptor_dict, service_lookup=service_lookup,
+            )
+        except ToolDescriptorError as exc:
+            return json.dumps({
+                "error": f"Descriptor failed re-validation at invocation: {exc}",
+            })
+
+        # Step 2: runtime enforcement. The operation is taken from the
+        # tool input under the conventional `__operation__` field; if
+        # absent, the tool's authority is consulted: a single-authority
+        # tool defaults to that operation.
+        operation = str(tool_input.get("__operation__", "")).strip()
+        if not operation and len(descriptor.authority) == 1:
+            operation = descriptor.authority[0]
+        # Strip the convention key so it doesn't leak into the tool
+        # input or the audit-log digest.
+        clean_input = {k: v for k, v in tool_input.items() if k != "__operation__"}
+
+        credential_store = self._credential_store_for(instance_id)
+        try:
+            enforce_invocation(EnforcementInputs(
+                descriptor=descriptor,
+                operation=operation,
+                descriptor_path=desc_path,
+                implementation_path=impl_path,
+                registered_hash=getattr(entry, "registration_hash", ""),
+                member_id=member_id,
+                credential_store=credential_store,
+                service_registry=self._services,
+            ))
+        except RuntimeEnforcementError as exc:
+            await self._emit_audit(
+                instance_id=instance_id,
+                member_id=member_id,
+                space_id=entry.home_space,
+                descriptor=descriptor,
+                operation=operation,
+                payload=clean_input,
+                success=False,
+                error=str(exc)[:300],
+            )
+            return json.dumps({"error": str(exc)})
+
+        # Step 3: build runtime context.
+        context = build_runtime_context(
+            install_data_dir=self._data_dir,
+            credential_store=credential_store,
+            instance_id=instance_id,
+            member_id=member_id,
+            space_id=entry.home_space,
+            tool_id=tool_name,
+            service_id=descriptor.service_id,
+        )
+
+        # Step 4: import the module and invoke execute(input, context).
+        # The space directory is added to sys.path for the import; the
+        # path entry is removed in the finally block to avoid bleeding
+        # imports across tool invocations.
+        path_entry = str(space_dir)
+        result_payload: Any
+        success = False
+        error_text = ""
+        sys.path.insert(0, path_entry)
+        try:
+            module_name = entry.implementation.removesuffix(".py")
+            try:
+                if module_name in sys.modules:
+                    module = importlib.reload(sys.modules[module_name])
+                else:
+                    module = importlib.import_module(module_name)
+            except Exception as exc:
+                raise RuntimeError(f"failed to import {module_name}: {exc}") from exc
+            execute_fn = getattr(module, "execute", None)
+            if execute_fn is None:
+                raise RuntimeError(
+                    f"tool module {module_name!r} does not define execute(input_data, context)"
+                )
+            result_payload = execute_fn(clean_input, context)
+            success = True
+        except Exception as exc:
+            result_payload = {"error": str(exc)[:300]}
+            error_text = str(exc)[:300]
+        finally:
+            try:
+                sys.path.remove(path_entry)
+            except ValueError:
+                pass
+
+        # Step 5: emit audit entry.
+        await self._emit_audit(
+            instance_id=instance_id,
+            member_id=member_id,
+            space_id=entry.home_space,
+            descriptor=descriptor,
+            operation=operation,
+            payload=clean_input,
+            success=success,
+            error=error_text,
+        )
+
+        # Step 6: return JSON.
+        try:
+            return json.dumps(result_payload)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "tool returned non-serialisable result"})
+
+    async def _emit_audit(
+        self,
+        *,
+        instance_id: str,
+        member_id: str,
+        space_id: str,
+        descriptor: ToolDescriptor,
+        operation: str,
+        payload: dict,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        """Write a workshop-primitive-shaped audit entry. Best effort —
+        log a warning on failure rather than blocking the tool result."""
+        if self._audit is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            audit_entry = build_audit_entry(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                instance_id=instance_id,
+                member_id=member_id,
+                space_id=space_id,
+                tool_name=descriptor.name,
+                operation=operation,
+                service_id=descriptor.service_id,
+                authority=descriptor.authority,
+                audit_category=descriptor.audit_category,
+                payload=payload,
+                success=success,
+                error=error,
+            )
+            await self._audit.log(instance_id, audit_entry.to_dict())
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "WORKSHOP_AUDIT_WRITE_FAILED: tool=%s err=%s",
+                descriptor.name, exc,
+            )
 
     # --- Lazy Registration on Space Entry ---
 

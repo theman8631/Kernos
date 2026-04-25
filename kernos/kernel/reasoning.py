@@ -1714,7 +1714,9 @@ class ReasoningService:
                     # Workspace tool — dispatch via workspace manager
                     _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                     result = await self._workspace.execute_workspace_tool(
-                        request.instance_id, block.name, tool_input, _data_dir)
+                        request.instance_id, block.name, tool_input, _data_dir,
+                        member_id=request.member_id,
+                    )
                     logger.info("TOOL_DISPATCH: name=%s type=workspace", block.name)
                     tool_duration_ms = int((time.monotonic() - t_tool) * 1000)
                     logger.info("AGENT_RESULT: tool=%s success=%s preview=%s",
@@ -1742,7 +1744,9 @@ class ReasoningService:
                     and self._workspace._catalog.has_workspace_tool(block.name)):
                 _data_dir = os.getenv("KERNOS_DATA_DIR", "./data")
                 result = await self._workspace.execute_workspace_tool(
-                    request.instance_id, block.name, tool_input, _data_dir)
+                    request.instance_id, block.name, tool_input, _data_dir,
+                    member_id=request.member_id,
+                )
                 logger.info("TOOL_DISPATCH: name=%s type=workspace", block.name)
             else:
                 result = await self._mcp.call_tool(block.name, tool_input)

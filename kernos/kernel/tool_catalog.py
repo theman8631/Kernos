@@ -21,6 +21,13 @@ class CatalogEntry:
     home_space: str = ""         # space where this tool's data lives
     implementation: str = ""     # Python file implementing execute()
     stateful: bool = True        # whether tool needs home space for execution
+    # WORKSHOP-EXTERNAL-SERVICE-PRIMITIVE metadata (populated when the
+    # tool's descriptor declares the extended fields). These power
+    # service-bound dispatch + runtime enforcement at invocation time.
+    descriptor_file: str = ""        # filename of the .tool.json descriptor
+    service_id: str = ""             # bound external service, or "" for internal tools
+    registration_hash: str = ""      # SHA-256 of (descriptor || impl) at registration
+    force_registered: bool = False   # author bypassed authoring-pattern validation
 
 
 # Token budget for tool schemas per reasoning call
