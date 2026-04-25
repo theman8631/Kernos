@@ -29,7 +29,19 @@ When the user asks you to search for something, look something up, or find curre
 
 ### Requirements
 
-Playwright Python package (installed with Kernos) plus a Chromium browser. If missing, run `playwright install chromium` in the Kernos venv. See `docs/architecture/browser.md` for backend internals and failure modes.
+Playwright Python package (installed with Kernos) plus a browser. Real Chrome is detected and used by default when present on the host; bundled Chromium is the documented fallback (run `playwright install chromium` in the Kernos venv if missing). See `docs/architecture/browser.md` for backend internals and failure modes.
+
+### Persistent profile and login
+
+The browser uses a persistent profile at `data/browser-profile/` so cookies and login state carry across Kernos restarts. To log into a site (Notion, GitHub, Reddit, anything that requires authentication) before Kernos starts using it:
+
+```
+python -m kernos.browser login --url https://www.notion.so
+```
+
+The command opens a real browser window against the persistent profile. Authenticate manually; closing the window persists the session for future Kernos runs. Run `python -m kernos.browser info` to confirm the profile location and channel selection. Run `python -m kernos.browser --help` for the full subcommand list.
+
+**Security note:** the profile holds session cookies for everything you log into. Anyone with read access to `data/browser-profile/` has the equivalent of your logged-in browser for those sites. Don't share that directory and don't log into accounts whose compromise would be unacceptable from a host-readable file. See `docs/architecture/browser.md` for the full threat-surface discussion.
 
 ## Web Search (Brave Search)
 

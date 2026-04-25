@@ -28,13 +28,13 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 from markdownify import markdownify
 from mcp.server.fastmcp import FastMCP
 from playwright.async_api import (
-    Browser,
     BrowserContext,
     Page,
     Playwright,
@@ -61,48 +61,125 @@ _AUTH_PATH_MARKERS = re.compile(
 )
 
 
+def _resolve_profile_dir() -> Path:
+    """Where the persistent browser profile lives on disk.
+
+    Default: a browser-profile subfolder under the configured data
+    directory. Override by setting KERNOS_BROWSER_PROFILE_DIR for a
+    second concurrent process or a separate logged-in profile.
+    """
+    override = os.getenv("KERNOS_BROWSER_PROFILE_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    data_dir = Path(os.getenv("KERNOS_DATA_DIR", "./data")).resolve()
+    return data_dir / "browser-profile"
+
+
+def _resolve_chrome_channel() -> str | None:
+    """Pick the Chrome channel for the persistent context.
+
+    Real Chrome (channel="chrome") is the default when a Chrome-family
+    install is detected on the host. Real Chrome is harder to fingerprint
+    as automation than bundled Chromium and is the architectural reason
+    this batch exists. Operators who want the bundled Chromium for
+    portability or reproducibility can set KERNOS_BROWSER_FORCE_CHROMIUM
+    to a truthy value to opt out.
+    """
+    if os.getenv("KERNOS_BROWSER_FORCE_CHROMIUM", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        return None
+    # Detect real Chrome / Brave / Edge by their common Linux paths.
+    # Playwright also resolves channel="chrome" via its own logic on
+    # macOS and Windows; the explicit Linux path-existence check here
+    # is a friendlier early signal in our most-common deploy.
+    candidates = (
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    )
+    for path in candidates:
+        if Path(path).exists():
+            return "chrome"
+    # Fall back to bundled Chromium if nothing matched.
+    return None
+
+
+class BrowserProfileLockedError(RuntimeError):
+    """Friendlier wrapper around Playwright's raw profile-lock error.
+
+    Operators hit this when Kernos is already running another browser
+    against the same profile (or a stale process didn't release the
+    lock cleanly). The message names the override env var so the
+    operator can resolve in one step without reading source.
+    """
+
+
 class BrowserSession:
     """Singleton-style holder for the Playwright browser + active page.
 
-    One Chromium instance per MCP process; one page, reused across calls,
-    so that goto semantics match what Lightpanda gave callers. A CDP
-    session is attached to the page so we can query the accessibility
-    tree via DevTools Protocol — Playwright 1.58 removed the
-    `page.accessibility` shortcut, so CDP is now the canonical path.
+    One persistent context per MCP process backed by a profile directory
+    on disk (default: data/browser-profile/). Cookies, login state, and
+    the browser fingerprint persist across Kernos restarts so sites that
+    rely on returning-user signals (Notion, Reddit logged-in views,
+    GitHub authenticated pages) do not see each session as a fresh
+    automated bot. A CDP session is attached to the page for the
+    accessibility-tree path because Playwright removed the
+    page.accessibility shortcut.
     """
 
     def __init__(self) -> None:
         self._playwright: Optional[Playwright] = None
-        self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._cdp = None
         self._lock = asyncio.Lock()
 
-    async def ensure_page(self) -> Page:
+    @property
+    def profile_dir(self) -> Path:
+        return _resolve_profile_dir()
+
+    async def ensure_page(self, *, headless: bool = True) -> Page:
         async with self._lock:
             if self._page and not self._page.is_closed():
                 return self._page
             if self._playwright is None:
                 self._playwright = await async_playwright().start()
-            if self._browser is None:
-                self._browser = await self._playwright.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                    ],
-                )
             if self._context is None:
-                self._context = await self._browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (X11; Linux x86_64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/130.0.0.0 Safari/537.36"
-                    ),
-                    viewport={"width": 1280, "height": 900},
+                profile_dir = _resolve_profile_dir()
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                channel = _resolve_chrome_channel()
+                logger.info(
+                    "BROWSER_LAUNCH: profile=%s channel=%s headless=%s",
+                    profile_dir, channel or "chromium", headless,
                 )
-            self._page = await self._context.new_page()
+                try:
+                    self._context = await self._playwright.chromium.launch_persistent_context(
+                        str(profile_dir),
+                        channel=channel,
+                        headless=headless,
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                        ],
+                        user_agent=(
+                            "Mozilla/5.0 (X11; Linux x86_64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/130.0.0.0 Safari/537.36"
+                        ),
+                        viewport={"width": 1280, "height": 900},
+                        ignore_default_args=["--disable-extensions"],
+                    )
+                except Exception as exc:
+                    raise self._wrap_launch_error(exc, profile_dir) from exc
+            # Persistent contexts open with a default page; reuse it if
+            # available, otherwise create a fresh one.
+            if self._context.pages:
+                self._page = self._context.pages[0]
+            else:
+                self._page = await self._context.new_page()
             self._cdp = await self._context.new_cdp_session(self._page)
             try:
                 await self._cdp.send("Accessibility.enable")
@@ -112,6 +189,24 @@ class BrowserSession:
                 logger.debug("CDP Accessibility.enable failed; continuing")
             return self._page
 
+    @staticmethod
+    def _wrap_launch_error(exc: Exception, profile_dir: Path) -> Exception:
+        """Turn cryptic Playwright lock errors into operator-readable messages."""
+        message = str(exc)
+        lowered = message.lower()
+        if (
+            "processsingleton" in lowered
+            or "singletonlock" in lowered
+            or "is already in use" in lowered
+            or "browser is already in use" in lowered
+        ):
+            return BrowserProfileLockedError(
+                "Browser profile already in use by another Kernos process. "
+                "Either close the other process or set KERNOS_BROWSER_PROFILE_DIR "
+                f"to a different directory. Current profile: {profile_dir}"
+            )
+        return exc
+
     async def cdp(self):
         """Return the CDP session bound to the active page."""
         await self.ensure_page()
@@ -120,24 +215,16 @@ class BrowserSession:
     async def close(self) -> None:
         async with self._lock:
             self._cdp = None
-            if self._page and not self._page.is_closed():
-                try:
-                    await self._page.close()
-                except Exception:
-                    pass
             self._page = None
-            if self._context:
+            if self._context is not None:
+                # Persistent context owns the underlying browser process.
+                # Closing the context is sufficient; no separate browser
+                # close needed.
                 try:
                     await self._context.close()
                 except Exception:
                     pass
                 self._context = None
-            if self._browser:
-                try:
-                    await self._browser.close()
-                except Exception:
-                    pass
-                self._browser = None
             if self._playwright:
                 try:
                     await self._playwright.stop()
