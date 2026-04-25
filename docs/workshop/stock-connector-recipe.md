@@ -174,7 +174,9 @@ The recipe shape is identical for any stock connector. The substitutions for the
 | Drive + Docs | `google_drive` | `oauth_device_code` (shares Gmail's scope) | `read_doc`, `create_doc`, `list_files` | `drive_read_doc` |
 | Gmail upgrade | `gmail` | `oauth_device_code` | `read_message`, `send_message`, `manage_label` | `gmail_read_message` |
 
-Each ships under `kernos/kernel/services/<service>.service.json` plus tool files under `kernos/kernel/integrations/<service>/`. The auth-by-channel matrix decides where onboarding can run; `oauth_device_code` services (Slack, Drive, Gmail) onboard from any adapter once the device-code subsystem ships.
+Each ships under `kernos/kernel/services/<service>.service.json` plus tool files under `kernos/kernel/integrations/<service>/`. The auth-by-channel matrix decides where onboarding can run; `api_token` services onboard CLI-only and `oauth_device_code` services onboard via the same `credentials_cli onboard` subcommand which runs the RFC 8628 device flow synchronously (CLI today; adapter-side surfacing is a separate follow-on).
+
+For oauth services, the descriptor needs an `oauth` section with `device_authorization_uri`, `token_uri`, and either `client_id` (literal, for OSS-public clients) or `client_id_env` (env var name, for closed-app clients like Google Cloud where the operator registers the app). The `pkce` field declares whether the provider requires (`required`), accepts (`optional`), or rejects (`omit`) PKCE per RFC 7636. Refresh later via `credentials_cli refresh --service <id> --member <id>`; the helper consumes the stored refresh token and rotates the credential per RFC 6749 §6.
 
 ## When you hit a snag
 

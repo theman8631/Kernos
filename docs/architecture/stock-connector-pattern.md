@@ -13,7 +13,7 @@ A stock connector consists of four artifacts that compose with the primitive's m
 3. **An onboarding entry point** — how the operator gets credentials into Kernos.
 4. **An audit and gate alignment** — which operations classify as read / soft_write / hard_write / delete.
 
-Of these, only #1 and #2 ship as committed source. Onboarding flows through the existing `credentials_cli` for `api_token` services and the future device-code subsystem for OAuth services. Gate alignment is declarative (per-operation classification on the descriptor); no runtime code.
+Of these, only #1 and #2 ship as committed source. Onboarding flows through the existing `credentials_cli` for both `api_token` and `oauth_device_code` services; the CLI dispatches by the descriptor's `auth_type`. Gate alignment is declarative (per-operation classification on the descriptor); no runtime code.
 
 ## Where each component lives
 
@@ -77,7 +77,7 @@ The implementation is a `.py` file exporting `execute(input_data, context)` retu
 
 For `api_token` services, the existing `credentials_cli` already handles onboarding — the operator runs `python -m kernos.kernel.credentials_cli onboard --service <service_id>`. The auth-by-channel matrix refuses anything but CLI for api_token paste, so adapter-side onboarding does not exist for this auth type by design.
 
-For `oauth_device_code` services, the device-code subsystem ships separately (out of scope for the first stock connector); the onboarding entry then surfaces the device code through whichever adapter the operator initiates the flow from.
+For `oauth_device_code` services, the same CLI runs the RFC 8628 flow: prints the user code plus verification URI, blocks while polling the token endpoint at the service-supplied interval, stores the issued token bundle (with refresh token) on success. Refresh later via `python -m kernos.kernel.credentials_cli refresh --service <id> --member <id>`. Adapter-side onboarding (surfacing the device code via Discord / SMS / Telegram) is a separate follow-on; CLI is the only path today.
 
 A connector author does NOT write a service-specific onboarding command. The CLI consumes the service descriptor and routes by `auth_type`.
 
