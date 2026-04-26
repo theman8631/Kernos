@@ -1,0 +1,22 @@
+{
+  "service_id": "google_drive",
+  "display_name": "Google Drive",
+  "auth_type": "oauth_device_code",
+  "operations": [
+    "read_doc",
+    "list_files",
+    "query_files"
+  ],
+  "audit_category": "google_drive",
+  "required_scopes": [
+    "https://www.googleapis.com/auth/drive.readonly"
+  ],
+  "oauth": {
+    "device_authorization_uri": "https://oauth2.googleapis.com/device/code",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+    "pkce": "required"
+  },
+  "notes": "Google Drive read access via OAuth 2.0 for Limited-Input Devices (RFC 8628 device flow). Operator registers a Google Cloud OAuth client and sets GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET in the install environment. PKCE required by Google. The drive.readonly scope covers all read operations; write tools would request additional scopes via a separate descriptor or scope amendment."
+}

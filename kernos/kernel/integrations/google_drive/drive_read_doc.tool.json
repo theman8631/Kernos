@@ -1,0 +1,23 @@
+{
+  "name": "drive_read_doc",
+  "description": "Read a Google Doc as markdown given its file id. Exports the document via Drive's HTML export endpoint and converts to markdown. Reads from the workspace the invoking member's Google account has access to.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "file_id": {
+        "type": "string",
+        "description": "Google Drive file identifier (the long string in the document URL)."
+      }
+    },
+    "required": ["file_id"]
+  },
+  "implementation": "drive_read_doc.py",
+  "service_id": "google_drive",
+  "authority": ["read_doc"],
+  "operations": [
+    {"operation": "read_doc", "classification": "read"}
+  ],
+  "audit_category": "google_drive",
+  "domain_hints": ["google_drive", "documents", "knowledge"],
+  "stateful": false
+}
