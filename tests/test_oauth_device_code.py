@@ -525,3 +525,138 @@ def test_refresh_credential_raises_when_no_credential_stored(store):
         refresh_credential(
             service=desc, member_id="mem_alice", store=store, http_client=fake,
         )
+
+
+# ---------------------------------------------------------------------------
+# client_secret wiring (Drive batch C0 — Google divergence handling)
+# ---------------------------------------------------------------------------
+
+
+def _google_descriptor(monkeypatch=None):
+    """Google-shape descriptor: requires client_secret in token-exchange."""
+    if monkeypatch is not None:
+        monkeypatch.setenv("FAKE_GOOGLE_CLIENT_ID", "fake-client.apps.googleusercontent.com")
+        monkeypatch.setenv("FAKE_GOOGLE_CLIENT_SECRET", "fake-secret-abc")
+    return parse_service_descriptor({
+        "service_id": "google_drive",
+        "display_name": "Google Drive",
+        "auth_type": "oauth_device_code",
+        "operations": ["read_doc"],
+        "required_scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+        "oauth": {
+            "device_authorization_uri": "https://oauth2.googleapis.com/device/code",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id_env": "FAKE_GOOGLE_CLIENT_ID",
+            "client_secret_env": "FAKE_GOOGLE_CLIENT_SECRET",
+            "pkce": "required",
+        },
+    })
+
+
+def test_poll_for_token_includes_client_secret_when_configured(monkeypatch):
+    desc = _google_descriptor(monkeypatch)
+    start = _build_start(verifier="v")
+    fake = _FakeClient([
+        ("googleapis.com/token", _FakeResponse(200, {
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expires_in": 3600,
+        })),
+    ])
+    poll_for_token(
+        desc, start,
+        http_client=fake,
+        sleeper=lambda s: None,
+        clock=lambda: 0.0,
+    )
+    _, payload = fake.calls[0]
+    assert payload["client_id"] == "fake-client.apps.googleusercontent.com"
+    assert payload["client_secret"] == "fake-secret-abc"
+
+
+def test_poll_for_token_omits_client_secret_for_slack_shape():
+    """Slack-shape descriptors (no client_secret) must not transmit one."""
+    desc = _slack_descriptor()
+    start = _build_start()
+    fake = _FakeClient([
+        ("oauth/token", _FakeResponse(200, {
+            "access_token": "at", "expires_in": 3600,
+        })),
+    ])
+    poll_for_token(
+        desc, start,
+        http_client=fake,
+        sleeper=lambda s: None,
+        clock=lambda: 0.0,
+    )
+    _, payload = fake.calls[0]
+    assert "client_secret" not in payload
+
+
+def test_refresh_credential_includes_client_secret_when_configured(
+    store, monkeypatch,
+):
+    desc = _google_descriptor(monkeypatch)
+    store.add(
+        member_id="mem_alice", service_id="google_drive",
+        token="old-at", refresh_token="rt-1",
+    )
+    fake = _FakeClient([
+        ("googleapis.com/token", _FakeResponse(200, {
+            "access_token": "new-at", "expires_in": 3600,
+        })),
+    ])
+    refresh_credential(
+        service=desc, member_id="mem_alice", store=store, http_client=fake,
+    )
+    _, payload = fake.calls[0]
+    assert payload["client_secret"] == "fake-secret-abc"
+
+
+def test_refresh_credential_omits_client_secret_for_slack_shape(store):
+    desc = _slack_descriptor()
+    store.add(
+        member_id="mem_alice", service_id="slack",
+        token="old", refresh_token="rt-1",
+    )
+    fake = _FakeClient([
+        ("oauth/token", _FakeResponse(200, {
+            "access_token": "new", "expires_in": 3600,
+        })),
+    ])
+    refresh_credential(
+        service=desc, member_id="mem_alice", store=store, http_client=fake,
+    )
+    _, payload = fake.calls[0]
+    assert "client_secret" not in payload
+
+
+def test_poll_for_token_raises_when_secret_env_var_unset(monkeypatch):
+    """Descriptor names client_secret_env but the env var is missing —
+    the resolver raises before polling, surfacing the configuration
+    issue with a clear pointer to the env var name."""
+    monkeypatch.setenv("FAKE_GOOGLE_CLIENT_ID", "client-x")
+    monkeypatch.delenv("FAKE_GOOGLE_CLIENT_SECRET", raising=False)
+    desc = parse_service_descriptor({
+        "service_id": "google_drive",
+        "display_name": "Google Drive",
+        "auth_type": "oauth_device_code",
+        "operations": ["read_doc"],
+        "oauth": {
+            "device_authorization_uri": "https://oauth2.googleapis.com/device/code",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id_env": "FAKE_GOOGLE_CLIENT_ID",
+            "client_secret_env": "FAKE_GOOGLE_CLIENT_SECRET",
+            "pkce": "required",
+        },
+    })
+    start = _build_start(verifier="v")
+    fake = _FakeClient([])  # nothing should reach this
+    from kernos.kernel.services import ServiceDescriptorError
+    with pytest.raises(ServiceDescriptorError, match="FAKE_GOOGLE_CLIENT_SECRET"):
+        poll_for_token(
+            desc, start,
+            http_client=fake,
+            sleeper=lambda s: None,
+            clock=lambda: 0.0,
+        )

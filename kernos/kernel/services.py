@@ -179,13 +179,30 @@ class OAuthDeviceCodeConfig:
             Empty when client_id is set literally. Exactly one of
             client_id and client_id_env is populated; both empty is a
             validation error.
+        client_secret: optional literal client_secret. Some providers
+            (Google, GitHub via PAT-based OAuth apps) require a
+            client_secret in the token-exchange step alongside
+            client_id; pure RFC 8628 implementations (Slack) do not.
+            Empty when not needed or supplied via env var.
+        client_secret_env: optional env var name holding the
+            client_secret. At most one of client_secret and
+            client_secret_env may be set; both empty means the
+            service uses client-id-only auth.
         pkce: PkceMode per Q5.
+
+    The client_secret pair was added to handle the Google divergence
+    surfaced during STOCK-INTEGRATIONS-DRIVE: Google's device-flow
+    token-exchange step requires client_secret even though RFC 8628
+    does not. Including it here keeps the subsystem provider-agnostic
+    (the per-service descriptor decides whether to send secret).
     """
 
     device_authorization_uri: str
     token_uri: str
     client_id: str = ""
     client_id_env: str = ""
+    client_secret: str = ""
+    client_secret_env: str = ""
     pkce: PkceMode = PkceMode.OPTIONAL
 
 
@@ -264,6 +281,39 @@ class ServiceDescriptor:
             f"client_id and no client_id_env. Programmer error: do not "
             f"construct OAuthDeviceCodeConfig with both empty."
         )
+
+    def resolve_client_secret(self) -> str:
+        """Return the OAuth client_secret, or empty string when none is configured.
+
+        Unlike client_id, client_secret is genuinely optional — many
+        providers (Slack) don't need one for device flow. Empty
+        return means the device-code subsystem will not send a
+        client_secret in token-exchange requests; non-empty return
+        is included in those requests verbatim.
+
+        Raises ServiceDescriptorError only when client_secret_env is
+        named but the env var is missing — distinguishes "not
+        configured" from "configured but unresolvable."
+        """
+        if self.oauth is None:
+            raise ServiceDescriptorError(
+                f"Service {self.service_id!r} has no oauth config; "
+                f"resolve_client_secret is only valid for "
+                f"oauth_device_code services."
+            )
+        if self.oauth.client_secret:
+            return self.oauth.client_secret
+        if self.oauth.client_secret_env:
+            value = os.environ.get(self.oauth.client_secret_env, "").strip()
+            if not value:
+                raise ServiceDescriptorError(
+                    f"Service {self.service_id!r} expects the OAuth "
+                    f"client_secret in env var "
+                    f"{self.oauth.client_secret_env!r} but it is not "
+                    f"set or is empty. Set the env var and retry."
+                )
+            return value
+        return ""
 
 
 class ServiceDescriptorError(ValueError):
@@ -399,6 +449,17 @@ def _parse_oauth_section(
             f"of client_id (literal) or client_id_env (env var name)."
         )
 
+    client_secret = (raw.get("client_secret") or "").strip()
+    client_secret_env = (raw.get("client_secret_env") or "").strip()
+    if client_secret and client_secret_env:
+        raise ServiceDescriptorError(
+            f"Service {service_id!r}'s oauth section has both "
+            f"client_secret and client_secret_env set. Choose one. "
+            f"Most operators use client_secret_env so the secret is "
+            f"sourced from the host's environment rather than committed "
+            f"to the descriptor."
+        )
+
     pkce_raw = raw.get("pkce", "optional")
     try:
         pkce = PkceMode(pkce_raw)
@@ -414,6 +475,8 @@ def _parse_oauth_section(
         token_uri=token_uri,
         client_id=client_id,
         client_id_env=client_id_env,
+        client_secret=client_secret,
+        client_secret_env=client_secret_env,
         pkce=pkce,
     )
 

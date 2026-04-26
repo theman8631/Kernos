@@ -250,6 +250,7 @@ def poll_for_token(
     clock = clock or time.monotonic
 
     client_id = service.resolve_client_id()
+    client_secret = service.resolve_client_secret()
     interval = max(1, int(start.interval))
     deadline = clock() + max(60, int(start.expires_in))
 
@@ -274,6 +275,8 @@ def poll_for_token(
             "device_code": start.device_code,
             "client_id": client_id,
         }
+        if client_secret:
+            payload["client_secret"] = client_secret
         if start.pkce_verifier:
             payload["code_verifier"] = start.pkce_verifier
 
@@ -373,6 +376,9 @@ def refresh_credential(
         "refresh_token": existing.refresh_token,
         "client_id": service.resolve_client_id(),
     }
+    client_secret = service.resolve_client_secret()
+    if client_secret:
+        payload["client_secret"] = client_secret
 
     response_payload = _post(
         service.oauth.token_uri,

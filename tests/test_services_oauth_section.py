@@ -185,6 +185,80 @@ def test_resolve_client_id_raises_for_api_token_service():
 
 
 # ---------------------------------------------------------------------------
+# client_secret (Google divergence — Drive batch C0)
+# ---------------------------------------------------------------------------
+
+
+def test_oauth_section_accepts_client_secret_literal():
+    raw = _oauth_descriptor()
+    raw["oauth"]["client_secret"] = "shh-its-a-secret"
+    desc = parse_service_descriptor(raw)
+    assert desc.oauth.client_secret == "shh-its-a-secret"
+    assert desc.oauth.client_secret_env == ""
+
+
+def test_oauth_section_accepts_client_secret_env():
+    raw = _oauth_descriptor()
+    raw["oauth"]["client_secret_env"] = "GOOGLE_OAUTH_CLIENT_SECRET"
+    desc = parse_service_descriptor(raw)
+    assert desc.oauth.client_secret == ""
+    assert desc.oauth.client_secret_env == "GOOGLE_OAUTH_CLIENT_SECRET"
+
+
+def test_oauth_section_rejects_both_client_secret_and_env():
+    raw = _oauth_descriptor()
+    raw["oauth"]["client_secret"] = "x"
+    raw["oauth"]["client_secret_env"] = "Y"
+    with pytest.raises(
+        ServiceDescriptorError, match="client_secret and client_secret_env",
+    ):
+        parse_service_descriptor(raw)
+
+
+def test_oauth_section_client_secret_optional_unset_is_default():
+    """A descriptor without client_secret fields parses cleanly — Slack-
+    style providers don't need one."""
+    desc = parse_service_descriptor(_oauth_descriptor())
+    assert desc.oauth.client_secret == ""
+    assert desc.oauth.client_secret_env == ""
+
+
+def test_resolve_client_secret_returns_literal():
+    raw = _oauth_descriptor()
+    raw["oauth"]["client_secret"] = "literal-secret"
+    desc = parse_service_descriptor(raw)
+    assert desc.resolve_client_secret() == "literal-secret"
+
+
+def test_resolve_client_secret_reads_env_var(monkeypatch):
+    monkeypatch.setenv("EXAMPLE_OAUTH_SECRET", "secret-from-env")
+    raw = _oauth_descriptor()
+    raw["oauth"]["client_secret_env"] = "EXAMPLE_OAUTH_SECRET"
+    desc = parse_service_descriptor(raw)
+    assert desc.resolve_client_secret() == "secret-from-env"
+
+
+def test_resolve_client_secret_returns_empty_when_unconfigured():
+    desc = parse_service_descriptor(_oauth_descriptor())
+    assert desc.resolve_client_secret() == ""
+
+
+def test_resolve_client_secret_raises_when_env_var_unset(monkeypatch):
+    monkeypatch.delenv("EXAMPLE_OAUTH_SECRET", raising=False)
+    raw = _oauth_descriptor()
+    raw["oauth"]["client_secret_env"] = "EXAMPLE_OAUTH_SECRET"
+    desc = parse_service_descriptor(raw)
+    with pytest.raises(ServiceDescriptorError, match="not set"):
+        desc.resolve_client_secret()
+
+
+def test_resolve_client_secret_raises_for_api_token_service():
+    desc = parse_service_descriptor(_api_token_descriptor())
+    with pytest.raises(ServiceDescriptorError, match="no oauth config"):
+        desc.resolve_client_secret()
+
+
+# ---------------------------------------------------------------------------
 # Back-compat: existing api_token descriptors parse unchanged
 # ---------------------------------------------------------------------------
 
