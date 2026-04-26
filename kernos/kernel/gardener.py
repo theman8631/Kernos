@@ -27,6 +27,7 @@ must never break because the Gardener had a bad turn.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -161,6 +162,69 @@ class ProposalCoalescer:
     def buffered_count(self, canvas_id: str) -> int:
         return len(self._buffers.get(canvas_id, []))
 
+    def snapshot_pending(
+        self, canvas_id: str,
+    ) -> tuple["PendingProposal", ...]:
+        """Non-mutating read of currently-buffered proposals.
+
+        Per COHORT-ADAPT-GARDENER spec Section 7 + Kit edit #4:
+        the cohort needs a stable read surface that does NOT drain
+        or otherwise touch coalescer state. The returned tuple is
+        a copy of the buffered list at call time; callers can
+        iterate without affecting subsequent ``drain()`` semantics.
+        """
+        return tuple(self._buffers.get(canvas_id, []))
+
+
+# ---------------------------------------------------------------------------
+# Evolution observation ledger (COHORT-ADAPT-GARDENER)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EvolutionRecord:
+    """In-process record of a gardener evolution / section consultation.
+
+    Populated alongside ``consult_evolution`` and ``consult_section``
+    when they return a non-None GardenerDecision. The cohort's
+    snapshot surface reads the most-recent N records to populate
+    its ``recent_evolution`` field.
+
+    Per Kit's edit #4: this is a small ledger living inside
+    GardenerService — not a replacement for the existing event
+    stream. Consultations still emit canvas/gardener events
+    through the existing ``_event_emit`` callback; this ledger is
+    a per-canvas in-memory copy bounded by ``_evolution_ledger_max``.
+    """
+
+    decision_id: str  # synthetic, derived from canvas_id + occurred_at
+    action: str
+    confidence: str  # "low" | "medium" | "high"
+    pattern: str
+    affected_pages: tuple[str, ...]
+    occurred_at: datetime
+    consultation: str  # "evolution" | "section"
+
+
+# ---------------------------------------------------------------------------
+# GardenerSnapshot — the non-mutating read returned by current_observation_snapshot
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GardenerSnapshot:
+    """Frozen view of gardener's current state for a canvas.
+
+    Returned by ``GardenerService.current_observation_snapshot``.
+    The cohort wraps these records into ``CohortOutput.output``
+    after applying truncation + per-item visibility decisions.
+    """
+
+    canvas_id: str
+    pending_proposals: tuple["PendingProposal", ...]
+    recent_evolution: tuple[EvolutionRecord, ...]
+    observation_age_seconds: int | None  # age of the newest observation in either list
+
 
 # ---------------------------------------------------------------------------
 # Pattern cache
@@ -272,6 +336,12 @@ class GardenerService:
         self._event_emit = event_emit
         #: Track in-flight consultation tasks so tests can await them.
         self._in_flight: set[asyncio.Task] = set()
+        #: Per-canvas evolution observation ledger (COHORT-ADAPT-GARDENER).
+        #: In-process, capped — populated alongside consult_evolution /
+        #: consult_section when they return non-None decisions. The cohort
+        #: snapshot surface reads from here for ``recent_evolution``.
+        self._evolution_ledger: dict[str, "collections.deque[EvolutionRecord]"] = {}
+        self._evolution_ledger_max = 10
 
     # ---- Public API ------------------------------------------------------
 
@@ -514,13 +584,20 @@ class GardenerService:
         await self._ensure_patterns_loaded(ctx.instance_id)
         ctx.cross_pattern_heuristics = self._patterns.cross_pattern_body()
         try:
-            return await judge_evolution(ctx, reasoning_service=self._reasoning)
+            decision = await judge_evolution(
+                ctx, reasoning_service=self._reasoning,
+            )
         except GardenerExhausted as exc:
             logger.info("GARDENER_EXHAUSTED_EVOLUTION: %s", exc.reason)
             return None
         except Exception as exc:  # noqa: BLE001
             logger.warning("GARDENER_EVOLUTION_FAILED: %s", exc)
             return None
+        if decision is not None:
+            self._record_evolution(
+                ctx.canvas_id, decision, consultation="evolution",
+            )
+        return decision
 
     async def consult_preference_extraction(
         self, ctx: PreferenceExtractionContext,
@@ -553,7 +630,7 @@ class GardenerService:
     ) -> GardenerDecision | None:
         """Pillar 4 sub-entry — section-management judgment."""
         try:
-            return await judge_section_management(
+            decision = await judge_section_management(
                 ctx, reasoning_service=self._reasoning,
             )
         except GardenerExhausted as exc:
@@ -562,6 +639,11 @@ class GardenerService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("GARDENER_SECTION_FAILED: %s", exc)
             return None
+        if decision is not None:
+            self._record_evolution(
+                ctx.canvas_id, decision, consultation="section",
+            )
+        return decision
 
     @property
     def coalescer(self) -> ProposalCoalescer:
@@ -570,6 +652,90 @@ class GardenerService:
     @property
     def patterns(self) -> PatternCache:
         return self._patterns
+
+    # ---- COHORT-ADAPT-GARDENER read surface ------------------------------
+
+    def _record_evolution(
+        self,
+        canvas_id: str,
+        decision: GardenerDecision,
+        *,
+        consultation: str,
+    ) -> None:
+        """Append an EvolutionRecord to the per-canvas observation ledger.
+
+        Internal — called by ``consult_evolution`` and ``consult_section``
+        immediately after a non-None decision is produced. Tests may
+        call this directly to seed the ledger without running real
+        consultations.
+        """
+        if not canvas_id or decision is None:
+            return
+        occurred_at = datetime.now(timezone.utc)
+        decision_id = f"{canvas_id}:{occurred_at.timestamp():.6f}"
+        record = EvolutionRecord(
+            decision_id=decision_id,
+            action=decision.action,
+            confidence=decision.confidence,
+            pattern=decision.pattern or "",
+            affected_pages=tuple(decision.affected_pages or ()),
+            occurred_at=occurred_at,
+            consultation=consultation,
+        )
+        if canvas_id not in self._evolution_ledger:
+            self._evolution_ledger[canvas_id] = collections.deque(
+                maxlen=self._evolution_ledger_max,
+            )
+        self._evolution_ledger[canvas_id].append(record)
+
+    def current_observation_snapshot(
+        self,
+        *,
+        instance_id: str,
+        member_id: str,
+        canvas_id: str,
+    ) -> GardenerSnapshot:
+        """Non-mutating read of gardener's current state for a canvas.
+
+        Per COHORT-ADAPT-GARDENER spec Section 7 + Kit edit #4.
+        Returns a frozen ``GardenerSnapshot``. Guarantees:
+
+          - No LLM invocation. The method is a pure state read.
+          - No mutation of the proposal coalescer or evolution ledger.
+            ``snapshot_pending()`` returns a tuple-copy; the ledger
+            read iterates without dequeing.
+          - No event emission. The snapshot is purely observational.
+
+        ``observation_age_seconds`` is the age of the newest record
+        across both pending proposals and the evolution ledger, or
+        ``None`` if both are empty. Useful for integration to gauge
+        how stale the observation is.
+
+        ``instance_id`` and ``member_id`` are accepted for future
+        per-member scoping; v1 reads global per-canvas state. The
+        cohort adapter's ``active_spaces`` resolution already
+        confirms the active member's relationship to the canvas.
+        """
+        pending = self._coalescer.snapshot_pending(canvas_id)
+        recent = tuple(self._evolution_ledger.get(canvas_id, ()))
+
+        newest: datetime | None = None
+        for p in pending:
+            if newest is None or p.captured_at > newest:
+                newest = p.captured_at
+        for r in recent:
+            if newest is None or r.occurred_at > newest:
+                newest = r.occurred_at
+        age: int | None = None
+        if newest is not None:
+            age = max(0, int((datetime.now(timezone.utc) - newest).total_seconds()))
+
+        return GardenerSnapshot(
+            canvas_id=canvas_id,
+            pending_proposals=pending,
+            recent_evolution=recent,
+            observation_age_seconds=age,
+        )
 
     async def wait_idle(self) -> None:
         """Test helper — wait for all in-flight dispatch tasks to complete."""
