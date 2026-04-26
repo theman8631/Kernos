@@ -454,8 +454,52 @@ def _ms_since(start: float, clock: Callable[[], float]) -> int:
     return max(0, int((clock() - start) * 1000))
 
 
+def build_integration_inputs_from_fan_out(
+    fan_out_result,  # CohortFanOutResult — typed lazily to avoid import cycle
+    *,
+    user_message: str,
+    conversation_thread: tuple,
+    surfaced_tools: tuple = (),
+    active_context_spaces: tuple = (),
+    member_id: str,
+    instance_id: str,
+    space_id: str,
+    turn_id: str,
+):
+    """Construct IntegrationInputs from a CohortFanOutResult.
+
+    Per COHORT-ADAPT-COVENANT Section 2c: this is the boundary
+    where required_safety_cohort_failures crosses from the
+    fan-out runner's CohortFanOutResult into V1's IntegrationInputs.
+    The integration runner's filter phase reads the field and
+    enforces the safety policy (defer / constrained_response only).
+
+    Wiring callers (test fixtures today, INTEGRATION-WIRE-LIVE in
+    production) should use this helper rather than constructing
+    IntegrationInputs by hand so the safety-policy plumbing stays
+    consistent across call sites.
+    """
+    from kernos.kernel.integration.runner import IntegrationInputs
+
+    return IntegrationInputs(
+        user_message=user_message,
+        conversation_thread=conversation_thread,
+        cohort_outputs=fan_out_result.outputs,
+        surfaced_tools=surfaced_tools,
+        active_context_spaces=active_context_spaces,
+        member_id=member_id,
+        instance_id=instance_id,
+        space_id=space_id,
+        turn_id=turn_id,
+        required_safety_cohort_failures=tuple(
+            fan_out_result.required_safety_cohort_failures
+        ),
+    )
+
+
 __all__ = [
     "AuditEmitter",
     "CohortFanOutConfig",
     "CohortFanOutRunner",
+    "build_integration_inputs_from_fan_out",
 ]

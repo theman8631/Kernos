@@ -52,9 +52,12 @@ from kernos.kernel.integration.briefing import (
     BriefingValidationError,
     BudgetState,
     CohortOutput,
+    ConstrainedResponse,
     ContextItem,
+    Defer,
     FilteredItem,
     Restricted,
+    RespondOnly,
     decided_action_from_dict,
     minimal_fail_soft_briefing,
 )
@@ -127,6 +130,16 @@ class IntegrationInputs:
     space_id: str
     turn_id: str
     integration_run_id: str = ""
+    # COHORT-ADAPT-COVENANT V1 schema extension. Cohort_ids of
+    # required + safety_class cohorts whose fan-out outcome was
+    # not SUCCESS. Non-empty means safety is degraded and
+    # integration's filter phase must produce defer or
+    # constrained_response — not respond_only / execute_tool /
+    # propose_tool. Per spec Section 2c + Kit's load-bearing
+    # input ("safety-degraded fail-soft must never be respond_only").
+    # Backwards-compatible: defaults to empty tuple; pre-CAC
+    # callers see no behavior change.
+    required_safety_cohort_failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -407,6 +420,7 @@ class IntegrationRunner:
             f"{spaces_block}\n"
             "</active_context_spaces>\n\n"
             f"<user_message>\n{inputs.user_message}\n</user_message>\n\n"
+            f"{_render_safety_degradation(inputs.required_safety_cohort_failures)}"
             "Run the integration loop. Call read-only tools if you "
             "need more information. When ready, call "
             f"{FINALIZE_TOOL_NAME} with the structured briefing."
@@ -501,6 +515,24 @@ class IntegrationRunner:
             cohort_outputs=inputs.cohort_outputs,
         )
 
+        # COHORT-ADAPT-COVENANT safety policy: when one or more
+        # required + safety_class cohorts failed, the briefing's
+        # decided_action MUST be defer or constrained_response.
+        # respond_only / execute_tool / propose_tool are forbidden
+        # (Kit's load-bearing input: safety-degraded fail-soft
+        # must never be respond_only — and the same constraint
+        # applies on the success path post-finalize). If the model
+        # disobeyed, raise so the outer try/except routes to the
+        # safety-degraded fail-soft path.
+        if inputs.required_safety_cohort_failures:
+            if not isinstance(decided, (Defer, ConstrainedResponse)):
+                raise BriefingValidationError(
+                    "safety policy violation: required+safety_class cohort "
+                    f"failed ({list(inputs.required_safety_cohort_failures)}); "
+                    f"decided_action must be defer or constrained_response, "
+                    f"got {type(decided).__name__}"
+                )
+
         audit_trace = AuditTrace(
             cohort_outputs=cohort_refs,
             tools_called_during_prep=tuple(tools_called),
@@ -581,6 +613,61 @@ class IntegrationRunner:
         notes: str,
         error: str = "",
     ) -> Briefing:
+        # Per Kit's load-bearing input on COHORT-ADAPT-COVENANT:
+        # safety-degraded fail-soft must NEVER be respond_only.
+        # When required + safety_class cohorts failed, the fallback
+        # is a Defer briefing rather than the standard minimal
+        # respond_only fallback. This makes safety_class load-bearing
+        # even on the fail-soft path.
+        if inputs.required_safety_cohort_failures:
+            decided_action = Defer(
+                reason=(
+                    "required safety cohorts failed and integration could "
+                    "not produce a valid briefing; cannot proceed at full "
+                    "strength without safety verification"
+                ),
+                follow_up_signal=(
+                    f"will retry once required safety cohorts recover "
+                    f"({', '.join(inputs.required_safety_cohort_failures)})"
+                ),
+            )
+            presence_directive = (
+                "acknowledge the user briefly; signal that this turn must "
+                "be deferred until safety verification is possible. Do not "
+                "execute or propose tool calls."
+            )
+            safety_budget = BudgetState(
+                iterations_hit_limit=budget_state.iterations_hit_limit,
+                timeout_hit_limit=budget_state.timeout_hit_limit,
+                cohort_entries_hit_limit=budget_state.cohort_entries_hit_limit,
+                filtered_entries_hit_limit=budget_state.filtered_entries_hit_limit,
+                tokens_hit_limit=budget_state.tokens_hit_limit,
+                required_cohort_failed=True,
+                required_safety_cohort_failed=True,
+                cohort_fan_out_global_timeout=budget_state.cohort_fan_out_global_timeout,
+            )
+            briefing = Briefing(
+                relevant_context=(),
+                filtered_context=(),
+                decided_action=decided_action,
+                presence_directive=presence_directive,
+                audit_trace=AuditTrace(
+                    cohort_outputs=cohort_refs,
+                    tools_called_during_prep=tuple(tools_called),
+                    iterations_used=iterations,
+                    budget_state=safety_budget,
+                    fail_soft_engaged=True,
+                    phase_durations_ms=dict(phase_durations_ms),
+                    notes=f"safety-degraded fail-soft: {notes}",
+                ),
+                turn_id=inputs.turn_id,
+                integration_run_id=inputs.integration_run_id,
+            )
+            await self._emit_audit(
+                briefing, success=False, error=error or notes,
+            )
+            return briefing
+
         briefing = minimal_fail_soft_briefing(
             turn_id=inputs.turn_id,
             integration_run_id=inputs.integration_run_id,
@@ -655,6 +742,34 @@ def _with_run_id(inputs: IntegrationInputs, run_id: str) -> IntegrationInputs:
         space_id=inputs.space_id,
         turn_id=inputs.turn_id,
         integration_run_id=run_id,
+        required_safety_cohort_failures=inputs.required_safety_cohort_failures,
+    )
+
+
+def _render_safety_degradation(failed_safety_cohorts: tuple[str, ...]) -> str:
+    """Render the safety-policy preamble injected into the prompt body.
+
+    Per COHORT-ADAPT-COVENANT Section 2c: when one or more
+    required + safety_class cohorts failed, the integration model
+    must be told that respond_only / execute_tool / propose_tool
+    are forbidden for this turn. The safety constraint is enforced
+    structurally on the post-finalize path too — this preamble is
+    cooperative guidance so the model doesn't waste tokens
+    proposing forbidden actions.
+    """
+    if not failed_safety_cohorts:
+        return ""
+    return (
+        "<safety_policy>\n"
+        f"Required safety_class cohorts failed this turn: "
+        f"{', '.join(failed_safety_cohorts)}.\n"
+        "Without these cohorts' signals, Kernos cannot verify safety\n"
+        "constraints. You MUST produce a briefing whose decided_action\n"
+        "is `defer` (preferred) or `constrained_response`. The actions\n"
+        "respond_only, execute_tool, and propose_tool are forbidden\n"
+        "for this turn. Encode the missing safety signal as the\n"
+        "presence_directive's behavioral instruction.\n"
+        "</safety_policy>\n\n"
     )
 
 

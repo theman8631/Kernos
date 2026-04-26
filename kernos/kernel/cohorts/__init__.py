@@ -40,6 +40,7 @@ from kernos.kernel.cohorts.runner import (
     AuditEmitter,
     CohortFanOutConfig,
     CohortFanOutRunner,
+    build_integration_inputs_from_fan_out,
 )
 from kernos.kernel.cohorts.synthetic_test_cohort import (
     SyntheticBehaviour,
@@ -69,6 +70,7 @@ __all__ = [
     "ExecutionMode",
     "SyntheticBehaviour",
     "Turn",
+    "build_integration_inputs_from_fan_out",
     "make_gardener_descriptor",
     "make_memory_descriptor",
     "make_synthetic_cohort",
