@@ -36,12 +36,20 @@ from kernos.kernel.cohorts.redaction import (
     sanitize_exception,
 )
 from kernos.kernel.cohorts.registry import CohortRegistry
+from kernos.kernel.cohorts.runner import (
+    AuditEmitter,
+    CohortFanOutConfig,
+    CohortFanOutRunner,
+)
 
 __all__ = [
+    "AuditEmitter",
     "CohortContext",
     "CohortDescriptor",
     "CohortDescriptorError",
+    "CohortFanOutConfig",
     "CohortFanOutResult",
+    "CohortFanOutRunner",
     "CohortRegistry",
     "CohortRunCallable",
     "ContextSpaceRef",
