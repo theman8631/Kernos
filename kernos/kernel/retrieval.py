@@ -76,6 +76,108 @@ class EntityResult:
 
 
 # ---------------------------------------------------------------------------
+# Structured snapshot types (COHORT-ADAPT-MEMORY)
+#
+# Per the spec's Section 2a + Kit edits #3, #5, #6, #7: structured
+# retrieval surface that shares the collect+policy+rank+budget-shape
+# pipeline with the existing formatted `search()` path.
+# ---------------------------------------------------------------------------
+
+
+# Default top-N caps applied at structured-snapshot budget-shape time.
+# search() uses token budget for the same shape; same pipeline, different
+# units (token-budget for text, count-budget for structured snapshot).
+SNAPSHOT_TOP_KNOWLEDGE = 5
+SNAPSHOT_TOP_ENTITIES = 5
+SNAPSHOT_KNOWLEDGE_CONTENT_CAP = 300  # chars
+SNAPSHOT_ARCHIVE_SUMMARY_CAP = 500  # chars
+
+
+@dataclass(frozen=True)
+class KnowledgeMatch:
+    """Public, structured form of a ranked knowledge entry.
+
+    Mirrors KnowledgeEntry's fields the cohort surface exposes,
+    minus internal state. `quality_score` is retrieval-local
+    semantics — useful for ordering inside a single retrieval but
+    NOT a cross-cohort universal score (per spec criterion 21).
+    """
+
+    entry_id: str
+    content: str  # untruncated; cohort layer truncates per its budget
+    authored_by: str  # owner_member_id; "" = instance owner
+    created_at: str
+    quality_score: float
+    similarity: float
+    source_space_id: str  # entry.context_space
+
+
+@dataclass(frozen=True)
+class EntityMatch:
+    """Public, structured form of an entity-graph match.
+
+    `knowledge_count` reflects post-disclosure-filter linked entries
+    (Kit edit #4). `uncertainty_notes` carries MAYBE_SAME_AS edges
+    after filtering to entities the requesting member can see.
+    """
+
+    entity_id: str
+    canonical_name: str
+    entity_type: str
+    knowledge_count: int
+    linked_knowledge_ids: tuple[str, ...]
+    uncertainty_notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ArchiveMatch:
+    """Public, structured form of a compaction-archive match.
+
+    Always None when `include_archives=False` (the cohort path).
+    Populated only when the legacy `remember`-tool path passes
+    `include_archives=True` and an archive was extracted. Rich
+    span metadata (spans_from, spans_to) is future work — the
+    existing archive substrate doesn't carry it cleanly today.
+    """
+
+    archive_id: str
+    span_summary: str  # the extract; truncated at the cohort layer
+    ancestor_space_id: str
+
+
+@dataclass(frozen=True)
+class RetrievalSnapshot:
+    """Structured retrieval result.
+
+    Returned by `search_structured()`. Same collect+policy+rank+
+    budget-shape pipeline as `search()`; this is the cohort-friendly
+    output shape.
+
+    `source`:
+      - "normal" — regular semantic + entity-graph retrieval
+      - "state_intercept" — preference/state intercept fired;
+        knowledge/entities/archive empty, state_intercept populated
+        (Kit edit #5; spec Section 2b)
+
+    `retrieval_attempted` distinguishes graceful-empty-on-
+    embedding-failure (False) from genuine empty results (True).
+    Per Kit edit #6 / spec criterion 16. Other unexpected bugs
+    are NOT swallowed here; they propagate to the runner.
+    """
+
+    knowledge: tuple[KnowledgeMatch, ...]
+    entities: tuple[EntityMatch, ...]
+    archive: ArchiveMatch | None
+    maybe_same_as: tuple[tuple[str, str], ...]  # (entity_a_name, entity_b_name)
+    state_intercept: str | None
+    source: str  # "normal" | "state_intercept"
+    query: str
+    scope_chain: tuple[str, ...]
+    retrieval_attempted: bool
+    truncated: bool
+
+
+# ---------------------------------------------------------------------------
 # Ranking function
 # ---------------------------------------------------------------------------
 
@@ -212,6 +314,11 @@ class RetrievalService:
         DISCLOSURE-GATE: when requesting_member_id is provided, entries
         authored by other members are filtered per the simplified relationship
         permission model. Callers in turn-path should always pass it.
+
+        Per COHORT-ADAPT-MEMORY: this path now shares its pipeline with
+        `search_structured(include_archives=True)`. Output shape is text
+        (existing remember-tool surface); structured shape lives on the
+        sibling method.
         """
         now = utc_now()
         query_lower = query.lower()
@@ -239,12 +346,23 @@ class RetrievalService:
             logger.info("SCOPE_CHAIN: space=%s depth=%d chain=%s",
                 active_space_id, len(scope_chain) - 1, scope_chain)
 
+        # Build the permission map once and thread it through every
+        # disclosure-gate-aware payload source (Kit edit #4).
+        permission_map = None
+        if requesting_member_id and instance_db is not None:
+            from kernos.kernel.disclosure_gate import build_permission_map
+            permission_map = await build_permission_map(
+                instance_db, requesting_member_id,
+            )
+
         # Embed the query
         try:
             query_embedding = await self.embeddings.embed(query)
+            embedding_succeeded = True
         except Exception as exc:
             logger.warning("Retrieval: embedding failed for query %r: %s", query[:60], exc)
             query_embedding = None
+            embedding_succeeded = False
 
         # Stage 1: Gather candidates (concurrent via asyncio.gather)
         async def _empty_knowledge() -> list[ScoredKnowledge]:
@@ -259,7 +377,12 @@ class RetrievalService:
         else:
             knowledge_task = _empty_knowledge()
 
-        entity_task = self._search_entities(instance_id, query, active_space_id, scope_chain)
+        entity_task = self._search_entities(
+            instance_id, query, active_space_id, scope_chain,
+            requesting_member_id=requesting_member_id,
+            permission_map=permission_map,
+            trace=trace,
+        )
         archive_task = self._search_archives(instance_id, query, active_space_id, scope_chain)
 
         knowledge_candidates, entity_results, archive_result = await asyncio.gather(
@@ -278,8 +401,12 @@ class RetrievalService:
             logger.warning("Retrieval: archive search failed: %s", archive_result)
             archive_result = None
 
-        # Collect MAYBE_SAME_AS for uncertainty notes
-        maybe_same_as = await self._collect_maybe_same_as(instance_id, entity_results)
+        # Collect MAYBE_SAME_AS for uncertainty notes (gated per Kit edit #4)
+        maybe_same_as = await self._collect_maybe_same_as(
+            instance_id, entity_results,
+            requesting_member_id=requesting_member_id,
+            permission_map=permission_map,
+        )
 
         # Stage 2: Rank by quality
         for c in knowledge_candidates:
@@ -363,8 +490,20 @@ class RetrievalService:
         query: str,
         active_space_id: str,
         scope_chain: list[str] | None = None,
+        *,
+        requesting_member_id: str = "",
+        permission_map: Any | None = None,
+        trace: Any = None,
     ) -> list[EntityResult]:
-        """Search entities by name/alias match. Walks scope chain."""
+        """Search entities by name/alias match. Walks scope chain.
+
+        Per COHORT-ADAPT-MEMORY Kit edit #4: the disclosure gate
+        applies to the linked KnowledgeEntries pulled by
+        `_resolve_entity_knowledge` too — not just the
+        `_search_knowledge` semantic path. Pass requesting_member_id
+        + permission_map through; the resolver filters at the
+        merge step.
+        """
         entities = await self.state.query_entity_nodes(
             instance_id, active_only=True
         )
@@ -388,7 +527,11 @@ class RetrievalService:
             ):
                 # Resolve SAME_AS edges — merge linked entities
                 merged_knowledge = await self._resolve_entity_knowledge(
-                    instance_id, entity
+                    instance_id,
+                    entity,
+                    requesting_member_id=requesting_member_id,
+                    permission_map=permission_map,
+                    trace=trace,
                 )
                 matched.append(
                     EntityResult(entity=entity, knowledge=merged_knowledge)
@@ -400,9 +543,19 @@ class RetrievalService:
         self,
         instance_id: str,
         entity: EntityNode,
+        *,
+        requesting_member_id: str = "",
+        permission_map: Any | None = None,
+        trace: Any = None,
     ) -> list[KnowledgeEntry]:
-        """Gather all knowledge linked to this entity, resolving SAME_AS edges."""
-        knowledge = []
+        """Gather all knowledge linked to this entity, resolving SAME_AS edges.
+
+        Per Kit edit #4: when requesting_member_id + permission_map
+        are supplied, filter linked entries through the disclosure
+        gate before returning. Without that filter, entity resolution
+        would surface entries the active member shouldn't see.
+        """
+        knowledge: list[KnowledgeEntry] = []
 
         # Direct knowledge links
         for entry_id in entity.knowledge_entry_ids:
@@ -434,6 +587,18 @@ class RetrievalService:
                             and entry.id not in [k.id for k in knowledge]
                         ):
                             knowledge.append(entry)
+
+        # Uniform disclosure gate: apply the same filter the semantic
+        # knowledge path uses. Without requesting_member_id this is
+        # a no-op (legacy callers pre-CAM see no behavior change).
+        if requesting_member_id and permission_map is not None and knowledge:
+            from kernos.kernel.disclosure_gate import filter_knowledge_entries
+            knowledge = filter_knowledge_entries(
+                knowledge,
+                requesting_member_id=requesting_member_id,
+                permission_map=permission_map,
+                trace=trace,
+            )
 
         return knowledge
 
@@ -498,8 +663,19 @@ class RetrievalService:
         self,
         instance_id: str,
         entity_results: list[EntityResult],
+        *,
+        requesting_member_id: str = "",
+        permission_map: Any | None = None,
     ) -> list[tuple[EntityNode, EntityNode]]:
-        """Collect MAYBE_SAME_AS edges for matched entities."""
+        """Collect MAYBE_SAME_AS edges for matched entities.
+
+        Per Kit edit #4: filter pairs to those where the OTHER node
+        references at least one knowledge entry the requesting
+        member can see. If all the other node's referencing
+        knowledge is gated out, the uncertainty note can't be
+        surfaced — it would otherwise leak the existence of an
+        entity tied to gated content.
+        """
         maybe_pairs: list[tuple[EntityNode, EntityNode]] = []
         for er in entity_results:
             edges = await self.state.query_identity_edges(
@@ -515,9 +691,253 @@ class RetrievalService:
                     other_node = await self.state.get_entity_node(
                         instance_id, other_id
                     )
-                    if other_node and other_node.active:
-                        maybe_pairs.append((er.entity, other_node))
+                    if not (other_node and other_node.active):
+                        continue
+                    # Disclosure check: drop the pair if the other
+                    # node has zero visible knowledge for the
+                    # requesting member.
+                    if requesting_member_id and permission_map is not None:
+                        from kernos.kernel.disclosure_gate import (
+                            filter_knowledge_entries,
+                        )
+                        other_knowledge: list[KnowledgeEntry] = []
+                        for entry_id in other_node.knowledge_entry_ids:
+                            entry = await self.state.get_knowledge_entry(
+                                instance_id, entry_id,
+                            )
+                            if entry and entry.active:
+                                other_knowledge.append(entry)
+                        visible = filter_knowledge_entries(
+                            other_knowledge,
+                            requesting_member_id=requesting_member_id,
+                            permission_map=permission_map,
+                        )
+                        if not visible and other_knowledge:
+                            # Other node exists but has no visible
+                            # knowledge — drop the uncertainty note.
+                            continue
+                    maybe_pairs.append((er.entity, other_node))
         return maybe_pairs
+
+    # -----------------------------------------------------------------------
+    # COHORT-ADAPT-MEMORY: search_structured surface
+    # -----------------------------------------------------------------------
+
+    async def search_structured(
+        self,
+        instance_id: str,
+        query: str,
+        active_space_id: str,
+        requesting_member_id: str = "",
+        instance_db: Any = None,
+        trace: Any = None,
+        *,
+        include_archives: bool = False,
+    ) -> RetrievalSnapshot:
+        """Structured retrieval surface — collect + policy + rank + budget-shape.
+
+        Same pipeline as `search()`; differs only in output shape
+        (`RetrievalSnapshot` vs. formatted text). Per Kit edit #3
+        the two paths cannot drift — they share the entity / knowledge /
+        archive / state-intercept logic via the same internal helpers.
+
+        Per Kit edit #2: archive search is gated behind
+        `include_archives` because today's `_search_archives`
+        invokes Haiku twice. The cohort path passes `False`; the
+        legacy `remember`-tool path passes `True` (preserves
+        existing archive coverage).
+
+        Per Kit edit #6: only embedding/vector failure produces
+        ``retrieval_attempted=False`` with empty arrays. Every
+        other unexpected error propagates so the cohort runner
+        (or the caller) can register an outcome=error rather than
+        silently swallow.
+        """
+        now = utc_now()
+        query_lower = query.lower()
+
+        # State intercept short-circuit (Kit edit #5).
+        _state_keywords = [
+            "preference", "setting", "notification", "trigger",
+            "what's set up", "what do i have", "what is set",
+        ]
+        if any(kw in query_lower for kw in _state_keywords):
+            try:
+                from kernos.kernel.introspection import build_user_truth_view
+                state_view = await build_user_truth_view(
+                    instance_id, self.state,
+                    getattr(self.reasoning, "_trigger_store", None),
+                    getattr(self.reasoning, "_registry", None),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "REMEMBER_STATE_AUGMENT_STRUCTURED: failed: %s", exc,
+                )
+                state_view = ""
+            if state_view:
+                return RetrievalSnapshot(
+                    knowledge=(),
+                    entities=(),
+                    archive=None,
+                    maybe_same_as=(),
+                    state_intercept=f"[Structured state — authoritative]\n{state_view}",
+                    source="state_intercept",
+                    query=query,
+                    scope_chain=(active_space_id,),
+                    retrieval_attempted=False,
+                    truncated=False,
+                )
+
+        # Build the permission map once for uniform disclosure gating.
+        permission_map = None
+        if requesting_member_id and instance_db is not None:
+            from kernos.kernel.disclosure_gate import build_permission_map
+            permission_map = await build_permission_map(
+                instance_db, requesting_member_id,
+            )
+
+        # Scope chain.
+        scope_chain = await self._build_scope_chain(
+            instance_id, active_space_id,
+        )
+
+        # Embed the query. Embedding failure is the only error path
+        # that produces ``retrieval_attempted=False`` with empty
+        # arrays; everything else propagates (Kit edit #6).
+        try:
+            query_embedding = await self.embeddings.embed(query)
+        except Exception as exc:
+            logger.warning(
+                "Retrieval: embedding failed for query %r: %s",
+                query[:60], exc,
+            )
+            return RetrievalSnapshot(
+                knowledge=(),
+                entities=(),
+                archive=None,
+                maybe_same_as=(),
+                state_intercept=None,
+                source="normal",
+                query=query,
+                scope_chain=tuple(scope_chain),
+                retrieval_attempted=False,
+                truncated=False,
+            )
+
+        # Parallel collect with uniform disclosure-gate threading.
+        knowledge_task = self._search_knowledge(
+            instance_id, query, query_embedding, active_space_id, scope_chain,
+            requesting_member_id=requesting_member_id,
+            instance_db=instance_db, trace=trace,
+        )
+        entity_task = self._search_entities(
+            instance_id, query, active_space_id, scope_chain,
+            requesting_member_id=requesting_member_id,
+            permission_map=permission_map,
+            trace=trace,
+        )
+        if include_archives:
+            archive_task = self._search_archives(
+                instance_id, query, active_space_id, scope_chain,
+            )
+        else:
+            async def _no_archive():
+                return None
+            archive_task = _no_archive()
+
+        knowledge_candidates, entity_results, archive_result = (
+            await asyncio.gather(
+                knowledge_task, entity_task, archive_task,
+                return_exceptions=False,  # propagate unexpected bugs
+            )
+        )
+
+        # MAYBE_SAME_AS, gated.
+        maybe_same_as = await self._collect_maybe_same_as(
+            instance_id, entity_results,
+            requesting_member_id=requesting_member_id,
+            permission_map=permission_map,
+        )
+
+        # Rank knowledge by quality score.
+        for c in knowledge_candidates:
+            c.quality_score = compute_quality_score(
+                c.entry, active_space_id, now,
+            )
+        knowledge_candidates = _apply_foresight_boost(
+            knowledge_candidates, query_lower, now,
+        )
+        knowledge_candidates.sort(
+            key=lambda c: c.quality_score, reverse=True,
+        )
+
+        # Budget-shape: top-N each.
+        knowledge_truncated = (
+            len(knowledge_candidates) > SNAPSHOT_TOP_KNOWLEDGE
+        )
+        entities_truncated = (
+            len(entity_results) > SNAPSHOT_TOP_ENTITIES
+        )
+        knowledge_top = knowledge_candidates[:SNAPSHOT_TOP_KNOWLEDGE]
+        entities_top = entity_results[:SNAPSHOT_TOP_ENTITIES]
+
+        # Project rich types into the public structured surface.
+        knowledge_matches = tuple(
+            KnowledgeMatch(
+                entry_id=sk.entry.id,
+                content=sk.entry.content,
+                authored_by=sk.entry.owner_member_id,
+                created_at=sk.entry.created_at,
+                quality_score=sk.quality_score,
+                similarity=sk.similarity,
+                source_space_id=sk.entry.context_space or "",
+            )
+            for sk in knowledge_top
+        )
+
+        entity_matches = []
+        for er in entities_top:
+            uncertainty: list[str] = []
+            for pair_a, pair_b in maybe_same_as:
+                if pair_a.id == er.entity.id:
+                    uncertainty.append(pair_b.canonical_name)
+                elif pair_b.id == er.entity.id:
+                    uncertainty.append(pair_a.canonical_name)
+            entity_matches.append(
+                EntityMatch(
+                    entity_id=er.entity.id,
+                    canonical_name=er.entity.canonical_name,
+                    entity_type=er.entity.entity_type or "",
+                    knowledge_count=len(er.knowledge),
+                    linked_knowledge_ids=tuple(
+                        e.id for e in er.knowledge
+                    ),
+                    uncertainty_notes=tuple(uncertainty),
+                )
+            )
+
+        archive_match: ArchiveMatch | None = None
+        if include_archives and archive_result:
+            archive_match = ArchiveMatch(
+                archive_id=f"{active_space_id}:archive",
+                span_summary=archive_result,
+                ancestor_space_id=active_space_id,
+            )
+
+        return RetrievalSnapshot(
+            knowledge=knowledge_matches,
+            entities=tuple(entity_matches),
+            archive=archive_match,
+            maybe_same_as=tuple(
+                (a.canonical_name, b.canonical_name) for a, b in maybe_same_as
+            ),
+            state_intercept=None,
+            source="normal",
+            query=query,
+            scope_chain=tuple(scope_chain),
+            retrieval_attempted=True,
+            truncated=knowledge_truncated or entities_truncated,
+        )
 
     def _format_results(
         self,
