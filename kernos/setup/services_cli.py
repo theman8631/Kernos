@@ -233,7 +233,7 @@ def cmd_services_info(args: argparse.Namespace) -> int:
     if descriptor.notes:
         print(f"  Notes        : {descriptor.notes}")
 
-    # Credential key state (per spec Section 6 + criterion 17).
+    # Credential key state (per spec Section 6 + criterion 17, 20).
     print()
     print("  Credential key:")
     if os.environ.get("KERNOS_CREDENTIAL_KEY", "").strip():
@@ -244,7 +244,8 @@ def cmd_services_info(args: argparse.Namespace) -> int:
     else:
         print(
             "    source     : auto-generated per-instance on first "
-            "credential write"
+            "credential write (alternative: set KERNOS_CREDENTIAL_KEY "
+            "env var explicitly)"
         )
     print(
         "    permissions: parent directory locked to 0700 / key file "
