@@ -233,6 +233,29 @@ def cmd_services_info(args: argparse.Namespace) -> int:
     if descriptor.notes:
         print(f"  Notes        : {descriptor.notes}")
 
+    # Credential key state (per spec Section 6 + criterion 17).
+    print()
+    print("  Credential key:")
+    if os.environ.get("KERNOS_CREDENTIAL_KEY", "").strip():
+        print(
+            "    source     : KERNOS_CREDENTIAL_KEY env var "
+            "(operator-managed)"
+        )
+    else:
+        print(
+            "    source     : auto-generated per-instance on first "
+            "credential write"
+        )
+    print(
+        "    permissions: parent directory locked to 0700 / key file "
+        "0600 (refused if filesystem disagrees)"
+    )
+    print(
+        "    backup     : if you rely on auto-generated keys, back up "
+        "the .key file under each instance's credentials directory; "
+        "loss invalidates all stored credentials for that instance"
+    )
+
     print()
     print("  Onboarding next step:")
     print(

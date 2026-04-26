@@ -771,23 +771,51 @@ async def _dispatch(args) -> None:
 
 
 def cmd_setup(args) -> None:
-    """`kernos setup llm [status]` — interactive LLM setup console (sync)."""
-    if getattr(args, "setup_target", None) != "llm":
-        print(
-            "Usage: kernos setup llm [status]\n"
-            "  kernos setup llm          interactive LLM configuration\n"
-            "  kernos setup llm status   on-demand per-provider diagnostic"
-        )
+    """`kernos setup` dispatcher.
+
+    `kernos setup llm` routes to the interactive LLM console (sync,
+    zero LLM calls). `kernos setup` with no subtarget runs the
+    INSTALL-FOR-STOCK-CONNECTORS first-run flow (service-state
+    bootstrap; TTY interactive or non-interactive with --enable-
+    services / --all-enabled / --non-interactive).
+    """
+    target = getattr(args, "setup_target", None) or ""
+
+    if target == "llm":
+        from kernos.setup.console import run_setup
+        rest = list(getattr(args, "setup_args", []) or [])
+        sys_exit = run_setup(rest)
+        if sys_exit:
+            sys.exit(sys_exit)
         return
-    # Setup is sync — no asyncio. Zero LLM calls.
-    from kernos.setup.console import run_setup
 
-    rest = list(getattr(args, "setup_args", []) or [])
-    sys_exit = run_setup(rest)
-    if sys_exit:
-        import sys
+    if target in ("", "services"):
+        # First-run service-state setup. The setup-args list carries
+        # the post-target flags (--data-dir, --non-interactive, etc).
+        from kernos.setup.first_run import (
+            cmd_setup_first_run,
+        )
+        ns = _parse_first_run_args(list(getattr(args, "setup_args", []) or []))
+        rc = cmd_setup_first_run(ns)
+        if rc:
+            sys.exit(rc)
+        return
 
-        sys.exit(sys_exit)
+    print(
+        "Usage:\n"
+        "  kernos setup                       interactive service-state setup\n"
+        "  kernos setup --non-interactive --enable-services notion,github\n"
+        "  kernos setup --all-enabled\n"
+        "  kernos setup llm [status]          interactive LLM configuration"
+    )
+
+
+def _parse_first_run_args(rest: list[str]) -> argparse.Namespace:
+    """Parse the trailing flags after `kernos setup` for the first-run flow."""
+    parser = argparse.ArgumentParser(prog="kernos setup")
+    from kernos.setup.first_run import add_first_run_args
+    add_first_run_args(parser)
+    return parser.parse_args(rest)
 
 
 def main() -> None:

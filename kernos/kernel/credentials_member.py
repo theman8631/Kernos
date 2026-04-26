@@ -147,7 +147,22 @@ def _resolve_key(data_dir: str | Path, instance_id: str) -> bytes:
             raise RuntimeError(f"Failed to read credential key at {path}: {exc}") from exc
 
     # First-run auto-generation. Mode 0600 set explicitly after write.
+    # Parent dir locked to 0700 per INSTALL-FOR-STOCK-CONNECTORS Section 6
+    # (operator-only access; credentials/secrets must not be group-readable).
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except (OSError, NotImplementedError) as exc:
+        # Some filesystems (FAT, certain network mounts) don't honor
+        # POSIX permissions. The spec says generation must refuse on
+        # such filesystems rather than silently leak operator-owned
+        # secrets to the world.
+        raise RuntimeError(
+            f"refusing to generate credential key under {path.parent}: "
+            f"filesystem does not honor 0700 permissions ({exc}). "
+            f"Move data dir to a POSIX-permission-honoring location "
+            f"or set KERNOS_CREDENTIAL_KEY explicitly."
+        ) from exc
     new_key = Fernet.generate_key()
     # Write the key with restrictive permissions from the start.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -155,6 +170,14 @@ def _resolve_key(data_dir: str | Path, instance_id: str) -> bytes:
         os.write(fd, new_key)
     finally:
         os.close(fd)
+    # Verify the file landed at 0600. Some filesystems silently
+    # widen mode bits; refuse on detection.
+    actual_mode = path.stat().st_mode & 0o777
+    if actual_mode != 0o600:
+        raise RuntimeError(
+            f"credential key at {path} has mode {oct(actual_mode)}; "
+            f"expected 0o600. Filesystem may not honor POSIX permissions."
+        )
     logger.warning(_BACKUP_NOTICE, path)
     return new_key
 
