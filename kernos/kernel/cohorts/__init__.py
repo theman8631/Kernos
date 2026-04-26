@@ -45,6 +45,10 @@ from kernos.kernel.cohorts.synthetic_test_cohort import (
     SyntheticBehaviour,
     make_synthetic_cohort,
 )
+from kernos.kernel.cohorts.gardener_cohort import (
+    make_gardener_descriptor,
+    register_gardener_cohort,
+)
 
 __all__ = [
     "AuditEmitter",
@@ -61,7 +65,9 @@ __all__ = [
     "ExecutionMode",
     "SyntheticBehaviour",
     "Turn",
+    "make_gardener_descriptor",
     "make_synthetic_cohort",
+    "register_gardener_cohort",
     "sanitize",
     "sanitize_exception",
 ]
