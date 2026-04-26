@@ -134,3 +134,24 @@ class ToolCatalog:
         # Since we don't track per-entry version, return all entries when version mismatch detected.
         # This is fine — the scan LLM filters for relevance.
         return self.get_all()
+
+    def disabled_tool_names(self, disabled_service_ids: set[str]) -> set[str]:
+        """Return tool names whose service_id is in the disabled set.
+
+        Per INSTALL-FOR-STOCK-CONNECTORS Section 2 (surfacing layer):
+        disabled service tools never surface, regardless of any other
+        relevance signal. The catalog still holds the entries (so
+        `kernos services list` can show them as available-but-disabled);
+        callers building agent-facing tool lists pass these names into
+        their `exclude` set so the surfacer never offers them.
+
+        Tools without a service_id (kernel tools, MCP tools) are never
+        in the result — they're install-level always-available.
+        """
+        if not disabled_service_ids:
+            return set()
+        return {
+            entry.name
+            for entry in self._entries.values()
+            if entry.service_id and entry.service_id in disabled_service_ids
+        }

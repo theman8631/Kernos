@@ -65,6 +65,21 @@ def workspace(tmp_path, env_key):
         service_registry=services,
         audit_store=audit,
     )
+    # INSTALL-FOR-STOCK-CONNECTORS: dispatch is now disabled-by-default
+    # without an explicit service-state record. These tests exercise
+    # the happy-path of a known-good service, so we enable notion in
+    # the install state. Tests of the disabled-refusal path live in
+    # test_install_dispatch_enforcement.py.
+    from kernos.setup.service_state import (
+        ServiceStateSource,
+        ServiceStateUpdatedBy,
+    )
+    ws.service_state_store().set(
+        "notion",
+        enabled=True,
+        source=ServiceStateSource.SETUP,
+        updated_by=ServiceStateUpdatedBy.OPERATOR,
+    )
     return ws, catalog, services, audit, tmp_path
 
 
@@ -339,3 +354,59 @@ async def test_service_bound_dispatch_hash_check_fires_on_impl_edit(workspace):
         member_id="mem_alice",
     ))
     assert "edited since" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_service_bound_dispatch_refuses_disabled_service_with_dedicated_audit(
+    workspace,
+):
+    """INSTALL-FOR-STOCK-CONNECTORS Section 2 + 11: dispatch refuses
+    invocation of a disabled service-bound tool, and the refusal
+    lands under audit category install.dispatch_refused_disabled_service
+    (distinct from the workshop's per-tool audit shape)."""
+    ws, _catalog, _services, audit, tmp_path = workspace
+    # Flip notion to disabled (the workspace fixture had enabled it).
+    from kernos.setup.service_state import (
+        ServiceStateSource,
+        ServiceStateUpdatedBy,
+    )
+    ws.service_state_store().set(
+        "notion",
+        enabled=False,
+        source=ServiceStateSource.OPERATOR,
+        updated_by=ServiceStateUpdatedBy.OPERATOR,
+        reason="disabled for this test",
+    )
+
+    space_dir = tmp_path / "discord_owner" / "spaces" / "space_a" / "files"
+    _write_descriptor_and_impl(
+        space_dir,
+        name="reader",
+        descriptor_extras={
+            "service_id": "notion",
+            "authority": ["read_pages"],
+            "operations": [{"operation": "read_pages", "classification": "read"}],
+        },
+        impl_src="def execute(input_data, context): return {'ok': True}\n",
+    )
+    await ws.register_tool("discord:owner", "space_a", "reader.tool.json")
+    # Add a credential so the only refusal path is the disabled flag.
+    store = ws._credential_store_for("discord:owner")
+    store.add(member_id="mem_alice", service_id="notion", token="x")
+
+    result = json.loads(await ws.execute_workspace_tool(
+        "discord:owner", "reader", {}, str(tmp_path),
+        member_id="mem_alice",
+    ))
+    assert "disabled" in result["error"]
+    assert "notion" in result["error"]
+    assert "kernos services enable" in result["error"]
+
+    # Audit entry uses the dedicated install.* category, NOT the
+    # workshop's tool.invocation shape.
+    assert len(audit.entries) == 1
+    instance_id, entry = audit.entries[0]
+    assert instance_id == "discord:owner"
+    assert entry["audit_category"] == "install.dispatch_refused_disabled_service"
+    assert entry["service_id"] == "notion"
+    assert entry["tool_name"] == "reader"

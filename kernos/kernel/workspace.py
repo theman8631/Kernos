@@ -30,10 +30,12 @@ from kernos.kernel.tool_runtime import build_runtime_context
 from kernos.kernel.tool_runtime_enforcement import (
     EnforcementInputs,
     RuntimeEnforcementError,
+    ServiceDisabledError,
     compute_registration_hash,
     enforce_invocation,
 )
 from kernos.kernel.tool_validation import validate_tool_file
+from kernos.setup.service_state import ServiceStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,10 @@ class WorkspaceManager:
         # Per-instance credential stores cached on first use. Each
         # store is bound to one (data_dir, instance_id) pair.
         self._credential_stores: dict[str, MemberCredentialStore] = {}
+        # Install-level service state store (shared across instances).
+        # Lazy: instantiated on first access so tests/legacy callers
+        # that never touch service-bound dispatch don't pay the cost.
+        self._service_state_store: ServiceStateStore | None = None
 
     def set_catalog(self, catalog: Any) -> None:
         """Set the ToolCatalog reference (called after construction)."""
@@ -191,6 +197,18 @@ class WorkspaceManager:
                 self._data_dir, instance_id,
             )
         return self._credential_stores[instance_id]
+
+    def service_state_store(self) -> ServiceStateStore:
+        """Return (or construct) the install-level service state store.
+
+        Install-scoped: one store regardless of instance. Lazy-built
+        so legacy code paths that don't touch service-bound dispatch
+        don't trigger filesystem access. Public so the surfacing
+        layer can read disabled state too.
+        """
+        if self._service_state_store is None:
+            self._service_state_store = ServiceStateStore(self._data_dir)
+        return self._service_state_store
 
     # --- Path helpers ---
 
@@ -821,6 +839,7 @@ class WorkspaceManager:
         clean_input = {k: v for k, v in tool_input.items() if k != "__operation__"}
 
         credential_store = self._credential_store_for(instance_id)
+        service_state_store = self.service_state_store()
         try:
             enforce_invocation(EnforcementInputs(
                 descriptor=descriptor,
@@ -831,7 +850,21 @@ class WorkspaceManager:
                 member_id=member_id,
                 credential_store=credential_store,
                 service_registry=self._services,
+                service_state_store=service_state_store,
             ))
+        except ServiceDisabledError as exc:
+            # INSTALL-FOR-STOCK-CONNECTORS: dedicated audit category
+            # for disabled-service refusals so operators can grep the
+            # log for "what got refused because a service was off."
+            await self._emit_disabled_service_audit(
+                instance_id=instance_id,
+                member_id=member_id,
+                space_id=entry.home_space,
+                tool_name=descriptor.name,
+                service_id=descriptor.service_id,
+                operation=operation,
+            )
+            return json.dumps({"error": str(exc)})
         except RuntimeEnforcementError as exc:
             await self._emit_audit(
                 instance_id=instance_id,
@@ -945,6 +978,46 @@ class WorkspaceManager:
             logger.warning(
                 "WORKSHOP_AUDIT_WRITE_FAILED: tool=%s err=%s",
                 descriptor.name, exc,
+            )
+
+    async def _emit_disabled_service_audit(
+        self,
+        *,
+        instance_id: str,
+        member_id: str,
+        space_id: str,
+        tool_name: str,
+        service_id: str,
+        operation: str,
+    ) -> None:
+        """Emit `install.dispatch_refused_disabled_service` audit entry.
+
+        Per INSTALL-FOR-STOCK-CONNECTORS spec Section 11. Distinct
+        from the workshop's per-invocation audit shape — this fires
+        before the tool's authority and credential machinery, so the
+        category is install-flavored rather than tool-flavored.
+        Best-effort: never blocks the dispatch refusal path.
+        """
+        if self._audit is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            entry = {
+                "type": "install.dispatch_refused_disabled_service",
+                "audit_category": "install.dispatch_refused_disabled_service",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "instance_id": instance_id,
+                "member_id": member_id,
+                "space_id": space_id,
+                "tool_name": tool_name,
+                "service_id": service_id,
+                "operation": operation,
+            }
+            await self._audit.log(instance_id, entry)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "INSTALL_AUDIT_WRITE_FAILED: tool=%s service=%s err=%s",
+                tool_name, service_id, exc,
             )
 
     # --- Lazy Registration on Space Entry ---

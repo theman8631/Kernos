@@ -433,6 +433,28 @@ async def run(ctx: PhaseContext) -> PhaseContext:
     pinned_tools: list[dict] = []
     _added: set[str] = set()
 
+    # INSTALL-FOR-STOCK-CONNECTORS Section 2 (surfacing layer):
+    # disabled-service tools are filtered out of the agent's tool
+    # catalog as a hard override, regardless of any other relevance
+    # signal. Pre-populating _added with disabled tool names makes
+    # every subsequent `if name in _added: continue` skip them, and
+    # build_catalog_text(exclude=_added) excludes them from the
+    # surfacer scan as well. Catalog entries themselves stay
+    # registered so `kernos services list` can show them as
+    # available-but-disabled.
+    try:
+        _service_store = handler._workspace.service_state_store()
+        _disabled_services = _service_store.disabled_service_ids()
+        _added.update(
+            handler._tool_catalog.disabled_tool_names(_disabled_services)
+        )
+    except Exception:  # defensive — surfacing must not fail on store errors
+        logger.warning(
+            "TOOL_SURFACING: failed to read service_state for disabled-filter; "
+            "continuing without filter",
+            exc_info=True,
+        )
+
     def _add_tool(schema: dict) -> bool:
         name = schema.get("name", "")
         if name and name not in _added:

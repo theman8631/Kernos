@@ -54,6 +54,7 @@ from kernos.kernel.tool_runtime import (
     ToolRuntimeContext,
     is_within_sandbox,
 )
+from kernos.setup.service_state import ServiceStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,17 @@ class CredentialUnavailableError(RuntimeEnforcementError):
 
 class SandboxViolationError(RuntimeEnforcementError):
     """Path operation reached outside the per-member tool data directory."""
+
+
+class ServiceDisabledError(RuntimeEnforcementError):
+    """Service-bound tool invocation refused because the service is disabled.
+
+    Per the INSTALL-FOR-STOCK-CONNECTORS spec Section 2: dispatch
+    is the security boundary for the disabled flag. Surfacing
+    reduces visibility but is a UX filter; a leaked tool ID could
+    invoke a disabled service if dispatch didn't enforce. This
+    error closes that window.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +261,30 @@ def check_credential_scope(
 # ---------------------------------------------------------------------------
 
 
+def check_service_enabled(
+    *,
+    descriptor: ToolDescriptor,
+    service_state_store: "ServiceStateStore | None",
+) -> None:
+    """Raise ServiceDisabledError when a service-bound tool's service
+    is disabled in the install state.
+
+    Tools that are not service-bound pass trivially. When no
+    service_state_store is provided (legacy callers, tests),
+    enforcement is skipped — any caller that wants the disabled
+    flag honored must pass the store.
+    """
+    if not descriptor.is_service_bound or service_state_store is None:
+        return
+    if not service_state_store.is_enabled(descriptor.service_id):
+        raise ServiceDisabledError(
+            f"service {descriptor.service_id!r} is disabled for this "
+            f"install. Enable it with `kernos services enable "
+            f"{descriptor.service_id}` or run `kernos setup` to "
+            f"reconfigure."
+        )
+
+
 def check_sandbox_path(*, target: Path | str, context: ToolRuntimeContext) -> None:
     """Raise SandboxViolationError if `target` falls outside the
     invocation's data_dir.
@@ -294,6 +330,7 @@ class EnforcementInputs:
     member_id: str
     credential_store: MemberCredentialStore
     service_registry: ServiceRegistry | None = None
+    service_state_store: ServiceStateStore | None = None
 
 
 def enforce_invocation(inputs: EnforcementInputs) -> None:
@@ -314,6 +351,16 @@ def enforce_invocation(inputs: EnforcementInputs) -> None:
         operation=inputs.operation,
         service_registry=inputs.service_registry,
     )
+    # Check 5 (INSTALL-FOR-STOCK-CONNECTORS): refuse service-bound
+    # invocation when the service is disabled. Runs before the
+    # credential check because a disabled service shouldn't even
+    # query the credential store. When no service_state_store is
+    # supplied, this check is skipped — but production callers
+    # (workspace dispatch) always pass the store.
+    check_service_enabled(
+        descriptor=inputs.descriptor,
+        service_state_store=inputs.service_state_store,
+    )
     check_credential_scope(
         descriptor=inputs.descriptor,
         member_id=inputs.member_id,
@@ -333,10 +380,12 @@ __all__ = [
     "HashMismatchError",
     "RuntimeEnforcementError",
     "SandboxViolationError",
+    "ServiceDisabledError",
     "check_credential_scope",
     "check_hash_unchanged",
     "check_operation_authority",
     "check_sandbox_path",
+    "check_service_enabled",
     "compute_registration_hash",
     "enforce_invocation",
 ]
