@@ -20,6 +20,7 @@ Or manually with the venv active:
 """
 import argparse
 import asyncio
+import sys
 import json
 import os
 from pathlib import Path
@@ -892,6 +893,24 @@ def main() -> None:
         help="Subcommand arguments (e.g. 'status').",
     )
 
+    # services (INSTALL-FOR-STOCK-CONNECTORS, top-level enable/disable/list/info)
+    from kernos.setup.services_cli import add_services_subcommand
+    add_services_subcommand(subparsers)
+
+    # credentials (top-level wrapper around the existing module-level CLI;
+    # forwards remainder args to kernos.kernel.credentials_cli.main).
+    p = subparsers.add_parser(
+        "credentials",
+        help=(
+            "Manage member credentials for external services "
+            "(onboard, revoke, refresh, list, info)."
+        ),
+    )
+    p.add_argument(
+        "credentials_args", nargs=argparse.REMAINDER,
+        help="Forwarded to `python -m kernos.kernel.credentials_cli`.",
+    )
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -900,6 +919,18 @@ def main() -> None:
     # Sync commands run directly, async commands go through asyncio.run().
     if args.command == "setup":
         cmd_setup(args)
+        return
+    if args.command == "services":
+        from kernos.setup.services_cli import dispatch_services
+        rc = dispatch_services(args)
+        if rc:
+            sys.exit(rc)
+        return
+    if args.command == "credentials":
+        from kernos.kernel.credentials_cli import main as credentials_main
+        rc = credentials_main(list(getattr(args, "credentials_args", []) or []))
+        if rc:
+            sys.exit(rc)
         return
 
     asyncio.run(_dispatch(args))
