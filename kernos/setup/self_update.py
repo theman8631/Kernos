@@ -166,6 +166,51 @@ def _reinstall(source_dir: Path) -> tuple[bool, str]:
     return (True, "")
 
 
+def run_post_update_hooks(data_dir: str | Path) -> tuple[int, int, int]:
+    """Run the shared install-hook runner in post_update phase.
+
+    Per INSTALL-FOR-STOCK-CONNECTORS Section 7: self_update.py runs
+    the SAME hook runner that `kernos setup` runs. New substrate
+    pieces declare hooks; the updater honors them after pip
+    install. Returns (succeeded, failed, skipped_check) counts so
+    the surrounding update-log can summarize.
+
+    Best-effort: hook failures are loud but non-fatal. The update
+    completes regardless; failed hooks persist in the
+    hook_status store and surface via `kernos services info`
+    install_health.
+    """
+    try:
+        from kernos.setup.install_hooks import (
+            HookPhase,
+            HookRunner,
+            HookStatusStore,
+            build_default_registry,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"{_LOG_PREFIX} install-hook import failed: {exc}")
+        return (0, 0, 0)
+
+    try:
+        registry = build_default_registry()
+        status_store = HookStatusStore(data_dir)
+        runner = HookRunner(registry=registry, status_store=status_store)
+        report = runner.run(
+            phase=HookPhase.POST_UPDATE,
+            invoked_by="self_update",
+            data_dir=data_dir,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"{_LOG_PREFIX} install-hook runner raised: {exc}")
+        return (0, 0, 0)
+
+    return (
+        len(report.succeeded),
+        len(report.failed),
+        len(report.skipped_check),
+    )
+
+
 def _commit_range_log(source_dir: Path, pre_pull_head: str) -> str:
     """Return the ``git log pre_pull_head..HEAD --oneline`` output."""
     if not pre_pull_head:
@@ -305,6 +350,29 @@ def enforce_or_continue(
         )
 
     resolved_data_dir = data_dir or os.getenv("KERNOS_DATA_DIR", "./data")
+
+    # INSTALL-FOR-STOCK-CONNECTORS Section 7 (Kit edit #2): run the
+    # shared install-hook runner after pip install so substrate that
+    # needs install-time work (e.g. browser binaries, directory
+    # permissions) gets handled. Fresh installs invoke the same
+    # runner from `kernos setup`; updates invoke it here.
+    try:
+        succeeded, failed, skipped = run_post_update_hooks(resolved_data_dir)
+        logger.info(
+            "%s_HOOKS: succeeded=%d failed=%d skipped=%d",
+            _LOG_PREFIX, succeeded, failed, skipped,
+        )
+        if failed:
+            logger.warning(
+                "%s_HOOKS_FAILED: %d hook(s) failed — see "
+                "data/install/hook_status.json or `kernos services info`",
+                _LOG_PREFIX, failed,
+            )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "%s_HOOKS_RAISED: %s — update still applied",
+            _LOG_PREFIX, exc,
+        )
     try:
         commits = _commit_range_log(source_dir, pre_pull_head)
         _write_update_log(resolved_data_dir, pre_pull_head, branch, commits)

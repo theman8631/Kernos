@@ -476,8 +476,16 @@ def cmd_setup_first_run(args: argparse.Namespace) -> int:
     Distinct from `kernos setup llm` (that goes through
     kernos.setup.console). The first-run flow handles service-state
     bootstrapping; LLM configuration is its own surface.
+
+    The shared install-hook runner (Section 7) fires twice: pre-
+    setup (substrate bootstrap, e.g., create data/install/ dir) and
+    post-setup (validate credential dirs, etc.). Failed hooks are
+    loud but non-fatal; the install completes and `kernos services
+    info` install_health surfaces the failures.
     """
     data_dir = _resolve_data_dir(args)
+    _run_install_hooks(data_dir=data_dir, phase="pre_setup")
+
     try:
         result = run_first_run(
             data_dir=data_dir,
@@ -496,7 +504,43 @@ def cmd_setup_first_run(args: argparse.Namespace) -> int:
 
     if result.bootstrapped_disabled:
         print(f"  State written: {result.state_path}")
+
+    _run_install_hooks(data_dir=data_dir, phase="post_setup")
     return 0
+
+
+def _run_install_hooks(*, data_dir: Path, phase: str) -> None:
+    """Invoke the shared install-hook runner. Best-effort.
+
+    Failed hooks are reported to stdout so the operator sees them,
+    persisted to the hook_status store, and never fatal — install
+    proceeds regardless.
+    """
+    from kernos.setup.install_hooks import (
+        HookPhase,
+        HookRunner,
+        HookStatusStore,
+        build_default_registry,
+    )
+    registry = build_default_registry()
+    status_store = HookStatusStore(data_dir)
+    runner = HookRunner(registry=registry, status_store=status_store)
+    phase_enum = HookPhase(phase) if phase in (p.value for p in HookPhase) else None
+    report = runner.run(
+        phase=phase_enum,
+        invoked_by="kernos_setup",
+        data_dir=data_dir,
+    )
+    if report.failed:
+        print(
+            f"  install hooks ({phase}): {len(report.failed)} failed; "
+            f"see `kernos services info <id>` install_health for details"
+        )
+    elif report.total > 0:
+        print(
+            f"  install hooks ({phase}): {len(report.succeeded)} succeeded, "
+            f"{len(report.skipped_check)} skipped"
+        )
 
 
 def add_first_run_args(parser: argparse.ArgumentParser) -> None:

@@ -256,12 +256,49 @@ def cmd_services_info(args: argparse.Namespace) -> int:
         "loss invalidates all stored credentials for that instance"
     )
 
+    # Install health (Section 7 acceptance criterion 16). Surfaces
+    # the hook runner's persisted status so operators can see at a
+    # glance whether install-time substrate work is healthy.
+    _print_install_health(data_dir)
+
     print()
     print("  Onboarding next step:")
     print(
         f"    kernos credentials onboard --service {descriptor.service_id}"
     )
     return 0
+
+
+def _print_install_health(data_dir: Path) -> None:
+    """Render the install_health summary line + failure list.
+
+    Best-effort: a missing or unreadable hook_status store means
+    "no hooks have run yet" — print a benign placeholder rather
+    than failing the info command.
+    """
+    try:
+        from kernos.setup.install_hooks import HookStatusStore
+        store = HookStatusStore(data_dir)
+        statuses = store.list_all()
+    except Exception:
+        statuses = ()
+
+    print()
+    print("  install_health:")
+    if not statuses:
+        print("    no hooks have run yet (run `kernos setup` to bootstrap)")
+        return
+    succeeded = sum(1 for s in statuses if s.last_outcome == "success")
+    failed = [s for s in statuses if s.last_outcome == "failed"]
+    skipped = sum(1 for s in statuses if s.last_outcome == "skipped_check")
+    print(
+        f"    total {len(statuses)} hooks — succeeded={succeeded} "
+        f"failed={len(failed)} skipped_check={skipped}"
+    )
+    if failed:
+        for s in failed:
+            print(f"    failed: {s.hook_id} — {s.last_error}")
+        print("    retry: `kernos setup`")
 
 
 # ---------------------------------------------------------------------------

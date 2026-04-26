@@ -32,10 +32,12 @@ operator to back the key up or set it explicitly.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,6 +132,39 @@ def _key_path(data_dir: str | Path, instance_id: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+_CREDENTIAL_KEY_GEN_GUARD = threading.local()
+
+
+@contextlib.contextmanager
+def refuse_credential_key_generation(reason: str):
+    """Block credential-key generation while inside this context.
+
+    Per INSTALL-FOR-STOCK-CONNECTORS Section 6: install hooks may
+    NOT generate credential keys. The hook runner enters this
+    context around every hook's check/apply so a hook calling
+    `_resolve_key` triggers a runtime refusal even if it slipped
+    past registration. Reentrant — nested contexts stack.
+    """
+    stack = getattr(_CREDENTIAL_KEY_GEN_GUARD, "stack", None)
+    if stack is None:
+        stack = []
+        _CREDENTIAL_KEY_GEN_GUARD.stack = stack
+    stack.append(reason)
+    try:
+        yield
+    finally:
+        stack.pop()
+        if not stack:
+            _CREDENTIAL_KEY_GEN_GUARD.stack = []
+
+
+def _key_generation_blocked() -> str | None:
+    stack = getattr(_CREDENTIAL_KEY_GEN_GUARD, "stack", None)
+    if stack:
+        return stack[-1]
+    return None
+
+
 def _resolve_key(data_dir: str | Path, instance_id: str) -> bytes:
     """Resolve the Fernet key.
 
@@ -145,6 +180,16 @@ def _resolve_key(data_dir: str | Path, instance_id: str) -> bytes:
             return path.read_bytes().strip()
         except Exception as exc:
             raise RuntimeError(f"Failed to read credential key at {path}: {exc}") from exc
+
+    blocked_reason = _key_generation_blocked()
+    if blocked_reason is not None:
+        raise RuntimeError(
+            f"refusing to generate credential key from {blocked_reason}: "
+            f"install hooks may not generate, rotate, or overwrite the "
+            f"credential key. Generation happens on explicit operator "
+            f"events (`kernos setup`, `kernos credentials onboard`, first "
+            f"credential write)."
+        )
 
     # First-run auto-generation. Mode 0600 set explicitly after write.
     # Parent dir locked to 0700 per INSTALL-FOR-STOCK-CONNECTORS Section 6
