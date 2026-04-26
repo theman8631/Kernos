@@ -33,6 +33,7 @@ from kernos.kernel.integration.briefing import (
     Defer,
     ExecuteTool,
     FilteredItem,
+    Outcome,
     Pivot,
     ProposeTool,
     Public,
@@ -121,6 +122,83 @@ def test_cohort_output_round_trip_restricted():
     parsed = CohortOutput.from_dict(payload)
     assert parsed == co
     assert parsed.is_restricted is True
+
+
+def test_cohort_output_default_outcome_is_success():
+    co = CohortOutput(
+        cohort_id="memory", cohort_run_id="memcohort:r1", output={},
+    )
+    assert co.outcome is Outcome.SUCCESS
+    assert co.error_summary == ""
+    assert co.is_synthetic is False
+
+
+def test_cohort_output_synthetic_with_outcome_and_error_summary():
+    """COHORT-FAN-OUT-RUNNER Kit edit #4: synthetic outputs carry
+    outcome + error_summary as runner-owned metadata; output dict
+    stays empty."""
+    co = CohortOutput(
+        cohort_id="memory",
+        cohort_run_id="turn-7:memory:0",
+        output={},
+        outcome=Outcome.TIMEOUT_PER_COHORT,
+        error_summary="exceeded 500ms",
+    )
+    assert co.is_synthetic is True
+    assert co.outcome is Outcome.TIMEOUT_PER_COHORT
+    payload = co.to_dict()
+    assert payload["outcome"] == "timeout_per_cohort"
+    assert payload["error_summary"] == "exceeded 500ms"
+    assert payload["output"] == {}
+    assert CohortOutput.from_dict(payload) == co
+
+
+def test_cohort_output_round_trips_each_outcome_variant():
+    for variant in Outcome:
+        co = CohortOutput(
+            cohort_id="x",
+            cohort_run_id="t:x:0",
+            output={},
+            outcome=variant,
+            error_summary="" if variant is Outcome.SUCCESS else "redacted",
+        )
+        assert CohortOutput.from_dict(co.to_dict()) == co
+
+
+def test_cohort_output_rejects_invalid_outcome_at_parse():
+    with pytest.raises(BriefingValidationError, match="outcome"):
+        CohortOutput.from_dict(
+            {
+                "cohort_id": "x",
+                "cohort_run_id": "r1",
+                "output": {},
+                "visibility": {"kind": "public"},
+                "produced_at": "",
+                "outcome": "exploded",
+                "error_summary": "",
+            }
+        )
+
+
+def test_cohort_output_rejects_non_outcome_value():
+    with pytest.raises(BriefingValidationError, match="outcome"):
+        CohortOutput(
+            cohort_id="x",
+            cohort_run_id="r1",
+            output={},
+            outcome="success",  # type: ignore[arg-type]
+        )
+
+
+def test_outcome_enum_has_five_variants():
+    """Per Kit edit #8: timeout split into per-cohort vs global."""
+    assert {o.value for o in Outcome} == {
+        "success",
+        "timeout_per_cohort",
+        "timeout_global",
+        "error",
+        "cancelled",
+    }
 
 
 def test_cohort_output_rejects_empty_cohort_id():
@@ -411,7 +489,26 @@ def test_budget_state_round_trip():
         "cohort_entries_hit_limit": False,
         "filtered_entries_hit_limit": True,
         "tokens_hit_limit": False,
+        "required_cohort_failed": False,
+        "required_safety_cohort_failed": False,
+        "cohort_fan_out_global_timeout": False,
     }
+    assert BudgetState.from_dict(payload) == bs
+
+
+def test_budget_state_cohort_fan_out_flags_round_trip():
+    """COHORT-FAN-OUT-RUNNER Section 8 extends BudgetState with three
+    flags integration's filter phase reads to apply policy."""
+    bs = BudgetState(
+        required_cohort_failed=True,
+        required_safety_cohort_failed=True,
+        cohort_fan_out_global_timeout=True,
+    )
+    assert bs.any_hit is True
+    payload = bs.to_dict()
+    assert payload["required_cohort_failed"] is True
+    assert payload["required_safety_cohort_failed"] is True
+    assert payload["cohort_fan_out_global_timeout"] is True
     assert BudgetState.from_dict(payload) == bs
 
 

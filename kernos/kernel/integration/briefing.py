@@ -156,6 +156,33 @@ def visibility_from_dict(data: dict[str, Any]) -> Visibility:
 
 
 # ---------------------------------------------------------------------------
+# Outcome (CohortOutput runner-owned metadata; COHORT-FAN-OUT-RUNNER edit #4 + #8)
+# ---------------------------------------------------------------------------
+
+
+class Outcome(str, Enum):
+    """Runner-owned outcome attribution for a CohortOutput.
+
+    Synthetic outcomes (anything other than `success`) signal that the
+    cohort did not produce its own output; the runner constructed the
+    output to keep the result-list shape invariant. Integration's
+    filter phase reads `outcome != success` to recognise failed
+    cohorts.
+
+    Per Kit edit #8: timeout cause is split into `timeout_per_cohort`
+    (cohort exceeded its own `timeout_ms`) vs `timeout_global` (cohort
+    cancelled because the global wall-clock cap was hit). The two
+    cases differ in operator interpretation and downstream policy.
+    """
+
+    SUCCESS = "success"
+    TIMEOUT_PER_COHORT = "timeout_per_cohort"
+    TIMEOUT_GLOBAL = "timeout_global"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+
+
+# ---------------------------------------------------------------------------
 # CohortOutput
 # ---------------------------------------------------------------------------
 
@@ -164,15 +191,22 @@ def visibility_from_dict(data: dict[str, Any]) -> Visibility:
 class CohortOutput:
     """Structured cohort output the integration runner consumes.
 
-    The CohortOutput contract is part of this spec because integration
-    is the consumer; subsequent specs that build cohort adapters
-    target this contract. CohortOutputs that don't conform get
-    rejected by the runner's input validation.
+    The CohortOutput contract is part of the V1 spec because
+    integration is the consumer; subsequent specs that build cohort
+    adapters target this contract.
 
     `output` carries the cohort-specific payload. Integration's job
     is to interpret it; the schema only enforces that it's a dict
     so audit serialisation is straightforward. Restricted cohorts'
     output must NOT be copied into briefing text — see Visibility.
+
+    Runner-owned metadata (added by COHORT-FAN-OUT-RUNNER, Kit edit
+    #4): `outcome` and `error_summary`. These live OUTSIDE the
+    cohort-specific `output` payload to avoid namespace collision —
+    real cohorts may legitimately use a `status` key inside
+    `output`. Synthetic CohortOutputs (timeout / error / cancelled)
+    have `output: {}` and `outcome != Outcome.SUCCESS`; integration
+    filters on `outcome` not on `output` content.
     """
 
     cohort_id: str
@@ -180,6 +214,8 @@ class CohortOutput:
     output: dict[str, Any]
     visibility: Visibility = field(default_factory=Public)
     produced_at: str = ""  # ISO 8601 UTC; runner fills if blank
+    outcome: Outcome = Outcome.SUCCESS
+    error_summary: str = ""  # populated for outcome != SUCCESS; redacted
 
     def __post_init__(self) -> None:
         if not isinstance(self.cohort_id, str) or not self.cohort_id.strip():
@@ -207,10 +243,26 @@ class CohortOutput:
             raise BriefingValidationError(
                 "CohortOutput.produced_at must be an ISO 8601 string"
             )
+        if not isinstance(self.outcome, Outcome):
+            raise BriefingValidationError(
+                f"CohortOutput.outcome must be an Outcome; got "
+                f"{type(self.outcome).__name__}"
+            )
+        if not isinstance(self.error_summary, str):
+            raise BriefingValidationError(
+                "CohortOutput.error_summary must be a string"
+            )
 
     @property
     def is_restricted(self) -> bool:
         return isinstance(self.visibility, Restricted)
+
+    @property
+    def is_synthetic(self) -> bool:
+        """True when the runner built this output (cohort failed or
+        timed out). Integration filters on this rather than on
+        `output` content."""
+        return self.outcome is not Outcome.SUCCESS
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -219,6 +271,8 @@ class CohortOutput:
             "output": dict(self.output),
             "visibility": self.visibility.to_dict(),
             "produced_at": self.produced_at,
+            "outcome": self.outcome.value,
+            "error_summary": self.error_summary,
         }
 
     @classmethod
@@ -228,6 +282,14 @@ class CohortOutput:
                 f"CohortOutput must deserialise from a dict; got "
                 f"{type(data).__name__}"
             )
+        try:
+            outcome = Outcome(data.get("outcome", Outcome.SUCCESS.value))
+        except ValueError as exc:
+            valid = ", ".join(o.value for o in Outcome)
+            raise BriefingValidationError(
+                f"CohortOutput.outcome {data.get('outcome')!r} is not one "
+                f"of: {valid}"
+            ) from exc
         return cls(
             cohort_id=str(data.get("cohort_id", "")),
             cohort_run_id=str(data.get("cohort_run_id", "")),
@@ -236,6 +298,8 @@ class CohortOutput:
                 data.get("visibility") or Public().to_dict()
             ),
             produced_at=str(data.get("produced_at", "")),
+            outcome=outcome,
+            error_summary=str(data.get("error_summary", "")),
         )
 
 
@@ -680,17 +744,30 @@ def decided_action_from_dict(data: dict[str, Any]) -> DecidedAction:
 class BudgetState:
     """Which limits the integration run hit, if any.
 
-    Spec Section 4c lists five guardrails: max_iterations,
-    integration_timeout, max_summarized_cohort_entries,
-    max_filtered_entries, max_integration_tokens. BudgetState
-    flags map 1:1; True means the runner observed the limit being
-    hit during the run.
+    V1 (INTEGRATION-LAYER-V1) Section 4c flags: iterations,
+    timeout, cohort_entries, filtered_entries, tokens.
 
-    `tokens_hit_limit` is provisional — the runner doesn't track
-    cumulative token usage across iterations in v1 (max_tokens is
-    per-call). The flag is in the schema so the field exists when
-    cumulative tracking lands without breaking serialised audit
-    records.
+    COHORT-FAN-OUT-RUNNER Section 8 adds three flags integration's
+    filter phase reads to apply downstream policy:
+
+      - required_cohort_failed: at least one required cohort's
+        outcome is not SUCCESS. Integration produces a constrained
+        briefing that notes degraded context.
+      - required_safety_cohort_failed: a required cohort with
+        safety_class True failed. Integration's decided action
+        defaults to constrained_response or defer rather than
+        respond_only. Principle: if safety can't be verified, we
+        don't proceed at full strength.
+      - cohort_fan_out_global_timeout: the fan-out runner hit its
+        wall-clock cap. Distinct from the other failure flags so
+        downstream telemetry can attribute global vs per-cohort
+        causes cleanly.
+
+    `tokens_hit_limit` is provisional — the integration runner
+    doesn't track cumulative token usage across iterations in v1
+    (max_tokens is per-call). The flag is in the schema so the
+    field exists when cumulative tracking lands without breaking
+    serialised audit records.
     """
 
     iterations_hit_limit: bool = False
@@ -698,6 +775,9 @@ class BudgetState:
     cohort_entries_hit_limit: bool = False
     filtered_entries_hit_limit: bool = False
     tokens_hit_limit: bool = False
+    required_cohort_failed: bool = False
+    required_safety_cohort_failed: bool = False
+    cohort_fan_out_global_timeout: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -706,6 +786,9 @@ class BudgetState:
             "cohort_entries_hit_limit",
             "filtered_entries_hit_limit",
             "tokens_hit_limit",
+            "required_cohort_failed",
+            "required_safety_cohort_failed",
+            "cohort_fan_out_global_timeout",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise BriefingValidationError(
@@ -720,6 +803,9 @@ class BudgetState:
             or self.cohort_entries_hit_limit
             or self.filtered_entries_hit_limit
             or self.tokens_hit_limit
+            or self.required_cohort_failed
+            or self.required_safety_cohort_failed
+            or self.cohort_fan_out_global_timeout
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -729,6 +815,13 @@ class BudgetState:
             "cohort_entries_hit_limit": self.cohort_entries_hit_limit,
             "filtered_entries_hit_limit": self.filtered_entries_hit_limit,
             "tokens_hit_limit": self.tokens_hit_limit,
+            "required_cohort_failed": self.required_cohort_failed,
+            "required_safety_cohort_failed": (
+                self.required_safety_cohort_failed
+            ),
+            "cohort_fan_out_global_timeout": (
+                self.cohort_fan_out_global_timeout
+            ),
         }
 
     @classmethod
@@ -748,6 +841,15 @@ class BudgetState:
                 data.get("filtered_entries_hit_limit", False)
             ),
             tokens_hit_limit=bool(data.get("tokens_hit_limit", False)),
+            required_cohort_failed=bool(
+                data.get("required_cohort_failed", False)
+            ),
+            required_safety_cohort_failed=bool(
+                data.get("required_safety_cohort_failed", False)
+            ),
+            cohort_fan_out_global_timeout=bool(
+                data.get("cohort_fan_out_global_timeout", False)
+            ),
         )
 
 

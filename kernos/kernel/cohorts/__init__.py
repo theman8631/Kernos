@@ -1,0 +1,53 @@
+"""Per-turn cohort fan-out infrastructure.
+
+First follow-on spec to INTEGRATION-LAYER-V1. This package builds
+the fan-out runner that produces CohortOutput artifacts matching
+the V1 schema. Real cohort adapters (gardener, memory, patterns,
+covenant) come in subsequent specs and target this runner's
+contract.
+
+The runner is opt-in callable per spec acceptance criterion #13 —
+nothing in the existing reasoning loop or message handler invokes
+it yet. INTEGRATION-WIRE-LIVE later in the arc wires fan-out →
+integration → presence into the production turn pipeline.
+
+Failure isolation guarantee (narrowed per Kit edit #1):
+async-task-per-cohort isolates yielding coroutines from each
+other. The runner does NOT isolate against synchronous infinite
+loops, CPU-bound work without await yield points, blocking I/O
+without await, or memory exhaustion. v1 rejects sync callables at
+registration; cohort authors wrapping sync work must explicitly
+offload via loop.run_in_executor inside an async run callable.
+"""
+
+from kernos.kernel.cohorts.descriptor import (
+    CohortContext,
+    CohortDescriptor,
+    CohortDescriptorError,
+    CohortFanOutResult,
+    CohortRunCallable,
+    ContextSpaceRef,
+    ExecutionMode,
+    Turn,
+)
+from kernos.kernel.cohorts.redaction import (
+    DEFAULT_TRUNCATE_AT,
+    sanitize,
+    sanitize_exception,
+)
+from kernos.kernel.cohorts.registry import CohortRegistry
+
+__all__ = [
+    "CohortContext",
+    "CohortDescriptor",
+    "CohortDescriptorError",
+    "CohortFanOutResult",
+    "CohortRegistry",
+    "CohortRunCallable",
+    "ContextSpaceRef",
+    "DEFAULT_TRUNCATE_AT",
+    "ExecutionMode",
+    "Turn",
+    "sanitize",
+    "sanitize_exception",
+]
