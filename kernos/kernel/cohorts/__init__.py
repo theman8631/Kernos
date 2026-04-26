@@ -41,6 +41,10 @@ from kernos.kernel.cohorts.runner import (
     CohortFanOutConfig,
     CohortFanOutRunner,
 )
+from kernos.kernel.cohorts.synthetic_test_cohort import (
+    SyntheticBehaviour,
+    make_synthetic_cohort,
+)
 
 __all__ = [
     "AuditEmitter",
@@ -55,7 +59,9 @@ __all__ = [
     "ContextSpaceRef",
     "DEFAULT_TRUNCATE_AT",
     "ExecutionMode",
+    "SyntheticBehaviour",
     "Turn",
+    "make_synthetic_cohort",
     "sanitize",
     "sanitize_exception",
 ]
