@@ -54,6 +54,10 @@ from kernos.kernel.cohorts.memory_cohort import (
     make_memory_descriptor,
     register_memory_cohort,
 )
+from kernos.kernel.cohorts.covenant_cohort import (
+    make_covenant_descriptor,
+    register_covenant_cohort,
+)
 
 __all__ = [
     "AuditEmitter",
@@ -71,9 +75,11 @@ __all__ = [
     "SyntheticBehaviour",
     "Turn",
     "build_integration_inputs_from_fan_out",
+    "make_covenant_descriptor",
     "make_gardener_descriptor",
     "make_memory_descriptor",
     "make_synthetic_cohort",
+    "register_covenant_cohort",
     "register_gardener_cohort",
     "register_memory_cohort",
     "sanitize",
