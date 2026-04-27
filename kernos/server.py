@@ -500,9 +500,15 @@ async def on_ready():
         return {}
 
     async def _integration_audit_emitter(entry: dict) -> None:
+        """Bridge integration's audit entries into the existing audit
+        store. AuditStore.log is async with signature
+        (instance_id, entry) — threading instance_id from the entry's
+        turn-context fields when present."""
         try:
-            if audit is not None and hasattr(audit, "log"):
-                audit.log(entry)
+            if audit is None or not hasattr(audit, "log"):
+                return
+            instance_id = entry.get("instance_id", "") or ""
+            await audit.log(instance_id, entry)
         except Exception:
             logger.exception("IWL_INTEGRATION_AUDIT_EMIT_FAILED")
 
@@ -518,7 +524,7 @@ async def on_ready():
             event_type = (
                 EventType.TOOL_CALLED
                 if payload.get("type") == "tool.called"
-                else EventType.TOOL_RETURNED
+                else EventType.TOOL_RESULT
             )
             await emit_event(
                 events,
@@ -535,11 +541,14 @@ async def on_ready():
 
     async def _dispatcher_audit_emitter(entry: dict) -> None:
         """Bridge dispatcher's audit entries into the existing audit
-        store. References-not-dumps already enforced at the entry
-        construction site."""
+        store. AuditStore.log is async with signature
+        (instance_id, entry); references-not-dumps already enforced
+        at the entry construction site."""
         try:
-            if audit is not None and hasattr(audit, "log"):
-                audit.log(entry)
+            if audit is None or not hasattr(audit, "log"):
+                return
+            instance_id = entry.get("instance_id", "") or ""
+            await audit.log(instance_id, entry)
         except Exception:
             logger.exception("DISPATCHER_AUDIT_EMIT_FAILED")
 

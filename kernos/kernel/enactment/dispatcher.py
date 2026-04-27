@@ -550,7 +550,9 @@ class StepDispatcher:
 
         References-not-dumps invariant: tool_id + operation_name +
         turn_id are operator-readable references; argument values and
-        output payloads are NOT embedded.
+        output payloads are NOT embedded. `instance_id` is included
+        so the audit-store adapter (which routes by instance) can
+        partition correctly without re-deriving from the briefing.
         """
         if self._audit is None:
             return
@@ -558,6 +560,7 @@ class StepDispatcher:
             await self._audit(
                 {
                     "category": "tool.dispatch",
+                    "instance_id": _instance_id_from_briefing(briefing),
                     "turn_id": briefing.turn_id,
                     "tool_id": step.tool_id,
                     "operation_name": step.operation_name,
@@ -603,6 +606,21 @@ def build_step_dispatcher(
         audit_emitter=audit_emitter,
         default_timeout_ms=default_timeout_ms,
         on_dispatch_complete=on_dispatch_complete,
+    )
+
+
+def _instance_id_from_briefing(briefing) -> str:
+    """Best-effort lookup of instance_id from a Briefing.
+
+    The Briefing dataclass doesn't carry instance_id directly; it's
+    threaded via the audit_trace's references in V1. We attempt the
+    common attribute paths and fall back to "" so the audit emitter
+    can partition by empty bucket if upstream wiring didn't set it.
+    """
+    return (
+        getattr(briefing, "instance_id", "")
+        or getattr(briefing.audit_trace, "instance_id", "")
+        or ""
     )
 
 
