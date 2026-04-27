@@ -433,10 +433,21 @@ async def on_ready():
     except Exception:
         logger.exception("IWL_COVENANT_COHORT_REGISTRATION_FAILED")
 
+    async def _cohort_audit_emitter(entry: dict) -> None:
+        """Bridge cohort fan-out audit entries into the existing
+        audit store with the correct two-arg async signature."""
+        try:
+            if audit is None or not hasattr(audit, "log"):
+                return
+            instance_id = entry.get("instance_id", "") or ""
+            await audit.log(instance_id, entry)
+        except Exception:
+            logger.exception("IWL_COHORT_AUDIT_EMIT_FAILED")
+
     cohort_runner = CohortFanOutRunner(
         registry=cohort_registry,
+        audit_emitter=_cohort_audit_emitter,
         config=CohortFanOutConfig(),
-        emit_audit=None,
     )
 
     # Hook chain callers — v1 same-model default (Kit edit, locked).
