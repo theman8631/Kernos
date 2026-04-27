@@ -213,18 +213,38 @@ async def test_execute_tool_takes_full_machinery_branch():
 
 
 @pytest.mark.asyncio
-async def test_thin_path_takes_only_presence_renderer():
-    """Structural invariant: the thin path's only dependency is the
-    presence renderer. No dispatcher reachable. Verified by inspecting
-    the service's constructor surface — there is no dispatcher field."""
+async def test_thin_path_does_not_consult_dispatcher_even_when_wired():
+    """Structural invariant: the thin path code body never reaches the
+    dispatcher. C5 wires a dispatcher at the service level for the
+    full-machinery branch; the thin path must remain dispatch-free.
+
+    Pin verifies by wiring a dispatcher that raises on any call. If a
+    future change accidentally invokes the dispatcher from a thin-path
+    code path, the test fails loudly."""
     presence = _CapturingPresence()
-    service = EnactmentService(presence_renderer=presence)
-    # The service has no dispatcher attribute. Asserting the absence
-    # is the structural pin: future changes that add a dispatcher
-    # field on the thin path will fail this test.
-    assert not hasattr(service, "_dispatcher")
-    assert not hasattr(service, "_tool_dispatcher")
-    assert not hasattr(service, "dispatcher")
+
+    class _ExplodingDispatcher:
+        async def dispatch(self, inputs):
+            raise AssertionError(
+                "thin path must not consult the dispatcher"
+            )
+
+    service = EnactmentService(
+        presence_renderer=presence,
+        step_dispatcher=_ExplodingDispatcher(),
+    )
+    # Run every render-only kind through the service; if any of them
+    # reach the dispatcher, the explosion fires.
+    for action in (
+        RespondOnly(),
+        Defer(reason="x", follow_up_signal="y"),
+        ConstrainedResponse(constraint="t", satisfaction_partial="b"),
+        Pivot(reason="x", suggested_shape="redirect"),
+        ProposeTool(tool_id="x", arguments={}, reason="r"),
+        ClarificationNeeded(question="?", ambiguity_type="target"),
+    ):
+        outcome = await service.run(_briefing(action))
+        assert outcome.is_thin_path or outcome.subtype is TerminationSubtype.B2_USER_DISAMBIGUATION_NEEDED
 
 
 @pytest.mark.asyncio
@@ -362,3 +382,567 @@ async def test_turn_runner_can_consume_enactment_service():
 
     assert isinstance(outcome, EnactmentOutcome)
     assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+
+
+# ---------------------------------------------------------------------------
+# Full machinery (PDI C5)
+# ---------------------------------------------------------------------------
+
+
+from kernos.kernel.enactment.plan import (
+    Plan,
+    SignalKind,
+    Step,
+    StepExpectation,
+    StructuredSignal,
+    new_plan_id,
+    now_iso,
+)
+from kernos.kernel.enactment.service import (
+    DivergenceJudgeInputs,
+    DivergenceJudgment,
+    PlanCreationInputs,
+    PlanCreationResult,
+    StepDispatchInputs,
+    StepDispatchResult,
+)
+from kernos.kernel.enactment.tiers import FailureKind
+
+
+def _envelope(
+    *,
+    allowed_tool_classes=("email",),
+    allowed_operations=("send",),
+    confirmation_requirements=(),
+    forbidden_moves=(),
+) -> ActionEnvelope:
+    return ActionEnvelope(
+        intended_outcome="x",
+        allowed_tool_classes=tuple(allowed_tool_classes),
+        allowed_operations=tuple(allowed_operations),
+        confirmation_requirements=tuple(confirmation_requirements),
+        forbidden_moves=tuple(forbidden_moves),
+    )
+
+
+def _execute_briefing(
+    *,
+    envelope: ActionEnvelope | None = None,
+) -> Briefing:
+    return _briefing(
+        ExecuteTool(tool_id="email_send", arguments={"to": "x"}),
+        action_envelope=envelope or _envelope(),
+    )
+
+
+def _step(
+    *,
+    step_id: str = "s1",
+    tool_class: str = "email",
+    operation_name: str = "send",
+    expectation: StepExpectation | None = None,
+) -> Step:
+    return Step(
+        step_id=step_id,
+        tool_id="email_send",
+        arguments={"to": "x"},
+        tool_class=tool_class,
+        operation_name=operation_name,
+        expectation=expectation or StepExpectation(prose="email sent"),
+    )
+
+
+def _plan(steps=None, *, plan_id: str | None = None) -> Plan:
+    return Plan(
+        plan_id=plan_id or new_plan_id(),
+        turn_id="turn-1",
+        steps=tuple(steps or [_step()]),
+        created_at=now_iso(),
+    )
+
+
+class _StubPlanner:
+    def __init__(self, plan: Plan) -> None:
+        self._plan = plan
+        self.calls: list[PlanCreationInputs] = []
+
+    async def create_plan(self, inputs: PlanCreationInputs) -> PlanCreationResult:
+        self.calls.append(inputs)
+        return PlanCreationResult(plan=self._plan)
+
+
+class _StubDispatcher:
+    def __init__(self, results) -> None:
+        self._results = list(results)
+        self.calls: list[StepDispatchInputs] = []
+
+    async def dispatch(self, inputs: StepDispatchInputs) -> StepDispatchResult:
+        self.calls.append(inputs)
+        if self._results:
+            return self._results.pop(0)
+        return StepDispatchResult(
+            completed=True, output={"ok": True}
+        )
+
+
+class _StubReasoner:
+    def __init__(
+        self,
+        *,
+        judgments=None,
+        modified_step: Step | None = None,
+        pivot_step: Step | None = None,
+    ) -> None:
+        self._judgments = list(judgments or [
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=True,
+                failure_kind=FailureKind.NONE,
+            )
+        ])
+        self._modified = modified_step
+        self._pivot = pivot_step
+        self.judge_calls = 0
+        self.modify_calls = 0
+        self.pivot_calls = 0
+
+    async def judge_divergence(self, inputs: DivergenceJudgeInputs) -> DivergenceJudgment:
+        self.judge_calls += 1
+        if self._judgments:
+            return self._judgments.pop(0)
+        return DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        )
+
+    async def emit_modified_step(self, inputs) -> Step:
+        self.modify_calls += 1
+        return self._modified or _step(step_id="modified")
+
+    async def emit_pivot_step(self, inputs) -> Step:
+        self.pivot_calls += 1
+        return self._pivot or _step(step_id="pivot")
+
+
+def _full_machinery_service(
+    *,
+    plan: Plan | None = None,
+    dispatcher_results=None,
+    judgments=None,
+    modified_step: Step | None = None,
+    pivot_step: Step | None = None,
+    audit_sink=None,
+    presence: _CapturingPresence | None = None,
+    retry_budget: int = 3,
+    modify_budget: int = 2,
+    pivot_budget: int = 2,
+) -> tuple[EnactmentService, _StubPlanner, _StubDispatcher, _StubReasoner]:
+    plan = plan or _plan()
+    planner = _StubPlanner(plan)
+    dispatcher = _StubDispatcher(dispatcher_results or [])
+    reasoner = _StubReasoner(
+        judgments=judgments,
+        modified_step=modified_step,
+        pivot_step=pivot_step,
+    )
+    presence = presence or _CapturingPresence(text="terminal-render")
+
+    async def emit(entry: dict) -> None:
+        if audit_sink is not None:
+            audit_sink.append(entry)
+
+    service = EnactmentService(
+        presence_renderer=presence,
+        audit_emitter=emit if audit_sink is not None else None,
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        retry_budget=retry_budget,
+        modify_budget=modify_budget,
+        pivot_budget=pivot_budget,
+    )
+    return service, planner, dispatcher, reasoner
+
+
+# ----- not-wired guard -----
+
+
+@pytest.mark.asyncio
+async def test_full_machinery_without_dependencies_raises_clear_error():
+    service = EnactmentService(presence_renderer=_CapturingPresence())
+    with pytest.raises(EnactmentNotImplemented, match="planner"):
+        await service.run(_execute_briefing())
+
+
+# ----- plan creation observable in audit BEFORE step 1 dispatches -----
+
+
+@pytest.mark.asyncio
+async def test_plan_created_audit_emits_before_first_step_dispatches():
+    """Auditability invariant: enactment.plan_created lands in the
+    audit stream BEFORE the first step calls the dispatcher."""
+    audit_sink: list[dict] = []
+    plan = _plan(plan_id="plan-abc")
+    service, _planner, dispatcher, _reasoner = _full_machinery_service(
+        plan=plan, audit_sink=audit_sink,
+    )
+
+    # The dispatcher records the order of calls; audit_sink records
+    # audit emissions. We assert plan_created appears in audit BEFORE
+    # any step_attempted entry.
+    await service.run(_execute_briefing())
+
+    plan_created_idx = next(
+        (i for i, e in enumerate(audit_sink)
+         if e.get("category") == "enactment.plan_created"),
+        None,
+    )
+    step_attempted_idx = next(
+        (i for i, e in enumerate(audit_sink)
+         if e.get("category") == "enactment.step_attempted"),
+        None,
+    )
+    assert plan_created_idx is not None
+    assert step_attempted_idx is not None
+    assert plan_created_idx < step_attempted_idx
+    # And the dispatcher was called exactly once for the single step.
+    assert len(dispatcher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_created_audit_uses_plan_id_reference_not_payload():
+    """References-not-dumps invariant: the audit entry carries
+    plan_id and step_count, never the embedded plan payload."""
+    audit_sink: list[dict] = []
+    plan = _plan(plan_id="plan-xyz")
+    service, _, _, _ = _full_machinery_service(
+        plan=plan, audit_sink=audit_sink,
+    )
+    await service.run(_execute_briefing())
+
+    plan_entry = next(
+        e for e in audit_sink if e.get("category") == "enactment.plan_created"
+    )
+    assert plan_entry["plan_id"] == "plan-xyz"
+    assert plan_entry["step_count"] == 1
+    # No embedded plan payload.
+    assert "steps" not in plan_entry
+    assert "plan" not in plan_entry
+
+
+# ----- streaming-disabled-by-construction during full machinery -----
+
+
+@pytest.mark.asyncio
+async def test_full_machinery_does_not_consult_presence_during_loop():
+    """The presence_renderer is only consulted AFTER all steps
+    complete (terminal render). During the loop, no streaming-capable
+    component is reachable.
+
+    Pin: the presence stub records calls; full machinery happy path
+    invokes it exactly ONCE — at the end."""
+    presence = _CapturingPresence(text="terminal")
+    service, _, _, _ = _full_machinery_service(presence=presence)
+    await service.run(_execute_briefing())
+    # Exactly one render call — the terminal one.
+    assert len(presence.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_dependency_protocols_have_no_streaming_affordance():
+    """Compile-time guarantee: PlannerLike, StepDispatcherLike,
+    DivergenceReasonerLike return types do NOT carry a `streamed`
+    field. The streaming-capable type is PresenceRenderResult, which
+    is unreachable from the inner-loop dependencies."""
+    from dataclasses import fields
+    # PlanCreationResult, StepDispatchResult, DivergenceJudgment must
+    # not have a `streamed` field.
+    for cls in (PlanCreationResult, StepDispatchResult, DivergenceJudgment):
+        names = {f.name for f in fields(cls)}
+        assert "streamed" not in names, (
+            f"{cls.__name__} must not expose a streaming affordance"
+        )
+    # PresenceRenderResult IS streamable (used only for thin path
+    # and terminal render).
+    presence_names = {f.name for f in fields(PresenceRenderResult)}
+    assert "streamed" in presence_names
+
+
+# ----- happy path: single step succeeds; terminal render after loop -----
+
+
+@pytest.mark.asyncio
+async def test_full_machinery_happy_path_returns_terminal_render():
+    presence = _CapturingPresence(text="action complete")
+    service, _, dispatcher, reasoner = _full_machinery_service(
+        presence=presence,
+        dispatcher_results=[
+            StepDispatchResult(completed=True, output={"ok": True})
+        ],
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.text == "action complete"
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.decided_action_kind is ActionKind.EXECUTE_TOOL
+    assert len(dispatcher.calls) == 1
+    assert reasoner.judge_calls == 1
+
+
+# ----- envelope validation rejects invalid plan -----
+
+
+@pytest.mark.asyncio
+async def test_invalid_initial_plan_terminates_b1():
+    """Plan whose step uses a tool_class outside the envelope's
+    allowed_tool_classes is rejected. C5 surfaces a B1 placeholder."""
+    audit_sink: list[dict] = []
+    bad_plan = _plan(steps=[_step(tool_class="slack")])
+    envelope = _envelope(allowed_tool_classes=("email",))
+    service, _, dispatcher, _ = _full_machinery_service(
+        plan=bad_plan, audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    # Crucially: no step was dispatched. The envelope rejection
+    # happened before dispatch.
+    assert len(dispatcher.calls) == 0
+
+
+# ----- tier 1 retry on transient failure -----
+
+
+@pytest.mark.asyncio
+async def test_tier_1_retry_on_transient_failure():
+    """Engineered: first dispatch returns transient; second succeeds.
+    The retry stays on the same step with the same args; attempt
+    counter increments."""
+    audit_sink: list[dict] = []
+    service, _, dispatcher, reasoner = _full_machinery_service(
+        dispatcher_results=[
+            StepDispatchResult(
+                completed=False,
+                output={},
+                failure_kind=FailureKind.TRANSIENT,
+                error_summary="connection error",
+            ),
+            StepDispatchResult(completed=True, output={"ok": True}),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=False,
+                plan_still_valid=True,
+                failure_kind=FailureKind.TRANSIENT,
+            ),
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=True,
+                failure_kind=FailureKind.NONE,
+            ),
+        ],
+        audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert len(dispatcher.calls) == 2
+    assert dispatcher.calls[0].attempt_number == 1
+    assert dispatcher.calls[1].attempt_number == 2
+
+    step_attempts = [
+        e for e in audit_sink
+        if e.get("category") == "enactment.step_attempted"
+    ]
+    assert len(step_attempts) == 2
+    assert step_attempts[0]["attempt_number"] == 1
+    assert step_attempts[1]["attempt_number"] == 2
+
+
+# ----- tier 2 modify on corrective signal -----
+
+
+@pytest.mark.asyncio
+async def test_tier_2_modify_on_corrective_signal():
+    """Engineered: dispatcher returns CORRECTIVE_SIGNAL; reasoner
+    emits modified step; modified step succeeds."""
+    audit_sink: list[dict] = []
+    modified = _step(step_id="modified-step")
+    service, _, dispatcher, reasoner = _full_machinery_service(
+        modified_step=modified,
+        dispatcher_results=[
+            StepDispatchResult(
+                completed=False,
+                output={},
+                failure_kind=FailureKind.CORRECTIVE_SIGNAL,
+                corrective_signal="batch too large",
+            ),
+            StepDispatchResult(completed=True, output={"ok": True}),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=False,
+                plan_still_valid=True,
+                failure_kind=FailureKind.CORRECTIVE_SIGNAL,
+            ),
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=True,
+                failure_kind=FailureKind.NONE,
+            ),
+        ],
+        audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert reasoner.modify_calls == 1
+    modified_entry = next(
+        e for e in audit_sink
+        if e.get("category") == "enactment.step_modified"
+    )
+    assert modified_entry["modified_step_id"] == "modified-step"
+    assert modified_entry["envelope_validation_passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_tier_2_modify_envelope_violation_terminates_b1():
+    """Per Kit edit: tier-2 modify is envelope-validated. A modified
+    step that crosses allowed_tool_classes is rejected; B1 fires."""
+    audit_sink: list[dict] = []
+    bad_modified = _step(step_id="bad-mod", tool_class="slack")
+    envelope = _envelope(allowed_tool_classes=("email",))
+    service, _, dispatcher, _ = _full_machinery_service(
+        modified_step=bad_modified,
+        dispatcher_results=[
+            StepDispatchResult(
+                completed=False, output={},
+                failure_kind=FailureKind.CORRECTIVE_SIGNAL,
+            ),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=False,
+                plan_still_valid=True,
+                failure_kind=FailureKind.CORRECTIVE_SIGNAL,
+            ),
+        ],
+        audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    # The modified (bad) step was NOT dispatched.
+    assert len(dispatcher.calls) == 1
+
+
+# ----- tier 3 pivot on information divergence -----
+
+
+@pytest.mark.asyncio
+async def test_tier_3_pivot_on_information_divergence():
+    audit_sink: list[dict] = []
+    pivot_step = _step(step_id="pivot-step")
+    service, _, dispatcher, reasoner = _full_machinery_service(
+        pivot_step=pivot_step,
+        dispatcher_results=[
+            StepDispatchResult(completed=True, output={"results": []}),
+            StepDispatchResult(completed=True, output={"ok": True}),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=False,  # plan re-shaped
+                failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+            ),
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=True,
+                failure_kind=FailureKind.NONE,
+            ),
+        ],
+        audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert reasoner.pivot_calls == 1
+    pivot_entry = next(
+        e for e in audit_sink
+        if e.get("category") == "enactment.step_pivoted"
+    )
+    assert pivot_entry["replacement_step_id"] == "pivot-step"
+
+
+@pytest.mark.asyncio
+async def test_tier_3_pivot_envelope_violation_terminates_b1():
+    bad_pivot = _step(step_id="bad-pivot", tool_class="slack")
+    envelope = _envelope(allowed_tool_classes=("email",))
+    service, _, _, _ = _full_machinery_service(
+        pivot_step=bad_pivot,
+        dispatcher_results=[
+            StepDispatchResult(completed=True, output={"results": []}),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=False,
+                failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+            ),
+        ],
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+
+
+# ----- C6 boundaries — tier 4 reassemble + tier 5 surface placeholders -----
+
+
+@pytest.mark.asyncio
+async def test_tier_4_reassemble_routes_to_b1_placeholder_in_c5():
+    """C5 stubs tier-4 reassemble: the routing fires (information
+    divergence with no pivot budget), but full reassemble lands in
+    C6. C5 emits B1 placeholder with reason tier_4_reassemble_pending_c6."""
+    audit_sink: list[dict] = []
+    service, _, _, _ = _full_machinery_service(
+        dispatcher_results=[
+            StepDispatchResult(completed=True, output={"results": []}),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=False,
+                failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+            ),
+        ],
+        pivot_budget=0,  # exhaust pivot to trigger reassemble routing
+        audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    terminated = next(
+        e for e in audit_sink if e.get("category") == "enactment.terminated"
+    )
+    assert "tier_4_reassemble" in terminated["reason"]
+
+
+@pytest.mark.asyncio
+async def test_tier_5_b2_routes_to_b2_placeholder_in_c5():
+    audit_sink: list[dict] = []
+    service, _, _, _ = _full_machinery_service(
+        dispatcher_results=[
+            StepDispatchResult(
+                completed=False, output={},
+                failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+            ),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=False,
+                plan_still_valid=False,
+                failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+            ),
+        ],
+        audit_sink=audit_sink,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.B2_USER_DISAMBIGUATION_NEEDED
+    terminated = next(
+        e for e in audit_sink if e.get("category") == "enactment.terminated"
+    )
+    assert "tier_5_b2" in terminated["reason"]
