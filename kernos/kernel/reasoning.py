@@ -197,6 +197,7 @@ class ReasoningService:
         fallback_provider: Provider | None = None,
         *,
         chains: ChainConfig | None = None,
+        turn_runner: Any = None,  # TurnRunner | None — Any avoids circular import
     ) -> None:
         if chains is not None:
             self._chains = chains
@@ -234,6 +235,11 @@ class ReasoningService:
         # Track unknown-model warnings so we log each at most once per
         # ReasoningService process to avoid log spam.
         self._unknown_model_warned: set[str] = set()
+        # PDI C2: optional TurnRunner for the decoupled-cognition path.
+        # When None and the feature flag is set, .reason() raises a
+        # clear error rather than producing a half-formed turn. Default
+        # path (flag off) is the legacy reasoning loop, unchanged.
+        self._turn_runner = turn_runner
 
     @staticmethod
     def _trace(request: "ReasoningRequest", level: str, source: str, event: str, detail: str, **kw: Any) -> None:
@@ -2897,11 +2903,85 @@ class ReasoningService:
 
         return "\n".join(lines[i] for i in sorted(included))
 
+    async def _run_via_turn_runner(
+        self, request: ReasoningRequest
+    ) -> ReasoningResult:
+        """Route a ReasoningRequest through the TurnRunner.
+
+        Pure adapter: translate ReasoningRequest into TurnRunnerInputs,
+        invoke run_turn, and shape the response back into a
+        ReasoningResult so the call site stays unchanged.
+
+        The translation is deliberately conservative in C2 — only
+        fields the TurnRunner needs are passed through. INTEGRATION-
+        WIRE-LIVE will tighten the seam if needed once the full
+        cohort/integration/enactment dependencies are wired into the
+        production construction site.
+        """
+        from kernos.kernel.turn_runner import TurnRunnerInputs
+
+        inputs = TurnRunnerInputs.from_api_messages(
+            instance_id=request.instance_id,
+            member_id=request.member_id,
+            space_id=request.active_space_id,
+            turn_id=request.conversation_id,
+            user_message=request.input_text,
+            api_messages=tuple(request.messages),
+            active_space_ids=(
+                (request.active_space_id,) if request.active_space_id else ()
+            ),
+        )
+        outcome = await self._turn_runner.run_turn(inputs)
+        # The translation back to ReasoningResult is the response-
+        # delivery hook's job in production; skeleton C2 returns
+        # whatever the hook produced. Tests can inspect the outcome
+        # directly via the TurnRunner; ReasoningService callers see
+        # a ReasoningResult only when delivery is wired.
+        if isinstance(outcome, ReasoningResult):
+            return outcome
+        # Conservative skeleton fallback — the response_delivery hook
+        # has not been wired yet (or it returned a non-Result shape).
+        # Surface a minimal Result so the call site doesn't crash on
+        # the type contract; the real shape lands with INTEGRATION-
+        # WIRE-LIVE when delivery is wired end-to-end.
+        return ReasoningResult(
+            text="",
+            model=request.model,
+            input_tokens=0,
+            output_tokens=0,
+            estimated_cost_usd=0.0,
+            duration_ms=0,
+            tool_iterations=0,
+        )
+
     async def reason(self, request: ReasoningRequest) -> ReasoningResult:
         """Run a full reasoning turn, including tool-use loop.
 
         Raises ReasoningError subtypes on provider failure. Does NOT catch them.
+
+        PDI C2: when KERNOS_USE_DECOUPLED_TURN_RUNNER is set AND a
+        TurnRunner has been wired, this façade routes to the new
+        path. Otherwise the legacy loop runs unchanged. The signature
+        and return shape are identical across both paths so existing
+        callers (the message handler, scheduler, engine) need no
+        modification.
         """
+        from kernos.kernel.turn_runner import (
+            TurnRunner,
+            TurnRunnerNotWired,
+            use_decoupled_turn_runner,
+        )
+        if use_decoupled_turn_runner():
+            if self._turn_runner is None:
+                raise TurnRunnerNotWired(
+                    "KERNOS_USE_DECOUPLED_TURN_RUNNER is set but no "
+                    "TurnRunner was provided to ReasoningService. "
+                    "Either unset the flag or wire the TurnRunner "
+                    "(see kernos/kernel/turn_runner.py). The decoupled "
+                    "path lands incrementally across PDI C2-C7; full "
+                    "wiring arrives with INTEGRATION-WIRE-LIVE."
+                )
+            return await self._run_via_turn_runner(request)
         t_global = time.monotonic()
         messages = list(request.messages)
         tools = request.tools
