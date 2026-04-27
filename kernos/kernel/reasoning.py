@@ -199,6 +199,7 @@ class ReasoningService:
         chains: ChainConfig | None = None,
         turn_runner: Any = None,  # TurnRunner | None — Any avoids circular import
         trace_sink: list[dict] | None = None,  # IWL C2: shared tool-trace seam
+        turn_runner_provider: Any = None,  # IWL C6: per-turn factory; takes (request, event_emitter) -> (TurnRunner, ProductionResponseDelivery)
     ) -> None:
         if chains is not None:
             self._chains = chains
@@ -248,6 +249,14 @@ class ReasoningService:
         # clear error rather than producing a half-formed turn. Default
         # path (flag off) is the legacy reasoning loop, unchanged.
         self._turn_runner = turn_runner
+        # IWL C6: per-turn factory. When set, takes precedence over
+        # static turn_runner — produces a fresh TurnRunner +
+        # ProductionResponseDelivery per call so the synthetic
+        # reasoning.* events fire correctly and per-turn telemetry
+        # binding works. Production wiring uses this; tests may use
+        # either turn_runner (static) or turn_runner_provider
+        # (per-turn) depending on which seam they exercise.
+        self._turn_runner_provider = turn_runner_provider
 
     @staticmethod
     def _trace(request: "ReasoningRequest", level: str, source: str, event: str, detail: str, **kw: Any) -> None:
@@ -2924,6 +2933,85 @@ class ReasoningService:
 
         return "\n".join(lines[i] for i in sorted(included))
 
+    async def _run_via_turn_runner_provider(
+        self, request: ReasoningRequest
+    ) -> ReasoningResult:
+        """Route a request through the per-turn TurnRunner factory (IWL C6).
+
+        The provider produces (TurnRunner, ProductionResponseDelivery)
+        bound to (request, event_emitter) so:
+          - emit_request_event() fires ONCE at turn start.
+          - ProductionResponseDelivery.__call__ emits the SINGLE
+            reasoning.response at turn end.
+          - Per-turn AggregatedTelemetry wraps the hooks' chain
+            callers so token aggregation accumulates correctly.
+
+        This replaces the static turn_runner path for production
+        wiring. Tests that don't exercise the per-turn binding
+        continue to use the static turn_runner seam.
+        """
+        from kernos.kernel.turn_runner import TurnRunnerInputs
+
+        async def _event_emitter(payload: dict) -> None:
+            """Bridge synthetic reasoning.* events into the existing
+            event stream so legacy consumers see them with the right
+            shape."""
+            if self._events is None:
+                return
+            try:
+                from kernos.kernel.events import emit_event
+                from kernos.kernel.event_types import EventType
+                # The synthetic emission uses the existing event
+                # surface; payload['type'] determines the EventType.
+                await emit_event(
+                    self._events,
+                    EventType.REASONING_RESPONSE
+                    if payload.get("type") == "reasoning.response"
+                    else EventType.REASONING_REQUEST,
+                    payload.get("instance_id", ""),
+                    "reasoning_service.turn_runner",
+                    payload=payload,
+                )
+            except Exception:
+                logger.warning(
+                    "TURN_RUNNER_EVENT_EMIT_FAILED type=%s",
+                    payload.get("type", "?"),
+                    exc_info=True,
+                )
+
+        provider = self._turn_runner_provider
+        turn_runner, delivery = provider(request, _event_emitter)
+
+        # Synthetic reasoning.request emitted ONCE at turn start.
+        await delivery.emit_request_event()
+
+        inputs = TurnRunnerInputs.from_api_messages(
+            instance_id=request.instance_id,
+            member_id=request.member_id,
+            space_id=request.active_space_id,
+            turn_id=request.conversation_id,
+            user_message=request.input_text,
+            api_messages=tuple(request.messages),
+            active_space_ids=(
+                (request.active_space_id,) if request.active_space_id else ()
+            ),
+        )
+        outcome = await turn_runner.run_turn(inputs)
+        # When the response_delivery hook is wired correctly, the
+        # outcome IS the ReasoningResult (TurnRunner.deliver invoked
+        # delivery.__call__ which produced the result + emitted the
+        # synthetic reasoning.response).
+        if isinstance(outcome, ReasoningResult):
+            return outcome
+        # Defensive — provider returned a delivery hook that didn't
+        # produce a ReasoningResult. Surface clearly rather than
+        # producing degenerate output.
+        raise RuntimeError(
+            "turn_runner_provider returned a delivery that did not "
+            "produce a ReasoningResult. Check the provider's "
+            "response_delivery wiring."
+        )
+
     async def _run_via_turn_runner(
         self, request: ReasoningRequest
     ) -> ReasoningResult:
@@ -2993,6 +3081,8 @@ class ReasoningService:
             use_decoupled_turn_runner,
         )
         if use_decoupled_turn_runner():
+            if self._turn_runner_provider is not None:
+                return await self._run_via_turn_runner_provider(request)
             if self._turn_runner is None:
                 raise TurnRunnerNotWired(
                     "KERNOS_USE_DECOUPLED_TURN_RUNNER is set but no "

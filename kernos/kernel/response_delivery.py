@@ -80,6 +80,10 @@ class AggregatedTelemetry:
 
     Construction-time invariant: shared across hooks within a single
     turn; reset at turn start by the wiring layer.
+
+    StepDispatcher writes `tool_iterations` here after each
+    successful dispatch so ProductionResponseDelivery reads the
+    accurate count when constructing the ReasoningResult.
     """
 
     input_tokens: int = 0
@@ -87,6 +91,8 @@ class AggregatedTelemetry:
     estimated_cost_usd: float = 0.0
     hook_call_count: int = 0
     """Total number of model calls across hooks (for diagnostics)."""
+    tool_iterations: int = 0
+    """Count of step dispatches in the turn — written by StepDispatcher."""
 
     def add(
         self,
@@ -99,6 +105,13 @@ class AggregatedTelemetry:
         self.output_tokens += output_tokens
         self.estimated_cost_usd += cost_usd
         self.hook_call_count += 1
+
+    def add_tool_iteration(self) -> None:
+        """Called by StepDispatcher (or its wiring) after each
+        successful dispatch. Idempotent across paths because the
+        legacy reasoning loop and the new path use distinct telemetry
+        instances per turn."""
+        self.tool_iterations += 1
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +249,14 @@ class ProductionResponseDelivery:
     def increment_tool_iteration(self) -> None:
         """Called by the StepDispatcher (or its wrapper) after each
         tool dispatch to populate ReasoningResult.tool_iterations
-        accurately. Idempotent: caller controls when to increment."""
+        accurately. Idempotent: caller controls when to increment.
+
+        Production wiring routes the increment through
+        AggregatedTelemetry.add_tool_iteration() so a single
+        per-turn telemetry instance is the source of truth. Tests
+        may call this method directly on the delivery instance for
+        unit-level pinning.
+        """
         self._tool_iterations += 1
 
     @property
@@ -279,11 +299,19 @@ class ProductionResponseDelivery:
         forwards to the caller.
         """
         duration_ms = self._ms_since(self._turn_started_at)
-        tool_iterations = (
-            self._tool_iterations
-            if self._tool_iterations
-            else _step_count_from_outcome(outcome)
-        )
+        # Source of truth for tool_iterations:
+        #   1. Explicit increments via increment_tool_iteration()
+        #      (tests / direct callers).
+        #   2. Telemetry's tool_iterations (production wiring — the
+        #      StepDispatcher writes here per dispatch).
+        #   3. Outcome-based default (defensive, when neither is
+        #      populated).
+        if self._tool_iterations:
+            tool_iterations = self._tool_iterations
+        elif self._telemetry.tool_iterations:
+            tool_iterations = self._telemetry.tool_iterations
+        else:
+            tool_iterations = _step_count_from_outcome(outcome)
 
         result = enactment_outcome_to_reasoning_result(
             outcome,

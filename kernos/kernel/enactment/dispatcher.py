@@ -220,6 +220,7 @@ class StepDispatcher:
         audit_emitter: AuditEmitter | None = None,
         default_timeout_ms: int = DEFAULT_TOOL_TIMEOUT_MS,
         clock: Callable[[], float] = time.monotonic,
+        on_dispatch_complete: Callable[[], None] | None = None,
     ) -> None:
         self._executor = executor
         self._lookup = descriptor_lookup
@@ -233,6 +234,12 @@ class StepDispatcher:
         self._audit = audit_emitter
         self._default_timeout_ms = default_timeout_ms
         self._clock = clock
+        # Per-turn callback fired after each dispatch attempt (success
+        # or failure). Production wiring binds this to
+        # AggregatedTelemetry.add_tool_iteration so the ProductionResponseDelivery
+        # reads accurate tool_iterations when constructing the
+        # ReasoningResult. Tests may pass None.
+        self._on_dispatch_complete = on_dispatch_complete
 
     @property
     def trace_sink(self) -> TraceSink:
@@ -256,10 +263,14 @@ class StepDispatcher:
         # Operation resolution + ambiguity check.
         if descriptor is None:
             # Tool unknown — conservative failure; never dispatch.
+            duration = self._ms_since(start)
             await self._emit_tool_called(briefing, step)
             await self._emit_tool_result_failure(
-                briefing, step, "tool_not_registered",
-                duration_ms=self._ms_since(start),
+                briefing, step, "tool_not_registered", duration_ms=duration,
+            )
+            await self._emit_audit_entry(
+                briefing=briefing, step=step, completed=False,
+                duration_ms=duration, failure_label="tool_not_registered",
             )
             self._trace_sink.append(
                 _build_trace_entry(
@@ -269,6 +280,7 @@ class StepDispatcher:
                     output=f"tool {step.tool_id!r} not registered",
                 )
             )
+            self._fire_on_dispatch_complete()
             return StepDispatchResult(
                 completed=False,
                 output={},
@@ -277,7 +289,7 @@ class StepDispatcher:
                     f"tool {step.tool_id!r} is not registered with "
                     f"the workshop"
                 ),
-                duration_ms=self._ms_since(start),
+                duration_ms=duration,
             )
 
         resolution = resolve_operation(
@@ -288,10 +300,14 @@ class StepDispatcher:
         if resolution.ambiguous:
             # Ambiguous operations are NEVER dispatched (PDI C1
             # contract). Conservative refusal with clear error.
+            duration = self._ms_since(start)
             await self._emit_tool_called(briefing, step)
             await self._emit_tool_result_failure(
-                briefing, step, "operation_ambiguous",
-                duration_ms=self._ms_since(start),
+                briefing, step, "operation_ambiguous", duration_ms=duration,
+            )
+            await self._emit_audit_entry(
+                briefing=briefing, step=step, completed=False,
+                duration_ms=duration, failure_label="operation_ambiguous",
             )
             self._trace_sink.append(
                 _build_trace_entry(
@@ -304,6 +320,7 @@ class StepDispatcher:
                     ),
                 )
             )
+            self._fire_on_dispatch_complete()
             return StepDispatchResult(
                 completed=False,
                 output={},
@@ -313,7 +330,7 @@ class StepDispatcher:
                     f"{step.tool_id!r}; refusing dispatch (PDI C1 "
                     f"conservative fallback)"
                 ),
-                duration_ms=self._ms_since(start),
+                duration_ms=duration,
             )
 
         # Per-operation timeout.
@@ -343,6 +360,10 @@ class StepDispatcher:
             await self._emit_tool_result_failure(
                 briefing, step, "timeout", duration_ms=duration
             )
+            await self._emit_audit_entry(
+                briefing=briefing, step=step, completed=False,
+                duration_ms=duration, failure_label="timeout",
+            )
             self._trace_sink.append(
                 _build_trace_entry(
                     tool_id=step.tool_id,
@@ -351,6 +372,7 @@ class StepDispatcher:
                     output=f"tool {step.tool_id!r} timed out after {timeout_ms}ms",
                 )
             )
+            self._fire_on_dispatch_complete()
             return StepDispatchResult(
                 completed=False,
                 output={},
@@ -366,6 +388,10 @@ class StepDispatcher:
             await self._emit_tool_result_failure(
                 briefing, step, redacted, duration_ms=duration
             )
+            await self._emit_audit_entry(
+                briefing=briefing, step=step, completed=False,
+                duration_ms=duration, failure_label=redacted,
+            )
             self._trace_sink.append(
                 _build_trace_entry(
                     tool_id=step.tool_id,
@@ -374,6 +400,7 @@ class StepDispatcher:
                     output=f"tool {step.tool_id!r} raised {redacted}",
                 )
             )
+            self._fire_on_dispatch_complete()
             logger.exception("STEP_DISPATCH_UNEXPECTED_FAILURE tool=%s", step.tool_id)
             return StepDispatchResult(
                 completed=False,
@@ -391,6 +418,12 @@ class StepDispatcher:
         await self._emit_tool_result_success(
             briefing, step, result=result, duration_ms=duration_ms
         )
+        await self._emit_audit_entry(
+            briefing=briefing, step=step,
+            completed=not result.is_error,
+            duration_ms=duration_ms,
+            failure_label=result.error_summary if result.is_error else "",
+        )
         self._trace_sink.append(
             _build_trace_entry(
                 tool_id=step.tool_id,
@@ -399,6 +432,7 @@ class StepDispatcher:
                 output=result.output,
             )
         )
+        self._fire_on_dispatch_complete()
 
         return StepDispatchResult(
             completed=not result.is_error,
@@ -506,6 +540,49 @@ class StepDispatcher:
                 "TOOL_RESULT_EMIT_FAILED tool=%s", step.tool_id
             )
 
+    async def _emit_audit_entry(
+        self, *, briefing, step, completed: bool, duration_ms: int,
+        failure_label: str = "",
+    ) -> None:
+        """Emit a per-dispatch audit entry. The audit shape mirrors
+        the legacy reasoning loop's audit-store behavior so audit
+        replay / cost tracking work identically across paths.
+
+        References-not-dumps invariant: tool_id + operation_name +
+        turn_id are operator-readable references; argument values and
+        output payloads are NOT embedded.
+        """
+        if self._audit is None:
+            return
+        try:
+            await self._audit(
+                {
+                    "category": "tool.dispatch",
+                    "turn_id": briefing.turn_id,
+                    "tool_id": step.tool_id,
+                    "operation_name": step.operation_name,
+                    "tool_class": step.tool_class,
+                    "completed": completed,
+                    "duration_ms": duration_ms,
+                    "failure_label": failure_label,
+                }
+            )
+        except Exception:
+            logger.exception(
+                "TOOL_DISPATCH_AUDIT_EMIT_FAILED tool=%s", step.tool_id
+            )
+
+    def _fire_on_dispatch_complete(self) -> None:
+        """Invoke the per-turn dispatch-complete callback (production
+        wiring binds this to AggregatedTelemetry.add_tool_iteration).
+        Best-effort — a misbehaving callback doesn't break dispatch."""
+        if self._on_dispatch_complete is None:
+            return
+        try:
+            self._on_dispatch_complete()
+        except Exception:
+            logger.exception("ON_DISPATCH_COMPLETE_FAILED")
+
 
 def build_step_dispatcher(
     *,
@@ -515,6 +592,7 @@ def build_step_dispatcher(
     event_emitter: EventEmitter | None = None,
     audit_emitter: AuditEmitter | None = None,
     default_timeout_ms: int = DEFAULT_TOOL_TIMEOUT_MS,
+    on_dispatch_complete: Callable[[], None] | None = None,
 ) -> StepDispatcher:
     """Convenience factory mirroring the constructor."""
     return StepDispatcher(
@@ -524,6 +602,7 @@ def build_step_dispatcher(
         event_emitter=event_emitter,
         audit_emitter=audit_emitter,
         default_timeout_ms=default_timeout_ms,
+        on_dispatch_complete=on_dispatch_complete,
     )
 
 

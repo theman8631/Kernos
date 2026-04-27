@@ -206,20 +206,62 @@ returns entries from whichever path produced them.
 
 ## `server.py` production wiring
 
-Construction order (acceptance criterion #23):
+**Per-turn binding (IWL C6, Kit-mandated):** the production wiring
+constructs a `turn_runner_provider` closure passed to
+`ReasoningService(turn_runner_provider=...)`. The provider is
+invoked PER TURN by `ReasoningService._run_via_turn_runner_provider`
+and produces a fresh `(TurnRunner, ProductionResponseDelivery)`
+bound to the request and event emitter for that turn.
+
+The per-turn shape is load-bearing for three architectural
+properties:
+
+1. **Synthetic event single-emission.** `ProductionResponseDelivery`
+   binds `(request, telemetry, event_emitter)` per turn so
+   `emit_request_event()` fires once at start and the
+   `reasoning.response` fires once at end. No-double-count
+   invariant satisfied structurally.
+
+2. **Per-turn telemetry binding.** `AggregatedTelemetry` is fresh
+   per turn. The shared chain caller is wrapped with
+   `wrap_chain_caller_with_telemetry(telemetry)` and that wrapped
+   caller is plumbed into all four hooks (Planner,
+   DivergenceReasoner, PresenceRenderer, IntegrationService).
+   Token aggregation accumulates across all hook calls in the
+   turn; cost-tracking aggregates ONCE.
+
+3. **Tool-iteration accuracy.** StepDispatcher's
+   `on_dispatch_complete` callback is bound to
+   `telemetry.add_tool_iteration` so each successful dispatch
+   increments the per-turn counter; ProductionResponseDelivery
+   reads it for `ReasoningResult.tool_iterations`.
+
+Construction order at startup:
 1. `chains` from `build_chains_from_env()` (existing).
-2. Per-turn telemetry accumulator (`AggregatedTelemetry`).
-3. Hook-specific chain callers wrapped with
-   `wrap_chain_caller_with_telemetry`.
-4. Concrete hooks: `Planner`, `StepDispatcher`,
-   `DivergenceReasoner`, `PresenceRenderer`.
-5. `IntegrationService` (PDI C3-shipped).
-6. `EnactmentService` (PDI C4/C5/C6-shipped) wired with the four
-   hooks.
-7. `CohortFanOutRunner` with registered cohort adapters.
-8. `ProductionResponseDelivery`.
-9. `TurnRunner` (PDI C2-shipped constructor — NOT widened).
-10. `ReasoningService` with `turn_runner=` and `trace_sink=`.
+2. Shared trace sink (`reasoning_trace_sink: list[dict]`).
+3. `CohortRegistry` + register covenant cohort.
+4. `CohortFanOutRunner` (shared across turns).
+5. Shared `_shared_chain_caller` against the primary chain.
+6. Shared `_UnwiredDescriptorLookup` placeholder (raises
+   NotImplementedError loudly when full-machinery turns hit it
+   — architect-lean (a)).
+7. Shared `_UnwiredExecutor` placeholder.
+8. `_dispatcher_event_emitter` and `_dispatcher_audit_emitter`
+   bridges into the existing event stream / audit store.
+9. **`_build_per_turn_runner(request, event_emitter) -> (TurnRunner,
+   ProductionResponseDelivery)`** closure: per-turn factory that
+   constructs telemetry + wrapped chain + four hooks + integration
+   service + enactment service + delivery + turn runner.
+10. `ReasoningService(turn_runner_provider=_build_per_turn_runner,
+    trace_sink=reasoning_trace_sink)`.
+
+ReasoningService.reason() with the feature flag set routes to
+`_run_via_turn_runner_provider`, which:
+1. Calls the provider with the request → gets (TurnRunner, delivery).
+2. Calls `delivery.emit_request_event()` ONCE.
+3. Builds TurnRunnerInputs from the request.
+4. Calls `turn_runner.run_turn(inputs)`.
+5. Returns the ReasoningResult the delivery hook produced.
 
 The cohort registration in v1 covers the covenant cohort
 unconditionally (its only dependency is `StateStore`, which is
@@ -227,6 +269,13 @@ already wired in `server.py`). Gardener and memory cohort
 registration is a follow-up enhancement that lands when their
 service dependencies (`GardenerService` / `RetrievalService`) are
 restructured out of `MessageHandler`'s lazy-init path.
+
+**v1 loud-failure surface for unwired full-machinery dispatch:**
+`_UnwiredDescriptorLookup.descriptor_for(tool_id)` raises
+`NotImplementedError` rather than returning None. A graceful
+"tool-not-registered" StepDispatchResult would look indistinguishable
+from a misconfigured tool catalog during soak; the loud failure
+makes the deferred workshop binding observable.
 
 ## Feature flag semantics
 
@@ -264,6 +313,29 @@ measurement on representative scenarios.
 - Chain wrapper has no event-emission parameters (no-double-count).
 - DivergenceJudgment / ClarificationFormulationResult have no
   `streamed` field (streaming-disabled-by-construction).
+
+**Composition pins (IWL C6, Kit-mandated):**
+
+- The production turn_runner_provider's TurnRunner.response_delivery
+  IS an instance of `ProductionResponseDelivery` (not a stub or
+  lambda). Pinned in `tests/test_iwl_composition.py`.
+- Per-turn provider construction produces FRESH AggregatedTelemetry
+  + ProductionResponseDelivery instances on each call. Pinned via
+  identity check across two provider invocations.
+- The four hooks' chain callers are wrapped with
+  `wrap_chain_caller_with_telemetry`. Verified by invoking the
+  wrapped chain and confirming the per-turn telemetry accumulates.
+- Production StepDispatcher has non-None `event_emitter` AND
+  `audit_emitter` references AND non-None `on_dispatch_complete`
+  callback (for tool_iterations counting).
+- `_UnwiredDescriptorLookup.descriptor_for` raises
+  NotImplementedError (architect-lean (a)). Source-inspection pin
+  verifies the method body contains `raise NotImplementedError` and
+  does NOT contain `return None`.
+- End-to-end: `ReasoningService.reason()` with the feature flag
+  set routes through the provider, emits exactly one
+  `reasoning.request` and one `reasoning.response`, and returns a
+  ReasoningResult with non-stub duration_ms.
 
 ## Files
 
