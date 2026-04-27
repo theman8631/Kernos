@@ -41,6 +41,12 @@ from kernos.kernel.enactment.dispatcher import (
     TraceSink,
     build_step_dispatcher,
 )
+from kernos.kernel.enactment.divergence_reasoner import (
+    DEFAULT_REASONER_MAX_TOKENS,
+    DivergenceReasoner,
+    DivergenceReasonerError,
+    build_divergence_reasoner,
+)
 from kernos.kernel.enactment.envelope import (
     ValidationOutcome,
     validate_plan_against_envelope,
@@ -126,6 +132,7 @@ __all__ = [
     "DEFAULT_MODIFY_BUDGET",
     "DEFAULT_PIVOT_BUDGET",
     "DEFAULT_PLANNER_MAX_TOKENS",
+    "DEFAULT_REASONER_MAX_TOKENS",
     "DEFAULT_REASSEMBLY_PER_ENVELOPE",
     "DEFAULT_REASSEMBLY_PER_TURN",
     "DEFAULT_RETRY_BUDGET",
@@ -133,6 +140,8 @@ __all__ = [
     "DISCOVERED_INFORMATION_CAP",
     "DivergenceJudgeInputs",
     "DivergenceJudgment",
+    "DivergenceReasoner",
+    "DivergenceReasonerError",
     "DivergenceReasonerLike",
     "EnactmentNotImplemented",
     "EnactmentOutcome",
@@ -183,6 +192,7 @@ __all__ = [
     "TraceSink",
     "ValidationOutcome",
     "all_three_pass",
+    "build_divergence_reasoner",
     "build_enactment_service",
     "build_planner",
     "build_step_dispatcher",
