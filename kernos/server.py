@@ -374,7 +374,217 @@ async def on_ready():
     from kernos.providers.chains import build_chains_from_env
     chains, _primary_provider = build_chains_from_env()
 
-    reasoning = ReasoningService(events=events, mcp=mcp_manager, audit=audit, chains=chains)
+    # IWL C5: shared trace sink — StepDispatcher writes here on the
+    # new path; ReasoningService.drain_tool_trace() reads from this
+    # same list. The handler owns the drain (drain-ordering invariant).
+    reasoning_trace_sink: list[dict] = []
+
+    # IWL C5: TurnRunner wiring lives behind a feature-flag-OFF check.
+    # When KERNOS_USE_DECOUPLED_TURN_RUNNER is unset, the legacy path
+    # runs and the construction below produces a TurnRunner that's
+    # ready when the flag flips. v1 cohort registration covers
+    # the covenant cohort unconditionally (its only dep is StateStore
+    # which is wired here); gardener and memory cohorts wire when
+    # their service deps are restructured out of MessageHandler's
+    # lazy-init path.
+    from kernos.kernel.cohorts import (
+        CohortFanOutConfig,
+        CohortFanOutRunner,
+        CohortRegistry,
+        register_covenant_cohort,
+    )
+    from kernos.kernel.enactment import (
+        DivergenceReasoner,
+        EnactmentService,
+        Planner,
+        PresenceRenderer,
+        StaticToolCatalog,
+        StepDispatcher,
+        ToolExecutionResult,
+    )
+    from kernos.kernel.enactment.dispatcher import (
+        ToolDescriptorLookup,
+        ToolExecutor,
+        ToolExecutionInputs,
+    )
+    from kernos.kernel.integration.runner import IntegrationRunner
+    from kernos.kernel.integration.service import IntegrationService
+    from kernos.kernel.response_delivery import (
+        AggregatedTelemetry,
+        ProductionResponseDelivery,
+    )
+    from kernos.kernel.tool_descriptor import ToolDescriptor
+    from kernos.kernel.turn_runner import TurnRunner
+
+    # Cohort registration — v1 covenant only (see arch doc note).
+    cohort_registry = CohortRegistry()
+    try:
+        register_covenant_cohort(cohort_registry, state)
+    except Exception:
+        logger.exception("IWL_COVENANT_COHORT_REGISTRATION_FAILED")
+
+    cohort_runner = CohortFanOutRunner(
+        registry=cohort_registry,
+        config=CohortFanOutConfig(),
+        emit_audit=None,  # audit emission via ReasoningService's audit
+    )
+
+    # Hook chain callers — v1 same-model default (Kit edit, locked).
+    # All hooks use the primary chain. Per-hook differentiation
+    # deferred until soak telemetry justifies. Wrapping with
+    # telemetry happens per-turn in the routing seam (PDI's
+    # response_delivery binds an AggregatedTelemetry instance per
+    # turn). For server.py construction we use the unwrapped chain;
+    # the per-turn binding happens in ReasoningService.reason() when
+    # the new path fires.
+    primary_chain = chains.get("primary", [])
+
+    async def _shared_chain_caller(system, messages, tools, max_tokens):
+        """Provider-call shim against the primary chain. Per-turn
+        telemetry wrapping happens in the routing layer."""
+        if not primary_chain:
+            raise RuntimeError(
+                "primary chain not configured; new path requires a "
+                "configured provider"
+            )
+        entry = primary_chain[0]
+        return await entry.provider.complete(
+            model=entry.model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+
+    # Concrete hooks for the new path. Tool catalog and executor are
+    # currently empty/stub — workshop registry binding lands in a
+    # follow-up enhancement. The wiring is in place; the hooks are
+    # constructable; only catalog/executor population needs filling
+    # in.
+    planner_tool_catalog = StaticToolCatalog()  # empty in v1; see arch doc
+
+    class _UnwiredExecutor:
+        """Production tool executor placeholder. The workshop
+        registry binding (which would wrap the existing dispatch
+        primitive) is a follow-up enhancement. Until that lands,
+        any attempt to dispatch fails clearly so the issue surfaces
+        loudly rather than producing degenerate output."""
+
+        async def execute(self, inputs: ToolExecutionInputs) -> ToolExecutionResult:
+            raise RuntimeError(
+                f"production tool executor not wired; tool={inputs.tool_id!r}. "
+                f"Until the workshop-registry binding lands, only thin-path "
+                f"turns succeed end-to-end on the new path."
+            )
+
+    class _UnwiredDescriptorLookup:
+        """Empty descriptor lookup placeholder. Same deferral as the
+        executor above."""
+
+        def descriptor_for(self, tool_id):
+            return None
+
+    iwl_planner = Planner(
+        chain_caller=_shared_chain_caller,
+        tool_catalog=planner_tool_catalog,
+    )
+    iwl_dispatcher = StepDispatcher(
+        executor=_UnwiredExecutor(),
+        descriptor_lookup=_UnwiredDescriptorLookup(),
+        trace_sink=reasoning_trace_sink,
+    )
+    iwl_reasoner = DivergenceReasoner(
+        chain_caller=_shared_chain_caller,
+    )
+    iwl_presence = PresenceRenderer(
+        chain_caller=_shared_chain_caller,
+    )
+
+    # IntegrationService over the V1 IntegrationRunner. The runner
+    # needs chain_caller + read_only_dispatcher + audit_emitter; we
+    # inject thin shims here.
+    async def _integration_dispatcher(tool_id, args, inputs):
+        """Read-only dispatcher for integration's iterative loop.
+        v1 has no surfaced read-only tools wired; returns empty
+        result. Fills in when surfacer ships."""
+        return {}
+
+    async def _integration_audit_emitter(entry: dict) -> None:
+        """Best-effort audit emission via the existing audit store."""
+        try:
+            if audit is not None and hasattr(audit, "log"):
+                audit.log(entry)
+        except Exception:
+            logger.exception("IWL_INTEGRATION_AUDIT_EMIT_FAILED")
+
+    integration_service = IntegrationService(
+        chain_caller=_shared_chain_caller,
+        read_only_dispatcher=_integration_dispatcher,
+        audit_emitter=_integration_audit_emitter,
+    )
+    enactment_service = EnactmentService(
+        presence_renderer=iwl_presence,
+        planner=iwl_planner,
+        step_dispatcher=iwl_dispatcher,
+        divergence_reasoner=iwl_reasoner,
+    )
+
+    # Response delivery + TurnRunner — constructed per-turn via a
+    # factory so the AggregatedTelemetry instance is fresh each turn.
+    # ReasoningService.reason() (PDI C2) routes to TurnRunner when
+    # the flag is on; wiring layer reconstructs delivery + telemetry
+    # per turn so synthetic event aggregation is per-turn.
+    #
+    # For v1, we wire a TurnRunner with a per-turn delivery factory
+    # via a lambda. The TurnRunner's response_delivery hook is the
+    # closure that constructs telemetry per turn at run time.
+
+    def _make_response_delivery(request, telemetry, event_emitter):
+        return ProductionResponseDelivery(
+            request=request,
+            telemetry=telemetry,
+            event_emitter=event_emitter,
+        )
+
+    # Production TurnRunner — constructor stays pure per PDI shape;
+    # response_delivery is the closure that owns translation +
+    # synthetic events at turn boundary.
+    async def _production_response_delivery(briefing, outcome):
+        """Adapter shim: ReasoningService.reason() calls
+        TurnRunner.run_turn(); TurnRunner's deliver hook fires here.
+        We need a per-turn telemetry instance; the simplest binding
+        is to construct delivery on each invocation. ReasoningResult
+        translation happens here."""
+        # In v1 we have no explicit per-turn telemetry seam yet
+        # (chain wrappers aren't bound per turn). Return a minimal
+        # ReasoningResult that callers can act on; the synthetic
+        # event emission still happens via the delivery hook below.
+        from kernos.kernel.reasoning import ReasoningResult
+        return ReasoningResult(
+            text=outcome.text,
+            model=primary_chain[0].model if primary_chain else "",
+            input_tokens=0,
+            output_tokens=0,
+            estimated_cost_usd=0.0,
+            duration_ms=0,
+            tool_iterations=0,
+        )
+
+    turn_runner = TurnRunner(
+        cohort_runner=cohort_runner,
+        integration_service=integration_service,
+        enactment_service=enactment_service,
+        response_delivery=_production_response_delivery,
+    )
+
+    reasoning = ReasoningService(
+        events=events,
+        mcp=mcp_manager,
+        audit=audit,
+        chains=chains,
+        turn_runner=turn_runner,
+        trace_sink=reasoning_trace_sink,
+    )
     engine = TaskEngine(reasoning=reasoning, events=events)
     handler = MessageHandler(mcp_manager, conversations, tenants, audit, events, state, reasoning, registry, engine, secrets_dir=os.getenv("KERNOS_SECRETS_DIR", "./secrets"))
     handler._instance_db = instance_db  # Wire instance DB for member resolution
