@@ -1194,8 +1194,15 @@ class EnactmentService:
         divergence_pattern: str,
         attempt_count: int,
     ) -> None:
-        """Write-only sink. The ticket is recorded after the routing
-        decision is final. The observer's record() returns None — by
+        """Write-only sink + enactment.friction_observed audit emission.
+
+        Per PDI C7: the friction observer is the operator-visible
+        sink for tier-1/2 exhaustion patterns. The audit family also
+        carries the same signal so the broader audit pipeline can
+        cross-reference friction with other enactment.* events.
+
+        Both emissions happen AFTER the routing decision is final.
+        Neither return value is read by the EnactmentService — by
         construction, the ticket cannot influence subsequent routing.
         """
         ticket = FrictionTicket(
@@ -1213,6 +1220,21 @@ class EnactmentService:
             await self._friction.record(ticket)
         except Exception:
             logger.exception("FRICTION_OBSERVER_RECORD_FAILED")
+
+        # Audit emission. References-not-dumps: tool_id, operation_name,
+        # and divergence_pattern are operator-readable references; no
+        # arg values, no output payloads.
+        await self._emit(
+            {
+                "category": "enactment.friction_observed",
+                "turn_id": briefing.turn_id,
+                "tool_id": step.tool_id,
+                "operation_name": step.operation_name,
+                "divergence_pattern": divergence_pattern,
+                "attempt_count": attempt_count,
+                "decided_action_kind": briefing.decided_action.kind.value,
+            }
+        )
 
     # ----- audit emitters for the enactment.* family (PDI C5 entries) -----
 
