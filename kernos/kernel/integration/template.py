@@ -261,6 +261,46 @@ Call __finalize_briefing__ when you are ready to hand off. That ends the loop.
   - constrained_response  — presence partially satisfies under a named limit
   - pivot                 — presence generates a different shape than asked
   - defer                 — presence acknowledges and signals delay
+  - clarification_needed  — you cannot resolve a question without user input;
+                            ask it directly. Use when critical info is missing
+                            and signals (cohorts, memory, covenants, thread)
+                            cannot fill the gap. Required fields: question
+                            (≤200 chars, one sentence), ambiguity_type (one of
+                            target | parameter | approach | intent | other),
+                            partial_state (None for first-pass; populated only
+                            for B2 from the enactment layer).
+
+## Action envelope (REQUIRED for execute_tool)
+
+When decided_action.kind is execute_tool, you MUST also emit a well-formed
+action_envelope with at minimum:
+
+  - intended_outcome: one-sentence framing of what the action serves
+  - allowed_tool_classes: the capability classes this action may use
+  - allowed_operations: explicit operation names allowed (e.g. ["draft", "send"])
+
+Optional:
+  - constraints, confirmation_requirements, forbidden_moves
+
+The envelope is the structural contract enactment validates against at every
+plan-changing step. If you cannot construct a well-formed envelope (because
+critical info is missing or the action is too underspecified to bound), DO
+NOT emit execute_tool. Emit clarification_needed instead and let the user
+resolve the ambiguity.
+
+For non-action kinds (respond_only, propose_tool, constrained_response,
+pivot, defer, clarification_needed): OMIT action_envelope. There is no
+dispatch to constrain.
+
+## Confirmation boundaries
+
+If the user's request implies a confirmation step ("draft an email about X"),
+the envelope's allowed_operations should reflect ONLY the operations the
+user authorised this turn. A draft-only request: allowed_operations=["draft"].
+A direct send: allowed_operations=["send"]. A draft-then-send chain
+authorised in one turn: allowed_operations=["draft", "send"] AND
+confirmation_requirements=["send"] so enactment knows the send step
+requires explicit user confirmation.
 
 ## Redaction invariant (load-bearing safety property)
 
