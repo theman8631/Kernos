@@ -124,6 +124,48 @@ FINALIZE_TOOL_SCHEMA: dict = {
                     "satisfaction_partial": {"type": "string"},
                     "suggested_shape": {"type": "string"},
                     "follow_up_signal": {"type": "string"},
+                    # clarification_needed variant fields (PDI extension).
+                    # question is one short user-facing sentence;
+                    # ambiguity_type is the closed-enum classifier;
+                    # partial_state is bounded structured state from
+                    # B2-routed clarifications (None for first-pass).
+                    "question": {"type": "string"},
+                    "ambiguity_type": {
+                        "type": "string",
+                        "enum": [
+                            "target",
+                            "parameter",
+                            "approach",
+                            "intent",
+                            "other",
+                        ],
+                    },
+                    "partial_state": {
+                        "anyOf": [
+                            {"type": "null"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "attempted_action_summary": {
+                                        "type": "string",
+                                    },
+                                    "discovered_information": {
+                                        "type": "string",
+                                    },
+                                    "blocking_ambiguity": {
+                                        "type": "string",
+                                    },
+                                    "safe_question_context": {
+                                        "type": "string",
+                                    },
+                                    "audit_refs": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                            },
+                        ],
+                    },
                 },
             },
             "presence_directive": {
@@ -133,6 +175,48 @@ FINALIZE_TOOL_SCHEMA: dict = {
                     "this moment, what tone or stance the situation calls "
                     "for, what to be careful of. Presence-safe; behavioral "
                     "instruction only."
+                ),
+            },
+            # PDI Kit edit: action_envelope is REQUIRED when
+            # decided_action.kind is execute_tool. Conversational and
+            # render-only kinds (including propose_tool) MUST omit it
+            # — there's no dispatch to constrain.
+            "action_envelope": {
+                "anyOf": [
+                    {"type": "null"},
+                    {
+                        "type": "object",
+                        "required": ["intended_outcome"],
+                        "properties": {
+                            "intended_outcome": {"type": "string"},
+                            "allowed_tool_classes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "allowed_operations": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "constraints": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "confirmation_requirements": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "forbidden_moves": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                ],
+                "description": (
+                    "Required when decided_action.kind is execute_tool; "
+                    "MUST be omitted otherwise. Encodes the structural "
+                    "constraints EnactmentService validates against at "
+                    "every plan-changing tier."
                 ),
             },
         },

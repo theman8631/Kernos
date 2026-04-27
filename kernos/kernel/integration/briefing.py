@@ -32,6 +32,16 @@ The decided_action enum is final at:
 
     respond_only | execute_tool | propose_tool
                  | constrained_response | pivot | defer
+                 | clarification_needed
+
+The `clarification_needed` variant lands with the
+PRESENCE-DECOUPLING-INTRODUCE batch (V1 schema extension). Used by
+integration's first-pass when critical info is missing, and by
+EnactmentService's B2 termination (Tier-5 surface) when mid-action
+ambiguity blocks progress without same-turn integration re-entry.
+The variant carries a bounded `ClarificationPartialState` so the
+serialized briefing contract stays auditable rather than becoming
+an unbounded dumping ground.
 
 All dataclasses are frozen — briefings and cohort outputs are
 produced once and consumed read-only. Round-trip serialisation
@@ -451,7 +461,7 @@ class FilteredItem:
 class ActionKind(str, Enum):
     """Discriminator for the DecidedAction tagged union.
 
-    Final per the revised spec, exactly six variants:
+    Seven variants after the PDI extension:
       - respond_only          presence generates a conversational reply
       - execute_tool          presence executes the named tool now
       - propose_tool          presence surfaces a confirmation to the user
@@ -460,6 +470,11 @@ class ActionKind(str, Enum):
       - pivot                 presence generates a different shape than
                               the literal request
       - defer                 presence acknowledges and signals delay
+      - clarification_needed  integration could not resolve a question
+                              without user input (first-pass) OR
+                              EnactmentService surfaced a mid-action
+                              ambiguity (B2 termination — no same-turn
+                              integration re-entry).
     """
 
     RESPOND_ONLY = "respond_only"
@@ -468,6 +483,7 @@ class ActionKind(str, Enum):
     CONSTRAINED_RESPONSE = "constrained_response"
     PIVOT = "pivot"
     DEFER = "defer"
+    CLARIFICATION_NEEDED = "clarification_needed"
 
 
 @dataclass(frozen=True)
@@ -688,8 +704,210 @@ class Defer:
         )
 
 
+# ---------------------------------------------------------------------------
+# ClarificationNeeded (PDI V1 extension)
+# ---------------------------------------------------------------------------
+
+
+# Bounded char caps for ClarificationPartialState fields. The
+# serialized briefing contract carries these — without caps the
+# state can grow unbounded (especially via B2-routed mid-action
+# discovery payloads). Caps mirror the spec's Section 1 caps.
+CLARIFICATION_ATTEMPTED_ACTION_SUMMARY_CAP = 1000
+CLARIFICATION_DISCOVERED_INFORMATION_CAP = 1000
+CLARIFICATION_BLOCKING_AMBIGUITY_CAP = 500
+CLARIFICATION_SAFE_QUESTION_CONTEXT_CAP = 500
+CLARIFICATION_QUESTION_CAP = 200
+
+# Allowed ambiguity_type values. Closed enum so audit consumers can
+# filter; "other" is the catch-all when none of the more specific
+# kinds fit.
+_ALLOWED_AMBIGUITY_TYPES = ("target", "parameter", "approach", "intent", "other")
+
+
+@dataclass(frozen=True)
+class ClarificationPartialState:
+    """Bounded state attached to a B2-routed clarification.
+
+    Per Kit edit: typed dataclass with explicit char caps rather
+    than a free-form dict. First-pass clarifications carry
+    `partial_state=None` (nothing has been attempted yet); B2
+    clarifications carry a populated state with the attempted
+    action, the information discovered, the blocking ambiguity,
+    and safe context for the question. `audit_refs` lets the next
+    turn's integration pull the full traces if it needs depth
+    without inflating the in-prompt payload.
+
+    All char caps are enforced at construction; over-cap fields
+    raise `BriefingValidationError` so callers cannot accidentally
+    let unbounded data slip into the serialized briefing.
+    """
+
+    attempted_action_summary: str = ""
+    discovered_information: str = ""
+    blocking_ambiguity: str = ""
+    safe_question_context: str = ""
+    audit_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _check_cap(
+            self.attempted_action_summary,
+            CLARIFICATION_ATTEMPTED_ACTION_SUMMARY_CAP,
+            "ClarificationPartialState.attempted_action_summary",
+        )
+        _check_cap(
+            self.discovered_information,
+            CLARIFICATION_DISCOVERED_INFORMATION_CAP,
+            "ClarificationPartialState.discovered_information",
+        )
+        _check_cap(
+            self.blocking_ambiguity,
+            CLARIFICATION_BLOCKING_AMBIGUITY_CAP,
+            "ClarificationPartialState.blocking_ambiguity",
+        )
+        _check_cap(
+            self.safe_question_context,
+            CLARIFICATION_SAFE_QUESTION_CONTEXT_CAP,
+            "ClarificationPartialState.safe_question_context",
+        )
+        if not isinstance(self.audit_refs, tuple):
+            raise BriefingValidationError(
+                "ClarificationPartialState.audit_refs must be a tuple of "
+                "non-empty strings"
+            )
+        for ref in self.audit_refs:
+            if not isinstance(ref, str) or not ref.strip():
+                raise BriefingValidationError(
+                    "ClarificationPartialState.audit_refs entries must be "
+                    "non-empty strings"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempted_action_summary": self.attempted_action_summary,
+            "discovered_information": self.discovered_information,
+            "blocking_ambiguity": self.blocking_ambiguity,
+            "safe_question_context": self.safe_question_context,
+            "audit_refs": list(self.audit_refs),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ClarificationPartialState":
+        if not isinstance(data, dict):
+            raise BriefingValidationError(
+                f"ClarificationPartialState must deserialise from a dict; "
+                f"got {type(data).__name__}"
+            )
+        return cls(
+            attempted_action_summary=str(
+                data.get("attempted_action_summary", "")
+            ),
+            discovered_information=str(data.get("discovered_information", "")),
+            blocking_ambiguity=str(data.get("blocking_ambiguity", "")),
+            safe_question_context=str(data.get("safe_question_context", "")),
+            audit_refs=tuple(data.get("audit_refs", []) or []),
+        )
+
+
+@dataclass(frozen=True)
+class ClarificationNeeded:
+    """Integration could not resolve a question without user input.
+
+    Two production paths produce this variant:
+
+      1. Integration first-pass: critical info is missing and
+         signals (cohorts, memory, covenants, conversation thread)
+         cannot resolve. `partial_state` is None — nothing has
+         been attempted yet.
+
+      2. EnactmentService B2 termination: mid-action ambiguity
+         blocks progress. Enactment terminates and constructs
+         this variant; thin path renders `question` directly to
+         the user. NO same-turn integration re-entry; the
+         populated `partial_state` is stored for the NEXT turn's
+         integration alongside the user's reply.
+
+    `question` is bounded at 200 chars (one-sentence, concise,
+    user-facing). `ambiguity_type` is closed enum.
+    """
+
+    kind: ClassVar[ActionKind] = ActionKind.CLARIFICATION_NEEDED
+    question: str = ""
+    ambiguity_type: str = ""
+    partial_state: ClarificationPartialState | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.question, str) or not self.question.strip():
+            raise BriefingValidationError(
+                "ClarificationNeeded.question must be a non-empty string"
+            )
+        _check_cap(
+            self.question,
+            CLARIFICATION_QUESTION_CAP,
+            "ClarificationNeeded.question",
+        )
+        if (
+            not isinstance(self.ambiguity_type, str)
+            or self.ambiguity_type not in _ALLOWED_AMBIGUITY_TYPES
+        ):
+            valid = ", ".join(_ALLOWED_AMBIGUITY_TYPES)
+            raise BriefingValidationError(
+                f"ClarificationNeeded.ambiguity_type {self.ambiguity_type!r} "
+                f"is not one of: {valid}"
+            )
+        if self.partial_state is not None and not isinstance(
+            self.partial_state, ClarificationPartialState
+        ):
+            raise BriefingValidationError(
+                "ClarificationNeeded.partial_state must be None or a "
+                "ClarificationPartialState"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "question": self.question,
+            "ambiguity_type": self.ambiguity_type,
+            "partial_state": (
+                self.partial_state.to_dict()
+                if self.partial_state is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ClarificationNeeded":
+        _expect_kind(data, cls.kind)
+        partial_raw = data.get("partial_state")
+        partial = (
+            ClarificationPartialState.from_dict(partial_raw)
+            if isinstance(partial_raw, dict)
+            else None
+        )
+        return cls(
+            question=str(data.get("question", "")),
+            ambiguity_type=str(data.get("ambiguity_type", "")),
+            partial_state=partial,
+        )
+
+
+def _check_cap(value: str, cap: int, field_label: str) -> None:
+    if not isinstance(value, str):
+        raise BriefingValidationError(f"{field_label} must be a string")
+    if len(value) > cap:
+        raise BriefingValidationError(
+            f"{field_label} exceeds {cap}-char cap (got {len(value)})"
+        )
+
+
 DecidedAction = (
-    RespondOnly | ExecuteTool | ProposeTool | ConstrainedResponse | Pivot | Defer
+    RespondOnly
+    | ExecuteTool
+    | ProposeTool
+    | ConstrainedResponse
+    | Pivot
+    | Defer
+    | ClarificationNeeded
 )
 
 
@@ -700,6 +918,7 @@ _ACTION_VARIANTS: dict[ActionKind, type] = {
     ActionKind.CONSTRAINED_RESPONSE: ConstrainedResponse,
     ActionKind.PIVOT: Pivot,
     ActionKind.DEFER: Defer,
+    ActionKind.CLARIFICATION_NEEDED: ClarificationNeeded,
 }
 
 
@@ -965,6 +1184,131 @@ class AuditTrace:
 
 
 # ---------------------------------------------------------------------------
+# ActionEnvelope (PDI V1 extension — Kit edit)
+# ---------------------------------------------------------------------------
+
+
+# Action-shape decided actions that require an envelope. Conversational
+# kinds (respond_only, defer, constrained_response, pivot,
+# clarification_needed) do not — they don't dispatch tools so there's
+# nothing for the envelope to constrain. propose_tool also lives on
+# the thin path (render-only proposal); the actual execute_tool that
+# fires on the next turn carries its own envelope.
+_ACTION_SHAPE_KINDS: frozenset[ActionKind] = frozenset(
+    {ActionKind.EXECUTE_TOOL}
+)
+
+
+@dataclass(frozen=True)
+class ActionEnvelope:
+    """Explicit constraints on an action-shape decided_action.
+
+    Per Kit edit: ActionEnvelope is structural, not computed from
+    prose. EnactmentService validates every plan-changing tier
+    (initial plan + Tier-2 modify + Tier-3 pivot + Tier-4
+    reassemble) against this envelope. Violation → terminate B1.
+
+    This is what makes "EnactmentService never changes
+    decided_action" structurally testable rather than aspirational.
+
+      - intended_outcome: explicit, not extracted from prose. The
+        user-facing intent the action serves.
+      - allowed_tool_classes: capability classes (e.g.
+        ["email", "calendar"]) the action may use.
+      - allowed_operations: explicit operation names (e.g.
+        ["draft", "send"]). Confirmation-boundary case: a
+        draft-only envelope omits "send" so an attempted draft→send
+        chain fails validation.
+      - constraints: must / must_not derived from briefing reasoning.
+      - confirmation_requirements: operation names whose dispatch
+        requires explicit user confirmation across a turn boundary
+        (e.g. ["send"] when the envelope permits draft+send but
+        send must wait for the user).
+      - forbidden_moves: free-form patterns the envelope rejects
+        (e.g. ["channel_switch", "operation_escalation"]).
+
+    All fields are tuples (frozen-friendly) of stripped strings.
+    Empty tuples are valid for `constraints`,
+    `confirmation_requirements`, and `forbidden_moves`. The
+    intended_outcome field MUST be non-empty.
+    """
+
+    intended_outcome: str = ""
+    allowed_tool_classes: tuple[str, ...] = ()
+    allowed_operations: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    confirmation_requirements: tuple[str, ...] = ()
+    forbidden_moves: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.intended_outcome, str)
+            or not self.intended_outcome.strip()
+        ):
+            raise BriefingValidationError(
+                "ActionEnvelope.intended_outcome must be a non-empty string"
+            )
+        for label, value in (
+            ("allowed_tool_classes", self.allowed_tool_classes),
+            ("allowed_operations", self.allowed_operations),
+            ("constraints", self.constraints),
+            ("confirmation_requirements", self.confirmation_requirements),
+            ("forbidden_moves", self.forbidden_moves),
+        ):
+            if not isinstance(value, tuple):
+                raise BriefingValidationError(
+                    f"ActionEnvelope.{label} must be a tuple of non-empty "
+                    f"strings"
+                )
+            for entry in value:
+                if not isinstance(entry, str) or not entry.strip():
+                    raise BriefingValidationError(
+                        f"ActionEnvelope.{label} entries must be non-empty "
+                        f"strings"
+                    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intended_outcome": self.intended_outcome,
+            "allowed_tool_classes": list(self.allowed_tool_classes),
+            "allowed_operations": list(self.allowed_operations),
+            "constraints": list(self.constraints),
+            "confirmation_requirements": list(self.confirmation_requirements),
+            "forbidden_moves": list(self.forbidden_moves),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ActionEnvelope":
+        if not isinstance(data, dict):
+            raise BriefingValidationError(
+                f"ActionEnvelope must deserialise from a dict; got "
+                f"{type(data).__name__}"
+            )
+        return cls(
+            intended_outcome=str(data.get("intended_outcome", "")),
+            allowed_tool_classes=tuple(
+                data.get("allowed_tool_classes", []) or []
+            ),
+            allowed_operations=tuple(
+                data.get("allowed_operations", []) or []
+            ),
+            constraints=tuple(data.get("constraints", []) or []),
+            confirmation_requirements=tuple(
+                data.get("confirmation_requirements", []) or []
+            ),
+            forbidden_moves=tuple(data.get("forbidden_moves", []) or []),
+        )
+
+
+def action_kind_requires_envelope(kind: ActionKind) -> bool:
+    """True when a decided_action of this kind must carry a Briefing
+    action_envelope. PDI Kit edit: only execute_tool dispatches; only
+    execute_tool requires the envelope. Conversational + render-only
+    kinds (including propose_tool, which is render-only) do not."""
+    return kind in _ACTION_SHAPE_KINDS
+
+
+# ---------------------------------------------------------------------------
 # Briefing
 # ---------------------------------------------------------------------------
 
@@ -986,6 +1330,7 @@ class Briefing:
     audit_trace: AuditTrace
     turn_id: str = ""
     integration_run_id: str = ""
+    action_envelope: ActionEnvelope | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.relevant_context, tuple):
@@ -1017,6 +1362,7 @@ class Briefing:
                 ConstrainedResponse,
                 Pivot,
                 Defer,
+                ClarificationNeeded,
             ),
         ):
             raise BriefingValidationError(
@@ -1043,6 +1389,29 @@ class Briefing:
             raise BriefingValidationError(
                 "Briefing.integration_run_id must be a string"
             )
+        if self.action_envelope is not None and not isinstance(
+            self.action_envelope, ActionEnvelope
+        ):
+            raise BriefingValidationError(
+                "Briefing.action_envelope must be None or an ActionEnvelope"
+            )
+        # Action-shape decided_actions require an envelope (Kit edit).
+        # Render-only kinds must NOT carry an envelope — keeps the
+        # contract crisp: an envelope only exists when there's a real
+        # dispatch to constrain.
+        kind = getattr(self.decided_action, "kind", None)
+        if action_kind_requires_envelope(kind):
+            if self.action_envelope is None:
+                raise BriefingValidationError(
+                    f"Briefing.action_envelope is required when "
+                    f"decided_action.kind is {kind.value!r}"
+                )
+        elif self.action_envelope is not None:
+            raise BriefingValidationError(
+                f"Briefing.action_envelope must be None when "
+                f"decided_action.kind is {kind.value!r} (no dispatch to "
+                f"constrain)"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1053,6 +1422,11 @@ class Briefing:
             "audit_trace": self.audit_trace.to_dict(),
             "turn_id": self.turn_id,
             "integration_run_id": self.integration_run_id,
+            "action_envelope": (
+                self.action_envelope.to_dict()
+                if self.action_envelope is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -1062,6 +1436,12 @@ class Briefing:
                 f"Briefing must deserialise from a dict; got "
                 f"{type(data).__name__}"
             )
+        envelope_raw = data.get("action_envelope")
+        envelope = (
+            ActionEnvelope.from_dict(envelope_raw)
+            if isinstance(envelope_raw, dict)
+            else None
+        )
         return cls(
             relevant_context=tuple(
                 ContextItem.from_dict(d)
@@ -1078,6 +1458,7 @@ class Briefing:
             audit_trace=AuditTrace.from_dict(data.get("audit_trace") or {}),
             turn_id=str(data.get("turn_id", "")),
             integration_run_id=str(data.get("integration_run_id", "")),
+            action_envelope=envelope,
         )
 
 

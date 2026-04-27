@@ -177,9 +177,20 @@ async def test_no_safety_failures_execute_tool_still_allowed():
             "narration_context": "reading the doc",
         },
         "presence_directive": "execute and narrate",
+        # PDI Kit edit: action-shape decided_actions REQUIRE an
+        # explicit ActionEnvelope. Integration constructs the envelope
+        # alongside the decision; the runner rejects action-shape
+        # output without one.
+        "action_envelope": {
+            "intended_outcome": "read the requested document",
+            "allowed_tool_classes": ["drive"],
+            "allowed_operations": ["read"],
+        },
     })
     briefing = await runner.run(_inputs())
     assert isinstance(briefing.decided_action, ExecuteTool)
+    assert briefing.action_envelope is not None
+    assert briefing.action_envelope.intended_outcome.startswith("read")
 
 
 # ---------------------------------------------------------------------------

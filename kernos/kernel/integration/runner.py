@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from kernos.kernel.integration.briefing import (
+    ActionEnvelope,
     AuditTrace,
     Briefing,
     BriefingValidationError,
@@ -58,6 +59,7 @@ from kernos.kernel.integration.briefing import (
     FilteredItem,
     Restricted,
     RespondOnly,
+    action_kind_requires_envelope,
     decided_action_from_dict,
     minimal_fail_soft_briefing,
 )
@@ -497,6 +499,31 @@ class IntegrationRunner:
 
         decided = decided_action_from_dict(tool_input.get("decided_action") or {})
 
+        # PDI Kit edit: action-shape decided_actions REQUIRE an
+        # explicit ActionEnvelope on the briefing. Parse from
+        # tool_input when the kind warrants it; absent envelope on an
+        # action-shape decision is a structural violation surfaced
+        # via the same fail-soft path as malformed presence_directive.
+        envelope: ActionEnvelope | None = None
+        envelope_raw = tool_input.get("action_envelope")
+        if action_kind_requires_envelope(decided.kind):
+            if not isinstance(envelope_raw, dict):
+                raise BriefingValidationError(
+                    f"action_envelope is required when decided_action.kind "
+                    f"is {decided.kind.value!r}; integration must construct "
+                    f"a well-formed envelope or fall back to "
+                    f"clarification_needed"
+                )
+            envelope = ActionEnvelope.from_dict(envelope_raw)
+        elif isinstance(envelope_raw, dict):
+            # Non-action kinds must NOT carry an envelope; the briefing
+            # validator will reject. Surface clearly here so the
+            # mismatch is obvious in the audit trail.
+            raise BriefingValidationError(
+                f"action_envelope must be omitted when decided_action.kind "
+                f"is {decided.kind.value!r} (no dispatch to constrain)"
+            )
+
         directive = str(tool_input.get("presence_directive") or "").strip()
         if not directive:
             raise BriefingValidationError(
@@ -554,6 +581,7 @@ class IntegrationRunner:
             audit_trace=audit_trace,
             turn_id=inputs.turn_id,
             integration_run_id=inputs.integration_run_id,
+            action_envelope=envelope,
         )
 
     def _check_redaction_invariant(

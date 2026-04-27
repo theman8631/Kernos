@@ -22,11 +22,14 @@ import json
 import pytest
 
 from kernos.kernel.integration.briefing import (
+    ActionEnvelope,
     ActionKind,
     AuditTrace,
     Briefing,
     BriefingValidationError,
     BudgetState,
+    ClarificationNeeded,
+    ClarificationPartialState,
     CohortOutput,
     ConstrainedResponse,
     ContextItem,
@@ -40,6 +43,7 @@ from kernos.kernel.integration.briefing import (
     RespondOnly,
     Restricted,
     VisibilityKind,
+    action_kind_requires_envelope,
     decided_action_from_dict,
     minimal_fail_soft_briefing,
     now_iso,
@@ -446,8 +450,9 @@ def test_decided_action_rejects_kind_mismatch_on_specific_variant():
         Pivot.from_dict({"kind": "defer", "reason": "x", "suggested_shape": "y"})
 
 
-def test_decided_action_enum_is_final_six_variants():
-    """Spec Section 1 fixes the enum at exactly six values."""
+def test_decided_action_enum_includes_pdi_clarification_extension():
+    """Spec Section 1 fixed the enum at six variants; PDI extends to
+    seven by adding clarification_needed (V1 schema extension)."""
     assert {k.value for k in ActionKind} == {
         "respond_only",
         "execute_tool",
@@ -455,6 +460,7 @@ def test_decided_action_enum_is_final_six_variants():
         "constrained_response",
         "pivot",
         "defer",
+        "clarification_needed",
     }
 
 
@@ -627,10 +633,17 @@ def test_briefing_with_execute_tool_action_round_trip():
         ),
         presence_directive="execute and narrate",
         audit_trace=AuditTrace(iterations_used=2),
+        action_envelope=ActionEnvelope(
+            intended_outcome="read the requested document on the user's behalf",
+            allowed_tool_classes=("drive",),
+            allowed_operations=("read",),
+        ),
     )
     parsed = Briefing.from_dict(briefing.to_dict())
     assert isinstance(parsed.decided_action, ExecuteTool)
     assert parsed.decided_action.tool_id == "drive_read_doc"
+    assert parsed.action_envelope is not None
+    assert parsed.action_envelope.intended_outcome.startswith("read")
 
 
 def test_briefing_with_pivot_action_round_trip():
@@ -728,6 +741,7 @@ def test_briefing_to_dict_top_level_keys_are_closed_set():
         "audit_trace",
         "turn_id",
         "integration_run_id",
+        "action_envelope",
     }
 
 
@@ -752,3 +766,234 @@ def test_filtered_item_has_no_summary_field_per_revised_spec():
             summary="should not exist",  # type: ignore[call-arg]
             reason_filtered="r",
         )
+
+
+# ---------------------------------------------------------------------------
+# PDI extensions: ClarificationPartialState
+# ---------------------------------------------------------------------------
+
+
+def test_clarification_partial_state_default_round_trip():
+    state = ClarificationPartialState()
+    payload = state.to_dict()
+    assert payload == {
+        "attempted_action_summary": "",
+        "discovered_information": "",
+        "blocking_ambiguity": "",
+        "safe_question_context": "",
+        "audit_refs": [],
+    }
+    assert ClarificationPartialState.from_dict(payload) == state
+
+
+def test_clarification_partial_state_full_round_trip():
+    state = ClarificationPartialState(
+        attempted_action_summary="started drafting an email to Henry",
+        discovered_information="user has two contacts named Henry",
+        blocking_ambiguity="which Henry should receive the message",
+        safe_question_context="confirming the recipient before sending",
+        audit_refs=("evt-123", "evt-124"),
+    )
+    parsed = ClarificationPartialState.from_dict(state.to_dict())
+    assert parsed == state
+
+
+def test_clarification_partial_state_caps_attempted_action_summary():
+    with pytest.raises(BriefingValidationError, match="attempted_action_summary"):
+        ClarificationPartialState(attempted_action_summary="x" * 1001)
+
+
+def test_clarification_partial_state_caps_discovered_information():
+    with pytest.raises(BriefingValidationError, match="discovered_information"):
+        ClarificationPartialState(discovered_information="x" * 1001)
+
+
+def test_clarification_partial_state_caps_blocking_ambiguity():
+    with pytest.raises(BriefingValidationError, match="blocking_ambiguity"):
+        ClarificationPartialState(blocking_ambiguity="x" * 501)
+
+
+def test_clarification_partial_state_caps_safe_question_context():
+    with pytest.raises(BriefingValidationError, match="safe_question_context"):
+        ClarificationPartialState(safe_question_context="x" * 501)
+
+
+def test_clarification_partial_state_rejects_empty_audit_ref():
+    with pytest.raises(BriefingValidationError, match="audit_refs"):
+        ClarificationPartialState(audit_refs=("",))
+
+
+# ---------------------------------------------------------------------------
+# PDI extensions: ClarificationNeeded variant
+# ---------------------------------------------------------------------------
+
+
+def test_clarification_needed_first_pass_round_trip():
+    action = ClarificationNeeded(
+        question="Which calendar should I check?",
+        ambiguity_type="target",
+    )
+    assert action.kind is ActionKind.CLARIFICATION_NEEDED
+    payload = action.to_dict()
+    assert payload["kind"] == "clarification_needed"
+    assert payload["partial_state"] is None
+    parsed = decided_action_from_dict(payload)
+    assert isinstance(parsed, ClarificationNeeded)
+    assert parsed.partial_state is None
+
+
+def test_clarification_needed_b2_round_trip():
+    state = ClarificationPartialState(
+        attempted_action_summary="started drafting",
+        discovered_information="two recipients match",
+        blocking_ambiguity="which recipient",
+        safe_question_context="confirming the recipient",
+        audit_refs=("evt-1",),
+    )
+    action = ClarificationNeeded(
+        question="Did you mean Henry from work or Henry from book club?",
+        ambiguity_type="target",
+        partial_state=state,
+    )
+    payload = action.to_dict()
+    parsed = decided_action_from_dict(payload)
+    assert isinstance(parsed, ClarificationNeeded)
+    assert parsed.partial_state == state
+
+
+def test_clarification_needed_requires_non_empty_question():
+    with pytest.raises(BriefingValidationError, match="question"):
+        ClarificationNeeded(question="   ", ambiguity_type="target")
+
+
+def test_clarification_needed_caps_question_length():
+    with pytest.raises(BriefingValidationError, match="question"):
+        ClarificationNeeded(question="?" * 201, ambiguity_type="target")
+
+
+def test_clarification_needed_rejects_unknown_ambiguity_type():
+    with pytest.raises(BriefingValidationError, match="ambiguity_type"):
+        ClarificationNeeded(question="?", ambiguity_type="not_a_kind")
+
+
+def test_clarification_needed_accepts_all_ambiguity_types():
+    for kind in ("target", "parameter", "approach", "intent", "other"):
+        action = ClarificationNeeded(question="?", ambiguity_type=kind)
+        assert action.ambiguity_type == kind
+
+
+# ---------------------------------------------------------------------------
+# PDI extensions: ActionEnvelope
+# ---------------------------------------------------------------------------
+
+
+def test_action_envelope_minimal_round_trip():
+    envelope = ActionEnvelope(intended_outcome="send a quick confirmation email")
+    payload = envelope.to_dict()
+    parsed = ActionEnvelope.from_dict(payload)
+    assert parsed == envelope
+
+
+def test_action_envelope_full_round_trip():
+    envelope = ActionEnvelope(
+        intended_outcome="send a quick confirmation email",
+        allowed_tool_classes=("email",),
+        allowed_operations=("draft", "send"),
+        constraints=("must include the meeting time",),
+        confirmation_requirements=("send",),
+        forbidden_moves=("channel_switch", "operation_escalation"),
+    )
+    parsed = ActionEnvelope.from_dict(envelope.to_dict())
+    assert parsed == envelope
+
+
+def test_action_envelope_requires_non_empty_intended_outcome():
+    with pytest.raises(BriefingValidationError, match="intended_outcome"):
+        ActionEnvelope(intended_outcome="   ")
+
+
+def test_action_envelope_rejects_empty_string_in_collection():
+    with pytest.raises(BriefingValidationError, match="allowed_operations"):
+        ActionEnvelope(
+            intended_outcome="x",
+            allowed_operations=("",),
+        )
+
+
+def test_action_kind_requires_envelope_only_for_execute_tool():
+    assert action_kind_requires_envelope(ActionKind.EXECUTE_TOOL) is True
+    for other in (
+        ActionKind.RESPOND_ONLY,
+        ActionKind.PROPOSE_TOOL,
+        ActionKind.CONSTRAINED_RESPONSE,
+        ActionKind.PIVOT,
+        ActionKind.DEFER,
+        ActionKind.CLARIFICATION_NEEDED,
+    ):
+        assert action_kind_requires_envelope(other) is False
+
+
+# ---------------------------------------------------------------------------
+# PDI extensions: Briefing.action_envelope structural rule
+# ---------------------------------------------------------------------------
+
+
+def test_briefing_execute_tool_requires_action_envelope():
+    with pytest.raises(BriefingValidationError, match="action_envelope"):
+        Briefing(
+            relevant_context=(),
+            filtered_context=(),
+            decided_action=ExecuteTool(
+                tool_id="calendar_create_event",
+                arguments={"title": "x"},
+            ),
+            presence_directive="execute and narrate",
+            audit_trace=AuditTrace(),
+        )
+
+
+def test_briefing_respond_only_rejects_action_envelope():
+    with pytest.raises(BriefingValidationError, match="action_envelope"):
+        Briefing(
+            relevant_context=(),
+            filtered_context=(),
+            decided_action=RespondOnly(),
+            presence_directive="answer briefly",
+            audit_trace=AuditTrace(),
+            action_envelope=ActionEnvelope(intended_outcome="should not be here"),
+        )
+
+
+def test_briefing_propose_tool_rejects_action_envelope():
+    """Per Kit edit: propose_tool is render-only on the thin path. The
+    actual execute_tool that fires on the next turn carries its own
+    envelope. propose_tool itself MUST NOT carry one."""
+    with pytest.raises(BriefingValidationError, match="action_envelope"):
+        Briefing(
+            relevant_context=(),
+            filtered_context=(),
+            decided_action=ProposeTool(
+                tool_id="email_send",
+                arguments={"to": "x@example.com"},
+                reason="user asked to email",
+            ),
+            presence_directive="render the proposal",
+            audit_trace=AuditTrace(),
+            action_envelope=ActionEnvelope(intended_outcome="should not be here"),
+        )
+
+
+def test_briefing_clarification_needed_round_trip():
+    briefing = Briefing(
+        relevant_context=(),
+        filtered_context=(),
+        decided_action=ClarificationNeeded(
+            question="Which calendar should I check?",
+            ambiguity_type="target",
+        ),
+        presence_directive="ask the question naturally",
+        audit_trace=AuditTrace(iterations_used=1),
+    )
+    parsed = Briefing.from_dict(briefing.to_dict())
+    assert isinstance(parsed.decided_action, ClarificationNeeded)
+    assert parsed.action_envelope is None

@@ -56,7 +56,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,56 @@ class Aggregation(str, Enum):
     CROSS_MEMBER = "cross_member"  # reserved-but-rejected in v1
 
 
+class OperationSafety(str, Enum):
+    """Coarse safety taxonomy used by integration's catalog filter and
+    EnactmentService's branch decision (PDI extension).
+
+    Distinct from GateClassification (which drives the dispatch gate's
+    confirmation routing) — they correlate but serve different jobs:
+
+      - GateClassification: how the dispatch gate routes (read,
+        soft_write, hard_write, delete) for confirmation/blast-radius
+      - OperationSafety: who sees the operation
+        (integration sees read_only; enactment full machinery sees
+        mutating and sensitive_action)
+
+    Default derivation when an OperationClassification declares only a
+    GateClassification (no explicit safety override):
+
+      READ                       → read_only
+      SOFT_WRITE | HARD_WRITE    → mutating
+      DELETE                     → sensitive_action
+
+    Tools whose safety class differs from the gate-classification
+    default (e.g. a SOFT_WRITE operation that should still gate as
+    sensitive_action because of cross-member implications) declare
+    `safety` on the per-operation classification explicitly.
+    """
+
+    READ_ONLY = "read_only"
+    MUTATING = "mutating"
+    SENSITIVE_ACTION = "sensitive_action"
+
+
+# The conservative fallback when operation classification is
+# ambiguous. Per the PDI spec: an ambiguous operation is NEVER
+# surfaced to integration's catalog; full machinery treats it as
+# sensitive_action.
+DEFAULT_AMBIGUOUS_SAFETY = OperationSafety.SENSITIVE_ACTION
+
+
+# Default mapping from GateClassification to OperationSafety. Only
+# applied when an OperationClassification does not declare an explicit
+# `safety` override. Centralised here so the derivation rule lives in
+# one place.
+SAFETY_FOR_GATE: dict[GateClassification, OperationSafety] = {
+    GateClassification.READ: OperationSafety.READ_ONLY,
+    GateClassification.SOFT_WRITE: OperationSafety.MUTATING,
+    GateClassification.HARD_WRITE: OperationSafety.MUTATING,
+    GateClassification.DELETE: OperationSafety.SENSITIVE_ACTION,
+}
+
+
 # Default tool-level classification when nothing is declared.
 # Per architect's revision 1: missing classification fails closed,
 # not open. soft_write is the fail-closed shape.
@@ -110,17 +160,37 @@ _OPERATION_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 @dataclass(frozen=True)
 class OperationClassification:
-    """Per-operation gate classification (Kit edit 1).
+    """Per-operation gate classification (Kit edit 1, extended in PDI).
 
     A tool that exposes multiple operations classifies each
     independently. read_pages is read; write_pages is hard_write;
     delete_pages is delete. The tool-level gate_classification field
     remains as shorthand for single-operation tools; per-operation
     overrides at gate-routing time when both are present.
+
+    PDI extension fields (additive, fully back-compat):
+      - `safety`: OperationSafety override. Defaults to None, in
+        which case the safety class is derived from `classification`
+        via SAFETY_FOR_GATE. Use the override only when the gate
+        routing's confirmation policy and the catalog-filter safety
+        class need to disagree.
+      - `timeout_ms`: per-operation execution-budget hint. 0 means
+        "use the tool's default". Consumed by enactment full
+        machinery's per-step timeout enforcement.
     """
 
     operation: str
     classification: GateClassification
+    safety: OperationSafety | None = None
+    timeout_ms: int = 0
+
+    @property
+    def effective_safety(self) -> OperationSafety:
+        """Return the OperationSafety after applying the
+        gate-classification default when no override is set."""
+        if self.safety is not None:
+            return self.safety
+        return SAFETY_FOR_GATE[self.classification]
 
 
 def _validate_operation_name(name: str) -> str:
@@ -166,6 +236,13 @@ class ToolDescriptor:
     domain_hints: tuple[str, ...] = ()
     aggregation: Aggregation = Aggregation.PER_MEMBER
 
+    # PDI extension. Optional callable that derives the operation
+    # name from a call's args dict at dispatch time. Used by tools
+    # whose read/write classification depends on argument values
+    # (manage_covenants is the canonical example). Set programmatically
+    # by tool registration code; not parsed from JSON descriptors.
+    operation_resolver: Callable[[Mapping[str, Any]], str] | None = None
+
     # Pre-existing optional workshop fields (preserved for back-compat)
     type: str = ""
     stateful: bool = True
@@ -189,6 +266,45 @@ class ToolDescriptor:
         if self.gate_classification is not None:
             return self.gate_classification
         return DEFAULT_GATE_CLASSIFICATION
+
+    def operation_for(self, name: str) -> OperationClassification | None:
+        """Return the OperationClassification for `name`, or None."""
+        for op in self.operations:
+            if op.operation == name:
+                return op
+        return None
+
+    def operations_map(self) -> dict[str, OperationClassification]:
+        """Return a name-keyed view of declared per-operation
+        classifications. Convenience for callers that want dict-style
+        access (the canonical storage is the immutable tuple)."""
+        return {op.operation: op for op in self.operations}
+
+    def safety_for(self, operation: str | None) -> OperationSafety:
+        """Return the OperationSafety for `operation`.
+
+        Resolution order:
+          1. Per-operation `safety` override (if declared).
+          2. Per-operation derivation from `classification` via
+             SAFETY_FOR_GATE.
+          3. Tool-level gate_classification (shorthand) → safety via
+             SAFETY_FOR_GATE.
+          4. Default sensitive_action (conservative fallback for
+             unclassified tools).
+
+        Used by integration's catalog filter (only read_only is
+        surfaced) and by EnactmentService's full-machinery routing
+        (mutating + sensitive_action are dispatch operations).
+        """
+        if operation:
+            op = self.operation_for(operation)
+            if op is not None:
+                return op.effective_safety
+        if self.gate_classification is not None:
+            return SAFETY_FOR_GATE[self.gate_classification]
+        # No tool-level shorthand and no per-op match — conservative
+        # fallback rather than re-routing through DEFAULT_GATE_CLASSIFICATION.
+        return DEFAULT_AMBIGUOUS_SAFETY
 
     @property
     def is_service_bound(self) -> bool:
@@ -228,6 +344,7 @@ def parse_tool_descriptor(
     data: dict[str, Any],
     *,
     service_lookup: Any | None = None,
+    operation_resolver: Callable[[Mapping[str, Any]], str] | None = None,
 ) -> ToolDescriptor:
     """Validate and construct a ToolDescriptor from a dict.
 
@@ -305,6 +422,12 @@ def parse_tool_descriptor(
         # and let the runtime resolve it.
         audit_category = "" if service_id else name
 
+    if operation_resolver is not None and not callable(operation_resolver):
+        raise ToolDescriptorError(
+            "operation_resolver must be callable (mapping[str, Any] -> str) "
+            "or None"
+        )
+
     return ToolDescriptor(
         name=name,
         description=description,
@@ -317,6 +440,7 @@ def parse_tool_descriptor(
         audit_category=audit_category,
         domain_hints=domain_hints,
         aggregation=aggregation,
+        operation_resolver=operation_resolver,
         type=(data.get("type") or "").strip(),
         stateful=bool(data.get("stateful", True)),
         store=(data.get("store") or "").strip(),
@@ -420,8 +544,46 @@ def _parse_operations(value: Any) -> tuple[OperationClassification, ...]:
                 f"per-operation classification for {op!r} must declare "
                 f"a non-empty classification"
             )
-        out.append(OperationClassification(operation=op, classification=cls))
+        safety = _parse_operation_safety(entry.get("safety"))
+        timeout_ms = _parse_timeout_ms(entry.get("timeout_ms"))
+        out.append(
+            OperationClassification(
+                operation=op,
+                classification=cls,
+                safety=safety,
+                timeout_ms=timeout_ms,
+            )
+        )
     return tuple(out)
+
+
+def _parse_operation_safety(value: Any) -> OperationSafety | None:
+    """Parse an optional `safety` override from descriptor JSON.
+
+    Absent or empty → None (caller will derive safety from
+    GateClassification at lookup time). Unknown value → clear error
+    listing the valid set so authoring mistakes surface fast.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return OperationSafety(value)
+    except ValueError as exc:
+        valid = ", ".join(s.value for s in OperationSafety)
+        raise ToolDescriptorError(
+            f"operation safety {value!r} is not one of: {valid}"
+        ) from exc
+
+
+def _parse_timeout_ms(value: Any) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ToolDescriptorError(
+            f"operation timeout_ms must be a non-negative integer; got "
+            f"{value!r}"
+        )
+    return value
 
 
 def _parse_domain_hints(value: Any) -> tuple[str, ...]:
