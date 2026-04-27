@@ -31,6 +31,16 @@ Hard invariants enforced structurally:
   - Confirmation boundaries respected (envelope validation, C5-C6).
 """
 
+from kernos.kernel.enactment.dispatcher import (
+    DEFAULT_TOOL_TIMEOUT_MS,
+    StepDispatcher,
+    ToolDescriptorLookup,
+    ToolExecutionInputs,
+    ToolExecutionResult,
+    ToolExecutor,
+    TraceSink,
+    build_step_dispatcher,
+)
 from kernos.kernel.enactment.envelope import (
     ValidationOutcome,
     validate_plan_against_envelope,
@@ -119,6 +129,7 @@ __all__ = [
     "DEFAULT_REASSEMBLY_PER_ENVELOPE",
     "DEFAULT_REASSEMBLY_PER_TURN",
     "DEFAULT_RETRY_BUDGET",
+    "DEFAULT_TOOL_TIMEOUT_MS",
     "DISCOVERED_INFORMATION_CAP",
     "DivergenceJudgeInputs",
     "DivergenceJudgment",
@@ -141,6 +152,7 @@ __all__ = [
     "Planner",
     "PlannerError",
     "PlannerLike",
+    "StepDispatcher",
     "PresenceRenderResult",
     "PresenceRendererLike",
     "ReassemblyBudget",
@@ -162,12 +174,18 @@ __all__ = [
     "TierRouting",
     "ToolCatalogEntry",
     "ToolCatalogProvider",
+    "ToolDescriptorLookup",
+    "ToolExecutionInputs",
+    "ToolExecutionResult",
+    "ToolExecutor",
     "TierThreePivotInputs",
     "TierTwoModifyInputs",
+    "TraceSink",
     "ValidationOutcome",
     "all_three_pass",
     "build_enactment_service",
     "build_planner",
+    "build_step_dispatcher",
     "classify_routing",
     "evaluate_expectation_signals",
     "evaluate_signal",

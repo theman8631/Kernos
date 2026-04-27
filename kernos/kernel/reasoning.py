@@ -198,6 +198,7 @@ class ReasoningService:
         *,
         chains: ChainConfig | None = None,
         turn_runner: Any = None,  # TurnRunner | None — Any avoids circular import
+        trace_sink: list[dict] | None = None,  # IWL C2: shared tool-trace seam
     ) -> None:
         if chains is not None:
             self._chains = chains
@@ -223,8 +224,15 @@ class ReasoningService:
         self._tools_changed: bool = False  # Set by manage_capabilities; handler checks post-reasoning
         # Lazy tool loading: tracks which MCP tools have been loaded per-space session
         self._loaded_tools: dict[str, set[str]] = {}  # space_id → set of tool names
-        # Turn-level tool call trace — accumulated during reasoning, read+cleared by handler
-        self._turn_tool_trace: list[dict] = []
+        # Turn-level tool call trace — accumulated during reasoning, read+cleared by handler.
+        # IWL C2: when `trace_sink` is provided at construction, the new
+        # path's StepDispatcher writes into the same backing list so
+        # `drain_tool_trace()` returns entries from BOTH paths uniformly.
+        # Default: a fresh internal list (back-compat with legacy-only
+        # callers).
+        self._turn_tool_trace: list[dict] = (
+            trace_sink if trace_sink is not None else []
+        )
         # Hybrid token counting: real input_tokens from last principal reasoning call per-instance
         self._last_real_input_tokens: dict[str, int] = {}  # instance_id → tokens
         # Pre-flight chain-skip support — lazily-loaded model registry
@@ -559,9 +567,22 @@ class ReasoningService:
         return self._last_real_input_tokens.get(instance_id, 0)
 
     def drain_tool_trace(self) -> list[dict]:
-        """Return and clear the accumulated tool call trace for the current turn."""
-        trace = self._turn_tool_trace
-        self._turn_tool_trace = []
+        """Return and clear the accumulated tool call trace for the current turn.
+
+        IWL drain-ordering invariant (Kit final-signoff note): the
+        handler is the single owner of this drain. response_delivery /
+        StepDispatcher append into the trace store but never call
+        this method. After `reason()` returns, the handler calls
+        drain_tool_trace() once to consume the turn's entries.
+
+        IWL trace-sink note: when `trace_sink` was injected at
+        construction, the underlying list is shared with the new
+        path's StepDispatcher; drain returns entries from whichever
+        path produced them. The list is cleared in-place to preserve
+        the shared reference for subsequent turns.
+        """
+        trace = list(self._turn_tool_trace)
+        self._turn_tool_trace.clear()
         return trace
 
     def clear_loaded_tools(self, space_id: str) -> None:
