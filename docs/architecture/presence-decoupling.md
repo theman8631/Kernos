@@ -252,11 +252,18 @@ audit entries reference plans by ID, never embed plan content.
 
 Termination subtypes (closed enum):
 
-- `success_thin_path` — thin-path render of any kind
+- `success_thin_path` — thin-path render of any conversational
+  kind (respond_only, defer, constrained_response, pivot,
+  first-pass clarification_needed)
+- `success_full_machinery` — full machinery happy path; all steps
+  completed cleanly with terminal render
 - `thin_path_proposal_rendered` — propose_tool render
 - `b1_action_invalidated` — full machinery B1
 - `b2_user_disambiguation_needed` — full machinery B2 OR thin-path
   B2-routed clarification
+
+`success_thin_path` and `success_full_machinery` are kept distinct
+so audit filters can distinguish where each completion came from.
 
 Redaction invariants apply. EnactmentService consumes briefings
 that are already presence-safe (integration's runner enforces);

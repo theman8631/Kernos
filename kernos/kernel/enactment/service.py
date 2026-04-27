@@ -139,12 +139,18 @@ logger = logging.getLogger(__name__)
 class TerminationSubtype(str, Enum):
     """Closed enum of enactment.terminated audit subtypes.
 
-    Stable across C4-C6 — adding a value is a schema extension, not
+    Stable across C4-C8 — adding a value is a schema extension, not
     a tweak. The audit consumer (operator dashboards, friction
     observer) keys on these.
+
+    Per Kit re-review on PDI: success_thin_path and
+    success_full_machinery are kept distinct so audit filtering can
+    distinguish where each completion came from. C5/C6 emitted the
+    full-machinery happy path as success_thin_path; C8 corrects.
     """
 
     SUCCESS_THIN_PATH = "success_thin_path"
+    SUCCESS_FULL_MACHINERY = "success_full_machinery"
     THIN_PATH_PROPOSAL_RENDERED = "thin_path_proposal_rendered"
     B1_ACTION_INVALIDATED = "b1_action_invalidated"
     B2_USER_DISAMBIGUATION_NEEDED = "b2_user_disambiguation_needed"
@@ -702,15 +708,19 @@ class EnactmentService:
 
         # All steps completed cleanly. Terminal render via presence
         # renderer (the ONLY post-loop streaming point).
+        #
+        # Audit subtype is SUCCESS_FULL_MACHINERY (Kit re-review: keep
+        # full-machinery completions distinct from thin-path
+        # completions for diagnostic clarity in audit-trail filters).
         result = await self._presence.render(briefing)
         await self._emit_terminated(
             briefing,
-            TerminationSubtype.SUCCESS_THIN_PATH,
+            TerminationSubtype.SUCCESS_FULL_MACHINERY,
             text=result.text,
         )
         return EnactmentOutcome(
             text=result.text,
-            subtype=TerminationSubtype.SUCCESS_THIN_PATH,
+            subtype=TerminationSubtype.SUCCESS_FULL_MACHINERY,
             decided_action_kind=briefing.decided_action.kind,
             streamed=result.streamed,
         )

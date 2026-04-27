@@ -428,6 +428,81 @@ async def test_terminated_emits_with_required_fields():
 
 
 @pytest.mark.asyncio
+async def test_full_machinery_success_emits_dedicated_subtype():
+    """Per Kit re-review: full-machinery completions emit
+    success_full_machinery, not success_thin_path. Path-distinguished
+    subtypes give audit consumers diagnostic value when filtering by
+    termination shape.
+
+    This pin guards against regression to the C5/C6 bug where the
+    full-machinery happy path mislabelled itself as thin-path."""
+    audit_sink = []
+    plan = _plan()
+    service = _make_service(
+        planner=_Planner([plan]),
+        dispatcher=_Dispatcher([
+            StepDispatchResult(completed=True, output={"ok": True})
+        ]),
+        reasoner=_Reasoner(judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=True,
+                plan_still_valid=True,
+                failure_kind=FailureKind.NONE,
+            )
+        ]),
+        audit_sink=audit_sink,
+    )
+    await service.run(_execute_briefing())
+    entry = next(
+        e for e in audit_sink if e["category"] == "enactment.terminated"
+    )
+    assert entry["subtype"] == "success_full_machinery"
+    # The decided_action_kind also distinguishes execute_tool from
+    # thin-path kinds, but the subtype split is the load-bearing
+    # diagnostic for audit-trail filters.
+    assert entry["decided_action_kind"] == "execute_tool"
+
+
+@pytest.mark.asyncio
+async def test_thin_path_success_keeps_thin_path_subtype():
+    """Counterpart to the full-machinery pin: thin-path success keeps
+    the success_thin_path subtype. The two are kept distinct so audit
+    filters can grep by subtype."""
+    audit_sink = []
+
+    async def emit(entry):
+        audit_sink.append(entry)
+
+    from kernos.kernel.enactment import (
+        EnactmentService,
+        PresenceRenderResult,
+    )
+
+    class _Presence:
+        async def render(self, briefing):
+            return PresenceRenderResult(text="hi")
+
+    service = EnactmentService(
+        presence_renderer=_Presence(),
+        audit_emitter=emit,
+    )
+    briefing = Briefing(
+        relevant_context=(),
+        filtered_context=(),
+        decided_action=RespondOnly(),
+        presence_directive="x",
+        audit_trace=AuditTrace(),
+        turn_id="turn-1",
+        integration_run_id="run-1",
+    )
+    await service.run(briefing)
+    entry = next(
+        e for e in audit_sink if e["category"] == "enactment.terminated"
+    )
+    assert entry["subtype"] == "success_thin_path"
+
+
+@pytest.mark.asyncio
 async def test_friction_observed_emits_with_required_fields():
     audit_sink = []
     plan = _plan()

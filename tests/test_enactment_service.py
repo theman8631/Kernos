@@ -701,7 +701,7 @@ async def test_full_machinery_happy_path_returns_terminal_render():
     )
     outcome = await service.run(_execute_briefing())
     assert outcome.text == "action complete"
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     assert outcome.decided_action_kind is ActionKind.EXECUTE_TOOL
     assert len(dispatcher.calls) == 1
     assert reasoner.judge_calls == 1
@@ -761,7 +761,7 @@ async def test_tier_1_retry_on_transient_failure():
         audit_sink=audit_sink,
     )
     outcome = await service.run(_execute_briefing())
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     assert len(dispatcher.calls) == 2
     assert dispatcher.calls[0].attempt_number == 1
     assert dispatcher.calls[1].attempt_number == 2
@@ -810,7 +810,7 @@ async def test_tier_2_modify_on_corrective_signal():
         audit_sink=audit_sink,
     )
     outcome = await service.run(_execute_briefing())
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     assert reasoner.modify_calls == 1
     modified_entry = next(
         e for e in audit_sink
@@ -878,7 +878,7 @@ async def test_tier_3_pivot_on_information_divergence():
         audit_sink=audit_sink,
     )
     outcome = await service.run(_execute_briefing())
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     assert reasoner.pivot_calls == 1
     pivot_entry = next(
         e for e in audit_sink
@@ -971,7 +971,7 @@ async def test_tier_4_reassemble_creates_new_plan_and_resumes_from_step_one():
     )
     outcome = await service.run(_execute_briefing())
 
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     # Two plans created.
     assert len(planner.calls) == 2
     # Second create_plan call carries the prior_plan_id and
@@ -1410,7 +1410,7 @@ async def test_friction_observer_is_write_only_does_not_affect_routing():
     # and continues. The turn completes successfully (tier-2 modify
     # produces a successful step).
     outcome = await service.run(_execute_briefing())
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
 
 
 @pytest.mark.asyncio
@@ -1515,7 +1515,7 @@ async def test_cross_turn_confirmation_flow_turn_2_send_fires():
         ],
     )
     outcome = await service.run(_execute_briefing(envelope=envelope))
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     assert len(dispatcher.calls) == 1
 
 
@@ -1538,7 +1538,7 @@ async def test_send_only_envelope_with_in_turn_send_dispatches():
         ],
     )
     outcome = await service.run(_execute_briefing(envelope=envelope))
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     assert len(dispatcher.calls) == 1
 
 
@@ -1637,7 +1637,7 @@ async def test_two_reassemblies_in_one_turn_under_per_envelope_budget():
         reassembly_per_envelope=2,
     )
     outcome = await service.run(_execute_briefing())
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     reassembled = [
         e for e in audit_sink
         if e.get("category") == "enactment.plan_reassembled"
@@ -1927,7 +1927,7 @@ async def test_friction_ticket_does_not_short_circuit_subsequent_retries():
     # Friction ticket fired AND modify proceeded successfully.
     # The ticket did NOT prevent the modify path from running.
     assert len(observer.tickets) == 1
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
     # Modify was indeed called once (after retry exhaustion).
     assert reasoner.modify_calls == 1
 
@@ -1952,7 +1952,7 @@ async def test_empty_allowed_operations_envelope_treated_as_unconstrained():
     service, _, dispatcher, _ = _full_machinery_service(plan=plan)
     outcome = await service.run(_execute_briefing(envelope=envelope))
     # No envelope rejection; dispatch proceeds.
-    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert outcome.subtype is TerminationSubtype.SUCCESS_FULL_MACHINERY
 
 
 @pytest.mark.asyncio
