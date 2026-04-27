@@ -359,12 +359,45 @@ tests/test_iwl_integration.py               (end-to-end smoke)
 ## Rollout
 
 1. **IWL ships** (this batch): hooks + translation seam +
-   `server.py` wiring + integration tests. `features.use_decoupled_turn_runner=True`
-   becomes safe for soak validation.
-2. **Soak validation:** founder flips the flag for an instance; new
-   path runs on real turns. Friction observer accumulates tickets;
-   equivalence telemetry observed via the synthetic
-   `reasoning.response` event's `turn_completed_via` field.
-3. **PRESENCE-DECOUPLING-ACTIVATE:** flips flag default ON;
+   `server.py` wiring + integration tests + contract pins.
+   `features.use_decoupled_turn_runner=True` becomes safe for
+   **thin-path soak validation only** (see explicit constraint below).
+2. **INTEGRATION-WIRE-LIVE-WORKSHOP-BINDING (follow-up spec):**
+   threads real request context into full-machinery dispatcher
+   event/audit records (the `instance_id` propagation noted below)
+   AND wires the workshop dispatch primitive into `ToolExecutor`.
+   Required before broad soak that exercises full-machinery turns.
+3. **Broad soak validation:** founder flips the flag for an
+   instance; new path runs on real turns including full-machinery
+   dispatches. Friction observer accumulates tickets; equivalence
+   telemetry observed via the synthetic `reasoning.response`
+   event's `turn_completed_via` field.
+4. **PRESENCE-DECOUPLING-ACTIVATE:** flips flag default ON;
    deprecates legacy reasoning loop after benchmarked clearly and
    consistently better with no remaining tuning needs.
+
+## Push-approval constraint (architect, IWL v3 review)
+
+IWL is approved for push and thin-path soak. Broad soak (full-
+machinery turns) is gated on the workshop-binding follow-up.
+
+**Open thread surfaced at v3 approval:** `Briefing` / `AuditTrace`
+don't currently carry `instance_id`. The dispatcher's audit entries
+read instance_id via best-effort fallbacks (`_instance_id_from_briefing`
+helper) which return `""` today. For thin-path turns that produce
+no dispatcher records, this is invisible. For full-machinery turns
+the audit entries land in the `""` instance bucket, which is wrong
+shape for production audit partitioning.
+
+The fix lives in INTEGRATION-WIRE-LIVE-WORKSHOP-BINDING:
+
+  - Either thread `instance_id` onto `Briefing` / `AuditTrace`
+    (V1 schema extension), or onto a separate request-context
+    object the dispatcher reads.
+  - Audit entries should partition by the actual instance_id, not
+    the empty bucket.
+
+The thin-path soak the v3 approval covers does not exercise this
+gap; full-machinery dispatch is gated behind the
+`_UnwiredDescriptorLookup` loud-failure surface until the workshop
+binding lands.
