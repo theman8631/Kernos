@@ -49,6 +49,14 @@ from kernos.kernel.enactment.envelope import (
     validate_plan_against_envelope,
     validate_step_against_envelope,
 )
+from kernos.kernel.enactment.friction import (
+    FrictionObserverLike,
+    FrictionTicket,
+    NullFrictionObserver,
+    TIER_1_RETRY_EXHAUSTED,
+    TIER_2_MODIFY_EXHAUSTED,
+    now_iso as friction_now_iso,
+)
 from kernos.kernel.enactment.plan import (
     Plan,
     Step,
@@ -56,6 +64,11 @@ from kernos.kernel.enactment.plan import (
     evaluate_expectation_signals,
     new_plan_id,
     now_iso,
+)
+from kernos.kernel.enactment.reintegration import (
+    ExecutionTrace,
+    PlanRef,
+    ReintegrationContext,
 )
 from kernos.kernel.enactment.tiers import (
     DEFAULT_MODIFY_BUDGET,
@@ -70,9 +83,49 @@ from kernos.kernel.enactment.tiers import (
 from kernos.kernel.integration.briefing import (
     ActionEnvelope,
     ActionKind,
+    AuditTrace,
     Briefing,
     ClarificationNeeded,
+    ClarificationPartialState,
 )
+
+
+# ---------------------------------------------------------------------------
+# Reassembly budget (PDI C6)
+# ---------------------------------------------------------------------------
+
+
+# Default reassembly budgets per spec Section 5e (Tier 4).
+DEFAULT_REASSEMBLY_PER_ENVELOPE = 2
+DEFAULT_REASSEMBLY_PER_TURN = 3
+
+
+@dataclass(frozen=True)
+class ReassemblyBudget:
+    """Tier-4 budget tracked at envelope-conceptual / per-turn-implementation
+    level.
+
+    Per architect's C6 guidance: under the current one-action-per-turn
+    invariant, per-envelope and per-turn are equivalent. The budget
+    structure maps to envelope; the per-turn cap is a safety net that
+    becomes load-bearing if the one-action-per-turn invariant ever
+    breaks.
+    """
+
+    per_envelope_remaining: int = DEFAULT_REASSEMBLY_PER_ENVELOPE
+    per_turn_remaining: int = DEFAULT_REASSEMBLY_PER_TURN
+
+    def can_reassemble(self) -> bool:
+        return (
+            self.per_envelope_remaining > 0
+            and self.per_turn_remaining > 0
+        )
+
+    def consumed(self) -> "ReassemblyBudget":
+        return ReassemblyBudget(
+            per_envelope_remaining=max(0, self.per_envelope_remaining - 1),
+            per_turn_remaining=max(0, self.per_turn_remaining - 1),
+        )
 
 
 logger = logging.getLogger(__name__)
@@ -125,16 +178,21 @@ _FULL_MACHINERY_KINDS: frozenset[ActionKind] = frozenset({
 class EnactmentOutcome:
     """Result of one enactment turn.
 
-    `text` is the user-facing rendered response. `subtype` is the
-    enactment.terminated audit subtype. `decided_action_kind` is the
-    forwarded kind for telemetry. `streamed` records whether the
-    presence renderer streamed (thin path supports streaming; full
-    machinery disables it during execution and re-enables only after
-    terminal response).
-
-    `audit_refs` is operator-readable references to the audit entries
-    this enactment emitted. Empty in C4 (skeleton); C7 wires the audit
-    family fully.
+    `text`: user-facing rendered response.
+    `subtype`: enactment.terminated audit subtype.
+    `decided_action_kind`: forwarded kind for telemetry.
+    `streamed`: whether the presence renderer streamed (thin path
+        supports streaming; full machinery disables it during
+        execution and re-enables only after terminal response).
+    `audit_refs`: operator-readable references to audit entries.
+    `reintegration_context` (PDI C6): set on B1 / B2 termination —
+        carries the capped payload the next turn's integration
+        consumes alongside the user's reply.
+    `clarification` (PDI C6): set on B2 termination — the
+        ClarificationNeeded variant enactment constructed
+        directly (no integration call). Stored on the outcome so the
+        wiring layer can route to the next turn's integration with
+        the full clarification context attached.
     """
 
     text: str
@@ -142,6 +200,8 @@ class EnactmentOutcome:
     decided_action_kind: ActionKind
     streamed: bool = False
     audit_refs: tuple[str, ...] = ()
+    reintegration_context: ReintegrationContext | None = None
+    clarification: ClarificationNeeded | None = None
 
     @property
     def is_thin_path(self) -> bool:
@@ -202,11 +262,26 @@ AuditEmitter = Callable[[dict[str, Any]], Awaitable[None]]
 
 @dataclass(frozen=True)
 class PlanCreationInputs:
-    """Inputs to PlannerLike.create_plan."""
+    """Inputs to PlannerLike.create_plan.
+
+    Initial plans (created at the start of full machinery) carry only
+    `briefing` and `library_suggestions`. Tier-4 reassembled plans
+    additionally carry `prior_plan_id`, `triggering_context_summary`,
+    and `audit_refs` so the planner has the context it needs to
+    re-shape the plan.
+    """
 
     briefing: Briefing
     library_suggestions: tuple = ()
     """Stub returns empty in v1; workflow primitive future-loads."""
+
+    # PDI C6 extensions for tier-4 reassemble paths.
+    prior_plan_id: str = ""
+    """Empty for initial plans."""
+    triggering_context_summary: str = ""
+    """What invalidated the prior plan; empty for initial plans."""
+    audit_refs: tuple[str, ...] = ()
+    """References to audit entries for the prior plan / outcomes."""
 
 
 @dataclass(frozen=True)
@@ -320,13 +395,56 @@ class TierThreePivotInputs:
     briefing: Briefing
 
 
+@dataclass(frozen=True)
+class ClarificationFormulationInputs:
+    """Inputs to DivergenceReasonerLike.formulate_clarification (PDI C6).
+
+    Used when tier 5 B2 fires — the full machinery has detected
+    AMBIGUITY_NEEDS_USER and needs to construct a user-facing
+    ClarificationNeeded variant directly (no integration call).
+    """
+
+    failed_step: Step
+    dispatch_result: StepDispatchResult
+    briefing: Briefing
+    audit_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ClarificationFormulationResult:
+    """Output of DivergenceReasonerLike.formulate_clarification.
+
+    All char fields will be enforced by the downstream
+    ClarificationPartialState / ClarificationNeeded dataclasses (PDI
+    C1). The reasoner is responsible for staying within caps; over-
+    cap output causes BriefingValidationError on construction.
+
+    `ambiguity_type` must be one of the closed enum values:
+    target | parameter | approach | intent | other.
+    """
+
+    question: str
+    """≤200 chars; one user-facing sentence."""
+    ambiguity_type: str
+    """closed enum: target | parameter | approach | intent | other"""
+    blocking_ambiguity: str
+    """≤500 chars; description of what cannot be resolved."""
+    safe_question_context: str
+    """≤500 chars; user-safe context for the question."""
+    attempted_action_summary: str
+    """≤1000 chars; what was being attempted before B2 fired."""
+    discovered_information: str
+    """≤1000 chars; what was learned that surfaced ambiguity."""
+
+
 @runtime_checkable
 class DivergenceReasonerLike(Protocol):
     """Model-judged divergence routing for full machinery.
 
-    All return types are structured Step / DivergenceJudgment data.
-    No streaming affordance. The full machinery loop never hands the
-    user-facing presence renderer to this Protocol.
+    All return types are structured Step / DivergenceJudgment /
+    ClarificationFormulationResult data. No streaming affordance.
+    The full machinery loop never hands the user-facing presence
+    renderer to this Protocol.
     """
 
     async def judge_divergence(
@@ -340,6 +458,10 @@ class DivergenceReasonerLike(Protocol):
     async def emit_pivot_step(
         self, inputs: TierThreePivotInputs
     ) -> Step: ...
+
+    async def formulate_clarification(
+        self, inputs: ClarificationFormulationInputs
+    ) -> ClarificationFormulationResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -380,18 +502,30 @@ class EnactmentService:
         planner: PlannerLike | None = None,
         step_dispatcher: StepDispatcherLike | None = None,
         divergence_reasoner: DivergenceReasonerLike | None = None,
+        friction_observer: FrictionObserverLike | None = None,
         retry_budget: int = DEFAULT_RETRY_BUDGET,
         modify_budget: int = DEFAULT_MODIFY_BUDGET,
         pivot_budget: int = DEFAULT_PIVOT_BUDGET,
+        reassembly_per_envelope: int = DEFAULT_REASSEMBLY_PER_ENVELOPE,
+        reassembly_per_turn: int = DEFAULT_REASSEMBLY_PER_TURN,
     ) -> None:
+        # Same-turn integration re-entry is impossible by construction:
+        # there is NO integration_service parameter on this constructor.
+        # The B2 termination path constructs ClarificationNeeded directly
+        # via the divergence_reasoner.formulate_clarification hook —
+        # it never calls back into integration. Audit pin in test
+        # asserts no "integration"-named parameter exists.
         self._presence = presence_renderer
         self._audit = audit_emitter
         self._planner = planner
         self._dispatcher = step_dispatcher
         self._reasoner = divergence_reasoner
+        self._friction = friction_observer or NullFrictionObserver()
         self._retry_budget = retry_budget
         self._modify_budget = modify_budget
         self._pivot_budget = pivot_budget
+        self._reassembly_per_envelope = reassembly_per_envelope
+        self._reassembly_per_turn = reassembly_per_turn
 
     async def run(self, briefing: Briefing) -> EnactmentOutcome:
         """Branch on decided_action.kind and route to the right path.
@@ -479,8 +613,7 @@ class EnactmentService:
             raise EnactmentNotImplemented(
                 "Full machinery requires planner + step_dispatcher + "
                 "divergence_reasoner. Wire all three in the service "
-                "construction site (PDI C5+). Tier 4 reassemble + "
-                "tier 5 surface land in PDI C6."
+                "construction site."
             )
         envelope = briefing.action_envelope
         if envelope is None:
@@ -492,56 +625,89 @@ class EnactmentService:
                 "contract violation upstream of EnactmentService."
             )
 
-        # 1. Plan creation.
+        trace = ExecutionTrace()
+        reassembly_budget = ReassemblyBudget(
+            per_envelope_remaining=self._reassembly_per_envelope,
+            per_turn_remaining=self._reassembly_per_turn,
+        )
+
+        # 1. Initial plan creation.
         plan_result = await self._planner.create_plan(
             PlanCreationInputs(briefing=briefing)
         )
         plan = plan_result.plan
+        trace.record_plan(plan)
 
         # 2. enactment.plan_created emits BEFORE any step dispatches
         # (audit invariant — observable-before-action).
         await self._emit_plan_created(plan, briefing)
 
-        # 3. Initial envelope validation. If invalid → B1 placeholder
-        # in C5 (full B1 surface lands in C6 with reintegration
-        # context). For now: emit terminated subtype b1 and surface
-        # a clear pointer; C6 will replace with full reintegration.
+        # 3. Initial envelope validation. Invalid → B1 with capped
+        # reintegration context.
         plan_validation = validate_plan_against_envelope(plan, envelope)
         if not plan_validation.valid:
-            return await self._terminate_b1_placeholder(
+            trace.record_discovered_information(
+                f"plan rejected at envelope validation: "
+                f"{plan_validation.reason}"
+            )
+            return await self._terminate_b1(
                 briefing,
                 plan=plan,
+                trace=trace,
                 reason=f"envelope_violation:{plan_validation.reason}",
                 detail=plan_validation.detail,
             )
 
-        # 4. Per-step execution loop.
+        # 4. Per-step execution loop with tier 4 reassemble.
+        return await self._execute_plan(
+            plan=plan,
+            briefing=briefing,
+            envelope=envelope,
+            trace=trace,
+            reassembly_budget=reassembly_budget,
+        )
+
+    async def _execute_plan(
+        self,
+        *,
+        plan: Plan,
+        briefing: Briefing,
+        envelope: ActionEnvelope,
+        trace: ExecutionTrace,
+        reassembly_budget: ReassemblyBudget,
+    ) -> EnactmentOutcome:
+        """Execute every step of `plan`. On tier-4 reassemble, this
+        method is called recursively with the new plan; reassembly
+        budget decrements across the recursion.
+        """
         for step in plan.steps:
             outcome = await self._run_step_with_tiers(
                 step=step,
                 plan=plan,
                 briefing=briefing,
                 envelope=envelope,
+                trace=trace,
+                reassembly_budget=reassembly_budget,
             )
             if outcome is not None:
-                # Step routed to a terminating tier (B1 / B2 / not-yet-
-                # implemented in C5). Return the placeholder outcome.
+                # Step terminated the loop. If it's a reassemble
+                # signal (returned via a sentinel outcome subtype
+                # B1 with reason starting "tier_4_reassemble:"), we
+                # would handle here — but the actual reassemble
+                # path is handled inline within
+                # _run_step_with_tiers, which calls back into
+                # _execute_plan with the new plan. So any returned
+                # outcome here is genuinely terminating.
                 return outcome
 
-        # 5. All steps completed cleanly. Render terminal response via
-        # the presence renderer (which CAN stream — that's the only
-        # point where streaming is permissible).
+        # All steps completed cleanly. Terminal render via presence
+        # renderer (the ONLY post-loop streaming point).
         result = await self._presence.render(briefing)
         await self._emit_terminated(
             briefing,
             TerminationSubtype.SUCCESS_THIN_PATH,
             text=result.text,
         )
-        # NOTE: the SUCCESS_THIN_PATH subtype is reused here for the
-        # full-machinery happy path; C7 may split into a dedicated
-        # full-machinery subtype if telemetry needs it. The audit
-        # `decided_action_kind` already distinguishes execute_tool
-        # from thin-path kinds, so the split is not load-bearing.
         return EnactmentOutcome(
             text=result.text,
             subtype=TerminationSubtype.SUCCESS_THIN_PATH,
@@ -556,13 +722,17 @@ class EnactmentService:
         plan: Plan,
         briefing: Briefing,
         envelope: ActionEnvelope,
+        trace: ExecutionTrace,
+        reassembly_budget: ReassemblyBudget,
     ) -> EnactmentOutcome | None:
         """Execute one step + three-question check + tier handling.
 
         Returns None when the step (after any tier handling) completed
         cleanly — caller advances to the next step. Returns an
-        EnactmentOutcome when the step terminated the turn (B1 / B2 /
-        C5-stubbed C6 paths).
+        EnactmentOutcome when the step terminated the turn (B1 / B2)
+        OR when tier-4 reassembled the plan (recursion through
+        _execute_plan; the outcome bubbles up as the recursion's
+        terminal outcome).
         """
         budgets = TierBudgets(
             retry_remaining=self._retry_budget,
@@ -586,6 +756,9 @@ class EnactmentService:
                 step=current_step,
                 attempt_number=attempt_number,
                 result=dispatch_result,
+            )
+            trace.record_step_outcome(
+                _step_outcome_summary(current_step, dispatch_result)
             )
 
             # Three-question check.
@@ -627,6 +800,22 @@ class EnactmentService:
                 continue  # same step, same args, re-dispatch
 
             if routing is TierRouting.TIER_2_MODIFY:
+                # If we just exhausted the retry budget on a transient
+                # failure (and modify is the fallback), record a
+                # friction ticket. Write-only sink — the ticket
+                # is recorded after the routing decision is final;
+                # it does NOT influence the subsequent dispatch.
+                if (
+                    failure_kind is FailureKind.TRANSIENT
+                    and budgets.retry_remaining == 0
+                ):
+                    await self._record_friction_ticket(
+                        briefing=briefing,
+                        step=current_step,
+                        divergence_pattern=TIER_1_RETRY_EXHAUSTED,
+                        attempt_count=attempt_number,
+                    )
+
                 modified = await self._reasoner.emit_modified_step(
                     TierTwoModifyInputs(
                         original_step=current_step,
@@ -639,9 +828,14 @@ class EnactmentService:
                     modified, envelope
                 )
                 if not step_validation.valid:
-                    return await self._terminate_b1_placeholder(
+                    trace.record_discovered_information(
+                        f"tier-2 modify produced an envelope-violating "
+                        f"step: {step_validation.reason}"
+                    )
+                    return await self._terminate_b1(
                         briefing,
                         plan=plan,
+                        trace=trace,
                         reason=(
                             f"envelope_violation_on_modify:"
                             f"{step_validation.reason}"
@@ -673,9 +867,14 @@ class EnactmentService:
                     pivoted, envelope
                 )
                 if not step_validation.valid:
-                    return await self._terminate_b1_placeholder(
+                    trace.record_discovered_information(
+                        f"tier-3 pivot produced an envelope-violating "
+                        f"step: {step_validation.reason}"
+                    )
+                    return await self._terminate_b1(
                         briefing,
                         plan=plan,
+                        trace=trace,
                         reason=(
                             f"envelope_violation_on_pivot:"
                             f"{step_validation.reason}"
@@ -694,103 +893,326 @@ class EnactmentService:
                 attempt_number = 1
                 continue
 
-            # Tiers 4 / 5 are C6 territory. C5 surfaces a clear
-            # placeholder so wiring sites and tests see the boundary.
             if routing is TierRouting.TIER_4_REASSEMBLE:
-                return await self._terminate_b1_placeholder(
-                    briefing,
-                    plan=plan,
-                    reason="tier_4_reassemble_pending_c6",
-                    detail=(
-                        "tier-4 reassemble routing fired; full "
-                        "implementation lands in PDI C6."
+                # Tier-4: kickback to plan creation with new context.
+                # Recursion through _execute_plan with the new plan;
+                # reassembly_budget decrements once.
+                if not reassembly_budget.can_reassemble():
+                    return await self._terminate_b1(
+                        briefing,
+                        plan=plan,
+                        trace=trace,
+                        reason="reassembly_budget_exhausted",
+                        detail=(
+                            "tier-4 reassemble routing fired but "
+                            "per-envelope or per-turn reassembly "
+                            "budget is exhausted"
+                        ),
+                    )
+
+                # Friction ticket on tier-2 exhaustion (transient or
+                # corrective failures cycling through modify before
+                # reassembly fires).
+                if (
+                    failure_kind in (
+                        FailureKind.TRANSIENT,
+                        FailureKind.CORRECTIVE_SIGNAL,
+                        FailureKind.NON_TRANSIENT,
+                    )
+                    and budgets.modify_remaining == 0
+                ):
+                    await self._record_friction_ticket(
+                        briefing=briefing,
+                        step=current_step,
+                        divergence_pattern=TIER_2_MODIFY_EXHAUSTED,
+                        attempt_count=attempt_number,
+                    )
+
+                trace.record_discovered_information(
+                    f"plan reassembled after step {current_step.step_id}"
+                )
+                new_plan_inputs = PlanCreationInputs(
+                    briefing=briefing,
+                    prior_plan_id=plan.plan_id,
+                    triggering_context_summary=(
+                        f"step {current_step.step_id} of plan {plan.plan_id} "
+                        f"invalidated; reassembly requested."
+                    ),
+                    audit_refs=tuple(trace.audit_refs),
+                )
+                new_plan_result = await self._planner.create_plan(
+                    new_plan_inputs
+                )
+                # Stamp the new plan as reassembled.
+                new_plan = _stamp_reassembled(
+                    new_plan_result.plan,
+                    triggering_context_summary=(
+                        new_plan_inputs.triggering_context_summary
                     ),
                 )
-            if routing is TierRouting.TIER_5_SURFACE_B1:
-                return await self._terminate_b1_placeholder(
-                    briefing,
+                trace.record_plan(new_plan)
+                await self._emit_plan_reassembled(
                     plan=plan,
-                    reason="tier_5_b1_pending_c6",
-                    detail="budget exhausted; B1 surface lands in PDI C6.",
-                )
-            if routing is TierRouting.TIER_5_SURFACE_B2:
-                return await self._terminate_b2_placeholder(
-                    briefing,
-                    plan=plan,
-                    reason="tier_5_b2_pending_c6",
-                    detail=(
-                        "ambiguity routing fired; B2 surface lands in "
-                        "PDI C6."
+                    new_plan=new_plan,
+                    reason="tier_4_reassemble",
+                    triggering_context_summary=(
+                        new_plan_inputs.triggering_context_summary
+                    ),
+                    reassembly_count=(
+                        DEFAULT_REASSEMBLY_PER_TURN
+                        - reassembly_budget.per_turn_remaining
+                        + 1
                     ),
                 )
 
+                # Envelope validation on the new plan.
+                new_validation = validate_plan_against_envelope(
+                    new_plan, envelope
+                )
+                if not new_validation.valid:
+                    trace.record_discovered_information(
+                        f"reassembled plan rejected at envelope "
+                        f"validation: {new_validation.reason}"
+                    )
+                    return await self._terminate_b1(
+                        briefing,
+                        plan=new_plan,
+                        trace=trace,
+                        reason=(
+                            f"envelope_violation_on_reassemble:"
+                            f"{new_validation.reason}"
+                        ),
+                        detail=new_validation.detail,
+                    )
+
+                # Execute the new plan from step 1; consume one
+                # reassembly slot.
+                return await self._execute_plan(
+                    plan=new_plan,
+                    briefing=briefing,
+                    envelope=envelope,
+                    trace=trace,
+                    reassembly_budget=reassembly_budget.consumed(),
+                )
+
+            if routing is TierRouting.TIER_5_SURFACE_B1:
+                # Friction ticket if budgets exhausted on the
+                # transient/corrective path.
+                if budgets.modify_remaining == 0 and failure_kind in (
+                    FailureKind.TRANSIENT,
+                    FailureKind.CORRECTIVE_SIGNAL,
+                    FailureKind.NON_TRANSIENT,
+                ):
+                    await self._record_friction_ticket(
+                        briefing=briefing,
+                        step=current_step,
+                        divergence_pattern=TIER_2_MODIFY_EXHAUSTED,
+                        attempt_count=attempt_number,
+                    )
+                trace.record_discovered_information(
+                    f"step {current_step.step_id} exhausted budgets"
+                )
+                return await self._terminate_b1(
+                    briefing,
+                    plan=plan,
+                    trace=trace,
+                    reason="tier_5_b1_budget_exhausted",
+                    detail=(
+                        f"step {current_step.step_id} reached "
+                        f"TIER_5_SURFACE_B1 with failure_kind="
+                        f"{failure_kind.value}"
+                    ),
+                )
+
+            if routing is TierRouting.TIER_5_SURFACE_B2:
+                trace.record_discovered_information(
+                    f"step {current_step.step_id} surfaced ambiguity "
+                    f"requiring user input"
+                )
+                return await self._terminate_b2(
+                    briefing,
+                    plan=plan,
+                    failed_step=current_step,
+                    dispatch_result=dispatch_result,
+                    trace=trace,
+                )
+
             # Unknown routing → defensive B1.
-            return await self._terminate_b1_placeholder(
+            return await self._terminate_b1(
                 briefing,
                 plan=plan,
+                trace=trace,
                 reason="unknown_routing",
                 detail=f"classify_routing returned {routing!r}",
             )
 
-    # ----- placeholder terminations (full surfaces in C6) -----
+    # ----- C6 terminations: B1 + B2 with capped reintegration -----
 
-    async def _terminate_b1_placeholder(
+    async def _terminate_b1(
         self,
         briefing: Briefing,
         *,
         plan: Plan | None,
+        trace: ExecutionTrace,
         reason: str,
         detail: str,
     ) -> EnactmentOutcome:
-        """C5 placeholder for B1 termination.
+        """B1 surface: action invalidated. Capped reintegration payload
+        produced and stored on the EnactmentOutcome for the next turn's
+        integration.
 
-        C6 replaces with the full capped-reintegration payload + the
-        terminal render that surfaces "I started X but discovered Y"
-        framing to the user. C5 emits enactment.terminated with
-        subtype b1_action_invalidated and an empty user-facing text;
-        callers verify via the audit subtype.
+        User-facing text is the brief acknowledgment per spec ("I
+        started X but discovered Y; not proceeding"). C6 renders via
+        the presence_renderer with the original briefing — the
+        renderer's prompt (tuned in C7) handles the partial-work
+        acknowledgment.
         """
+        # Record audit refs for the trace BEFORE constructing the
+        # reintegration so the caps include them.
+        trace.record_audit_ref(
+            f"enactment.terminated:{briefing.turn_id}:b1"
+        )
+        reintegration = trace.to_reintegration_context(
+            original_decided_action_kind=briefing.decided_action.kind.value,
+        )
+
+        # Render terminal acknowledgment via presence_renderer. The
+        # renderer can stream — that's "after action complete" per
+        # the spec's streaming rule.
+        result = await self._presence.render(briefing)
+
         await self._emit_terminated(
             briefing,
             TerminationSubtype.B1_ACTION_INVALIDATED,
-            text="",
+            text=result.text,
             extra={
                 "reason": reason,
                 "detail": detail,
                 "plan_id": plan.plan_id if plan is not None else "",
+                "reintegration_truncated": reintegration.truncated,
+                "reintegration_plans_attempted": (
+                    len(reintegration.plans_attempted)
+                ),
             },
         )
         return EnactmentOutcome(
-            text="",
+            text=result.text,
             subtype=TerminationSubtype.B1_ACTION_INVALIDATED,
             decided_action_kind=briefing.decided_action.kind,
-            streamed=False,
+            streamed=result.streamed,
+            reintegration_context=reintegration,
         )
 
-    async def _terminate_b2_placeholder(
+    async def _terminate_b2(
         self,
         briefing: Briefing,
         *,
-        plan: Plan | None,
-        reason: str,
-        detail: str,
+        plan: Plan,
+        failed_step: Step,
+        dispatch_result: StepDispatchResult,
+        trace: ExecutionTrace,
     ) -> EnactmentOutcome:
+        """B2 surface: user disambiguation needed.
+
+        Per Kit edit (load-bearing): NO same-turn integration re-entry.
+        Enactment constructs the ClarificationNeeded variant directly
+        via the divergence_reasoner.formulate_clarification hook. The
+        thin path renders the question. Reintegration payload is
+        attached to the outcome for the NEXT turn's integration.
+
+        The structural invariant — "no same-turn integration re-entry"
+        — is enforced by construction: EnactmentService has NO
+        integration_service dependency. The B2 code path here cannot
+        reach integration even if a future bug tried to.
+        """
+        formulation = await self._reasoner.formulate_clarification(
+            ClarificationFormulationInputs(
+                failed_step=failed_step,
+                dispatch_result=dispatch_result,
+                briefing=briefing,
+                audit_refs=tuple(trace.audit_refs),
+            )
+        )
+
+        # Construct the bounded partial state (caps enforced by the
+        # ClarificationPartialState dataclass per PDI C1).
+        partial_state = ClarificationPartialState(
+            attempted_action_summary=formulation.attempted_action_summary,
+            discovered_information=formulation.discovered_information,
+            blocking_ambiguity=formulation.blocking_ambiguity,
+            safe_question_context=formulation.safe_question_context,
+            audit_refs=tuple(trace.audit_refs),
+        )
+        clarification = ClarificationNeeded(
+            question=formulation.question,
+            ambiguity_type=formulation.ambiguity_type,
+            partial_state=partial_state,
+        )
+
+        # Render the question via the thin path. We synthesize a
+        # briefing carrying the ClarificationNeeded variant so the
+        # presence renderer's interface stays uniform.
+        synthetic_briefing = _synthesize_clarification_briefing(
+            briefing, clarification
+        )
+        result = await self._presence.render(synthetic_briefing)
+
+        # Record audit ref + build capped reintegration.
+        trace.record_audit_ref(
+            f"enactment.terminated:{briefing.turn_id}:b2"
+        )
+        reintegration = trace.to_reintegration_context(
+            original_decided_action_kind=briefing.decided_action.kind.value,
+        )
+
         await self._emit_terminated(
             briefing,
             TerminationSubtype.B2_USER_DISAMBIGUATION_NEEDED,
-            text="",
+            text=result.text,
             extra={
-                "reason": reason,
-                "detail": detail,
-                "plan_id": plan.plan_id if plan is not None else "",
+                "reason": "tier_5_b2_user_disambiguation",
+                "plan_id": plan.plan_id,
+                "failed_step_id": failed_step.step_id,
+                "ambiguity_type": clarification.ambiguity_type,
+                "reintegration_truncated": reintegration.truncated,
             },
         )
         return EnactmentOutcome(
-            text="",
+            text=result.text,
             subtype=TerminationSubtype.B2_USER_DISAMBIGUATION_NEEDED,
             decided_action_kind=briefing.decided_action.kind,
-            streamed=False,
+            streamed=result.streamed,
+            reintegration_context=reintegration,
+            clarification=clarification,
         )
+
+    async def _record_friction_ticket(
+        self,
+        *,
+        briefing: Briefing,
+        step: Step,
+        divergence_pattern: str,
+        attempt_count: int,
+    ) -> None:
+        """Write-only sink. The ticket is recorded after the routing
+        decision is final. The observer's record() returns None — by
+        construction, the ticket cannot influence subsequent routing.
+        """
+        ticket = FrictionTicket(
+            tool_id=step.tool_id,
+            operation_name=step.operation_name,
+            divergence_pattern=divergence_pattern,
+            attempt_count=attempt_count,
+            decided_action_kind=briefing.decided_action.kind.value,
+            instance_id="",
+            member_id="",
+            turn_id=briefing.turn_id,
+            timestamp=friction_now_iso(),
+        )
+        try:
+            await self._friction.record(ticket)
+        except Exception:
+            logger.exception("FRICTION_OBSERVER_RECORD_FAILED")
 
     # ----- audit emitters for the enactment.* family (PDI C5 entries) -----
 
@@ -878,6 +1300,30 @@ class EnactmentService:
             }
         )
 
+    async def _emit_plan_reassembled(
+        self,
+        *,
+        plan: Plan,
+        new_plan: Plan,
+        reason: str,
+        triggering_context_summary: str,
+        reassembly_count: int,
+    ) -> None:
+        """References-not-dumps: prior_plan_id and new_plan_id only.
+        The plan payloads stay in their own audit references."""
+        await self._emit(
+            {
+                "category": "enactment.plan_reassembled",
+                "turn_id": plan.turn_id,
+                "prior_plan_id": plan.plan_id,
+                "new_plan_id": new_plan.plan_id,
+                "reason": reason,
+                "triggering_context_summary": triggering_context_summary,
+                "reassembly_count": reassembly_count,
+                "new_step_count": len(new_plan.steps),
+            }
+        )
+
     async def _emit(self, entry: dict[str, Any]) -> None:
         if self._audit is None:
             return
@@ -931,11 +1377,84 @@ def build_enactment_service(
     *,
     presence_renderer: PresenceRendererLike,
     audit_emitter: AuditEmitter | None = None,
+    planner: PlannerLike | None = None,
+    step_dispatcher: StepDispatcherLike | None = None,
+    divergence_reasoner: DivergenceReasonerLike | None = None,
+    friction_observer: FrictionObserverLike | None = None,
 ) -> EnactmentService:
     """Convenience factory mirroring the constructor."""
     return EnactmentService(
         presence_renderer=presence_renderer,
         audit_emitter=audit_emitter,
+        planner=planner,
+        step_dispatcher=step_dispatcher,
+        divergence_reasoner=divergence_reasoner,
+        friction_observer=friction_observer,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _step_outcome_summary(
+    step: Step, dispatch_result: StepDispatchResult
+) -> str:
+    """Compact, redacted per-step summary for the trace's
+    tool_outcomes_summary aggregator. Never includes argument values
+    or output payloads — references only."""
+    if dispatch_result.completed:
+        outcome = "completed"
+    else:
+        outcome = f"failed:{dispatch_result.failure_kind.value}"
+    return (
+        f"step {step.step_id} ({step.tool_id}.{step.operation_name}): "
+        f"{outcome}"
+    )
+
+
+def _stamp_reassembled(plan: Plan, *, triggering_context_summary: str) -> Plan:
+    """Return a copy of `plan` with `created_via='tier_4_reassemble'`.
+
+    The Plan dataclass is frozen; we use `from_dict(to_dict(...))` to
+    rebuild rather than `replace` to keep validation in the loop.
+    Triggering context is intentionally not embedded in the Plan
+    itself (it lives in the audit entry instead) — keeps the Plan
+    payload clean.
+    """
+    if plan.created_via == "tier_4_reassemble":
+        return plan
+    payload = plan.to_dict()
+    payload["created_via"] = "tier_4_reassemble"
+    return Plan.from_dict(payload)
+
+
+def _synthesize_clarification_briefing(
+    original: Briefing, clarification: ClarificationNeeded
+) -> Briefing:
+    """Build a synthetic Briefing carrying the ClarificationNeeded
+    variant for the thin-path renderer.
+
+    The original briefing was an execute_tool briefing with an
+    action_envelope. The synthetic briefing carries the
+    clarification_needed variant and NO action_envelope (action_envelope
+    must be None for non-action kinds per Briefing's structural rule).
+
+    `presence_directive` is preserved from the original so the
+    renderer has framing context. C7 prompt-tunes the renderer to
+    handle the B2 case naturally.
+    """
+    return Briefing(
+        relevant_context=original.relevant_context,
+        filtered_context=original.filtered_context,
+        decided_action=clarification,
+        presence_directive=original.presence_directive,
+        audit_trace=original.audit_trace,
+        turn_id=original.turn_id,
+        integration_run_id=original.integration_run_id,
+        # action_envelope must be None for clarification_needed.
+        action_envelope=None,
     )
 
 

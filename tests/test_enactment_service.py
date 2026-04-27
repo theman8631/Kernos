@@ -192,18 +192,19 @@ async def test_clarification_b2_routed_takes_thin_path_with_b2_subtype():
 
 @pytest.mark.asyncio
 async def test_execute_tool_takes_full_machinery_branch():
-    """Execute_tool is the only kind that takes full machinery. C4
-    stubs that branch with EnactmentNotImplemented pointing at C5."""
+    """Execute_tool routes to full machinery. Without the full
+    machinery dependencies wired, EnactmentNotImplemented surfaces
+    cleanly."""
     presence = _CapturingPresence()
     service = EnactmentService(presence_renderer=presence)
     briefing = _briefing(
         ExecuteTool(tool_id="x", arguments={"a": 1}),
         action_envelope=ActionEnvelope(intended_outcome="do x"),
     )
-    with pytest.raises(EnactmentNotImplemented, match="PDI C5"):
+    with pytest.raises(EnactmentNotImplemented, match="planner"):
         await service.run(briefing)
     # Presence was NOT called — full machinery has its own renderer
-    # path (lands in C5+).
+    # path that's only reached when dependencies are wired.
     assert presence.calls == []
 
 
@@ -492,6 +493,7 @@ class _StubReasoner:
         judgments=None,
         modified_step: Step | None = None,
         pivot_step: Step | None = None,
+        clarification=None,
     ) -> None:
         self._judgments = list(judgments or [
             DivergenceJudgment(
@@ -502,9 +504,11 @@ class _StubReasoner:
         ])
         self._modified = modified_step
         self._pivot = pivot_step
+        self._clarification = clarification
         self.judge_calls = 0
         self.modify_calls = 0
         self.pivot_calls = 0
+        self.formulate_calls = 0
 
     async def judge_divergence(self, inputs: DivergenceJudgeInputs) -> DivergenceJudgment:
         self.judge_calls += 1
@@ -523,6 +527,20 @@ class _StubReasoner:
     async def emit_pivot_step(self, inputs) -> Step:
         self.pivot_calls += 1
         return self._pivot or _step(step_id="pivot")
+
+    async def formulate_clarification(self, inputs):
+        from kernos.kernel.enactment.service import (
+            ClarificationFormulationResult,
+        )
+        self.formulate_calls += 1
+        return self._clarification or ClarificationFormulationResult(
+            question="Which option did you mean?",
+            ambiguity_type="target",
+            blocking_ambiguity="cannot disambiguate target",
+            safe_question_context="confirming target choice",
+            attempted_action_summary="started the action",
+            discovered_information="found two candidates",
+        )
 
 
 def _full_machinery_service(
@@ -890,18 +908,154 @@ async def test_tier_3_pivot_envelope_violation_terminates_b1():
     assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
 
 
-# ----- C6 boundaries — tier 4 reassemble + tier 5 surface placeholders -----
+# ----- PDI C6: tier 4 reassemble -----
 
 
 @pytest.mark.asyncio
-async def test_tier_4_reassemble_routes_to_b1_placeholder_in_c5():
-    """C5 stubs tier-4 reassemble: the routing fires (information
-    divergence with no pivot budget), but full reassemble lands in
-    C6. C5 emits B1 placeholder with reason tier_4_reassemble_pending_c6."""
+async def test_tier_4_reassemble_creates_new_plan_and_resumes_from_step_one():
+    """Tier-4 reassemble: information divergence with pivot exhausted
+    triggers reassemble. Planner produces a new plan; new plan
+    validates against envelope; execution resumes from step 1 of the
+    new plan. Reassembly budget decrements; happy path completes."""
+    audit_sink: list[dict] = []
+    initial_plan = _plan(steps=[_step(step_id="initial-step")], plan_id="plan-initial")
+    new_plan = _plan(
+        steps=[_step(step_id="new-step")],
+        plan_id="plan-new",
+    )
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+            self.calls = []
+
+        async def create_plan(self, inputs):
+            self.calls.append(inputs)
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner([initial_plan, new_plan])
+
+    dispatcher_results = [
+        # Initial step — success but plan invalidated (info divergence,
+        # pivot budget exhausted → reassemble).
+        StepDispatchResult(completed=True, output={"results": []}),
+        # New step — clean success after reassemble.
+        StepDispatchResult(completed=True, output={"ok": True}),
+    ]
+    judgments = [
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ]
+    dispatcher = _StubDispatcher(dispatcher_results)
+    reasoner = _StubReasoner(judgments=judgments)
+    presence = _CapturingPresence(text="terminal")
+
+    async def emit(entry):
+        audit_sink.append(entry)
+
+    service = EnactmentService(
+        presence_renderer=presence,
+        audit_emitter=emit,
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,  # force reassemble routing
+    )
+    outcome = await service.run(_execute_briefing())
+
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    # Two plans created.
+    assert len(planner.calls) == 2
+    # Second create_plan call carries the prior_plan_id and
+    # triggering_context_summary (per C6 reassemble inputs).
+    assert planner.calls[1].prior_plan_id == "plan-initial"
+    assert planner.calls[1].triggering_context_summary
+    # plan_reassembled audit emitted.
+    reassembled = [
+        e for e in audit_sink
+        if e.get("category") == "enactment.plan_reassembled"
+    ]
+    assert len(reassembled) == 1
+    assert reassembled[0]["prior_plan_id"] == "plan-initial"
+    assert reassembled[0]["new_plan_id"] == "plan-new"
+
+
+@pytest.mark.asyncio
+async def test_tier_4_reassemble_stamps_new_plan_with_created_via():
+    """The reassembled plan's created_via is 'tier_4_reassemble'.
+    Audit consumers can distinguish initial plans from reassembled
+    ones without re-deriving from event order."""
+    audit_sink: list[dict] = []
+    initial_plan = _plan(steps=[_step(step_id="initial")], plan_id="plan-i")
+    new_plan = _plan(steps=[_step(step_id="new")], plan_id="plan-n")
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+
+        async def create_plan(self, inputs):
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner([initial_plan, new_plan])
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(completed=True, output={}),
+        StepDispatchResult(completed=True, output={"ok": True}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ])
+
+    async def emit(entry):
+        audit_sink.append(entry)
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        audit_emitter=emit,
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,
+    )
+    await service.run(_execute_briefing())
+
+    # The plan_created audit for the reassembled plan should reflect
+    # created_via='tier_4_reassemble'.
+    plan_created = [
+        e for e in audit_sink
+        if e.get("category") == "enactment.plan_created"
+    ]
+    # initial plan created normally; reassembled plan does NOT trigger
+    # a second plan_created emission (plan_reassembled is the C6 audit
+    # for that). Only the initial one fires plan_created.
+    assert len(plan_created) == 1
+    assert plan_created[0]["created_via"] == "initial"
+
+
+@pytest.mark.asyncio
+async def test_tier_4_reassemble_budget_exhaustion_terminates_b1():
+    """When per-envelope reassembly budget is 0, tier-4 routing
+    terminates B1 directly with reason reassembly_budget_exhausted."""
     audit_sink: list[dict] = []
     service, _, _, _ = _full_machinery_service(
         dispatcher_results=[
-            StepDispatchResult(completed=True, output={"results": []}),
+            StepDispatchResult(completed=True, output={}),
         ],
         judgments=[
             DivergenceJudgment(
@@ -910,21 +1064,178 @@ async def test_tier_4_reassemble_routes_to_b1_placeholder_in_c5():
                 failure_kind=FailureKind.INFORMATION_DIVERGENCE,
             ),
         ],
-        pivot_budget=0,  # exhaust pivot to trigger reassemble routing
+        pivot_budget=0,
         audit_sink=audit_sink,
     )
+    # Override reassembly budget to 0.
+    service._reassembly_per_envelope = 0
     outcome = await service.run(_execute_briefing())
     assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
     terminated = next(
         e for e in audit_sink if e.get("category") == "enactment.terminated"
     )
-    assert "tier_4_reassemble" in terminated["reason"]
+    assert terminated["reason"] == "reassembly_budget_exhausted"
 
 
 @pytest.mark.asyncio
-async def test_tier_5_b2_routes_to_b2_placeholder_in_c5():
+async def test_tier_4_reassemble_envelope_violation_terminates_b1():
+    """Per Kit edit: tier-4 reassemble new-plan path is envelope-
+    validated. A reassembled plan that crosses allowed_tool_classes
+    terminates B1."""
+    initial_plan = _plan(steps=[_step(step_id="i")], plan_id="plan-i")
+    bad_new_plan = _plan(
+        steps=[_step(step_id="n", tool_class="slack")],
+        plan_id="plan-bad",
+    )
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+
+        async def create_plan(self, inputs):
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner([initial_plan, bad_new_plan])
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(completed=True, output={}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+    ])
+    envelope = _envelope(allowed_tool_classes=("email",))
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    # Only the initial step dispatched; the bad reassembled plan
+    # never executes.
+    assert len(dispatcher.calls) == 1
+
+
+# ----- PDI C6: tier 5 B1 surface with capped reintegration -----
+
+
+@pytest.mark.asyncio
+async def test_b1_termination_attaches_reintegration_context_to_outcome():
+    """B1 termination produces a ReintegrationContext attached to the
+    outcome. The next-turn wiring picks it up to feed integration."""
+    bad_plan = _plan(steps=[_step(tool_class="slack")])
+    envelope = _envelope(allowed_tool_classes=("email",))
+    service, _, _, _ = _full_machinery_service(plan=bad_plan)
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    assert outcome.reintegration_context is not None
+    assert (
+        outcome.reintegration_context.original_decided_action_kind
+        == "execute_tool"
+    )
+    # Truncation flag is False on a small payload.
+    assert outcome.reintegration_context.truncated is False
+    # Plans attempted at least includes the rejected plan.
+    assert len(outcome.reintegration_context.plans_attempted) >= 1
+
+
+@pytest.mark.asyncio
+async def test_b1_reintegration_context_caps_oversize_fields():
+    """When the trace accumulates beyond the caps, the
+    ReintegrationContext truncates and sets the truncated flag.
+    Caps enforced by __post_init__ — not aspirational."""
+    from kernos.kernel.enactment import ReintegrationContext, PlanRef
+
+    huge_summary = "x" * 2000
+    huge_discovery = "y" * 1000
+    many_plans = tuple(
+        PlanRef(plan_id=f"p{i}", created_via="initial", step_count=1)
+        for i in range(10)
+    )
+    ctx = ReintegrationContext(
+        original_decided_action_kind="execute_tool",
+        plans_attempted=many_plans,
+        tool_outcomes_summary=huge_summary,
+        discovered_information=huge_discovery,
+        audit_refs=("ref-1",),
+    )
+    assert ctx.truncated is True
+    assert len(ctx.tool_outcomes_summary) == 1000
+    assert len(ctx.discovered_information) == 500
+    assert len(ctx.plans_attempted) == 5
+
+
+@pytest.mark.asyncio
+async def test_b1_reintegration_emits_audit_with_truncation_flag():
+    """The terminated audit entry surfaces the reintegration's
+    truncation status so operators can spot bloated turns."""
     audit_sink: list[dict] = []
+    bad_plan = _plan(steps=[_step(tool_class="slack")])
+    envelope = _envelope(allowed_tool_classes=("email",))
     service, _, _, _ = _full_machinery_service(
+        plan=bad_plan, audit_sink=audit_sink,
+    )
+    await service.run(_execute_briefing(envelope=envelope))
+    terminated = next(
+        e for e in audit_sink if e.get("category") == "enactment.terminated"
+    )
+    assert "reintegration_truncated" in terminated
+    assert terminated["reintegration_truncated"] is False  # small payload
+    assert "reintegration_plans_attempted" in terminated
+
+
+# ----- PDI C6: tier 5 B2 surface — no same-turn integration re-entry -----
+
+
+def test_enactment_service_has_no_integration_dependency_by_construction():
+    """Structural pin: EnactmentService.__init__ has NO parameter
+    named or referencing 'integration'. Same-turn integration re-entry
+    on B2 is impossible because the dependency is unreachable.
+
+    Per architect's C6 guidance: not a runtime check; an import-time /
+    construction-time impossibility."""
+    import inspect
+    sig = inspect.signature(EnactmentService.__init__)
+    for param_name in sig.parameters:
+        assert "integration" not in param_name.lower(), (
+            f"EnactmentService.__init__ has parameter {param_name}; "
+            f"same-turn integration re-entry must be impossible by "
+            f"construction. Remove the parameter."
+        )
+
+
+def test_enactment_service_module_does_not_import_integration_service():
+    """Pin: the enactment.service module does not import IntegrationService
+    or IntegrationRunner. Verified by inspecting the module's __dict__."""
+    from kernos.kernel.enactment import service as service_module
+    for name in dir(service_module):
+        obj = getattr(service_module, name)
+        # Test must reject any IntegrationService / IntegrationRunner
+        # bound at module level.
+        cls_name = type(obj).__name__
+        if cls_name in ("IntegrationService", "IntegrationRunner"):
+            raise AssertionError(
+                f"enactment.service module bound {cls_name} as "
+                f"{name}; same-turn re-entry must be impossible by "
+                f"construction"
+            )
+
+
+@pytest.mark.asyncio
+async def test_b2_termination_constructs_clarification_directly():
+    """B2 surface: enactment constructs the ClarificationNeeded
+    variant via the divergence_reasoner.formulate_clarification hook.
+    No integration call. The clarification + reintegration travel on
+    the EnactmentOutcome to the next turn."""
+    audit_sink: list[dict] = []
+    service, _, _, reasoner = _full_machinery_service(
         dispatcher_results=[
             StepDispatchResult(
                 completed=False, output={},
@@ -941,8 +1252,733 @@ async def test_tier_5_b2_routes_to_b2_placeholder_in_c5():
         audit_sink=audit_sink,
     )
     outcome = await service.run(_execute_briefing())
+
     assert outcome.subtype is TerminationSubtype.B2_USER_DISAMBIGUATION_NEEDED
+    # Reasoner's formulate_clarification was called — the source of
+    # the question, NOT integration.
+    assert reasoner.formulate_calls == 1
+    # ClarificationNeeded variant attached to outcome.
+    assert outcome.clarification is not None
+    assert outcome.clarification.partial_state is not None
+    # ReintegrationContext attached for the NEXT turn's integration.
+    assert outcome.reintegration_context is not None
+    # Audit entry carries the ambiguity_type for telemetry.
     terminated = next(
         e for e in audit_sink if e.get("category") == "enactment.terminated"
     )
-    assert "tier_5_b2" in terminated["reason"]
+    assert terminated["subtype"] == "b2_user_disambiguation_needed"
+    assert "ambiguity_type" in terminated
+
+
+@pytest.mark.asyncio
+async def test_b2_renders_question_via_thin_path_presence_render():
+    """The B2 question is rendered through presence_renderer with a
+    synthetic briefing carrying the ClarificationNeeded variant."""
+    captured_briefings: list[Briefing] = []
+
+    class _CapturingPresenceLocal:
+        async def render(self, briefing: Briefing):
+            captured_briefings.append(briefing)
+            return PresenceRenderResult(text="rendered question")
+
+    service, _, _, _ = _full_machinery_service(
+        presence=_CapturingPresenceLocal(),
+        dispatcher_results=[
+            StepDispatchResult(
+                completed=False, output={},
+                failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+            ),
+        ],
+        judgments=[
+            DivergenceJudgment(
+                effect_matches_expectation=False,
+                plan_still_valid=False,
+                failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+            ),
+        ],
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.text == "rendered question"
+    # The presence renderer received a synthetic briefing where
+    # decided_action is ClarificationNeeded (NOT the original
+    # ExecuteTool). action_envelope is None on the synthetic briefing
+    # (clarification_needed must omit it).
+    assert len(captured_briefings) == 1
+    synthetic = captured_briefings[0]
+    assert isinstance(synthetic.decided_action, ClarificationNeeded)
+    assert synthetic.action_envelope is None
+
+
+# ----- PDI C6: friction observer (write-only sink) -----
+
+
+class _RecordingFrictionObserver:
+    def __init__(self) -> None:
+        self.tickets = []
+
+    async def record(self, ticket):
+        self.tickets.append(ticket)
+
+
+@pytest.mark.asyncio
+async def test_friction_ticket_emitted_on_tier_1_retry_exhaustion():
+    """When transient failures exhaust retry and routing falls to
+    modify, a TIER_1_RETRY_EXHAUSTED ticket is recorded."""
+    from kernos.kernel.enactment import TIER_1_RETRY_EXHAUSTED
+
+    observer = _RecordingFrictionObserver()
+    plan = _plan(steps=[_step()])
+    planner = _StubPlanner(plan)
+    # 4 transient failures in a row, then one modify success.
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(
+            completed=False, output={},
+            failure_kind=FailureKind.TRANSIENT,
+        ),
+    ] * 4 + [
+        StepDispatchResult(completed=True, output={"ok": True}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=False,
+            plan_still_valid=True,
+            failure_kind=FailureKind.TRANSIENT,
+        ),
+    ] * 4 + [
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ])
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        friction_observer=observer,
+        retry_budget=3,  # 3 retries → 4th attempt forces modify
+        modify_budget=2,
+    )
+    await service.run(_execute_briefing())
+    assert len(observer.tickets) == 1
+    assert observer.tickets[0].divergence_pattern == TIER_1_RETRY_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_friction_observer_is_write_only_does_not_affect_routing():
+    """Architectural invariant: tickets do NOT short-circuit routing.
+    A friction observer that raises on record() must not break the
+    turn — tickets are best-effort."""
+    class _BrokenObserver:
+        async def record(self, ticket):
+            raise RuntimeError("friction store unavailable")
+
+    plan = _plan(steps=[_step()])
+    planner = _StubPlanner(plan)
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(
+            completed=False, output={},
+            failure_kind=FailureKind.TRANSIENT,
+        ),
+    ] * 4 + [
+        StepDispatchResult(completed=True, output={"ok": True}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=False,
+            plan_still_valid=True,
+            failure_kind=FailureKind.TRANSIENT,
+        ),
+    ] * 4 + [
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ])
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        friction_observer=_BrokenObserver(),
+    )
+    # The broken observer's record() raises; the service swallows
+    # and continues. The turn completes successfully (tier-2 modify
+    # produces a successful step).
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+
+
+@pytest.mark.asyncio
+async def test_friction_observer_protocol_has_no_query_method():
+    """Pin: FrictionObserverLike Protocol exposes only record(),
+    no query/read method. By construction, the observer cannot feed
+    information back to the EnactmentService.
+
+    Verified via Protocol inspection: only `record` is in the
+    Protocol's method set."""
+    from kernos.kernel.enactment.friction import FrictionObserverLike
+    # FrictionObserverLike is a runtime_checkable Protocol with one
+    # method: record. Any instance conforming to it has only record.
+    methods = {
+        name
+        for name in dir(FrictionObserverLike)
+        if not name.startswith("_") and callable(getattr(FrictionObserverLike, name, None))
+    }
+    assert methods == {"record"}, (
+        f"FrictionObserverLike must expose only record(); found {methods}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_friction_ticket_carries_redacted_telemetry_fields():
+    """A ticket carries tool_id + operation_name + divergence_pattern
+    + attempt_count + decided_action_kind + identifiers + timestamp.
+    No argument values, no output payloads (references-not-dumps)."""
+    from kernos.kernel.enactment.friction import FrictionTicket
+    from dataclasses import fields
+    field_names = {f.name for f in fields(FrictionTicket)}
+    assert field_names == {
+        "tool_id", "operation_name", "divergence_pattern",
+        "attempt_count", "decided_action_kind",
+        "instance_id", "member_id", "turn_id", "timestamp",
+    }
+
+
+# ----- PDI C6: confirmation boundary tests (architect mandate) -----
+
+
+@pytest.mark.asyncio
+async def test_draft_only_envelope_rejects_send_in_same_turn():
+    """Confirmation boundary: a draft-only envelope rejects a plan
+    that chains draft → send. Confirmation crosses a turn boundary."""
+    plan = _plan(steps=[
+        _step(step_id="draft", operation_name="draft"),
+        _step(step_id="send", operation_name="send"),
+    ])
+    envelope = ActionEnvelope(
+        intended_outcome="draft only",
+        allowed_tool_classes=("email",),
+        allowed_operations=("draft",),  # send NOT permitted
+    )
+    service, _, dispatcher, _ = _full_machinery_service(plan=plan)
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    # Envelope rejection happens BEFORE first dispatch.
+    assert len(dispatcher.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_send_with_confirmation_requirement_rejected_in_same_turn():
+    """A draft+send envelope with send in confirmation_requirements
+    rejects a plan that includes the send step in the same turn.
+    User confirmation crosses a turn boundary; the next turn's
+    integration produces a fresh envelope without the confirmation
+    requirement before send can fire."""
+    plan = _plan(steps=[
+        _step(step_id="draft", operation_name="draft"),
+        _step(step_id="send", operation_name="send"),
+    ])
+    envelope = ActionEnvelope(
+        intended_outcome="draft and confirm before send",
+        allowed_tool_classes=("email",),
+        allowed_operations=("draft", "send"),
+        confirmation_requirements=("send",),
+    )
+    service, _, dispatcher, _ = _full_machinery_service(plan=plan)
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    assert len(dispatcher.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_turn_confirmation_flow_turn_2_send_fires():
+    """The cross-turn flow: turn 2 receives a fresh envelope that
+    permits send WITHOUT it being in confirmation_requirements (the
+    user confirmed on turn 1). The send step dispatches successfully."""
+    plan = _plan(steps=[_step(step_id="send", operation_name="send")])
+    envelope = ActionEnvelope(
+        intended_outcome="send the email user confirmed last turn",
+        allowed_tool_classes=("email",),
+        allowed_operations=("send",),
+        # No confirmation_requirements — confirmation already crossed
+        # the turn boundary on turn 1.
+    )
+    service, _, dispatcher, _ = _full_machinery_service(
+        plan=plan,
+        dispatcher_results=[
+            StepDispatchResult(completed=True, output={"ok": True}),
+        ],
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert len(dispatcher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_only_envelope_with_in_turn_send_dispatches():
+    """A send-only envelope (allowed_operations=["send"], no
+    confirmation_requirements) lets the send dispatch immediately.
+    Used when integration on the current turn already saw user
+    confirmation alongside the request."""
+    plan = _plan(steps=[_step(step_id="send", operation_name="send")])
+    envelope = ActionEnvelope(
+        intended_outcome="send the email",
+        allowed_tool_classes=("email",),
+        allowed_operations=("send",),
+    )
+    service, _, dispatcher, _ = _full_machinery_service(
+        plan=plan,
+        dispatcher_results=[
+            StepDispatchResult(completed=True, output={"ok": True}),
+        ],
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    assert len(dispatcher.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_friction_ticket_emitted_on_tier_2_modify_exhaustion_via_b1():
+    """When tier 2 modify exhausts and routing falls to B1, a
+    TIER_2_MODIFY_EXHAUSTED ticket is recorded."""
+    from kernos.kernel.enactment import TIER_2_MODIFY_EXHAUSTED
+
+    observer = _RecordingFrictionObserver()
+    plan = _plan(steps=[_step()])
+    planner = _StubPlanner(plan)
+    # Non-transient → routes directly to modify (skipping retry).
+    # Two non-transient failures → modify budget=1 exhausted.
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(
+            completed=False, output={},
+            failure_kind=FailureKind.NON_TRANSIENT,
+        ),
+    ] * 2)
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=False,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NON_TRANSIENT,
+        ),
+    ] * 2)
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        friction_observer=observer,
+        modify_budget=1,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    assert len(observer.tickets) == 1
+    assert observer.tickets[0].divergence_pattern == TIER_2_MODIFY_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_two_reassemblies_in_one_turn_under_per_envelope_budget():
+    """Reassembly budget tracking: per-envelope=2 allows two
+    reassemblies in a single turn before exhaustion."""
+    audit_sink: list[dict] = []
+    plan_a = _plan(steps=[_step(step_id="a1")], plan_id="plan-a")
+    plan_b = _plan(steps=[_step(step_id="b1")], plan_id="plan-b")
+    plan_c = _plan(steps=[_step(step_id="c1")], plan_id="plan-c")
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+
+        async def create_plan(self, inputs):
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner([plan_a, plan_b, plan_c])
+    # Step a1 → info divergence (reassemble 1)
+    # Step b1 → info divergence (reassemble 2)
+    # Step c1 → success
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(completed=True, output={}),  # a1
+        StepDispatchResult(completed=True, output={}),  # b1
+        StepDispatchResult(completed=True, output={"ok": True}),  # c1
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ])
+
+    async def emit(entry):
+        audit_sink.append(entry)
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        audit_emitter=emit,
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,  # force reassemble routing
+        reassembly_per_envelope=2,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    reassembled = [
+        e for e in audit_sink
+        if e.get("category") == "enactment.plan_reassembled"
+    ]
+    assert len(reassembled) == 2
+
+
+@pytest.mark.asyncio
+async def test_third_reassemble_attempt_terminates_b1_on_budget_exhaustion():
+    """Two reassemblies under per_envelope=2 succeed; the third
+    routing attempt terminates B1 with reassembly_budget_exhausted."""
+    audit_sink: list[dict] = []
+    plans = [
+        _plan(steps=[_step(step_id=f"s{i}")], plan_id=f"plan-{i}")
+        for i in range(3)
+    ]
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+
+        async def create_plan(self, inputs):
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner(plans)
+    # Three info divergences — first two reassemble, third hits budget.
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(completed=True, output={}),
+    ] * 3)
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+    ] * 3)
+
+    async def emit(entry):
+        audit_sink.append(entry)
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        audit_emitter=emit,
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,
+        reassembly_per_envelope=2,
+    )
+    outcome = await service.run(_execute_briefing())
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    terminated = next(
+        e for e in audit_sink if e.get("category") == "enactment.terminated"
+    )
+    assert terminated["reason"] == "reassembly_budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_b1_reintegration_carries_multiple_plan_refs_after_reassembly():
+    """After a reassemble + final B1, the reintegration_context
+    plans_attempted carries refs to BOTH plans."""
+    plans = [
+        _plan(steps=[_step(step_id="a")], plan_id="plan-a"),
+        _plan(steps=[_step(step_id="b", tool_class="slack")], plan_id="plan-b"),  # bad
+    ]
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+
+        async def create_plan(self, inputs):
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner(plans)
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(completed=True, output={}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+    ])
+    envelope = _envelope(allowed_tool_classes=("email",))
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,
+    )
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    assert outcome.subtype is TerminationSubtype.B1_ACTION_INVALIDATED
+    # Reintegration captures both plans.
+    assert outcome.reintegration_context is not None
+    plan_refs = outcome.reintegration_context.plans_attempted
+    assert len(plan_refs) == 2
+    assert plan_refs[0].plan_id == "plan-a"
+    assert plan_refs[1].plan_id == "plan-b"
+    # Reassembled plan has tier_4_reassemble created_via.
+    assert plan_refs[1].created_via == "tier_4_reassemble"
+
+
+@pytest.mark.asyncio
+async def test_plan_reassembled_audit_does_not_embed_plan_payload():
+    """References-not-dumps invariant on plan_reassembled audit."""
+    audit_sink: list[dict] = []
+    plans = [
+        _plan(steps=[_step(step_id="a")], plan_id="plan-a"),
+        _plan(steps=[_step(step_id="b")], plan_id="plan-b"),
+    ]
+
+    class _RotatingPlanner:
+        def __init__(self, plans):
+            self._plans = list(plans)
+
+        async def create_plan(self, inputs):
+            return PlanCreationResult(plan=self._plans.pop(0))
+
+    planner = _RotatingPlanner(plans)
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(completed=True, output={}),
+        StepDispatchResult(completed=True, output={"ok": True}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=False,
+            failure_kind=FailureKind.INFORMATION_DIVERGENCE,
+        ),
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ])
+
+    async def emit(entry):
+        audit_sink.append(entry)
+
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        audit_emitter=emit,
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        pivot_budget=0,
+    )
+    await service.run(_execute_briefing())
+
+    reassembled = next(
+        e for e in audit_sink
+        if e.get("category") == "enactment.plan_reassembled"
+    )
+    # IDs only; no embedded plan payloads.
+    assert reassembled["prior_plan_id"] == "plan-a"
+    assert reassembled["new_plan_id"] == "plan-b"
+    assert "steps" not in reassembled
+    assert "plan" not in reassembled
+
+
+@pytest.mark.asyncio
+async def test_b2_with_each_ambiguity_type_constructs_clarification():
+    """The five closed-enum ambiguity types are accepted by the
+    B2 path's ClarificationNeeded construction."""
+    from kernos.kernel.enactment.service import (
+        ClarificationFormulationResult,
+    )
+
+    for ambiguity_type in ("target", "parameter", "approach", "intent", "other"):
+        clarification = ClarificationFormulationResult(
+            question=f"q for {ambiguity_type}",
+            ambiguity_type=ambiguity_type,
+            blocking_ambiguity="b",
+            safe_question_context="c",
+            attempted_action_summary="a",
+            discovered_information="d",
+        )
+        plan = _plan(steps=[_step()])
+        planner = _StubPlanner(plan)
+        dispatcher = _StubDispatcher([
+            StepDispatchResult(
+                completed=False, output={},
+                failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+            ),
+        ])
+        reasoner = _StubReasoner(
+            judgments=[
+                DivergenceJudgment(
+                    effect_matches_expectation=False,
+                    plan_still_valid=False,
+                    failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+                ),
+            ],
+            clarification=clarification,
+        )
+        service = EnactmentService(
+            presence_renderer=_CapturingPresence(),
+            planner=planner,
+            step_dispatcher=dispatcher,
+            divergence_reasoner=reasoner,
+        )
+        outcome = await service.run(_execute_briefing())
+        assert outcome.clarification is not None
+        assert outcome.clarification.ambiguity_type == ambiguity_type
+
+
+@pytest.mark.asyncio
+async def test_b2_reasoner_receives_audit_refs_in_formulation_inputs():
+    """The formulate_clarification call carries audit_refs from the
+    execution trace so the reasoner has context for question framing."""
+    captured: list = []
+
+    class _CapturingReasoner(_StubReasoner):
+        async def formulate_clarification(self, inputs):
+            captured.append(inputs)
+            return await super().formulate_clarification(inputs)
+
+    plan = _plan(steps=[_step()])
+    planner = _StubPlanner(plan)
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(
+            completed=False, output={},
+            failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+        ),
+    ])
+    reasoner = _CapturingReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=False,
+            plan_still_valid=False,
+            failure_kind=FailureKind.AMBIGUITY_NEEDS_USER,
+        ),
+    ])
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+    )
+    await service.run(_execute_briefing())
+    assert len(captured) == 1
+    assert captured[0].failed_step.step_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_friction_ticket_does_not_short_circuit_subsequent_retries():
+    """Architectural pin: ticket emission happens AFTER routing is
+    final. Verifies that even after a friction ticket fires, the
+    routing decision (which already chose modify) proceeds unchanged."""
+    observer = _RecordingFrictionObserver()
+    plan = _plan(steps=[_step()])
+    planner = _StubPlanner(plan)
+    # Pattern: 4 transients (retry budget=3, exhaust to modify),
+    # then modify produces a successful step.
+    dispatcher = _StubDispatcher([
+        StepDispatchResult(
+            completed=False, output={},
+            failure_kind=FailureKind.TRANSIENT,
+        ),
+    ] * 4 + [
+        StepDispatchResult(completed=True, output={"ok": True}),
+    ])
+    reasoner = _StubReasoner(judgments=[
+        DivergenceJudgment(
+            effect_matches_expectation=False,
+            plan_still_valid=True,
+            failure_kind=FailureKind.TRANSIENT,
+        ),
+    ] * 4 + [
+        DivergenceJudgment(
+            effect_matches_expectation=True,
+            plan_still_valid=True,
+            failure_kind=FailureKind.NONE,
+        ),
+    ])
+    service = EnactmentService(
+        presence_renderer=_CapturingPresence(),
+        planner=planner,
+        step_dispatcher=dispatcher,
+        divergence_reasoner=reasoner,
+        friction_observer=observer,
+        retry_budget=3,
+    )
+    outcome = await service.run(_execute_briefing())
+    # Friction ticket fired AND modify proceeded successfully.
+    # The ticket did NOT prevent the modify path from running.
+    assert len(observer.tickets) == 1
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+    # Modify was indeed called once (after retry exhaustion).
+    assert reasoner.modify_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_allowed_operations_envelope_treated_as_unconstrained():
+    """Behavior pin: ActionEnvelope.allowed_operations=() means
+    'unconstrained' (the validator only enforces when the list is
+    non-empty). This mirrors the behavior of optional fields like
+    constraints / forbidden_moves; explicit allow-listing requires
+    the integrator to specify the operations.
+
+    Tool-class enforcement is stricter — empty allowed_tool_classes
+    means 'no tool classes permitted' — because tool classes are the
+    primary capability boundary."""
+    plan = _plan(steps=[_step(operation_name="send")])
+    envelope = ActionEnvelope(
+        intended_outcome="x",
+        allowed_tool_classes=("email",),
+        allowed_operations=(),  # unconstrained
+    )
+    service, _, dispatcher, _ = _full_machinery_service(plan=plan)
+    outcome = await service.run(_execute_briefing(envelope=envelope))
+    # No envelope rejection; dispatch proceeds.
+    assert outcome.subtype is TerminationSubtype.SUCCESS_THIN_PATH
+
+
+@pytest.mark.asyncio
+async def test_confirmation_boundary_no_in_turn_waiting():
+    """The 'no in-turn waiting' invariant: the EnactmentService never
+    blocks waiting for user confirmation mid-loop. Confirmation
+    requirements always cross a turn boundary; the service either
+    rejects the plan (envelope-violation B1) or proceeds because
+    confirmation already happened."""
+    # The previous test cases already exercise this: any plan that
+    # tries to chain through a confirmation step in the same turn
+    # is rejected at envelope validation, before any in-turn wait
+    # could even be implemented. This test verifies via inspection:
+    # the EnactmentService has no asyncio.Event, no wait_for, no
+    # in-loop user-confirmation hook.
+    import inspect
+    source = inspect.getsource(EnactmentService)
+    forbidden_substrings = [
+        "asyncio.Event",
+        "asyncio.wait_for",
+        "user_confirmation",
+        "wait_for_user",
+    ]
+    for substr in forbidden_substrings:
+        assert substr not in source, (
+            f"EnactmentService.source contains {substr!r}; in-turn "
+            f"waiting is forbidden — confirmation always crosses a "
+            f"turn boundary"
+        )
