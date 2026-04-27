@@ -62,6 +62,13 @@ from kernos.kernel.enactment.planner import (
     ToolCatalogProvider,
     build_planner,
 )
+from kernos.kernel.enactment.presence_renderer import (
+    B1RenderInputs,
+    B2RenderInputs,
+    DEFAULT_PRESENCE_MAX_TOKENS,
+    PresenceRenderer,
+    build_presence_renderer,
+)
 from kernos.kernel.enactment.friction import (
     FrictionObserverLike,
     FrictionTicket,
@@ -127,11 +134,14 @@ from kernos.kernel.enactment.tiers import (
 )
 
 __all__ = [
+    "B1RenderInputs",
+    "B2RenderInputs",
     "ClarificationFormulationInputs",
     "ClarificationFormulationResult",
     "DEFAULT_MODIFY_BUDGET",
     "DEFAULT_PIVOT_BUDGET",
     "DEFAULT_PLANNER_MAX_TOKENS",
+    "DEFAULT_PRESENCE_MAX_TOKENS",
     "DEFAULT_REASONER_MAX_TOKENS",
     "DEFAULT_REASSEMBLY_PER_ENVELOPE",
     "DEFAULT_REASSEMBLY_PER_TURN",
@@ -161,6 +171,7 @@ __all__ = [
     "Planner",
     "PlannerError",
     "PlannerLike",
+    "PresenceRenderer",
     "StepDispatcher",
     "PresenceRenderResult",
     "PresenceRendererLike",
@@ -195,6 +206,7 @@ __all__ = [
     "build_divergence_reasoner",
     "build_enactment_service",
     "build_planner",
+    "build_presence_renderer",
     "build_step_dispatcher",
     "classify_routing",
     "evaluate_expectation_signals",
