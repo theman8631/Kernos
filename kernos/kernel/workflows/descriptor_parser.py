@@ -279,14 +279,25 @@ def _build_verifier(body: dict) -> Verifier:
 
 
 def _build_predicate(raw: Any, *, ctx: str) -> dict:
-    """Accepts only canonical AST predicates for now. Expression-string
-    DSL compilation is C6."""
+    """Compile a descriptor predicate to canonical AST.
+
+    Accepts both canonical AST (dict) and expression-string DSL
+    (str). The DSL form compiles via :mod:`trigger_compiler`'s
+    deterministic parser. English-form predicates are NOT auto-
+    compiled here — operators wanting English compilation should
+    either pre-compile via ``trigger_compiler.compile_predicate_source``
+    with their LLM bound, or author the predicate as DSL / AST."""
     if isinstance(raw, str):
-        raise DescriptorError(
-            f"{ctx} expression-string DSL is not supported in this build; "
-            f"author the predicate as a structured AST. "
-            f"Expression-string compilation lands in WORKFLOW-LOOPS-ENGLISH-V1."
+        from kernos.kernel.workflows.trigger_compiler import (
+            CompilerError,
+            compile_dsl,
         )
+        try:
+            return compile_dsl(raw)
+        except CompilerError as exc:
+            raise DescriptorError(
+                f"{ctx} DSL compile error: {exc}"
+            ) from exc
     if not isinstance(raw, dict):
         raise DescriptorError(f"{ctx} must be a mapping (canonical AST)")
     return raw

@@ -300,11 +300,11 @@ class TestSharingConstraint:
             parse_descriptor(path)
 
 
-class TestExpressionStringRejected:
-    """C3 accepts only canonical AST predicates. Expression-string DSL
-    compilation lands in C6's trigger_compiler."""
+class TestExpressionStringDSL:
+    """C6 wires the descriptor parser to compile DSL predicates via
+    trigger_compiler. The DSL form is a deterministic parse — no LLM."""
 
-    def test_string_predicate_rejected(self, tmp_path):
+    def test_dsl_predicate_compiles_to_ast(self, tmp_path):
         text = textwrap.dedent("""
             workflow_id: x
             instance_id: inst_a
@@ -324,7 +324,32 @@ class TestExpressionStringRejected:
         """).lstrip()
         path = tmp_path / "wf.workflow.yaml"
         path.write_text(text)
-        with pytest.raises(DescriptorError, match="expression-string"):
+        wf = parse_descriptor(path)
+        assert wf.trigger.predicate == {
+            "op": "eq", "path": "payload.kind", "value": "report",
+        }
+
+    def test_unrecognised_dsl_raises_descriptor_error(self, tmp_path):
+        text = textwrap.dedent("""
+            workflow_id: x
+            instance_id: inst_a
+            name: x
+            version: "1.0"
+            bounds:
+              iteration_count: 1
+            verifier:
+              flavor: deterministic
+              check: x
+            action_sequence:
+              - action_type: mark_state
+                parameters: {key: x, value: 1, scope: instance}
+            trigger:
+              event_type: cc.batch.report
+              predicate: 'this is plain English, not DSL'
+        """).lstrip()
+        path = tmp_path / "wf.workflow.yaml"
+        path.write_text(text)
+        with pytest.raises(DescriptorError, match="DSL"):
             parse_descriptor(path)
 
 
