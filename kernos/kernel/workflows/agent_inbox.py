@@ -15,10 +15,12 @@ message if no provider is bound. Pin: structural test verifies the
 explicit unavailable-error path rather than silent fall-through to
 Notion.
 
-Notion-independence pin: only ``NotionAgentInbox`` may import or
-reference Notion APIs. The Protocol itself MUST stay
-provider-neutral. Structural test scans action library + agent
-inbox base for direct ``notion.so`` / Notion-tool references.
+Provider-independence pin: only the concrete inbox class at the
+bottom of this file may carry vendor-specific imports / URLs / tool
+namespaces. The Protocol itself MUST stay provider-neutral.
+Structural test scans the workflows + webhooks source tree for
+vendor-integration patterns and only allows them inside the
+concrete-inbox class body.
 """
 from __future__ import annotations
 

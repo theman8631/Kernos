@@ -407,6 +407,92 @@ Discord slash command: `/debug friction`, `/debug trace`, `/debug specs`. Epheme
 
 ---
 
+## 11c. Workflow Loop Primitive
+
+Background-execution substrate for trigger-driven workflows that compose multiple actions, audit each step, and pause for approvals when configured. Sits on top of `event_stream`'s post-flush hook (no parallel event substrate) and dispatches into the existing canvas / tool / workshop / presence surfaces (no new world-effect machinery).
+
+Shipped under SPEC-WORKFLOW-LOOP-PRIMITIVE (April 2026, 7 commits).
+
+### Substrate composition
+
+```
+event_stream emit ─→ writer flush ─→ post_flush hook
+                                          │
+                            trigger_registry evaluates predicates
+                                          │
+                                  match → match_listener
+                                          │
+                            execution_engine enqueues WorkflowExecution
+                                          │
+                                  worker task runs action sequence
+                                          │
+                                  action_library verbs ─→ existing surfaces
+```
+
+### Modules
+
+- `kernos/kernel/workflows/predicates.py` — canonical AST + evaluator (eq / contains / exists / in_set / time_window / actor_eq / event_type_starts_with / correlation_eq + AND/OR/NOT). Deterministic; no LLM at evaluation.
+- `kernos/kernel/workflows/trigger_registry.py` — `Trigger` + `TriggerRegistry`. Subscribes to `event_stream`'s post-flush hook. SQLite tables: `triggers` + `trigger_fires` (idempotency). Multi-tenancy by `instance_id`.
+- `kernos/kernel/workflows/workflow_registry.py` — `Workflow` + `Bounds` + `Verifier` + `ApprovalGate` + `ActionDescriptor` + `TriggerDescriptor` + `WorkflowRegistry`. SQLite table `workflows` (descriptor blob). Validation: bounds REQUIRED, verifier REQUIRED, gate_ref must resolve, `auto_proceed_with_default` requires `default_value` AND no irreversible downstream action (safe-deny).
+- `kernos/kernel/workflows/descriptor_parser.py` — three loaders (.workflow.yaml / .workflow.json / .workflow.md with YAML frontmatter). Sharing-constraint enforcement: instance-specific values must be parameterised (`{installer.<name>}`) or guarded by `instance_local: true`.
+- `kernos/kernel/workflows/trigger_compiler.py` — DSL parser (`event.payload.kind == "report"`, AND/OR/NOT, parens) + injectable English compiler.
+- `kernos/kernel/workflows/action_classification.py` — verb reversibility lookup powering safe-deny.
+- `kernos/kernel/workflows/action_library.py` — bounded set of verbs:
+    - World-effect (action-loop instances, covenant-gated, with verifiers): `notify_user`, `write_canvas`, `route_to_agent`, `call_tool`, `post_to_service`.
+    - Direct-effect (structural assertions only): `mark_state`, `append_to_ledger`.
+- `kernos/kernel/workflows/agent_inbox.py` — `AgentInbox` Protocol + `InMemoryAgentInbox` (test/dev) + `NotionAgentInbox` (production stub). `route_to_agent` raises `AgentInboxUnavailable` when no provider is bound.
+- `kernos/kernel/workflows/execution_engine.py` — `ExecutionEngine` + `WorkflowExecution`. Single asyncio queue, one worker task, sequential per-instance dispatch. Synthetic CohortContext built from trigger event + active spaces. Approval-gate semantics: action FIRST → pause AFTER → wait → resume; timeout per gate descriptor. Restart-resume reads `running` rows from SQLite, re-enqueues if next action is `resume_safe`, else aborts with `aborted_by_restart`.
+- `kernos/kernel/workflows/ledger.py` — `WorkflowLedger`. Append-only markdown file at `data/{instance_id}/workflows/{workflow_id}/ledger.md`. Cross-instance path-isolation pin.
+- `kernos/kernel/webhooks/receiver.py` — FastAPI `register_routes(app, registry)`. POST `/webhooks/{source_id}` with HMAC or bearer auth, optional schema validator, translates validated bodies to `event_stream.emit("external.webhook", ...)`.
+
+### Audit events
+
+Emitted to `event_stream` with shared `correlation_id` per execution:
+
+- `workflow.execution_started`
+- `workflow.execution_step_succeeded` / `workflow.execution_step_failed`
+- `workflow.execution_paused` (gate) / `workflow.execution_resumed`
+- `workflow.gate_auto_proceeded` / `workflow.owner_escalation`
+- `workflow.execution_terminated`
+
+### Authoring workflows
+
+Operators author `.workflow.yaml` (or `.json` / `.md`) descriptors:
+
+```yaml
+workflow_id: morning-briefing
+instance_id: inst_a
+name: Morning briefing
+version: "1.0"
+owner: founder
+bounds:
+  iteration_count: 1
+  wall_time_seconds: 30
+verifier:
+  flavor: deterministic
+  check: briefing_delivered
+action_sequence:
+  - action_type: notify_user
+    parameters:
+      channel: primary
+      message: Good morning.
+      urgency: low
+trigger:
+  event_type: time.tick
+  predicate: 'event.payload.cadence == "daily"'
+```
+
+Register via `await workflow_registry.register_workflow_from_file(path)`. Atomic across `workflows` + `triggers` SQLite tables in a single transaction.
+
+### Composition with shipped primitives
+
+- **EVENT-STREAM-TO-SQLITE:** EXTENDED with post-flush hook in C1; the existing event taxonomy carries new `workflow.*` event types; multi-tenancy by `instance_id` preserved.
+- **ACTION-LOOP-PRIMITIVE:** EXTENDED. World-effect verbs ARE action-loop instances (intent-satisfaction verifiers). Direct-effect verbs are structurally asserted only — Anti-Goal compliance.
+- **Cohort architecture:** Synthetic CohortContext-equivalent at execution start; world-effect verbs consult covenant via injected `covenant_gate` callable.
+- **Notion-independence:** the workflow primitive ships with no Notion dependency. Vendor-specific imports / URLs / tool namespaces are confined to `NotionAgentInbox` in `agent_inbox.py`. Structural test in `tests/test_workflows_integration.py::TestNotionLeakWholeSpec` enforces.
+
+---
+
 ## 12. Awareness & Scheduling
 
 ### Awareness Evaluator
