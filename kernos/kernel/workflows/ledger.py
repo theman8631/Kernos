@@ -59,33 +59,63 @@ class WorkflowLedger:
 
     # -- path helpers ---------------------------------------------------
 
-    def _instance_root(self, instance_id: str) -> Path:
+    def _instance_root_unresolved(self, instance_id: str) -> Path:
         if not instance_id:
             raise LedgerPathViolation("instance_id must be non-empty")
-        return (self._data_dir / _safe_segment(instance_id) / "workflows").resolve()
+        return self._data_dir / _safe_segment(instance_id) / "workflows"
 
     def ledger_path(self, instance_id: str, workflow_id: str) -> Path:
         """Resolve the ledger file path for (instance_id, workflow_id).
 
-        Raises ``LedgerPathViolation`` if the resolution falls outside
-        the instance-scoped subtree (defence against ``..`` injection,
-        absolute-path workflow_ids, or symlink games)."""
-        instance_root = self._instance_root(instance_id)
-        path = (
-            instance_root
-            / _safe_segment(workflow_id)
-            / "ledger.md"
-        )
-        resolved = path.resolve()
-        # The resolved path MUST sit inside instance_root.
+        Raises ``LedgerPathViolation`` if the path falls outside the
+        instance-scoped subtree, OR if any path component on the way
+        down is itself a symbolic link.
+
+        Symlink defence (Codex review post-C7): ``Path.resolve()``
+        follows symlinks before any check, which means an attacker
+        who plants a symlink anywhere inside ``data/`` could
+        otherwise escape the instance subtree. We walk segment-by-
+        segment from ``data_dir`` down, checking each existing
+        component with ``is_symlink`` (uses ``lstat`` semantics),
+        and refuse to traverse any symlink.
+        """
+        # Build the unresolved descent path.
+        segments = [
+            _safe_segment(instance_id),
+            "workflows",
+            _safe_segment(workflow_id),
+            "ledger.md",
+        ]
+        # Walk segment-by-segment, rejecting any symlinked component.
+        cur = self._data_dir
+        for seg in segments:
+            cur = cur / seg
+            if cur.exists() and cur.is_symlink():
+                raise LedgerPathViolation(
+                    f"ledger path traverses a symlink at {cur!s}; "
+                    f"refusing to follow"
+                )
+        # Sanity: the unresolved-then-resolved path must still sit
+        # inside the unresolved instance root (catches ``..`` games
+        # that escaped _safe_segment).
+        unresolved_root = self._instance_root_unresolved(instance_id)
+        # Resolve only AFTER the symlink walk has cleared every
+        # component on the way down. Use strict=False because
+        # non-existent leaves are fine (append() will create them).
+        resolved = cur.resolve()
         try:
-            resolved.relative_to(instance_root)
+            resolved.relative_to(unresolved_root.resolve())
         except ValueError:
             raise LedgerPathViolation(
                 f"ledger path {resolved!s} resolves outside the instance "
-                f"subtree {instance_root!s}"
+                f"subtree {unresolved_root!s}"
             )
         return resolved
+
+    def _instance_root(self, instance_id: str) -> Path:
+        # Kept for backward compatibility with tests that probed the
+        # internal helper. Identical to the unresolved root.
+        return self._instance_root_unresolved(instance_id)
 
     # -- write ----------------------------------------------------------
 

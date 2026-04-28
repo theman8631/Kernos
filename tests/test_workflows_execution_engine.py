@@ -446,6 +446,55 @@ class TestRestartResume:
 # ===========================================================================
 
 
+class TestBoundsEnforcement:
+    """Codex review post-C7: registration requires `bounds`, but
+    execution must actually honour them at runtime — otherwise the
+    declared bound is dead metadata. v1 enforces wall_time_seconds;
+    iteration_count and cost_usd are not yet enforceable for
+    sequential action chains and ship as registration-only metadata
+    until a future spec adds runtime tracking."""
+
+    async def test_wall_time_exceeded_aborts_execution(self, stack):
+        """A workflow whose action runs longer than its
+        wall_time_seconds bound must abort with `wall_time_exceeded`."""
+        # Replace the mark_state verb with one that sleeps longer
+        # than the workflow's wall_time bound.
+        from kernos.kernel.workflows.action_library import (
+            ActionLibrary, MarkStateAction,
+        )
+        slow_lib = ActionLibrary()
+
+        async def slow_set(*, key, value, scope, instance_id):
+            await asyncio.sleep(2.0)
+
+        async def slow_get(*, key, scope, instance_id):
+            return None
+
+        slow_lib.register(MarkStateAction(
+            state_store_set=slow_set, state_store_get=slow_get,
+        ))
+        # Swap in the slow library on the running engine.
+        stack["engine"]._action_library = slow_lib
+        # Register a workflow with a 1-second wall_time bound.
+        wf = _make_workflow(
+            workflow_id="wf-bounds",
+            bounds=Bounds(iteration_count=1, wall_time_seconds=1),
+        )
+        await stack["wfr"].register_workflow(wf)
+        await event_stream.emit("inst_a", "cc.batch.report", {})
+        await event_stream.flush_now()
+        # Wait long enough for the bound to bite.
+        await asyncio.sleep(1.5)
+        execs = await stack["engine"].list_executions(
+            "inst_a", state="aborted",
+        )
+        assert any(
+            e.workflow_id == "wf-bounds"
+            and e.aborted_reason == "wall_time_exceeded"
+            for e in execs
+        )
+
+
 class TestBackgroundExecution:
     async def test_emit_latency_unchanged_with_engine_running(self, stack):
         """Acceptance criterion 11: workflows run BACKGROUND. emit

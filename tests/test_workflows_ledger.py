@@ -80,3 +80,21 @@ class TestLedgerCrossInstanceIsolation:
         b = await ledger.read_last("inst_b", "wf-1")
         assert a["step"] == 1
         assert b["step"] == 100
+
+    def test_symlinked_ancestor_rejected(self, tmp_path):
+        """Codex review post-C7: an attacker who plants a symlink
+        somewhere inside data/ could escape the instance subtree
+        because Path.resolve() follows symlinks before relative_to
+        checks. The ledger now walks ancestors and rejects any
+        symlinked component."""
+        # Plant a real instance dir, then replace its workflows
+        # subdir with a symlink to elsewhere.
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        instance_dir = tmp_path / "inst_a"
+        instance_dir.mkdir()
+        symlinked_workflows = instance_dir / "workflows"
+        symlinked_workflows.symlink_to(elsewhere)
+        ledger = WorkflowLedger(str(tmp_path))
+        with pytest.raises(LedgerPathViolation, match="symlink"):
+            ledger.ledger_path("inst_a", "wf-1")

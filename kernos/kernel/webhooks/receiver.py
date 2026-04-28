@@ -67,6 +67,14 @@ class WebhookSourceConfig:
             raise ValueError(
                 "exactly one of hmac_secret / bearer_token must be set"
             )
+        # Reject empty credentials — an empty bearer_token would
+        # accept ``Authorization: Bearer `` (trailing space), and an
+        # empty hmac_secret produces a deterministic predictable
+        # signature.
+        if self.bearer_token is not None and not self.bearer_token.strip():
+            raise ValueError("bearer_token must not be empty")
+        if self.hmac_secret is not None and len(self.hmac_secret) == 0:
+            raise ValueError("hmac_secret must not be empty")
 
 
 class WebhookRegistry:

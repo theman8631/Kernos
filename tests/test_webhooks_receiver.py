@@ -235,6 +235,22 @@ class TestRegistry:
                 bearer_token="t", hmac_secret=b"s",
             )
 
+    def test_empty_bearer_token_rejected(self):
+        with pytest.raises(ValueError, match="bearer_token"):
+            WebhookSourceConfig(
+                source_id="x", instance_id="i", bearer_token="",
+            )
+        with pytest.raises(ValueError, match="bearer_token"):
+            WebhookSourceConfig(
+                source_id="x", instance_id="i", bearer_token="   ",
+            )
+
+    def test_empty_hmac_secret_rejected(self):
+        with pytest.raises(ValueError, match="hmac_secret"):
+            WebhookSourceConfig(
+                source_id="x", instance_id="i", hmac_secret=b"",
+            )
+
 
 class TestMultiTenancy:
     async def test_source_instance_id_carries_to_event(self, app_and_writer):

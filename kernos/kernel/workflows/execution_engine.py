@@ -363,6 +363,27 @@ class ExecutionEngine:
         if wf is None:
             await self._abort(execution, "workflow_not_found")
             return
+        # Bounds enforcement (Codex review post-C7): wrap the rest of
+        # the run in asyncio.wait_for so wall_time_seconds bounds are
+        # actually enforced at runtime — registration requires the
+        # field, so the runtime should honour it. iteration_count and
+        # cost_usd bounds are not yet enforceable for sequential
+        # action chains; future work.
+        wall_time = wf.bounds.wall_time_seconds
+        if wall_time is not None and wall_time > 0:
+            try:
+                await asyncio.wait_for(
+                    self._run_action_sequence(execution, wf),
+                    timeout=wall_time,
+                )
+            except asyncio.TimeoutError:
+                await self._abort(execution, "wall_time_exceeded")
+            return
+        await self._run_action_sequence(execution, wf)
+
+    async def _run_action_sequence(
+        self, execution: WorkflowExecution, wf: Workflow,
+    ) -> None:
         # Build synthetic CohortContext.
         try:
             context = await self._build_context(execution, wf)
