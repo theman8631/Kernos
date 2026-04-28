@@ -117,6 +117,24 @@ class TestRegistration:
         with pytest.raises(ValueError):
             await registry.update_status(trig.trigger_id, "wat")
 
+    async def test_register_rolls_back_on_cache_failure(self, registry):
+        """If the in-memory cache update raises after a successful
+        DB INSERT, the persisted row must be rolled back so on-disk
+        state cannot disagree with in-memory state. Forces the failure
+        by monkeypatching ``_cache_insert`` to raise."""
+        original = registry._cache_insert
+        registry._cache_insert = lambda t: (_ for _ in ()).throw(  # type: ignore[assignment]
+            RuntimeError("cache busted"),
+        )
+        try:
+            with pytest.raises(RuntimeError, match="cache busted"):
+                await registry.register_trigger(_make_trigger())
+        finally:
+            registry._cache_insert = original  # type: ignore[assignment]
+        # Persisted row was rolled back.
+        rows = await registry.list_triggers("inst_a")
+        assert rows == []
+
 
 class TestPostFlushDispatch:
     async def test_match_fires_listener(self, registry):
@@ -294,6 +312,23 @@ class TestIdempotency:
         registry.add_match_listener(lambda t, e: captured.append(e))
         await registry.register_trigger(_make_trigger(
             idempotency_key_template="{payload[absent_field]}",
+        ))
+        await event_stream.emit("inst_a", "cc.batch.report", {"kind": "report"})
+        await event_stream.flush_now()
+        assert captured == []
+
+    async def test_template_attribute_traversal_rejected(self, registry):
+        """Templates must not be able to read arbitrary Python
+        attributes via the ``.attr`` format spec. ``{payload.__class__}``
+        would otherwise leak ``<class 'dict'>`` into the rendered key
+        and let an operator probe Python internals at registration
+        time. The custom formatter raises ValueError on attribute
+        access, which is treated as a missing-field render → no fire.
+        """
+        captured: list = []
+        registry.add_match_listener(lambda t, e: captured.append(e))
+        await registry.register_trigger(_make_trigger(
+            idempotency_key_template="{payload.__class__}",
         ))
         await event_stream.emit("inst_a", "cc.batch.report", {"kind": "report"})
         await event_stream.flush_now()

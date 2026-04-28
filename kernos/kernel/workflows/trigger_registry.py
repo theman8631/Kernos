@@ -25,6 +25,21 @@ suppression atomic.
 Restart-resume: ``start()`` reloads all active triggers from SQLite
 into the in-memory cache before attaching the post-flush hook, so a
 restart with no other state change preserves matching behaviour.
+
+Concurrency assumption: this registry runs on a single asyncio event
+loop. Cache reads (``_candidates_for_event``) are unlocked because
+in-loop dict reads cannot interleave with in-loop dict writes;
+mutations take ``_cache_lock`` purely to serialise interleavings of
+multiple await-points within mutation paths. Cross-thread access is
+not supported.
+
+``update_status`` transition window: when a trigger flips between
+``active`` and ``paused``/``retired`` there is a brief window
+between the DB commit and the cache swap during which a concurrent
+post-flush dispatch can observe the pre-transition state. This is
+acceptable for the paused/retired transitions — at most one extra
+fire — and the design favours simplicity over making transitions
+fully synchronous.
 """
 from __future__ import annotations
 
@@ -32,9 +47,9 @@ import asyncio
 import inspect
 import json
 import logging
+import string
 import uuid
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -59,6 +74,39 @@ where C5's execution engine plugs in to enqueue workflow runs."""
 
 
 _WILDCARD_EVENT_TYPE = "*"
+
+
+# ---------------------------------------------------------------------------
+# Idempotency template formatter
+#
+# `str.format` accepts both ``[key]`` index access and ``.attr`` attribute
+# access. Index access against a payload dict is the intended template
+# surface; attribute access is not — and `{payload.__class__}` style
+# templates would otherwise leak Python internals into rendered keys.
+# This formatter rejects attribute access at render time; the renderer
+# treats the resulting ValueError the same as a missing field (key
+# renders to None and the trigger does not fire).
+# ---------------------------------------------------------------------------
+
+
+class _IdempotencyKeyFormatter(string.Formatter):
+    """Subset formatter: bare-name + `[key]` lookup only. Attribute
+    access (`name.attr`) raises ValueError."""
+
+    def get_field(self, field_name, args, kwargs):
+        first, rest = string._string.formatter_field_name_split(field_name)  # type: ignore[attr-defined]
+        obj = self.get_value(first, args, kwargs)
+        for is_attr, key in rest:
+            if is_attr:
+                raise ValueError(
+                    f"attribute access not allowed in idempotency template: "
+                    f"{field_name!r}"
+                )
+            obj = obj[key]
+        return obj, first
+
+
+_IDEMPOTENCY_FORMATTER = _IdempotencyKeyFormatter()
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +292,15 @@ class TriggerRegistry:
 
     async def register_trigger(self, trigger: Trigger) -> Trigger:
         """Validate + persist + cache. Returns the trigger with
-        defaults filled in (trigger_id and created_at if absent)."""
+        defaults filled in (trigger_id and created_at if absent).
+
+        Atomic-registration contract: predicate is validated BEFORE
+        any I/O so a malformed AST never reaches SQLite. After the
+        INSERT commits, the cache is updated under the registry's
+        cache lock. If the cache update raises (extremely unlikely
+        for in-memory dicts), the persisted row is rolled back so the
+        on-disk state cannot disagree with the in-memory state.
+        """
         if self._db is None:
             raise RuntimeError("TriggerRegistry not started")
         # Validate predicate before doing any I/O.
@@ -262,8 +318,26 @@ class TriggerRegistry:
             trigger.to_row(),
         )
         await self._db.commit()
-        async with self._cache_lock:
-            self._cache_insert(trigger)
+        try:
+            async with self._cache_lock:
+                self._cache_insert(trigger)
+        except Exception:
+            # Roll back the persisted row so on-disk state matches
+            # the in-memory state. If the rollback itself fails, both
+            # exceptions are surfaced — the caller can inspect via
+            # list_triggers and decide whether to retry.
+            try:
+                await self._db.execute(
+                    "DELETE FROM triggers WHERE trigger_id = ?",
+                    (trigger.trigger_id,),
+                )
+                await self._db.commit()
+            except Exception as rb_exc:
+                logger.error(
+                    "TRIGGER_REGISTRATION_ROLLBACK_FAILED trigger_id=%s error=%s",
+                    trigger.trigger_id, rb_exc, exc_info=True,
+                )
+            raise
         return trigger
 
     async def get_trigger(self, trigger_id: str) -> Trigger | None:
@@ -416,11 +490,17 @@ class TriggerRegistry:
 
     def _render_idempotency_key(self, trigger: Trigger, event: Event) -> str | None:
         """Render the idempotency_key_template against the event.
-        Returns None if the template references a missing field.
-        Templates use Python format syntax with the event's fields and
-        ``payload`` exposed (e.g. ``"{payload[task_id]}"``)."""
+        Returns None if the template references a missing field or
+        uses disallowed attribute traversal. Templates use a subset of
+        Python format syntax: bare names + ``[key]`` index access.
+        Attribute traversal (``{payload.something}``) is rejected to
+        prevent templates from reading arbitrary Python attributes
+        of bound values."""
+        if trigger.idempotency_key_template is None:
+            return None
         try:
-            return trigger.idempotency_key_template.format(  # type: ignore[union-attr]
+            return _IDEMPOTENCY_FORMATTER.format(
+                trigger.idempotency_key_template,
                 event_id=event.event_id,
                 instance_id=event.instance_id,
                 member_id=event.member_id or "",
@@ -430,7 +510,7 @@ class TriggerRegistry:
                 timestamp=event.timestamp,
                 payload=event.payload,
             )
-        except (KeyError, IndexError, AttributeError):
+        except (KeyError, IndexError, AttributeError, ValueError, TypeError):
             return None
 
     async def _record_fire(
