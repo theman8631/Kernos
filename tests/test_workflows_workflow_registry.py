@@ -35,7 +35,7 @@ async def registries(tmp_path):
     trig = TriggerRegistry()
     await trig.start(str(tmp_path))
     wf = WorkflowRegistry()
-    await wf.start(trig)
+    await wf.start(str(tmp_path), trig)
     yield trig, wf
     await wf.stop()
     await _reset_trigger_registry(trig)
@@ -330,6 +330,40 @@ class TestRegistration:
         trigs = await trig_registry.list_triggers("inst_a")
         assert all(w.workflow_id != "wf-bad" for w in wfs)
         assert all(t.workflow_id != "wf-bad" for t in trigs)
+
+    async def test_register_rolls_back_workflow_when_trigger_insert_fails(
+        self, registries, monkeypatch,
+    ):
+        """Force the trigger INSERT to fail AFTER the workflow INSERT
+        succeeded. The cross-table rollback must undo the workflow
+        row so neither table holds partial state."""
+        from kernos.kernel.workflows.trigger_registry import Trigger
+        from kernos.kernel.workflows import workflow_registry as wr_mod
+
+        trig_registry, wf_registry = registries
+        # Seed a Trigger with a known id.
+        await trig_registry.register_trigger(Trigger(
+            trigger_id="collide-me",
+            workflow_id="some-other-wf",
+            instance_id="inst_a",
+            event_type="cc.batch.report",
+            predicate={"op": "exists", "path": "event_id"},
+            owner="founder",
+        ))
+        # Force register_workflow to mint the same trigger_id for
+        # this registration; the second INSERT will hit the PRIMARY KEY
+        # constraint and raise IntegrityError.
+        monkeypatch.setattr(wr_mod.uuid, "uuid4", lambda: "collide-me")
+        with pytest.raises(Exception):
+            await wf_registry.register_workflow(
+                _basic_workflow(workflow_id="wf-rollback"),
+            )
+        # Workflow row rolled back.
+        wfs = await wf_registry.list_workflows("inst_a")
+        assert all(w.workflow_id != "wf-rollback" for w in wfs)
+        # Only the seeded trigger remains.
+        trigs = await trig_registry.list_triggers("inst_a")
+        assert [t.trigger_id for t in trigs] == ["collide-me"]
 
     async def test_register_duplicate_workflow_id_fails_atomically(self, registries):
         """Second register with the same workflow_id raises on

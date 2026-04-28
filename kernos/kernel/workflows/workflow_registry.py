@@ -315,7 +315,24 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         stmt = stmt.strip()
         if stmt:
             await db.execute(stmt)
-    await db.commit()
+    # Connection runs with isolation_level=None; explicit transactions
+    # only when register_workflow needs them. Schema DDL above is in
+    # autocommit so no explicit commit is required here.
+
+
+class _NullLock:
+    """Async-context-manager no-op lock. Used as a placeholder when
+    register_workflow runs without a paired trigger and therefore
+    doesn't need to take the trigger registry's cache lock."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+_NULL_LOCK = _NullLock()
 
 
 # ---------------------------------------------------------------------------
@@ -384,30 +401,57 @@ def _workflow_from_row(row) -> Workflow:
 
 class WorkflowRegistry:
     """Owns the workflows SQLite table and the cross-table atomic
-    registration pipeline. Shares the TriggerRegistry's connection so
-    workflow + trigger inserts run inside a single SQLite transaction.
+    registration pipeline.
+
+    Connection model: WorkflowRegistry opens its OWN aiosqlite
+    connection to instance.db (the same shared file the event_stream
+    writer and trigger_registry use). Sharing a connection with the
+    trigger_registry would let the post-flush hook's writes to the
+    ``trigger_fires`` table commit an in-progress workflow transaction
+    on the shared connection — that's the classic mid-transaction
+    interleaving hazard. Separate connections give each subsystem its
+    own transaction state; SQLite serialises concurrent writes via
+    its WAL + busy_timeout configuration.
+
+    The connection is opened with ``isolation_level=None`` so the
+    transaction lifecycle is fully under our control: every
+    write goes inside an explicit BEGIN/COMMIT block managed by
+    ``register_workflow``.
+
+    Atomicity model: register_workflow holds ``self._lock`` and
+    (when a trigger is paired) the trigger_registry's
+    ``_cache_lock`` for the entire BEGIN → INSERT workflow → INSERT
+    trigger → cache_insert → COMMIT window. Any failure inside
+    triggers a single ROLLBACK + cache_remove path so durable state
+    and in-memory cache always agree.
     """
 
     def __init__(self) -> None:
         self._trigger_registry: TriggerRegistry | None = None
         self._db: aiosqlite.Connection | None = None
+        self._db_path: Path | None = None
         self._lock = asyncio.Lock()
 
-    async def start(self, trigger_registry: TriggerRegistry) -> None:
-        """Adopt the trigger registry's connection and ensure schema."""
+    async def start(self, data_dir: str, trigger_registry: TriggerRegistry) -> None:
+        """Open our own connection to instance.db, ensure schema, and
+        bind to the trigger_registry for cross-table cache refresh."""
         if self._db is not None:
             return
-        if trigger_registry._db is None:  # type: ignore[attr-defined]
-            raise RuntimeError(
-                "TriggerRegistry must be started before WorkflowRegistry"
-            )
         self._trigger_registry = trigger_registry
-        self._db = trigger_registry._db  # type: ignore[attr-defined]
+        self._db_path = Path(data_dir) / "instance.db"
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # isolation_level=None puts the connection in autocommit mode so
+        # explicit BEGIN/COMMIT semantics work cleanly. Without this,
+        # sqlite3 manages an implicit transaction layer that would
+        # conflict with explicit BEGIN.
+        self._db = await aiosqlite.connect(str(self._db_path), isolation_level=None)
+        self._db.row_factory = aiosqlite.Row
         await _ensure_schema(self._db)
 
     async def stop(self) -> None:
-        """Detach. The trigger registry owns the connection lifecycle."""
-        self._db = None
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
         self._trigger_registry = None
 
     # -- registration ---------------------------------------------------
@@ -460,64 +504,60 @@ class WorkflowRegistry:
                 status="active",
                 created_at=wf.created_at,
             )
+        # Lock order: workflow lock → trigger-registry cache lock.
+        # Hooks on the writer task never acquire cache_lock during
+        # evaluation (they only read the cache), so this ordering
+        # cannot deadlock against post-flush dispatch.
+        cache_lock_ctx = (
+            self._trigger_registry._cache_lock  # type: ignore[attr-defined]
+            if trigger is not None else _NULL_LOCK
+        )
         async with self._lock:
-            await self._db.execute("BEGIN")
-            try:
-                await self._db.execute(
-                    "INSERT INTO workflows ("
-                    " workflow_id, instance_id, name, description, owner,"
-                    " version, status, descriptor_json, created_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        wf.workflow_id, wf.instance_id, wf.name, wf.description,
-                        wf.owner, wf.version, wf.status,
-                        _workflow_descriptor_blob(wf), wf.created_at,
-                    ),
-                )
-                if trigger is not None:
-                    await self._db.execute(
-                        "INSERT INTO triggers ("
-                        " trigger_id, workflow_id, instance_id, event_type,"
-                        " predicate, predicate_source, description, actor_filter,"
-                        " correlation_filter, idempotency_key_template, owner,"
-                        " version, status, created_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        trigger.to_row(),
-                    )
-                await self._db.commit()
-            except Exception:
-                await self._db.rollback()
-                raise
-        # After the transaction commits, refresh the trigger registry's
-        # in-memory cache so the new trigger fires on subsequent flushes.
-        if trigger is not None:
-            try:
-                async with self._trigger_registry._cache_lock:  # type: ignore[attr-defined]
-                    self._trigger_registry._cache_insert(trigger)  # type: ignore[attr-defined]
-            except Exception:
-                # Roll back the durable rows so on-disk and in-memory
-                # state cannot disagree. If the rollback fails too,
-                # surface both — the operator can inspect.
-                logger.error(
-                    "WORKFLOW_REGISTER_CACHE_FAILED workflow_id=%s error attempting rollback",
-                    wf.workflow_id,
-                )
+            async with cache_lock_ctx:
+                await self._db.execute("BEGIN")
+                inserted_in_cache = False
                 try:
                     await self._db.execute(
-                        "DELETE FROM workflows WHERE workflow_id = ?",
-                        (wf.workflow_id,),
+                        "INSERT INTO workflows ("
+                        " workflow_id, instance_id, name, description, owner,"
+                        " version, status, descriptor_json, created_at"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            wf.workflow_id, wf.instance_id, wf.name, wf.description,
+                            wf.owner, wf.version, wf.status,
+                            _workflow_descriptor_blob(wf), wf.created_at,
+                        ),
                     )
-                    await self._db.execute(
-                        "DELETE FROM triggers WHERE trigger_id = ?",
-                        (trigger.trigger_id,),
-                    )
-                    await self._db.commit()
-                except Exception as rb_exc:
-                    logger.error(
-                        "WORKFLOW_REGISTER_ROLLBACK_FAILED workflow_id=%s error=%s",
-                        wf.workflow_id, rb_exc, exc_info=True,
-                    )
-                raise
+                    if trigger is not None:
+                        await self._db.execute(
+                            "INSERT INTO triggers ("
+                            " trigger_id, workflow_id, instance_id, event_type,"
+                            " predicate, predicate_source, description, actor_filter,"
+                            " correlation_filter, idempotency_key_template, owner,"
+                            " version, status, created_at"
+                            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            trigger.to_row(),
+                        )
+                        # Cache update INSIDE the transaction. If this
+                        # raises, the SQL rollback below also undoes
+                        # the durable INSERTs so on-disk and in-memory
+                        # state cannot disagree.
+                        self._trigger_registry._cache_insert(trigger)  # type: ignore[attr-defined]
+                        inserted_in_cache = True
+                    await self._db.execute("COMMIT")
+                except Exception:
+                    try:
+                        await self._db.execute("ROLLBACK")
+                    except Exception as rb_exc:
+                        logger.error(
+                            "WORKFLOW_REGISTER_ROLLBACK_FAILED workflow_id=%s error=%s",
+                            wf.workflow_id, rb_exc, exc_info=True,
+                        )
+                    if inserted_in_cache and trigger is not None:
+                        self._trigger_registry._cache_remove(  # type: ignore[attr-defined]
+                            trigger.trigger_id,
+                        )
+                    raise
         return wf
 
     # -- queries --------------------------------------------------------
