@@ -28,13 +28,14 @@ cross-member analytics), retention-eviction, cross-instance federation.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import aiosqlite
 
@@ -43,6 +44,99 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FLUSH_INTERVAL_S = 2.0
 DEFAULT_FLUSH_THRESHOLD = 100
+
+
+# ---------------------------------------------------------------------------
+# Post-flush hook (WORKFLOW-LOOP-PRIMITIVE C1)
+#
+# Hooks attach to the writer task's flush callback so they only fire on
+# durable events (after the SQLite batch write + commit succeed). Hooks
+# are NOT inline with `emit` — emit returns immediately per the shipped
+# fire-and-forget contract; hook evaluation happens on the writer task's
+# successful-flush callback.
+#
+# Failure isolation invariant (Kit edit, narrow review): exceptions
+# raised by any hook are caught + logged and MUST NOT propagate back
+# into event_stream's flush path or block subsequent flushes. Durable
+# event persistence stays independent of hook code health.
+#
+# The hook registry is module-level so multiple subsystems (trigger
+# registry being the first; reflection-pass / improvement-loop in
+# future specs) can attach without coordinating through the writer
+# singleton's internal state.
+# ---------------------------------------------------------------------------
+
+
+PostFlushHook = Callable[[list["Event"]], Awaitable[None] | None]
+"""(events_just_flushed) → optionally awaitable. Hook receives the
+batch of events that were just durably persisted. Return value is
+ignored; raising is caught + logged."""
+
+
+_POST_FLUSH_HOOKS: list[PostFlushHook] = []
+
+
+def register_post_flush_hook(hook: PostFlushHook) -> None:
+    """Register a callback that fires after a successful SQLite flush.
+
+    The callback receives the list of Events that were just durably
+    persisted in that flush. Multiple hooks may register; they fire in
+    registration order. Each hook is wrapped in a try/except so an
+    exception in one does not affect the others or the writer's flush
+    path.
+
+    Hooks may be sync or async (`async def` callables awaited;
+    plain callables called directly). Async hooks are the recommended
+    shape for non-trivial work since the writer task is async.
+
+    Idempotent for the same callable identity — registering the same
+    hook twice still results in a single entry.
+    """
+    if hook in _POST_FLUSH_HOOKS:
+        return
+    _POST_FLUSH_HOOKS.append(hook)
+
+
+def unregister_post_flush_hook(hook: PostFlushHook) -> bool:
+    """Remove a previously-registered hook. Returns True if removed,
+    False if it wasn't registered. Used by tests for clean teardown."""
+    if hook not in _POST_FLUSH_HOOKS:
+        return False
+    _POST_FLUSH_HOOKS.remove(hook)
+    return True
+
+
+def _registered_post_flush_hooks() -> tuple[PostFlushHook, ...]:
+    """Snapshot of current hooks. Test-only inspection surface; not
+    part of the public API."""
+    return tuple(_POST_FLUSH_HOOKS)
+
+
+async def _fire_post_flush_hooks(batch: list["Event"]) -> None:
+    """Invoke each registered hook with the freshly-flushed batch.
+
+    Failure-isolation contract: exceptions are caught + logged with
+    enough context to diagnose the offending hook; they do NOT
+    propagate. Async hooks are awaited; sync hooks are called.
+    """
+    if not _POST_FLUSH_HOOKS:
+        return
+    # Snapshot the registry so a hook that re-registers (or another
+    # task that mutates the list during iteration) doesn't disturb
+    # this firing pass.
+    hooks_snapshot = tuple(_POST_FLUSH_HOOKS)
+    for hook in hooks_snapshot:
+        try:
+            result = hook(batch)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.warning(
+                "EVENT_STREAM_POST_FLUSH_HOOK_FAILED hook=%s error=%s",
+                getattr(hook, "__qualname__", repr(hook)),
+                exc,
+                exc_info=True,
+            )
 
 #: Retention window documented in install/architecture docs. Eviction is
 #: a separate batch; this constant is currently informational only.
@@ -220,6 +314,11 @@ class _EventWriter:
             # Put them back at the front so we retry next flush
             async with self._lock:
                 self._queue = batch + self._queue
+            return
+        # Successful durable persist — fire post-flush hooks. Hook
+        # exceptions are caught inside _fire_post_flush_hooks so they
+        # cannot disturb the writer task's flush path.
+        await _fire_post_flush_hooks(batch)
 
     async def read_db(self) -> aiosqlite.Connection | None:
         """Return the live DB connection for queries. Used by read functions."""
@@ -437,6 +536,7 @@ async def _reset_for_tests() -> None:
 
 __all__ = [
     "Event",
+    "PostFlushHook",
     "RETENTION_DAYS",
     "emit",
     "events_by_correlation",
@@ -444,6 +544,8 @@ __all__ = [
     "events_in_window",
     "flush_now",
     "queue_depth",
+    "register_post_flush_hook",
     "start_writer",
     "stop_writer",
+    "unregister_post_flush_hook",
 ]
