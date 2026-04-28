@@ -87,6 +87,8 @@ Requires Python 3.11+, an LLM API key (Anthropic, OpenAI/Codex, or Ollama), and 
 
 **[Full architecture →](docs/architecture/overview.md)** · **[Pipeline reference →](docs/architecture/pipeline-reference.md)** · **[Primitives →](docs/architecture/primitives-reference.md)**
 
+**[Canonical introduction →](docs/kernos-introduction.md)** — the document the running agent reaches when asked what Kernos is. Innovation overview plus a navigable map of every architecture / behavior / capability surface.
+
 ---
 
 ## Design frames

@@ -2,6 +2,8 @@
 
 Kernos is a personal agentic operating system. It runs as a persistent agent that learns who you are, connects to the tools you need, and handles the work you shouldn't have to think about. You interact with it through text — SMS, Discord, or (soon) a web interface — and it manages the rest.
 
+> **Start here:** [`kernos-introduction.md`](kernos-introduction.md) — the canonical introduction. Innovation overview plus a navigable map of every architecture, behavior, capability, identity, and roadmap surface in this docs tree. The running agent also reaches this document when asked what Kernos is.
+
 ## How It Works
 
 Kernos has three layers:
