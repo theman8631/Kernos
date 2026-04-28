@@ -153,6 +153,28 @@ class TestHookFailureIsolation:
         assert captured_a == [1]
         assert captured_b == [1]
 
+    async def test_async_hook_raising_after_await_is_caught(self, writer):
+        """An async hook that raises AFTER an internal await still gets
+        caught. Pins that the try/except wraps both `hook(batch)` (call
+        time) and `await result` (post-await raise)."""
+        async def boom_after_await(batch):
+            await asyncio.sleep(0)  # yield once, then raise
+            raise RuntimeError("post-await")
+
+        captured: list = []
+
+        async def cap(batch):
+            captured.append(len(batch))
+
+        register_post_flush_hook(boom_after_await)
+        register_post_flush_hook(cap)
+        await event_stream.emit("inst_a", "tool.called", {}, member_id="mem_a")
+        # If the post-await raise leaked, this would propagate.
+        await event_stream.flush_now()
+        assert captured == [1]
+        events = await event_stream.events_for_member("inst_a", "mem_a")
+        assert len(events) == 1
+
     async def test_subsequent_flush_still_fires_hook(self, writer):
         flush_counts: list[int] = []
 
@@ -200,6 +222,21 @@ class TestRegistration:
         async def never_registered(batch): ...
 
         assert unregister_post_flush_hook(never_registered) is False
+
+    async def test_reset_for_tests_clears_hooks(self, tmp_path):
+        """`_reset_for_tests` must clear the global hook registry so
+        hooks don't leak across tests via the module-level list."""
+        await event_stream._reset_for_tests()
+        await event_stream.start_writer(str(tmp_path))
+        try:
+            async def hook(batch): ...
+
+            register_post_flush_hook(hook)
+            assert hook in _registered_post_flush_hooks()
+            await event_stream._reset_for_tests()
+            assert _registered_post_flush_hooks() == ()
+        finally:
+            await event_stream._reset_for_tests()
 
 
 class TestMultiTenancy:

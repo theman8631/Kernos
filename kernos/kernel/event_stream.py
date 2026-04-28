@@ -49,16 +49,23 @@ DEFAULT_FLUSH_THRESHOLD = 100
 # ---------------------------------------------------------------------------
 # Post-flush hook (WORKFLOW-LOOP-PRIMITIVE C1)
 #
-# Hooks attach to the writer task's flush callback so they only fire on
-# durable events (after the SQLite batch write + commit succeed). Hooks
-# are NOT inline with `emit` — emit returns immediately per the shipped
-# fire-and-forget contract; hook evaluation happens on the writer task's
-# successful-flush callback.
+# Hooks fire after a successful SQLite batch write + commit, so they
+# only see durably-persisted events. emit() is unchanged — its
+# fire-and-forget contract is preserved; emit never awaits a hook.
 #
-# Failure isolation invariant (Kit edit, narrow review): exceptions
-# raised by any hook are caught + logged and MUST NOT propagate back
-# into event_stream's flush path or block subsequent flushes. Durable
-# event persistence stays independent of hook code health.
+# Execution scope: hooks run wherever _flush_once() runs successfully.
+# That includes the writer task's periodic flush (the common path),
+# the threshold-trigger background task spawned by emit(), the read
+# APIs' pre-read flush, and explicit flush_now() / stop_writer drains.
+# A slow hook therefore can slow callers that explicitly await a flush
+# (reads, drain) — but it cannot affect emit's fast-path latency
+# because emit either enqueues-and-returns or schedules the flush as
+# a task.
+#
+# Failure isolation invariant: exceptions raised by any hook are
+# caught + logged inside _fire_post_flush_hooks and MUST NOT propagate
+# into event_stream's flush path or block other hooks. Durable event
+# persistence stays independent of hook code health.
 #
 # The hook registry is module-level so multiple subsystems (trigger
 # registry being the first; reflection-pass / improvement-loop in
@@ -532,6 +539,10 @@ async def _reset_for_tests() -> None:
     # idempotent restart, but tests want a perfectly clean slate.
     global _WRITER
     _WRITER = _EventWriter()
+    # Clear post-flush hook registrations too — a hook left over from
+    # an earlier test would otherwise fire on subsequent test flushes
+    # and silently mutate state across tests.
+    _POST_FLUSH_HOOKS.clear()
 
 
 __all__ = [
