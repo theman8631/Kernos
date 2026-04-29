@@ -156,6 +156,12 @@ async def _wait_for(predicate, timeout=2.0, step=0.02):
     return False
 
 
+def _make_deliver(stack):
+    async def deliver(**kw):
+        return {"persisted_id": "d-1"}
+    return deliver
+
+
 # ===========================================================================
 # Schema migration (AC #3)
 # ===========================================================================
@@ -303,6 +309,72 @@ class TestNonceAvailabilityDuringAction:
 
 
 class TestGatedActionFailure:
+    async def test_failed_gated_action_with_continue_does_not_enter_gate(
+        self, stack,
+    ):
+        """Codex C1 review iteration: a gated action that fails with
+        continuation_rules.on_failure='continue' MUST NOT enter the
+        gate — the discard-on-failure invariant applies regardless
+        of the continuation rule. Without this fix the engine would
+        persist the nonce + pause for an action that never actually
+        produced the approval request."""
+        # Same crash setup but continuation 'continue'.
+        crash_lib = ActionLibrary()
+        write_count = {"n": 0}
+
+        async def explode_set(**kw):
+            write_count["n"] += 1
+            raise RuntimeError("boom")
+
+        async def explode_get(**kw):
+            return None
+
+        crash_lib.register(MarkStateAction(
+            state_store_set=explode_set, state_store_get=explode_get,
+        ))
+        # Add a follow-up direct-effect action that succeeds, so the
+        # workflow can complete past the failed gate-step.
+        crash_lib.register(NotifyUserAction(deliver_fn=_make_deliver(stack)))
+        stack["engine"]._action_library = crash_lib
+        wf = _make_workflow(
+            workflow_id="wf-fail-continue",
+            approval_gates=[_gate("g1")],
+            action_sequence=[
+                ActionDescriptor(
+                    action_type="mark_state",
+                    parameters={"key": "x", "value": 1, "scope": "instance"},
+                    gate_ref="g1",
+                    continuation_rules=ContinuationRules(on_failure="continue"),
+                ),
+                _make_action("notify_user", channel="primary",
+                             message="continued", urgency="low"),
+            ],
+        )
+        await stack["wfr"].register_workflow(wf)
+        await event_stream.emit("inst_a", "cc.batch.report", {})
+        await event_stream.flush_now()
+        await _wait_for(lambda: write_count["n"] >= 1, timeout=2.0)
+        # Give the engine a moment to dispatch the post-fail step.
+        await asyncio.sleep(0.3)
+        # Workflow must NOT be paused; gate_nonce stays empty.
+        execs = await stack["engine"].list_executions("inst_a")
+        target = next(e for e in execs if e.workflow_id == "wf-fail-continue")
+        assert target.gate_nonce == ""
+        assert target.state in {"completed", "running", "aborted"}
+        # And the gate-paused event should NOT have been emitted for
+        # this execution.
+        from datetime import datetime, timezone
+        events = await event_stream.events_in_window(
+            "inst_a",
+            datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+            datetime.fromisoformat("2099-01-01T00:00:00+00:00"),
+        )
+        assert not any(
+            e.event_type == "workflow.execution_paused_at_gate"
+            and e.correlation_id == target.correlation_id
+            for e in events
+        )
+
     async def test_failed_gated_action_discards_nonce(self, stack):
         """If the gate_ref action fails, the unused nonce is discarded
         and the execution does NOT enter gate wait. No orphan

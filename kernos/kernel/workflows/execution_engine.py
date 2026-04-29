@@ -117,9 +117,14 @@ class WorkflowExecution:
     trigger_event_payload: dict = field(default_factory=dict)
     trigger_event_id: str = ""
     member_id: str = ""
-    # WLP-GATE-SCOPING C1: gate_nonce is non-empty iff the execution
-    # is in a paused-for-approval substate. Set after a successful
-    # gate_ref action; cleared on resume / timeout / termination.
+    # WLP-GATE-SCOPING C1: gate_nonce is set after a gate_ref action
+    # completes successfully and persisted while the execution waits
+    # for approval. Cleared by ``_clear_gate_nonce`` on successful
+    # resume (including auto_proceed_with_default). Aborted/timed-out
+    # executions are terminated rather than cleared, so the column
+    # may remain populated on terminated rows — match logic only
+    # consults the in-memory waiter table, never SQL nonce values,
+    # so this is hygienic debt rather than a wake vector.
     gate_nonce: str = ""
 
     def to_row(self) -> tuple:
@@ -206,14 +211,26 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
     # pre-existing workflow_executions table from the WLP batch, so we
     # check the column list and add it if absent. Pre-existing rows
     # have an empty gate_nonce until their next pause event.
+    #
+    # Race tolerance (Codex C1 review iteration): two engine
+    # initializers running concurrently can both observe the column
+    # absent, then both attempt ALTER. SQLite raises OperationalError
+    # ("duplicate column name") on the loser. Catch that specific
+    # case and treat as benign — by the time we caught it, the
+    # column exists, which is exactly what we wanted.
     async with db.execute(
         "SELECT name FROM pragma_table_info('workflow_executions')"
     ) as cur:
         existing_columns = {row[0] for row in await cur.fetchall()}
     if "gate_nonce" not in existing_columns:
-        await db.execute(
-            "ALTER TABLE workflow_executions ADD COLUMN gate_nonce TEXT DEFAULT ''"
-        )
+        try:
+            await db.execute(
+                "ALTER TABLE workflow_executions "
+                "ADD COLUMN gate_nonce TEXT DEFAULT ''"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -504,9 +521,12 @@ class ExecutionEngine:
                     "VERIFY_RAISED execution_id=%s step=%s error=%s",
                     execution.execution_id, idx, exc,
                 )
-            if not result.success or not verified:
+            action_succeeded = result.success and verified
+            if not action_succeeded:
                 # Gated-action failure path: discard the unused
                 # nonce; do NOT enter gate wait. AC #8 pin.
+                # `pending_gate_nonce` is a local; going out of scope
+                # here is the discard.
                 await self._record_step_failed(
                     execution, idx, action,
                     error=result.error or "verifier_rejected",
@@ -516,13 +536,18 @@ class ExecutionEngine:
                     return
                 # continue/retry: v1 just continues; retry budget is
                 # observed by the action library's own dispatch path
-                # in future iterations.
-            else:
-                await self._record_step_succeeded(execution, idx, action, result)
+                # in future iterations. Even when continuing, a
+                # FAILED gated action MUST NOT enter the gate (per
+                # the discard-on-failure invariant). Skip the gate
+                # block entirely on failure.
+                await self._mark_step_complete(execution, idx)
+                continue
+            await self._record_step_succeeded(execution, idx, action, result)
             # Approval-gate handling: action FIRST (already executed
-            # above), pause AFTER. The nonce minted pre-action is now
-            # persisted on the execution row so match logic can
-            # require both descriptor predicate AND nonce match.
+            # above and succeeded), pause AFTER. The nonce minted
+            # pre-action is now persisted on the execution row so
+            # match logic can require both descriptor predicate AND
+            # nonce match. Failed gated actions never reach here.
             if action.gate_ref is not None:
                 gate = gate_by_name[action.gate_ref]
                 await self._persist_gate_nonce(execution, pending_gate_nonce)
