@@ -229,6 +229,10 @@ class TestApprovalGates:
         )
 
     async def test_gate_resumes_on_matching_event(self, stack):
+        """WLP-GATE-SCOPING C1: approval events MUST carry the
+        engine-minted gate_nonce + execution_id to wake the paused
+        execution. The engine persists the nonce after the gated
+        action completes; tests query it to compose a valid approval."""
         await stack["wfr"].register_workflow(
             self._gated_workflow(gate_behavior="abort_workflow"),
         )
@@ -238,9 +242,15 @@ class TestApprovalGates:
         await _wait_for(
             lambda: ("instance", "inst_a", "x") in stack["store"],
         )
-        # Send approval event.
+        # Read the engine-minted nonce off the paused execution row.
+        execs = await stack["engine"].list_executions("inst_a")
+        gated = next(e for e in execs if e.gate_nonce)
+        # Send approval event with the matching nonce + execution_id.
         await event_stream.emit(
-            "inst_a", "user.approval", {}, member_id="founder",
+            "inst_a", "user.approval",
+            {"execution_id": gated.execution_id,
+             "gate_nonce": gated.gate_nonce},
+            member_id="founder",
         )
         await event_stream.flush_now()
         await _wait_for(

@@ -274,9 +274,16 @@ class TestApprovalGateEndToEnd:
         await _wait_for(
             lambda: ("instance", "inst_a", "pre_gate") in stack["state"],
         )
-        # Engine is now paused waiting for approval. Send it.
+        # Engine is now paused waiting for approval. Read the
+        # engine-minted nonce + execution_id and emit a valid
+        # approval (WLP-GATE-SCOPING C1: nonce binding required).
+        execs = await stack["engine"].list_executions("inst_a")
+        gated = next(e for e in execs if e.gate_nonce)
         await event_stream.emit(
-            "inst_a", "user.approval", {}, member_id="founder",
+            "inst_a", "user.approval",
+            {"execution_id": gated.execution_id,
+             "gate_nonce": gated.gate_nonce},
+            member_id="founder",
         )
         await event_stream.flush_now()
         # Post-gate action runs.

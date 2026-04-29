@@ -117,6 +117,10 @@ class WorkflowExecution:
     trigger_event_payload: dict = field(default_factory=dict)
     trigger_event_id: str = ""
     member_id: str = ""
+    # WLP-GATE-SCOPING C1: gate_nonce is non-empty iff the execution
+    # is in a paused-for-approval substate. Set after a successful
+    # gate_ref action; cleared on resume / timeout / termination.
+    gate_nonce: str = ""
 
     def to_row(self) -> tuple:
         return (
@@ -125,7 +129,7 @@ class WorkflowExecution:
             json.dumps(self.intermediate_state), self.last_heartbeat,
             self.aborted_reason, self.started_at, self.terminated_at,
             json.dumps(self.trigger_event_payload), self.trigger_event_id,
-            self.member_id,
+            self.member_id, self.gate_nonce,
         )
 
     @classmethod
@@ -138,6 +142,13 @@ class WorkflowExecution:
             payload = json.loads(row["trigger_event_payload"]) or {}
         except Exception:
             payload = {}
+        # gate_nonce was added by WLP-GATE-SCOPING C1; rows from the
+        # original WLP schema may not have the column populated. Fall
+        # back to "" so older rows present consistently.
+        try:
+            gate_nonce = row["gate_nonce"] or ""
+        except (KeyError, IndexError):
+            gate_nonce = ""
         return cls(
             execution_id=row["execution_id"],
             workflow_id=row["workflow_id"],
@@ -153,6 +164,7 @@ class WorkflowExecution:
             trigger_event_payload=payload,
             trigger_event_id=row["trigger_event_id"] or "",
             member_id=row["member_id"] or "",
+            gate_nonce=gate_nonce,
         )
 
 
@@ -176,7 +188,8 @@ CREATE TABLE IF NOT EXISTS workflow_executions (
     terminated_at           TEXT DEFAULT '',
     trigger_event_payload   TEXT DEFAULT '{}',
     trigger_event_id        TEXT DEFAULT '',
-    member_id               TEXT DEFAULT ''
+    member_id               TEXT DEFAULT '',
+    gate_nonce              TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_executions_state
     ON workflow_executions(instance_id, state);
@@ -188,6 +201,19 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         stmt = stmt.strip()
         if stmt:
             await db.execute(stmt)
+    # WLP-GATE-SCOPING C1: explicit ALTER migration for the gate_nonce
+    # column. CREATE TABLE IF NOT EXISTS does not add the column to a
+    # pre-existing workflow_executions table from the WLP batch, so we
+    # check the column list and add it if absent. Pre-existing rows
+    # have an empty gate_nonce until their next pause event.
+    async with db.execute(
+        "SELECT name FROM pragma_table_info('workflow_executions')"
+    ) as cur:
+        existing_columns = {row[0] for row in await cur.fetchall()}
+    if "gate_nonce" not in existing_columns:
+        await db.execute(
+            "ALTER TABLE workflow_executions ADD COLUMN gate_nonce TEXT DEFAULT ''"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +223,46 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# WLP-GATE-SCOPING C1: action-payload template interpolation. The
+# engine substitutes a small set of named placeholders inside string
+# values within an action's parameters dict so descriptors can refer
+# to engine-minted runtime values (notably the gate_nonce that wasn't
+# yet known when the descriptor was authored).
+#
+# Recognised placeholders:
+#   {workflow.execution_id}   → execution.execution_id
+#   {workflow.gate_nonce}     → engine-minted nonce (gate_ref actions only)
+#   {workflow.correlation_id} → execution.correlation_id
+#   {workflow.workflow_id}    → execution.workflow_id
+#   {workflow.instance_id}    → execution.instance_id
+#
+# Substitution is plain string replacement (no Python format-spec
+# semantics) so descriptors cannot reach into Python attributes the
+# substitution table doesn't expose. Recursive over nested dicts and
+# lists; non-string scalars pass through unchanged.
+
+
+_INTERPOLATION_KEYS = (
+    "execution_id", "gate_nonce", "correlation_id",
+    "workflow_id", "instance_id",
+)
+
+
+def _interpolate_params(value: Any, ctx: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        out = value
+        for key in _INTERPOLATION_KEYS:
+            out = out.replace("{workflow." + key + "}", ctx.get(key, ""))
+        return out
+    if isinstance(value, dict):
+        return {k: _interpolate_params(v, ctx) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interpolate_params(item, ctx) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_interpolate_params(item, ctx) for item in value)
+    return value
 
 
 class ExecutionEngine:
@@ -217,11 +283,16 @@ class ExecutionEngine:
         self._listener_callable: Callable | None = None
         self._gate_waiters: dict[str, asyncio.Event] = {}
         # gate_waiters: execution_id → Event signalled when an
-        # approval event matching the current gate predicate flushes.
+        # approval event matching the current gate predicate AND
+        # carrying the engine-minted nonce flushes.
         self._gate_predicates: dict[str, dict] = {}
-        # gate_predicates: execution_id → current gate's
-        # approval_event_predicate.
         self._gate_event_types: dict[str, str] = {}
+        # WLP-GATE-SCOPING C1: per-active-wait nonce. Match logic in
+        # ``_on_post_flush_for_gates`` requires the incoming event's
+        # ``payload.gate_nonce`` to match this AND ``payload.execution_id``
+        # to equal the paused execution's id, in addition to the
+        # descriptor predicate.
+        self._gate_nonces: dict[str, str] = {}
         self._gate_hook_registered: bool = False
 
     # -- lifecycle ------------------------------------------------------
@@ -316,8 +387,9 @@ class ExecutionEngine:
             " execution_id, workflow_id, instance_id, correlation_id,"
             " state, action_index_completed, intermediate_state,"
             " last_heartbeat, aborted_reason, started_at, terminated_at,"
-            " trigger_event_payload, trigger_event_id, member_id"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " trigger_event_payload, trigger_event_id, member_id,"
+            " gate_nonce"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             execution.to_row(),
         )
         self._queue.put_nowait(execution)
@@ -395,8 +467,27 @@ class ExecutionEngine:
         for idx in range(start_idx, len(wf.action_sequence)):
             action = wf.action_sequence[idx]
             verb = self._action_library.get(action.action_type)
+            # WLP-GATE-SCOPING C1: nonce minted BEFORE the gated
+            # action executes so the action's payload can carry it
+            # (e.g. route_to_agent's approval_request block). The
+            # nonce is held in a local until the action completes
+            # successfully; if the action fails or aborts, the unused
+            # nonce is discarded and no pause is entered.
+            pending_gate_nonce = (
+                str(uuid.uuid4()) if action.gate_ref is not None else ""
+            )
+            interp_ctx = {
+                "execution_id": execution.execution_id,
+                "gate_nonce": pending_gate_nonce,
+                "correlation_id": execution.correlation_id,
+                "workflow_id": execution.workflow_id,
+                "instance_id": execution.instance_id,
+            }
+            interpolated_params = _interpolate_params(
+                action.parameters, interp_ctx,
+            )
             try:
-                result = await verb.execute(context, action.parameters)
+                result = await verb.execute(context, interpolated_params)
             except Exception as exc:
                 await self._record_step_failed(
                     execution, idx, action, error=f"execute_raised:{exc}",
@@ -405,13 +496,17 @@ class ExecutionEngine:
                 return
             verified = False
             try:
-                verified = await verb.verify(context, action.parameters, result)
+                verified = await verb.verify(
+                    context, interpolated_params, result,
+                )
             except Exception as exc:
                 logger.warning(
                     "VERIFY_RAISED execution_id=%s step=%s error=%s",
                     execution.execution_id, idx, exc,
                 )
             if not result.success or not verified:
+                # Gated-action failure path: discard the unused
+                # nonce; do NOT enter gate wait. AC #8 pin.
                 await self._record_step_failed(
                     execution, idx, action,
                     error=result.error or "verifier_rejected",
@@ -424,12 +519,17 @@ class ExecutionEngine:
                 # in future iterations.
             else:
                 await self._record_step_succeeded(execution, idx, action, result)
-            # Approval-gate handling: action FIRST, pause AFTER.
+            # Approval-gate handling: action FIRST (already executed
+            # above), pause AFTER. The nonce minted pre-action is now
+            # persisted on the execution row so match logic can
+            # require both descriptor predicate AND nonce match.
             if action.gate_ref is not None:
                 gate = gate_by_name[action.gate_ref]
+                await self._persist_gate_nonce(execution, pending_gate_nonce)
                 cont = await self._await_gate(execution, gate)
                 if not cont:
                     return  # _await_gate aborted
+                await self._clear_gate_nonce(execution)
             await self._mark_step_complete(execution, idx)
         # All steps done — mark completed.
         await self._complete(execution)
@@ -437,31 +537,49 @@ class ExecutionEngine:
     async def _await_gate(
         self, execution: WorkflowExecution, gate: ApprovalGate,
     ) -> bool:
-        """Pause until an approval event matches the gate predicate, or
-        timeout. Returns True if the engine should continue with the
-        next action, False if it aborted the execution."""
+        """Pause until an approval event matches the gate predicate AND
+        carries the engine-minted gate_nonce + execution_id, or timeout.
+        Returns True if the engine should continue with the next
+        action, False if it aborted the execution.
+
+        WLP-GATE-SCOPING C1: emits ``workflow.execution_paused_at_gate``
+        with the full gate descriptor + the engine-minted gate_nonce
+        so downstream agents (founder UI, AgentInbox listeners) know
+        what fields to compose into a valid approval response.
+        """
         await event_stream.emit(
-            execution.instance_id, "workflow.execution_paused",
+            execution.instance_id, "workflow.execution_paused_at_gate",
             {"execution_id": execution.execution_id,
              "gate_name": gate.gate_name,
-             "approval_event_type": gate.approval_event_type},
+             "gate_nonce": execution.gate_nonce,
+             "pause_reason": gate.pause_reason,
+             "approval_event_type": gate.approval_event_type,
+             "approval_event_predicate": gate.approval_event_predicate,
+             "timeout_seconds": gate.timeout_seconds,
+             "bound_behavior_on_timeout": gate.bound_behavior_on_timeout},
             correlation_id=execution.correlation_id,
         )
         ev = asyncio.Event()
         self._gate_waiters[execution.execution_id] = ev
         self._gate_predicates[execution.execution_id] = gate.approval_event_predicate
         self._gate_event_types[execution.execution_id] = gate.approval_event_type
+        # Stash the nonce + execution_id on the waiter context so the
+        # post-flush match logic can verify both, not just the
+        # descriptor predicate.
+        self._gate_nonces[execution.execution_id] = execution.gate_nonce
         try:
             await asyncio.wait_for(ev.wait(), timeout=gate.timeout_seconds)
         except asyncio.TimeoutError:
             self._gate_waiters.pop(execution.execution_id, None)
             self._gate_predicates.pop(execution.execution_id, None)
             self._gate_event_types.pop(execution.execution_id, None)
+            self._gate_nonces.pop(execution.execution_id, None)
             return await self._handle_gate_timeout(execution, gate)
         finally:
             self._gate_waiters.pop(execution.execution_id, None)
             self._gate_predicates.pop(execution.execution_id, None)
             self._gate_event_types.pop(execution.execution_id, None)
+            self._gate_nonces.pop(execution.execution_id, None)
         await event_stream.emit(
             execution.instance_id, "workflow.execution_resumed",
             {"execution_id": execution.execution_id,
@@ -498,20 +616,32 @@ class ExecutionEngine:
     async def _on_post_flush_for_gates(self, batch: list[Event]) -> None:
         """Post-flush hook that resolves approval-gate waits.
 
-        Runs in addition to the trigger registry's hook. For each
-        active gate-wait, scan the batch for events that match the
-        gate's approval_event_type + approval_event_predicate. On
-        match, set the corresponding asyncio.Event."""
+        WLP-GATE-SCOPING C1: requires BOTH the descriptor predicate
+        match AND the engine-minted nonce + execution_id binding.
+        Either failing means the event does not wake this paused
+        execution. This closes the bypass risk where a broad
+        descriptor predicate (e.g. ``actor_eq founder``) would
+        otherwise let any approval from that actor wake any paused
+        execution waiting on the same event_type.
+        """
         if not self._gate_waiters:
             return
         for execution_id, waiter in list(self._gate_waiters.items()):
             event_type = self._gate_event_types.get(execution_id)
             predicate = self._gate_predicates.get(execution_id)
-            if event_type is None or predicate is None:
+            expected_nonce = self._gate_nonces.get(execution_id)
+            if event_type is None or predicate is None or not expected_nonce:
                 continue
             for event in batch:
                 if event.event_type != event_type:
                     continue
+                # Nonce + execution_id binding (engine-enforced).
+                payload = event.payload or {}
+                if payload.get("execution_id") != execution_id:
+                    continue
+                if payload.get("gate_nonce") != expected_nonce:
+                    continue
+                # Descriptor predicate (author-controlled).
                 try:
                     if evaluate_predicate(predicate, event):
                         waiter.set()
@@ -561,6 +691,36 @@ class ExecutionEngine:
             "UPDATE workflow_executions SET state = ?, last_heartbeat = ? "
             "WHERE execution_id = ?",
             (state, execution.last_heartbeat, execution.execution_id),
+        )
+
+    async def _persist_gate_nonce(
+        self, execution: WorkflowExecution, nonce: str,
+    ) -> None:
+        """Record the gate_nonce against the running execution row so
+        post-flush match logic can require it on incoming approvals.
+        Called after the gate_ref action completes successfully —
+        unsuccessful actions discard the unused nonce instead."""
+        assert self._db is not None
+        execution.gate_nonce = nonce
+        await self._db.execute(
+            "UPDATE workflow_executions SET gate_nonce = ?, last_heartbeat = ? "
+            "WHERE execution_id = ?",
+            (nonce, _now(), execution.execution_id),
+        )
+
+    async def _clear_gate_nonce(
+        self, execution: WorkflowExecution,
+    ) -> None:
+        """Clear the gate_nonce after the execution resumes from a
+        gate. Stale-nonce-rejection (AC #13) relies on this — once
+        cleared, a replayed approval event carrying the old nonce
+        finds no waiter to wake."""
+        assert self._db is not None
+        execution.gate_nonce = ""
+        await self._db.execute(
+            "UPDATE workflow_executions SET gate_nonce = '', "
+            "last_heartbeat = ? WHERE execution_id = ?",
+            (_now(), execution.execution_id),
         )
 
     async def _mark_step_complete(
