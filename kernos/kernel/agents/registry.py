@@ -36,6 +36,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Protocol
 
 import aiosqlite
 
@@ -134,6 +135,73 @@ class InvalidAgentStatusTransition(AgentRegistryError):
     """Raised on ``update_status`` if the target status is unknown
     or the transition is structurally invalid (e.g. retired →
     active is forbidden — retired is terminal)."""
+
+
+# ---------------------------------------------------------------------------
+# Resolver result + ranker protocol (C3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Match:
+    """Single confident hit. Only ``active`` records produce
+    ``Match`` from ``resolve_natural``."""
+    record: "AgentRecord"
+
+
+@dataclass(frozen=True)
+class Ambiguity:
+    """Multiple plausible candidates. The caller decides whether
+    to ask the user (conversational routing) or fail-closed
+    (workflow registration via natural-language reference, per
+    Kit's extra catch — registration treats Ambiguity as a
+    structural failure)."""
+    candidates: tuple["AgentRecord", ...]
+
+
+@dataclass(frozen=True)
+class NotFound:
+    """No match. Conversational handler may surface "I don't
+    recognize that agent — here are the agents I know" with the
+    instance's active-record listing."""
+
+
+ResolveResult = "Match | Ambiguity | NotFound"
+
+
+@dataclass(frozen=True)
+class RankedCandidate:
+    """One ranker output: an AgentRecord plus a confidence score.
+    Higher is better; the resolver checks whether the top
+    candidate is materially clear of the runner-up."""
+    record: "AgentRecord"
+    confidence: float
+
+
+class AgentResolverRanker(Protocol):
+    """Optional Protocol an LLM-backed ranker implements. Injected
+    via the AgentRegistry constructor; tests pass a fake or omit
+    entirely (in which case ``resolve_natural`` skips step 3 of
+    the resolution chain).
+
+    Implementations rank candidates by phrase / domain_summary /
+    capabilities_summary similarity. The registry only consumes
+    the returned ordering + confidences; it does not depend on
+    any specific scoring model."""
+
+    async def rank(
+        self, phrase: str, candidates: list["AgentRecord"],
+    ) -> list[RankedCandidate]: ...
+
+
+# Confidence margin required for the ranker step to declare a
+# clear winner. If top score is not at least this much greater
+# than runner-up, resolver returns Ambiguity instead of Match —
+# the spec calls this out as "materially higher than runner-up
+# AND no collision risk." Picking 0.15 as a default; tests can
+# override by passing concrete confidences. Kit-review-question
+# #3 left the threshold as implementation judgment.
+_RANKER_CONFIDENCE_MARGIN = 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +371,13 @@ class AgentRegistry:
         self,
         *,
         provider_registry: ProviderRegistry | None = None,
+        ranker: AgentResolverRanker | None = None,
     ) -> None:
         self._db: aiosqlite.Connection | None = None
         self._db_path: Path | None = None
         self._lock = asyncio.Lock()
         self._provider_registry = provider_registry
+        self._ranker = ranker
 
     @property
     def provider_registry(self) -> ProviderRegistry | None:
@@ -483,6 +553,185 @@ class AgentRegistry:
             )
         return await self.get_by_id(agent_id, instance_id)
 
+    # -- resolve_natural (C3) -----------------------------------------
+
+    async def resolve_natural(
+        self,
+        phrase: str,
+        instance_id: str,
+        *,
+        space_id: str | None = None,
+        domain_label: str | None = None,
+        allow_llm_fallback: bool = True,
+    ) -> "Match | Ambiguity | NotFound":
+        """Resolve a natural-language phrase to an agent record.
+
+        Resolution order (per spec section 2; AC #6 + AC #7):
+
+          1. Exact ``agent_id`` match against ACTIVE records
+          2. Exact alias match against ACTIVE records
+             (multiple → Ambiguity)
+          3. Optional ranker fallback (only if ``allow_llm_fallback``
+             AND the registry was constructed with a ranker)
+          4. Default-agent priority chain (only if scope kwargs
+             provided): space+domain → space-only → domain-only
+          5. NotFound
+
+        At no step does the resolver silently pick when collision
+        risk is nontrivial. Workflow registration that consumes
+        this surface treats Ambiguity as a registration-time
+        failure (Kit's extra catch). Conversational routing
+        surfaces it as a clarification question.
+
+        Paused records are NOT discoverable via natural-language
+        resolution — only ``get_by_id`` returns them, for
+        audit / admin surfaces (Kit edit, v1 → v2: paused = "don't
+        send work").
+        """
+        if self._db is None:
+            return NotFound()
+
+        phrase_clean = phrase.strip()
+        if not phrase_clean:
+            return NotFound()
+
+        active = await self.list_agents(instance_id, status="active")
+
+        # Step 1: exact agent_id.
+        for record in active:
+            if record.agent_id == phrase_clean:
+                return Match(record=record)
+
+        # Step 2: exact alias (case-insensitive against the active
+        # set; multiple matches → Ambiguity).
+        phrase_lower = phrase_clean.lower()
+        alias_hits = [
+            r for r in active
+            if any(a.lower() == phrase_lower for a in r.aliases)
+        ]
+        if len(alias_hits) == 1:
+            return Match(record=alias_hits[0])
+        if len(alias_hits) >= 2:
+            return Ambiguity(candidates=tuple(alias_hits))
+
+        # Step 3: optional ranker fallback (only if explicitly
+        # enabled AND the registry was constructed with a ranker).
+        if allow_llm_fallback and self._ranker is not None and active:
+            ranked = await self._ranker.rank(phrase_clean, list(active))
+            if ranked:
+                # Sort defensively in case the ranker doesn't.
+                ranked = sorted(
+                    ranked, key=lambda c: c.confidence, reverse=True,
+                )
+                top = ranked[0]
+                if len(ranked) == 1:
+                    return Match(record=top.record)
+                # Materially clear of runner-up?
+                runner_up = ranked[1]
+                if top.confidence - runner_up.confidence >= _RANKER_CONFIDENCE_MARGIN:
+                    return Match(record=top.record)
+                # Otherwise surface ambiguity with ranked candidates.
+                return Ambiguity(
+                    candidates=tuple(c.record for c in ranked),
+                )
+
+        # Step 4: default-agent priority chain (only consulted if
+        # the caller passed scope kwargs).
+        if space_id is not None or domain_label is not None:
+            default = await self._lookup_default_agent(
+                instance_id, space_id, domain_label,
+            )
+            if default is not None:
+                # The default's agent_id may have been retired or
+                # paused since registration — re-fetch and check.
+                record = await self.get_by_id(default, instance_id)
+                if record is not None and record.status == "active":
+                    return Match(record=record)
+
+        return NotFound()
+
+    async def _lookup_default_agent(
+        self,
+        instance_id: str,
+        space_id: str | None,
+        domain_label: str | None,
+    ) -> str | None:
+        """Three-step priority chain (AC #16): space+domain →
+        space-only → domain-only. Each step short-circuits on hit.
+        Returns the agent_id of the matched default, or None."""
+        if self._db is None:
+            return None
+        # 1. Most specific: space + domain.
+        if space_id is not None and domain_label is not None:
+            async with self._db.execute(
+                "SELECT agent_id FROM default_agents "
+                "WHERE instance_id = ? AND scope_kind = 'space_id' "
+                "AND scope_id = ? AND domain_label = ?",
+                (instance_id, space_id, domain_label),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is not None:
+                return row["agent_id"]
+        # 2. Space-only.
+        if space_id is not None:
+            async with self._db.execute(
+                "SELECT agent_id FROM default_agents "
+                "WHERE instance_id = ? AND scope_kind = 'space_id' "
+                "AND scope_id = ? AND domain_label = ''",
+                (instance_id, space_id),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is not None:
+                return row["agent_id"]
+        # 3. Domain-only.
+        if domain_label is not None:
+            async with self._db.execute(
+                "SELECT agent_id FROM default_agents "
+                "WHERE instance_id = ? AND scope_kind = 'domain' "
+                "AND scope_id = '' AND domain_label = ?",
+                (instance_id, domain_label),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is not None:
+                return row["agent_id"]
+        return None
+
+    async def register_default(
+        self,
+        instance_id: str,
+        agent_id: str,
+        *,
+        space_id: str | None = None,
+        domain_label: str | None = None,
+    ) -> None:
+        """Operator surface for setting up default agents.
+
+        Pass exactly the scope you want to register at:
+          - ``space_id`` + ``domain_label`` → most-specific row
+          - ``space_id`` only → space-only row
+          - ``domain_label`` only → domain-only row
+
+        Empty/None for both is rejected — the caller would never
+        be able to reach this row through ``resolve_natural``.
+        """
+        if self._db is None:
+            raise RuntimeError("AgentRegistry not started")
+        if not agent_id:
+            raise ValueError("agent_id is required")
+        if space_id is None and domain_label is None:
+            raise ValueError(
+                "default-agent rows require at least one of "
+                "space_id or domain_label"
+            )
+        scope_kind = "space_id" if space_id is not None else "domain"
+        await self._insert_default(DefaultAgentRecord(
+            instance_id=instance_id,
+            scope_kind=scope_kind,
+            scope_id=space_id or "",
+            domain_label=domain_label or "",
+            agent_id=agent_id,
+        ))
+
     async def _find_alias_conflict(
         self, instance_id: str, aliases: list[str],
         attempting_agent_id: str,
@@ -565,9 +814,14 @@ __all__ = [
     "AgentRecord",
     "AgentRegistry",
     "AgentRegistryError",
+    "AgentResolverRanker",
     "AgentRetired",
     "AliasCollisionError",
+    "Ambiguity",
     "DefaultAgentRecord",
     "InvalidAgentStatusTransition",
+    "Match",
+    "NotFound",
+    "RankedCandidate",
     "VALID_AGENT_STATUSES",
 ]
