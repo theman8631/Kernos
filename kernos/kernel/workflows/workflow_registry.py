@@ -498,11 +498,26 @@ class WorkflowRegistry:
         # Validate before any I/O. Predicates inside (workflow trigger,
         # gate predicates) are also validated here.
         validate_workflow(wf)
-        # DAR C4: validate route_to_agent agent_id references against
-        # the agent registry if one is wired in. Per AC #8 + AC #9:
-        # unregistered / paused / retired targets fail registration
-        # loudly, and `@default:` references are rejected (defaults
-        # are conversational-only, not workflow-authorable).
+        # DAR C4: validate route_to_agent agent_id references.
+        # Per AC #8 + AC #9 (Codex consolidated review iteration):
+        # validation is MANDATORY for any workflow whose action
+        # sequence contains route_to_agent. If no agent registry is
+        # wired AND the workflow contains route_to_agent, fail
+        # closed — a workflow cannot route to an agent the system
+        # has no way to look up. Workflows without route_to_agent
+        # don't need an agent registry (e.g. mark_state-only
+        # workflows from the WLP era).
+        has_route_to_agent = any(
+            a.action_type == "route_to_agent"
+            for a in wf.action_sequence
+        )
+        if has_route_to_agent and self._agent_registry is None:
+            raise WorkflowError(
+                "workflow contains route_to_agent action(s) but no "
+                "agent registry is wired into WorkflowRegistry — call "
+                "wire_agent_registry(...) at startup so agent_id "
+                "references can be validated"
+            )
         if self._agent_registry is not None:
             await self._validate_agent_references(wf)
         # Build the corresponding Trigger row.

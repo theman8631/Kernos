@@ -234,6 +234,26 @@ class TestAliasCollision:
             agent_id="agent-b", aliases=[],
         ))
 
+    async def test_alias_collision_case_insensitive(self, registry):
+        """Codex consolidated DAR review: alias collision check was
+        case-sensitive but resolve_natural is case-insensitive.
+        ``"Reviewer"`` and ``"reviewer"`` would both register and
+        then resolve as Ambiguity. Fix: collision check now
+        normalises to lowercase. Pin verifies the same alias in
+        different case fails registration."""
+        await registry.register_agent(_record(
+            agent_id="agent-a", aliases=["Reviewer"],
+        ))
+        with pytest.raises(AliasCollisionError):
+            await registry.register_agent(_record(
+                agent_id="agent-b", aliases=["reviewer"],
+            ))
+        # Mixed-case variants also caught.
+        with pytest.raises(AliasCollisionError):
+            await registry.register_agent(_record(
+                agent_id="agent-c", aliases=["REVIEWER"],
+            ))
+
 
 # ===========================================================================
 # Lifecycle

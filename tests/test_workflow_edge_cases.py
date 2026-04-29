@@ -138,8 +138,22 @@ async def stack(tmp_path):
     await event_stream.start_writer(str(tmp_path))
     trig = TriggerRegistry()
     await trig.start(str(tmp_path))
+    # DAR C4: pre-register the agent_ids the edge-case scenarios
+    # use (Scenario 4 routes to "founder", Scenario 7 routes to
+    # "spec-agent" + "code-agent", Scenario 9 routes to "x") so
+    # registration-time validation succeeds. Tests still use the
+    # legacy RouteToAgentAction(inbox=...) dispatch path.
+    from kernos.kernel.agents.registry import AgentRecord, AgentRegistry
+    agents = AgentRegistry()
+    await agents.start(str(tmp_path))
+    for aid in ("founder", "spec-agent", "code-agent", "x"):
+        await agents._insert_record(AgentRecord(
+            agent_id=aid, instance_id="inst_a",
+            provider_key="legacy-noop",
+        ))
     wfr = WorkflowRegistry()
     await wfr.start(str(tmp_path), trig)
+    wfr.wire_agent_registry(agents)
     state: dict = {}
 
     async def state_set(*, key, value, scope, instance_id):
@@ -179,10 +193,11 @@ async def stack(tmp_path):
         "tmp_path": tmp_path, "trig": trig, "wfr": wfr, "lib": lib,
         "ledger": ledger, "engine": engine, "state": state,
         "delivery": delivery, "canvas": canvas, "tools": tools,
-        "services": services, "inbox": inbox,
+        "services": services, "inbox": inbox, "agents": agents,
     }
     await engine.stop()
     await wfr.stop()
+    await agents.stop()
     await _reset_trigger_registry(trig)
     await event_stream._reset_for_tests()
 

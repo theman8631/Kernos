@@ -101,8 +101,23 @@ async def stack(tmp_path):
     await event_stream.start_writer(str(tmp_path))
     trig = TriggerRegistry()
     await trig.start(str(tmp_path))
+    # DAR C4: workflows that use route_to_agent require the agent
+    # registry to be wired into WorkflowRegistry. This test uses
+    # the legacy RouteToAgentAction(inbox=...) dispatch path, so
+    # we register a minimal agent record just to satisfy the
+    # registration-time validation; the action library bypasses
+    # the registry at dispatch via the legacy inbox= constructor
+    # parameter.
+    from kernos.kernel.agents.registry import AgentRecord, AgentRegistry
+    agents = AgentRegistry()
+    await agents.start(str(tmp_path))
+    await agents._insert_record(AgentRecord(
+        agent_id="founder", instance_id="inst_a",
+        provider_key="legacy-noop",
+    ))
     wfr = WorkflowRegistry()
     await wfr.start(str(tmp_path), trig)
+    wfr.wire_agent_registry(agents)
     state: dict = {}
 
     async def state_set(*, key, value, scope, instance_id):
@@ -125,10 +140,11 @@ async def stack(tmp_path):
     yield {
         "tmp_path": tmp_path, "trig": trig, "wfr": wfr, "lib": lib,
         "ledger": ledger, "engine": engine, "state": state,
-        "inbox": inbox,
+        "inbox": inbox, "agents": agents,
     }
     await engine.stop()
     await wfr.stop()
+    await agents.stop()
     await _reset_trigger_registry(trig)
     await event_stream._reset_for_tests()
 

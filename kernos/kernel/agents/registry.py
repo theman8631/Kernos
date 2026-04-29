@@ -737,12 +737,22 @@ class AgentRegistry:
         attempting_agent_id: str,
     ) -> tuple[str, str] | None:
         """Walk active records in the instance; return
-        (offending_alias, conflicting_agent_id) on the first
-        collision found. Used by register_agent before persistence.
+        (offending_alias_as_authored, conflicting_agent_id) on the
+        first collision found. Used by register_agent before
+        persistence.
+
+        Case-normalisation (Codex consolidated review iteration):
+        aliases are compared case-insensitively. ``resolve_natural``
+        already lowercases on read, so the collision check must
+        match — otherwise ``"Reviewer"`` and ``"reviewer"`` could
+        both register and then resolve as ambiguity. The error
+        message reports the alias as authored on the proposed side.
         """
         if self._db is None:
             return None
-        proposed = set(aliases)
+        # Map lowered alias → original authored form for messaging.
+        proposed_lower_to_authored = {a.lower(): a for a in aliases}
+        proposed_lower = set(proposed_lower_to_authored)
         async with self._db.execute(
             "SELECT agent_id, aliases FROM agent_records "
             "WHERE instance_id = ? AND status = 'active'",
@@ -755,12 +765,15 @@ class AgentRegistry:
                 # registering NEW, but guard anyway).
                 continue
             try:
-                claimed = set(json.loads(row["aliases"]) or [])
+                claimed_raw = json.loads(row["aliases"]) or []
             except Exception:
-                claimed = set()
-            overlap = proposed & claimed
+                claimed_raw = []
+            claimed_lower = {a.lower() for a in claimed_raw}
+            overlap = proposed_lower & claimed_lower
             if overlap:
-                return (next(iter(overlap)), row["agent_id"])
+                offending_lower = next(iter(overlap))
+                authored = proposed_lower_to_authored[offending_lower]
+                return (authored, row["agent_id"])
         return None
 
     # -- internal helpers exposed for C3 / tests -----------------------

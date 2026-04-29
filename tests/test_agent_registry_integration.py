@@ -380,6 +380,68 @@ class TestWorkflowAgentValidation:
         registered = await stack["wfr"].register_workflow(wf)
         assert registered.workflow_id == "wf-good"
 
+    async def test_route_to_agent_workflow_without_registry_wired_fails(
+        self, tmp_path,
+    ):
+        """Codex consolidated DAR review: when a workflow contains
+        route_to_agent and no AgentRegistry is wired into
+        WorkflowRegistry, registration MUST fail closed. AC #8 / #9
+        are not bypassable by forgetting to wire the registry."""
+        await event_stream._reset_for_tests()
+        await event_stream.start_writer(str(tmp_path))
+        try:
+            trig = TriggerRegistry()
+            await trig.start(str(tmp_path))
+            wfr = WorkflowRegistry()
+            await wfr.start(str(tmp_path), trig)
+            # NOTE: deliberately not calling wire_agent_registry.
+            wf = _build_workflow(
+                workflow_id="wf-no-registry",
+                action_sequence=[ActionDescriptor(
+                    action_type="route_to_agent",
+                    parameters={"agent_id": "anything",
+                                "payload": {}},
+                )],
+            )
+            with pytest.raises(WorkflowError, match="agent registry"):
+                await wfr.register_workflow(wf)
+            # No partial state.
+            wfs = await wfr.list_workflows("inst_a")
+            assert all(w.workflow_id != "wf-no-registry" for w in wfs)
+            await wfr.stop()
+            await _reset_trigger_registry(trig)
+        finally:
+            await event_stream._reset_for_tests()
+
+    async def test_workflow_without_route_to_agent_does_not_require_registry(
+        self, tmp_path,
+    ):
+        """Mark_state-only workflows (and other non-route_to_agent
+        workflows) don't need an agent registry — backward compat
+        with WLP-era workflows holds."""
+        await event_stream._reset_for_tests()
+        await event_stream.start_writer(str(tmp_path))
+        try:
+            trig = TriggerRegistry()
+            await trig.start(str(tmp_path))
+            wfr = WorkflowRegistry()
+            await wfr.start(str(tmp_path), trig)
+            # No agent registry wired.
+            wf = _build_workflow(
+                workflow_id="wf-state-only",
+                action_sequence=[ActionDescriptor(
+                    action_type="mark_state",
+                    parameters={"key": "x", "value": 1, "scope": "instance"},
+                )],
+            )
+            # Succeeds without any registry binding.
+            registered = await wfr.register_workflow(wf)
+            assert registered.workflow_id == "wf-state-only"
+            await wfr.stop()
+            await _reset_trigger_registry(trig)
+        finally:
+            await event_stream._reset_for_tests()
+
 
 # ===========================================================================
 # Conversational routing thin consumer (AC #14)
