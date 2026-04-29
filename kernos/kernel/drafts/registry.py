@@ -39,10 +39,17 @@ from typing import Any, Awaitable, Callable
 
 import aiosqlite
 
+from kernos.kernel.drafts.envelope import validate_envelope
 from kernos.kernel.drafts.errors import (
     DraftAliasCollision,
+    DraftConcurrentModification,
+    DraftEnvelopeInvalid,
     DraftError,
     DraftNotFound,
+    DraftTerminal,
+    InvalidDraftTransition,
+    ReadyStateMutationRequiresDemotion,
+    WorkflowReferenceMissing,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +60,46 @@ VALID_DRAFT_STATUSES = frozenset({
 })
 
 TERMINAL_STATUSES = frozenset({"committed", "abandoned"})
+
+
+# State machine matrix per spec. Maps each non-terminal status to
+# the set of allowed *direct* targets via update_draft. Note:
+# ``ready → committed`` is intentionally NOT in this matrix —
+# that transition is gated by ``mark_committed`` only (AC #6).
+_ALLOWED_TRANSITIONS = {
+    "shaping": frozenset({"shaping", "blocked", "ready"}),
+    "blocked": frozenset({"shaping", "blocked"}),
+    "ready":   frozenset({"ready", "shaping"}),
+    # Terminal states have no outbound; mutations on them raise
+    # DraftTerminal before this matrix is consulted.
+}
+
+
+# Substantive content fields (AC #14). Mutating any of these on
+# a ``status='ready'`` draft requires explicit demotion to
+# ``status='shaping'`` in the same call.
+_SUBSTANTIVE_CONTENT_FIELDS = frozenset({
+    "partial_spec_json", "display_name", "aliases",
+    "intent_summary", "resolution_notes",
+})
+
+
+# Sentinel used by update_draft to distinguish "don't change this
+# field" from "set to None". We use a unique class-typed singleton
+# so type checkers can keep the union shapes honest.
+class _UnsetT:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "_UNSET"
+
+
+_UNSET = _UnsetT()
 
 
 # Event emitter signature: (event_type, payload, *, instance_id) →
@@ -189,6 +236,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _maybe_await(value: Any) -> Any:
+    """Await ``value`` if it's awaitable; otherwise return as-is.
+    Lets ``mark_committed`` accept both sync and async
+    ``workflow_registry.exists`` implementations."""
+    if asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -303,6 +359,398 @@ class DraftRegistry:
         ) as cur:
             row = await cur.fetchone()
         return WorkflowDraft.from_row(row) if row else None
+
+    # -- update_draft (C2) --------------------------------------------
+
+    async def update_draft(
+        self,
+        *,
+        instance_id: str,
+        draft_id: str,
+        expected_version: int,
+        home_space_id: "str | None | _UnsetT" = _UNSET,
+        display_name: "str | None | _UnsetT" = _UNSET,
+        aliases: "list[str] | _UnsetT" = _UNSET,
+        intent_summary: "str | _UnsetT" = _UNSET,
+        partial_spec_json: "dict | _UnsetT" = _UNSET,
+        resolution_notes: "str | None | _UnsetT" = _UNSET,
+        status: "str | _UnsetT" = _UNSET,
+    ) -> WorkflowDraft:
+        """Compare-and-swap mutation with envelope validation,
+        state-machine enforcement, ready-state demotion guard,
+        alias collision check, and event emission.
+
+        See spec section "DraftRegistry API" for the full
+        contract; the inline comments below trace the validation
+        order and lock the spec invariants in place.
+        """
+        if self._db is None:
+            raise RuntimeError("DraftRegistry not started")
+        async with self._lock:
+            current = await self.get_draft(
+                instance_id=instance_id, draft_id=draft_id,
+            )
+            if current is None:
+                raise DraftNotFound(
+                    f"draft_id {draft_id!r} not found in instance "
+                    f"{instance_id!r}"
+                )
+            if current.status in TERMINAL_STATUSES:
+                raise DraftTerminal(
+                    f"draft {draft_id!r} is in terminal status "
+                    f"{current.status!r}; mutations forbidden"
+                )
+            if current.version != expected_version:
+                raise DraftConcurrentModification(
+                    f"expected version {expected_version}, "
+                    f"current is {current.version}"
+                )
+
+            # Status transition enforcement (AC #4, #6).
+            if not isinstance(status, _UnsetT):
+                if status not in VALID_DRAFT_STATUSES:
+                    raise InvalidDraftTransition(
+                        f"unknown status {status!r}"
+                    )
+                # mark_committed is the only path to committed (AC #6).
+                if status == "committed":
+                    raise InvalidDraftTransition(
+                        "status='committed' must be set via "
+                        "mark_committed, not update_draft"
+                    )
+                # abandon_draft is the only path to abandoned.
+                if status == "abandoned":
+                    raise InvalidDraftTransition(
+                        "status='abandoned' must be set via "
+                        "abandon_draft, not update_draft"
+                    )
+                allowed = _ALLOWED_TRANSITIONS.get(
+                    current.status, frozenset(),
+                )
+                if status not in allowed:
+                    raise InvalidDraftTransition(
+                        f"transition {current.status!r} → {status!r} "
+                        f"not in allowed set {sorted(allowed)}"
+                    )
+
+            # Ready-state demotion guard (AC #14). Substantive
+            # content fields per spec; non-substantive
+            # (home_space_id, status alone) doesn't trigger.
+            substantive_mutation = (
+                not isinstance(display_name, _UnsetT)
+                or not isinstance(aliases, _UnsetT)
+                or not isinstance(intent_summary, _UnsetT)
+                or not isinstance(partial_spec_json, _UnsetT)
+                or not isinstance(resolution_notes, _UnsetT)
+            )
+            if (
+                current.status == "ready"
+                and substantive_mutation
+                and (isinstance(status, _UnsetT) or status != "shaping")
+            ):
+                raise ReadyStateMutationRequiresDemotion(
+                    f"draft {draft_id!r} is ready; substantive content "
+                    f"mutations require explicit status='shaping' "
+                    f"demotion in the same call"
+                )
+
+            # Envelope validation on partial_spec_json (AC #8, #9).
+            if not isinstance(partial_spec_json, _UnsetT):
+                validate_envelope(partial_spec_json)
+
+            # Alias collision check (AC #15) — distinct typed error.
+            if not isinstance(aliases, _UnsetT):
+                if not isinstance(aliases, list):
+                    raise DraftEnvelopeInvalid(
+                        f"aliases must be a list, got "
+                        f"{type(aliases).__name__}"
+                    )
+                conflict = await self._find_alias_conflict(
+                    instance_id=instance_id,
+                    proposed_aliases=aliases,
+                    self_draft_id=draft_id,
+                )
+                if conflict is not None:
+                    alias, owner_id = conflict
+                    raise DraftAliasCollision(
+                        f"alias {alias!r} already claimed by active "
+                        f"draft {owner_id!r} in instance {instance_id!r}"
+                    )
+
+            # Apply field updates to a working copy.
+            new_status = (
+                current.status if isinstance(status, _UnsetT)
+                else status
+            )
+            new_home_space_id = (
+                current.home_space_id
+                if isinstance(home_space_id, _UnsetT)
+                else home_space_id
+            )
+            new_display_name = (
+                current.display_name
+                if isinstance(display_name, _UnsetT)
+                else display_name
+            )
+            new_aliases = (
+                current.aliases
+                if isinstance(aliases, _UnsetT)
+                else list(aliases)
+            )
+            new_intent_summary = (
+                current.intent_summary
+                if isinstance(intent_summary, _UnsetT)
+                else intent_summary
+            )
+            new_partial_spec = (
+                current.partial_spec_json
+                if isinstance(partial_spec_json, _UnsetT)
+                else partial_spec_json
+            )
+            new_resolution_notes = (
+                current.resolution_notes
+                if isinstance(resolution_notes, _UnsetT)
+                else resolution_notes
+            )
+            now = _now()
+            new_version = current.version + 1
+
+            await self._db.execute(
+                "UPDATE workflow_drafts SET"
+                " home_space_id = ?, status = ?, display_name = ?,"
+                " aliases = ?, intent_summary = ?,"
+                " partial_spec_json = ?, resolution_notes = ?,"
+                " version = ?, updated_at = ?, last_touched_at = ? "
+                "WHERE instance_id = ? AND draft_id = ?",
+                (
+                    new_home_space_id, new_status, new_display_name,
+                    json.dumps(new_aliases), new_intent_summary,
+                    json.dumps(new_partial_spec), new_resolution_notes,
+                    new_version, now, now,
+                    instance_id, draft_id,
+                ),
+            )
+
+        # Read back the persisted row.
+        updated = await self.get_draft(
+            instance_id=instance_id, draft_id=draft_id,
+        )
+        # Event emission. Order matters only for downstream
+        # observers — we emit status_changed first, then the more
+        # specific home_space_changed if applicable.
+        if updated.status != current.status:
+            await self._emit("draft.status_changed", {
+                "draft_id": draft_id,
+                "instance_id": instance_id,
+                "old_status": current.status,
+                "new_status": updated.status,
+                "version": updated.version,
+                "changed_at": updated.updated_at,
+            }, instance_id=instance_id)
+        if updated.home_space_id != current.home_space_id:
+            await self._emit("draft.home_space_changed", {
+                "draft_id": draft_id,
+                "instance_id": instance_id,
+                "old_home_space_id": current.home_space_id,
+                "new_home_space_id": updated.home_space_id,
+                "changed_at": updated.updated_at,
+            }, instance_id=instance_id)
+        return updated
+
+    # -- mark_committed (C2) ------------------------------------------
+
+    async def mark_committed(
+        self,
+        *,
+        instance_id: str,
+        draft_id: str,
+        expected_version: int,
+        committed_workflow_id: str,
+        workflow_registry: Any | None = None,
+    ) -> WorkflowDraft:
+        """Sole path from ``status='ready'`` to ``status='committed'``
+        (AC #6). CAS on version. Optional runtime existence check
+        via the passed ``workflow_registry`` (AC #12). Emits
+        ``draft.status_changed`` AND ``draft.committed`` after
+        persistence (AC #11).
+        """
+        if self._db is None:
+            raise RuntimeError("DraftRegistry not started")
+        if not committed_workflow_id:
+            raise ValueError("committed_workflow_id is required")
+        async with self._lock:
+            current = await self.get_draft(
+                instance_id=instance_id, draft_id=draft_id,
+            )
+            if current is None:
+                raise DraftNotFound(
+                    f"draft_id {draft_id!r} not found in instance "
+                    f"{instance_id!r}"
+                )
+            if current.status in TERMINAL_STATUSES:
+                raise DraftTerminal(
+                    f"draft {draft_id!r} is in terminal status "
+                    f"{current.status!r}"
+                )
+            if current.version != expected_version:
+                raise DraftConcurrentModification(
+                    f"expected version {expected_version}, "
+                    f"current is {current.version}"
+                )
+            # AC #13: mark_committed requires status='ready'.
+            if current.status != "ready":
+                raise InvalidDraftTransition(
+                    f"mark_committed requires status='ready'; "
+                    f"draft {draft_id!r} is in status "
+                    f"{current.status!r}"
+                )
+            # AC #12: optional runtime existence check.
+            if workflow_registry is not None:
+                exists = await _maybe_await(workflow_registry.exists(
+                    committed_workflow_id, instance_id,
+                ))
+                if not exists:
+                    raise WorkflowReferenceMissing(
+                        f"committed_workflow_id "
+                        f"{committed_workflow_id!r} not found in "
+                        f"workflow_registry for instance "
+                        f"{instance_id!r}"
+                    )
+            now = _now()
+            new_version = current.version + 1
+            await self._db.execute(
+                "UPDATE workflow_drafts SET status = 'committed', "
+                "committed_workflow_id = ?, version = ?, "
+                "updated_at = ?, last_touched_at = ? "
+                "WHERE instance_id = ? AND draft_id = ?",
+                (
+                    committed_workflow_id, new_version, now, now,
+                    instance_id, draft_id,
+                ),
+            )
+        updated = await self.get_draft(
+            instance_id=instance_id, draft_id=draft_id,
+        )
+        # AC #11: emit BOTH status_changed AND committed.
+        await self._emit("draft.status_changed", {
+            "draft_id": draft_id,
+            "instance_id": instance_id,
+            "old_status": current.status,
+            "new_status": "committed",
+            "version": updated.version,
+            "changed_at": updated.updated_at,
+        }, instance_id=instance_id)
+        await self._emit("draft.committed", {
+            "draft_id": draft_id,
+            "instance_id": instance_id,
+            "committed_workflow_id": committed_workflow_id,
+            "version": updated.version,
+            "committed_at": updated.updated_at,
+        }, instance_id=instance_id)
+        return updated
+
+    # -- abandon_draft (C2) -------------------------------------------
+
+    async def abandon_draft(
+        self,
+        *,
+        instance_id: str,
+        draft_id: str,
+        expected_version: int,
+    ) -> WorkflowDraft:
+        """Transition any non-terminal status to ``abandoned``.
+        Row preserved for audit (no destructive deletion). CAS on
+        version. Emits ``draft.status_changed`` AND
+        ``draft.abandoned`` after persistence (AC #11)."""
+        if self._db is None:
+            raise RuntimeError("DraftRegistry not started")
+        async with self._lock:
+            current = await self.get_draft(
+                instance_id=instance_id, draft_id=draft_id,
+            )
+            if current is None:
+                raise DraftNotFound(
+                    f"draft_id {draft_id!r} not found in instance "
+                    f"{instance_id!r}"
+                )
+            if current.status in TERMINAL_STATUSES:
+                raise DraftTerminal(
+                    f"draft {draft_id!r} is in terminal status "
+                    f"{current.status!r}"
+                )
+            if current.version != expected_version:
+                raise DraftConcurrentModification(
+                    f"expected version {expected_version}, "
+                    f"current is {current.version}"
+                )
+            now = _now()
+            new_version = current.version + 1
+            await self._db.execute(
+                "UPDATE workflow_drafts SET status = 'abandoned', "
+                "version = ?, updated_at = ?, last_touched_at = ? "
+                "WHERE instance_id = ? AND draft_id = ?",
+                (new_version, now, now, instance_id, draft_id),
+            )
+        updated = await self.get_draft(
+            instance_id=instance_id, draft_id=draft_id,
+        )
+        await self._emit("draft.status_changed", {
+            "draft_id": draft_id,
+            "instance_id": instance_id,
+            "old_status": current.status,
+            "new_status": "abandoned",
+            "version": updated.version,
+            "changed_at": updated.updated_at,
+        }, instance_id=instance_id)
+        await self._emit("draft.abandoned", {
+            "draft_id": draft_id,
+            "instance_id": instance_id,
+            "prior_status": current.status,
+            "version": updated.version,
+            "abandoned_at": updated.updated_at,
+        }, instance_id=instance_id)
+        return updated
+
+    # -- alias-collision helper ----------------------------------------
+
+    async def _find_alias_conflict(
+        self,
+        *,
+        instance_id: str,
+        proposed_aliases: list[str],
+        self_draft_id: str,
+    ) -> tuple[str, str] | None:
+        """Walk active (non-terminal) drafts in this instance;
+        return (offending_alias, conflicting_draft_id) on first
+        overlap. Aliases compared case-insensitively, matching
+        DAR's pattern."""
+        if self._db is None or not proposed_aliases:
+            return None
+        proposed_lower_to_authored = {
+            a.lower(): a for a in proposed_aliases
+        }
+        proposed_lower = set(proposed_lower_to_authored)
+        async with self._db.execute(
+            "SELECT draft_id, aliases FROM workflow_drafts "
+            "WHERE instance_id = ? AND status IN "
+            "('shaping','blocked','ready')",
+            (instance_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        for row in rows:
+            if row["draft_id"] == self_draft_id:
+                continue
+            try:
+                claimed_raw = json.loads(row["aliases"]) or []
+            except Exception:
+                claimed_raw = []
+            claimed_lower = {a.lower() for a in claimed_raw}
+            overlap = proposed_lower & claimed_lower
+            if overlap:
+                offending_lower = next(iter(overlap))
+                authored = proposed_lower_to_authored[offending_lower]
+                return (authored, row["draft_id"])
+        return None
 
     # -- event emission helper ----------------------------------------
 
