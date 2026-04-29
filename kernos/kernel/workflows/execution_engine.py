@@ -47,8 +47,12 @@ Audit events emitted to event_stream:
   - ``workflow.execution_started``
   - ``workflow.execution_step_succeeded``
   - ``workflow.execution_step_failed``
-  - ``workflow.execution_paused`` (entered approval gate)
+  - ``workflow.execution_paused_at_gate`` (entered approval gate;
+    payload carries gate_nonce for engine-bound match logic per
+    WLP-GATE-SCOPING C1)
   - ``workflow.execution_resumed`` (gate satisfied)
+  - ``workflow.gate_auto_proceeded`` (timeout with default value)
+  - ``workflow.owner_escalation`` (timeout with escalate behavior)
   - ``workflow.execution_terminated``
 
 All carry the execution's ``correlation_id`` so audit chains compose
