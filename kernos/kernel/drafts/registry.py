@@ -6,6 +6,27 @@ WDP C1: schema + ``WorkflowDraft`` dataclass + ``create_draft`` +
 envelope validation + concurrency. C3 adds ``list_drafts`` +
 ``cleanup_abandoned_older_than`` + the live sweep.
 
+**Future-composition requirement** (architect-stated invariant
+for downstream specs): WorkflowDraft persistence must remain
+substrate-neutral while carrying enough lightweight context for
+future surfaces to attach intelligently. Drafts MUST NOT depend
+directly on Canvas, tools, domains, agents, or any specific
+future subsystem. Instead, they expose stable identity
+(``draft_id``), lifecycle state (``status``, the state machine),
+provenance (``source_thread_id``, ``created_at``,
+``last_touched_at``), mutable ``home_space_id`` for "most-relevant-
+to" semantics, human-readable intent/resolution notes
+(``intent_summary``, ``resolution_notes``), and factual lifecycle
+events (the five ``draft.*`` event types) so other surfaces can
+project drafts into their own world. Canvas can render or
+annotate pending routines; tools can validate capabilities;
+domains can provide briefs; future systems can attach by
+reference. The elegant shape is not WDP knowing every surface —
+it is WDP being a small, durable coordination object that other
+systems can discover, reference, and enrich without coupling.
+Reviewers of any WDP follow-on spec should reject changes that
+introduce direct dependencies on adjacent subsystems.
+
 Design notes:
 
 * **Composite primary key ``(instance_id, draft_id)``** — DAR's
@@ -710,6 +731,95 @@ class DraftRegistry:
             "abandoned_at": updated.updated_at,
         }, instance_id=instance_id)
         return updated
+
+    # -- list_drafts (C3) ----------------------------------------------
+
+    async def list_drafts(
+        self,
+        *,
+        instance_id: str,
+        status: str | None = None,
+        home_space_id: str | None = None,
+        include_terminal: bool = False,
+    ) -> list[WorkflowDraft]:
+        """Return drafts in an instance, ordered by ``last_touched_at``
+        descending (most recently touched first — useful for surfacing
+        what the user was working on most recently).
+
+        Default: excludes ``committed`` AND ``abandoned``
+        (AC #16). ``include_terminal=True`` or an explicit ``status``
+        filter surfaces them. ``home_space_id`` narrows further.
+        """
+        if self._db is None:
+            return []
+        clauses = ["instance_id = ?"]
+        args: list = [instance_id]
+        if status is not None:
+            if status not in VALID_DRAFT_STATUSES:
+                raise ValueError(
+                    f"unknown status filter {status!r}; "
+                    f"valid: {sorted(VALID_DRAFT_STATUSES)}"
+                )
+            clauses.append("status = ?")
+            args.append(status)
+        elif not include_terminal:
+            clauses.append(
+                "status NOT IN ('committed', 'abandoned')"
+            )
+        if home_space_id is not None:
+            clauses.append("home_space_id = ?")
+            args.append(home_space_id)
+        query = (
+            "SELECT * FROM workflow_drafts WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY last_touched_at DESC"
+        )
+        async with self._db.execute(query, args) as cur:
+            rows = await cur.fetchall()
+        return [WorkflowDraft.from_row(r) for r in rows]
+
+    # -- cleanup (C3) --------------------------------------------------
+
+    async def cleanup_abandoned_older_than(
+        self,
+        *,
+        instance_id: str,
+        days: int,
+    ) -> int:
+        """Delete abandoned rows older than ``days`` in this instance.
+
+        Pin (AC #17): only ``abandoned`` rows are eligible. Active /
+        blocked / ready / committed rows are NEVER touched, regardless
+        of their ``updated_at``. Cross-instance: scoped to the calling
+        ``instance_id`` via the WHERE clause; instance B's abandoned
+        rows are invisible to a cleanup call scoped to instance A.
+
+        Returns the count of rows deleted.
+
+        Operator-explicit, time-bounded — this is the one method on
+        WDP's surface that can remove rows. There is no scheduler;
+        callers pick when to run it. The kernel's standing
+        no-destructive-deletions principle is satisfied because the
+        deletion is opt-in retention policy, not substrate behaviour.
+        """
+        if self._db is None:
+            return 0
+        if days < 0:
+            raise ValueError("days must be non-negative")
+        from datetime import timedelta
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+        async with self._lock:
+            async with self._db.execute(
+                "DELETE FROM workflow_drafts "
+                "WHERE instance_id = ? "
+                "AND status = 'abandoned' "
+                "AND updated_at < ?",
+                (instance_id, cutoff),
+            ) as cur:
+                deleted = cur.rowcount
+        return int(deleted) if deleted is not None else 0
 
     # -- alias-collision helper ----------------------------------------
 
