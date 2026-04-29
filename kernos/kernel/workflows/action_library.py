@@ -496,7 +496,19 @@ class AppendToLedgerAction:
             )
         except Exception:
             return False
-        return last is not None and last == params["entry"]
+        if last is None:
+            return False
+        # Codex doc-batch review: production ledger writers
+        # (e.g. WorkflowLedger) inject a `logged_at` timestamp into
+        # every appended entry, so a raw equality check against the
+        # caller's original entry would always fail in production.
+        # Verify by checking that every key/value the caller wrote is
+        # present in the read-back record — extra writer-injected
+        # fields (logged_at, future audit metadata) don't fail the
+        # check.
+        if not isinstance(last, dict) or not isinstance(params["entry"], dict):
+            return last == params["entry"]
+        return all(last.get(k) == v for k, v in params["entry"].items())
 
 
 # ---------------------------------------------------------------------------

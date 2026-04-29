@@ -290,6 +290,38 @@ class TestAppendToLedger:
             "workflow_id": "wf-1", "entry": entry,
         }, result) is True
 
+    async def test_verify_tolerates_writer_injected_logged_at(self):
+        """Production WorkflowLedger writer injects `logged_at` into
+        every entry on the way to disk. The verifier MUST tolerate
+        extra writer-injected fields and check only that the caller's
+        entry is present in the read-back record. Codex doc-batch
+        review caught the equality-check bug; this pin prevents
+        regression."""
+        ledger: dict = {}
+
+        async def append(*, workflow_id, entry, instance_id):
+            # Mimic WorkflowLedger by injecting logged_at on the way in.
+            stored = {**entry, "logged_at": "2026-04-30T08:00:00+00:00"}
+            ledger.setdefault((instance_id, workflow_id), []).append(stored)
+
+        async def read_last(*, workflow_id, instance_id):
+            entries = ledger.get((instance_id, workflow_id))
+            return entries[-1] if entries else None
+
+        verb = AppendToLedgerAction(
+            ledger_append_fn=append, ledger_read_last_fn=read_last,
+        )
+        entry = {"step": 1, "synopsis": "did the thing"}
+        result = await verb.execute(_Ctx(), {
+            "workflow_id": "wf-prod", "entry": entry,
+        })
+        assert result.success
+        # Verifier must succeed even though the read-back entry has
+        # an extra `logged_at` field the caller didn't write.
+        assert await verb.verify(_Ctx(), {
+            "workflow_id": "wf-prod", "entry": entry,
+        }, result) is True
+
 
 # ===========================================================================
 # ActionLibrary registry

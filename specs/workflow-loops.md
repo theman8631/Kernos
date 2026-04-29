@@ -63,29 +63,36 @@ Triggers persist in SQLite alongside the events table. All trigger lookups filte
 | field | notes |
 |---|---|
 | `workflow_id` | UUIDv4 |
+| `instance_id` | multi-tenancy key — the install this workflow lives in |
 | `name`, `description`, `owner`, `version` | human-readable metadata |
 | `action_sequence` | ordered list of action descriptors |
 | `approval_gates` | top-level list of named `ApprovalGate` descriptors |
 | `bounds` | iteration count / wall time / cost / composite — declared explicitly |
 | `verifier` | descriptor naming the intent-satisfaction check |
+| `trigger` | embedded `TriggerDescriptor` (event_type + predicate + optional filters) — registered atomically alongside the Workflow row |
+| `metadata` | free-form dict for descriptor-author notes |
+| `instance_local` | when `true`, opts out of the sharing-constraint check |
 | `created_at`, `status` | lifecycle |
 
-Each action descriptor names an action verb, parameters, optional per-action expectation, continuation rules (on failure: abort / continue / retry up to N), and an optional `gate_ref` referencing a named approval gate.
+Each action descriptor names an action verb, parameters, optional per-action expectation, continuation rules (`on_failure`: abort / continue / retry up to N), an optional `gate_ref` referencing a named approval gate, and a `resume_safe` flag (default `false`) controlling restart-resume behavior.
 
-A workflow without declared bounds fails registration loudly. A workflow without a declared verifier fails registration loudly. These are structural invariants, not advisory — the primitive refuses to register a workflow that can run unbounded or claim success without checking.
+A workflow without declared bounds fails registration loudly. A workflow without a declared verifier fails registration loudly. These are structural invariants, not advisory — the primitive refuses to register a workflow that can run unbounded or claim success without checking. (Of the bounds, only `wall_time_seconds` is enforced at runtime today; `iteration_count` and `cost_usd` are registration-required metadata that future runtime tracking will honor.)
 
 ### Portable descriptor format
 
-Workflows author as files: `.workflow.yaml` (preferred), `.workflow.json`, or `.workflow.md` (Markdown with YAML frontmatter for human-readable workflows). The file shape matches the `Workflow` dataclass exactly. `register_workflow(file_path)` parses, validates against the schema, compiles the trigger predicate, validates that all `gate_ref` references resolve to declared gates, and persists `Workflow` + `Trigger` records **atomically via a single SQLite transaction**. Any failure at any phase (parse, schema validation, predicate compilation, gate-reference validation, persistence) leaves no partial state.
+Workflows author as files: `.workflow.yaml` (preferred), `.workflow.json`, or `.workflow.md` (Markdown with YAML frontmatter for human-readable workflows). The file shape matches the `Workflow` dataclass. `register_workflow_from_file(file_path)` parses, validates against the schema, compiles the trigger predicate, validates that all `gate_ref` references resolve to declared gates, and persists `Workflow` + `Trigger` records **atomically via a single SQLite transaction**. Any failure at any phase (parse, schema validation, predicate compilation, gate-reference validation, persistence) leaves no partial state.
+
+Predicates ship in two forms: canonical AST (a JSON object with the documented operator vocabulary) and an expression-string DSL (e.g. `event.payload.kind == "report"`). The descriptor parser auto-detects which form a string predicate is and compiles DSL to AST through `trigger_compiler.compile_dsl`. English-form predicates are an opt-in surface: an operator who wires an `english_compiler` callable into `compile_predicate_source` can author triggers in plain English, but `register_workflow_from_file` does NOT invoke an LLM by default — registration stays deterministic and offline-safe.
 
 Workflows referencing instance-specific values must either parameterize them (`{installer.member_id}`) or mark themselves `instance_local: true`. The registration compiler enforces this against an explicit allowlist: `member_id`, `instance_id`, `space_id`, `canvas_id`, `agent_id` / AgentInbox provider bindings, `channel_id`, `service_id` / credential references. Unparameterized matches without the local-only flag fail registration loudly with field-level error messages identifying the offending path.
 
-The format is what makes workflows authorable / shareable / installable like skills. Operators write them by hand, generate them from English descriptions via a one-time LLM compile at registration, or download them from a future community library.
+The format is what makes workflows authorable / shareable / installable like skills. Operators write them by hand, write them in DSL form for the registration pipeline to compile, or — once an English compiler is wired up — generate them from English descriptions.
 
 A minimal `.workflow.yaml` looks like this:
 
 ```yaml
 workflow_id: cc-batch-arrival-notice
+instance_id: "{installer.instance_id}"   # filled in at registration time
 name: CC batch report arrival notice
 owner: founder
 version: 1.0
@@ -124,11 +131,11 @@ Seven bounded verbs split into two classes by ACTION-LOOP-PRIMITIVE compliance:
 
 | verb | wraps | verifier |
 |---|---|---|
-| `notify_user(channel, message, urgency)` | presence/adapter surface | message delivered + persisted in conversation log |
-| `write_canvas(canvas_id, content, append_or_replace)` | canvas write surface | read-after-write canvas state |
-| `route_to_agent(agent_id, payload)` | AgentInbox Protocol | payload visible at inbox read API |
-| `call_tool(tool_id, args)` | tool dispatch primitive | per the tool's declared verifier |
-| `post_to_service(service_id, payload)` | workshop primitive | per the service's declared verifier |
+| `notify_user(channel, message, urgency)` | presence/adapter surface | wrapped delivery returned a truthy receipt; conversation-log persistence is delivery-side, not re-checked here |
+| `write_canvas(canvas_id, content, append_or_replace)` | canvas write surface | read-after-write: replace → exact match; append → content visible in current state |
+| `route_to_agent(agent_id, payload)` | AgentInbox Protocol | payload's `persisted_id` is visible at inbox read API |
+| `call_tool(tool_id, args)` | tool dispatch primitive | per the tool's declared verifier when one is wired in via `tool_verifier_fn`; otherwise falls back to the dispatch's success bit |
+| `post_to_service(service_id, payload)` | workshop primitive | per the service's declared verifier when wired via `service_verifier_fn`; otherwise success-bit fallback |
 
 **Direct-effect verbs** are NOT action-loop instances. Per ACTION-LOOP-PRIMITIVE's anti-goal ("do not use the action loop as an excuse to add LLM calls to deterministic operations"), these have structural assertions only:
 
@@ -184,7 +191,7 @@ Either failing means no wake. The author cannot weaken nonce enforcement by writ
 
 `auto_proceed_with_default` is the timeout behavior that substitutes a declared default outcome if no approval arrives. It must not allow timeout to silently bypass real human approval for downstream actions that cannot be undone. The constraint is structural: a gate with `auto_proceed_with_default` MUST NOT permit timeout-driven continuation into any subsequent action that is irreversible / world-effect.
 
-Action library verbs are classified at registration time. `notify_user`, `write_canvas` with `replace` on non-versioned canvases, `route_to_agent` to external destinations, `post_to_service`, and `call_tool` for tools the tool registry marks irreversible are **irreversible**. `mark_state` (versioned), `append_to_ledger` (append-only), `write_canvas` with `append`, and `call_tool` for tools marked reversible are **reversible**.
+Action library verbs are classified at registration time. `notify_user`, `write_canvas` with `append_or_replace == "replace"`, `route_to_agent`, `post_to_service`, and `call_tool` are classified **irreversible** (v1 treats every tool dispatch as irreversible by default — per-tool reversibility metadata lands when the tool registry exposes it). `mark_state` (versioned), `append_to_ledger` (append-only), and `write_canvas` with `append_or_replace == "append"` are **reversible**.
 
 Registration walks the action sequence; for every gate with `auto_proceed_with_default`, the validator inspects all action descriptors AFTER the gated action up to the next gate or workflow end. Any irreversible action in that downstream slice fails registration loudly with field-level error identifying the gate, the gated action, and the offending downstream action.
 
@@ -249,16 +256,16 @@ Cohorts may observe workflow state during turns by querying `workflow_registry` 
 
 | module | role |
 |---|---|
-| `kernos/kernel/workflows/predicates.py` | Predicate AST, expression-string DSL compiler |
+| `kernos/kernel/workflows/predicates.py` | Predicate AST schema + deterministic evaluator (no I/O, no LLM) |
+| `kernos/kernel/workflows/trigger_compiler.py` | Expression-string DSL → canonical AST compiler; optional English compiler hook |
 | `kernos/kernel/workflows/trigger_registry.py` | Trigger persistence, post-flush hook attachment, match evaluation |
-| `kernos/kernel/workflows/workflow_registry.py` | Workflow persistence, descriptor validation |
-| `kernos/kernel/workflows/descriptor_parser.py` | YAML / JSON / Markdown frontmatter loaders, schema validation |
-| `kernos/kernel/workflows/action_classification.py` | Reversibility classification per verb / per tool |
+| `kernos/kernel/workflows/workflow_registry.py` | Workflow persistence, descriptor validation, atomic Workflow + Trigger registration |
+| `kernos/kernel/workflows/descriptor_parser.py` | YAML / JSON / Markdown-frontmatter loaders + sharing-constraint enforcement |
+| `kernos/kernel/workflows/action_classification.py` | Per-verb reversibility classification powering safe-deny |
 | `kernos/kernel/workflows/action_library.py` | Seven bounded verbs |
-| `kernos/kernel/workflows/agent_inbox.py` | AgentInbox Protocol + concretes |
-| `kernos/kernel/workflows/execution_engine.py` | Background queue drain, action sequence run, gate pause/resume, restart-resume |
-| `kernos/kernel/workflows/ledger.py` | Append-only per-workflow markdown ledger |
-| `kernos/kernel/workflows/trigger_compiler.py` | One-time English-to-AST compile at registration |
+| `kernos/kernel/workflows/agent_inbox.py` | AgentInbox Protocol + InMemory / Notion concretes |
+| `kernos/kernel/workflows/execution_engine.py` | Background queue drain, action-sequence run, gate pause/resume, gate_nonce binding, restart-resume |
+| `kernos/kernel/workflows/ledger.py` | Append-only per-workflow markdown ledger with cross-instance path isolation |
 | `kernos/kernel/webhooks/receiver.py` | External webhook ingestion → `external.webhook` events |
 
 ## See also
