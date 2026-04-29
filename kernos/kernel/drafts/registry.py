@@ -261,7 +261,8 @@ async def _maybe_await(value: Any) -> Any:
     """Await ``value`` if it's awaitable; otherwise return as-is.
     Lets ``mark_committed`` accept both sync and async
     ``workflow_registry.exists`` implementations."""
-    if asyncio.iscoroutine(value):
+    import inspect as _inspect
+    if _inspect.isawaitable(value):
         return await value
     return value
 
@@ -457,12 +458,23 @@ class DraftRegistry:
             # Ready-state demotion guard (AC #14). Substantive
             # content fields per spec; non-substantive
             # (home_space_id, status alone) doesn't trigger.
+            #
+            # Codex consolidated review: detect substantive
+            # mutations by VALUE-CHANGE, not parameter presence.
+            # A no-op set of display_name to its current value
+            # should not demand demotion. Compare each provided
+            # field to the row's current value; only count it as
+            # mutation when they differ.
+            def _changes(name: str, provided: Any) -> bool:
+                if isinstance(provided, _UnsetT):
+                    return False
+                return getattr(current, name) != provided
             substantive_mutation = (
-                not isinstance(display_name, _UnsetT)
-                or not isinstance(aliases, _UnsetT)
-                or not isinstance(intent_summary, _UnsetT)
-                or not isinstance(partial_spec_json, _UnsetT)
-                or not isinstance(resolution_notes, _UnsetT)
+                _changes("display_name", display_name)
+                or _changes("aliases", aliases)
+                or _changes("intent_summary", intent_summary)
+                or _changes("partial_spec_json", partial_spec_json)
+                or _changes("resolution_notes", resolution_notes)
             )
             if (
                 current.status == "ready"
@@ -536,21 +548,36 @@ class DraftRegistry:
             now = _now()
             new_version = current.version + 1
 
-            await self._db.execute(
+            # Codex consolidated review (HIGH): include version in
+            # the WHERE clause so the CAS happens at the SQL layer,
+            # not just in Python. Without this, a writer on a
+            # different connection could slip a write between our
+            # read and update; the in-process self._lock only
+            # serialises this DraftRegistry instance. After the
+            # UPDATE we check rowcount; if 0, another writer
+            # advanced the version after our read — re-raise as
+            # DraftConcurrentModification.
+            async with self._db.execute(
                 "UPDATE workflow_drafts SET"
                 " home_space_id = ?, status = ?, display_name = ?,"
                 " aliases = ?, intent_summary = ?,"
                 " partial_spec_json = ?, resolution_notes = ?,"
                 " version = ?, updated_at = ?, last_touched_at = ? "
-                "WHERE instance_id = ? AND draft_id = ?",
+                "WHERE instance_id = ? AND draft_id = ? "
+                "AND version = ?",
                 (
                     new_home_space_id, new_status, new_display_name,
                     json.dumps(new_aliases), new_intent_summary,
                     json.dumps(new_partial_spec), new_resolution_notes,
                     new_version, now, now,
-                    instance_id, draft_id,
+                    instance_id, draft_id, expected_version,
                 ),
-            )
+            ) as cur:
+                if cur.rowcount == 0:
+                    raise DraftConcurrentModification(
+                        f"version advanced concurrently for draft "
+                        f"{draft_id!r} (expected {expected_version})"
+                    )
 
         # Read back the persisted row.
         updated = await self.get_draft(
@@ -639,16 +666,23 @@ class DraftRegistry:
                     )
             now = _now()
             new_version = current.version + 1
-            await self._db.execute(
+            # Codex iteration: SQL-layer CAS on version.
+            async with self._db.execute(
                 "UPDATE workflow_drafts SET status = 'committed', "
                 "committed_workflow_id = ?, version = ?, "
                 "updated_at = ?, last_touched_at = ? "
-                "WHERE instance_id = ? AND draft_id = ?",
+                "WHERE instance_id = ? AND draft_id = ? "
+                "AND version = ?",
                 (
                     committed_workflow_id, new_version, now, now,
-                    instance_id, draft_id,
+                    instance_id, draft_id, expected_version,
                 ),
-            )
+            ) as cur:
+                if cur.rowcount == 0:
+                    raise DraftConcurrentModification(
+                        f"version advanced concurrently for draft "
+                        f"{draft_id!r} (expected {expected_version})"
+                    )
         updated = await self.get_draft(
             instance_id=instance_id, draft_id=draft_id,
         )
@@ -706,12 +740,20 @@ class DraftRegistry:
                 )
             now = _now()
             new_version = current.version + 1
-            await self._db.execute(
+            # Codex iteration: SQL-layer CAS on version.
+            async with self._db.execute(
                 "UPDATE workflow_drafts SET status = 'abandoned', "
                 "version = ?, updated_at = ?, last_touched_at = ? "
-                "WHERE instance_id = ? AND draft_id = ?",
-                (new_version, now, now, instance_id, draft_id),
-            )
+                "WHERE instance_id = ? AND draft_id = ? "
+                "AND version = ?",
+                (new_version, now, now, instance_id, draft_id,
+                 expected_version),
+            ) as cur:
+                if cur.rowcount == 0:
+                    raise DraftConcurrentModification(
+                        f"version advanced concurrently for draft "
+                        f"{draft_id!r} (expected {expected_version})"
+                    )
         updated = await self.get_draft(
             instance_id=instance_id, draft_id=draft_id,
         )
@@ -879,7 +921,12 @@ class DraftRegistry:
                 payload=payload,
                 instance_id=instance_id,
             )
-            if asyncio.iscoroutine(result):
+            # Codex consolidated review: the type contract is
+            # ``Awaitable[None] | None``. asyncio.iscoroutine only
+            # catches bare coroutines; Tasks / Futures / custom
+            # __await__ objects need inspect.isawaitable.
+            import inspect as _inspect
+            if _inspect.isawaitable(result):
                 await result
         except Exception as exc:
             logger.warning(

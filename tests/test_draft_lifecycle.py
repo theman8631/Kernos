@@ -284,6 +284,38 @@ class TestEnvelopeValidation:
                 partial_spec_json={"api_key": "value"},
             )
 
+    async def test_secret_key_word_boundary_does_not_misfire(self, registry):
+        """Codex MEDIUM (envelope tightening): the secret-key
+        match must be word-boundaried so benign keys that merely
+        contain a secret token as a SUBSTRING don't fire. E.g.
+        ``user_secret_question`` (a draft asking the user a
+        secret question) and ``passcode_label`` (a description
+        field) should pass; ``api_key`` and ``my_password`` still
+        reject."""
+        d = await registry.create_draft(
+            instance_id="inst_a", intent_summary="x",
+        )
+        # Benign keys that contain "secret" / "password" /
+        # "credential" as substrings but not as bounded tokens.
+        out = await registry.update_draft(
+            instance_id="inst_a", draft_id=d.draft_id,
+            expected_version=0,
+            partial_spec_json={
+                "user_secret_question": "What's your favorite color?",
+                "passcode_label": "Enter your code",
+                "credentialed_users": ["alice", "bob"],
+            },
+        )
+        assert out.partial_spec_json["user_secret_question"]
+        # Real secret-shaped keys still reject.
+        with pytest.raises(DraftEnvelopeInvalid, match="secret-shaped"):
+            await registry.update_draft(
+                instance_id="inst_a", draft_id=d.draft_id,
+                expected_version=out.version,
+                status="shaping",
+                partial_spec_json={"my_password": "..."},
+            )
+
     async def test_valid_payload_accepted(self, registry):
         d = await registry.create_draft(
             instance_id="inst_a", intent_summary="x",
@@ -739,6 +771,76 @@ class TestKeywordOnlyRemainingAPIs:
 # ===========================================================================
 # DraftNotFound on missing rows
 # ===========================================================================
+
+
+class TestCodexIterationPins:
+    """Pins added in C3.1 for Codex consolidated review findings."""
+
+    async def test_sql_cas_blocks_concurrent_writer_via_second_connection(
+        self, registry, tmp_path,
+    ):
+        """Codex HIGH: CAS must enforce at the SQL layer, not just
+        in Python. Simulate a concurrent writer on a second
+        connection by directly UPDATEing the row's version, then
+        attempting an update_draft with the now-stale
+        expected_version. The SQL-layer CAS must reject."""
+        d = await registry.create_draft(
+            instance_id="inst_a", intent_summary="x",
+        )
+        # Write directly against the same DB file via a second
+        # connection — bypasses self._lock.
+        import aiosqlite
+        async with aiosqlite.connect(
+            str(registry._db_path), isolation_level=None,
+        ) as side_conn:
+            await side_conn.execute(
+                "UPDATE workflow_drafts SET version = 99 "
+                "WHERE instance_id = ? AND draft_id = ?",
+                ("inst_a", d.draft_id),
+            )
+        # Now attempt update via the original registry with the
+        # stale expected_version=0. The SQL-WHERE-version=? gate
+        # MUST block.
+        with pytest.raises(DraftConcurrentModification):
+            await registry.update_draft(
+                instance_id="inst_a", draft_id=d.draft_id,
+                expected_version=0, status="blocked",
+            )
+
+    async def test_ready_demotion_skips_equal_value_no_op(self, registry):
+        """Codex MEDIUM (AC #14 over-fire): setting display_name
+        to its CURRENT value on a ready draft should NOT demand
+        demotion. Substantive-mutation detection now compares
+        against current instead of just checking parameter
+        presence."""
+        d = await registry.create_draft(
+            instance_id="inst_a", intent_summary="x",
+        )
+        # Set display_name to "the name".
+        out = await registry.update_draft(
+            instance_id="inst_a", draft_id=d.draft_id,
+            expected_version=0, display_name="the name",
+        )
+        # Promote to ready.
+        out = await registry.update_draft(
+            instance_id="inst_a", draft_id=d.draft_id,
+            expected_version=out.version, status="ready",
+        )
+        # Re-set display_name to "the name" (unchanged) — should
+        # NOT raise ReadyStateMutationRequiresDemotion.
+        out = await registry.update_draft(
+            instance_id="inst_a", draft_id=d.draft_id,
+            expected_version=out.version,
+            display_name="the name",
+        )
+        assert out.status == "ready"  # stayed ready
+        # But changing it to a different value DOES demand demotion.
+        with pytest.raises(ReadyStateMutationRequiresDemotion):
+            await registry.update_draft(
+                instance_id="inst_a", draft_id=d.draft_id,
+                expected_version=out.version,
+                display_name="different name",
+            )
 
 
 class TestNotFound:

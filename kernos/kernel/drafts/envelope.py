@@ -52,15 +52,69 @@ EXECUTABLE_VALUE_PATTERNS = (
 )
 
 
-# Secret-keyword patterns. Match against KEY names (case-insensitive
-# substring) and against VALUE strings (regex). When a value-side
-# match fires, the error message names the KEY only — never the
-# value (AC #9).
-SECRET_KEY_SUBSTRINGS = (
-    "secret", "password", "passwd", "api_key", "apikey",
-    "private_key", "privatekey", "auth_token", "access_token",
-    "bearer_token",
+# Secret-keyword patterns matched against KEY names. Codex
+# consolidated review caught that plain substring matching is too
+# aggressive — ``user_secret_question`` (a benign description
+# field) would fire on ``secret``. Python's ``\b`` doesn't help
+# here because ``_`` counts as a word char, so the word-boundary
+# regex still matches inside underscore-separated tokens.
+#
+# The fix: match by structural position. Three categories:
+#
+#   WHOLE_KEY_TOKENS — the entire (lowercased) key equals the
+#       token. Catches ``secret``, ``password``, ``api_key``.
+#   SUFFIX_TOKENS — the key ends with ``_<token>``. Catches
+#       ``my_password``, ``user_api_key``, ``deploy_secret``.
+#   PREFIX_TOKENS — the key starts with ``<token>_``. Catches
+#       ``password_hash``, ``api_key_id``, ``secret_value``.
+#
+# Benign passes: ``user_secret_question`` (secret is in the
+# middle), ``passcode_label`` (different word), ``api_keyboard``
+# (no underscore separator after api_key).
+
+WHOLE_KEY_TOKENS = frozenset({
+    "secret", "password", "passwd",
+    "api_key", "apikey",
+    "private_key", "privatekey",
+    "auth_token", "access_token", "bearer_token",
+    "credential", "credentials",
+})
+
+SUFFIX_TOKENS = (
+    "_secret", "_password", "_passwd",
+    "_api_key", "_apikey",
+    "_private_key", "_privatekey",
+    "_auth_token", "_access_token", "_bearer_token",
+    "_credential", "_credentials",
 )
+
+PREFIX_TOKENS = (
+    "secret_", "password_", "passwd_",
+    "api_key_", "apikey_",
+    "private_key_", "privatekey_",
+    "auth_token_", "access_token_", "bearer_token_",
+    "credential_", "credentials_",
+)
+
+
+# Backward-compat reference: callers that imported the old
+# tuple still get the canonical token list. Internal logic now
+# uses the three categories above.
+SECRET_KEY_SUBSTRINGS = tuple(WHOLE_KEY_TOKENS)
+
+
+def _key_matches_secret(key: str) -> bool:
+    """Return True if ``key`` looks like a credential-carrying
+    field name. False for benign descriptors that merely contain
+    secret words as substrings."""
+    lowered = key.lower()
+    if lowered in WHOLE_KEY_TOKENS:
+        return True
+    if any(lowered.endswith(s) for s in SUFFIX_TOKENS):
+        return True
+    if any(lowered.startswith(s) for s in PREFIX_TOKENS):
+        return True
+    return False
 
 SECRET_VALUE_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
@@ -135,20 +189,26 @@ def _check_key(key: str, *, path: str) -> None:
     """Reject keys that match executable-blob or secret-keyword
     patterns. For secret keys we want the key NAMED in the error
     so operators can find and rename it; that's distinct from
-    secret VALUES (which we never echo)."""
+    secret VALUES (which we never echo).
+
+    Secret-key matching uses word-boundary regexes (Codex
+    consolidated review iteration) so ``user_secret_question``
+    doesn't fire on ``secret`` substring. ``api_key``,
+    ``apiKey``, ``API_KEY``, ``my_password`` still match because
+    the token sits at a real boundary.
+    """
     lowered = key.lower()
     if lowered in EXECUTABLE_KEY_NAMES:
         raise DraftEnvelopeInvalid(
             f"partial_spec_json contains executable-blob key "
             f"{key!r} at {path}"
         )
-    for substring in SECRET_KEY_SUBSTRINGS:
-        if substring in lowered:
-            raise DraftEnvelopeInvalid(
-                f"partial_spec_json contains secret-shaped key "
-                f"{key!r} at {path} — drafts must not carry "
-                f"credential material"
-            )
+    if _key_matches_secret(key):
+        raise DraftEnvelopeInvalid(
+            f"partial_spec_json contains secret-shaped key "
+            f"{key!r} at {path} — drafts must not carry "
+            f"credential material"
+        )
 
 
 def _check_value_string(value: str, *, path: str) -> None:
@@ -178,7 +238,10 @@ __all__ = [
     "EXECUTABLE_KEY_NAMES",
     "EXECUTABLE_VALUE_PATTERNS",
     "MAX_PAYLOAD_BYTES",
+    "PREFIX_TOKENS",
     "SECRET_KEY_SUBSTRINGS",
     "SECRET_VALUE_PATTERNS",
+    "SUFFIX_TOKENS",
+    "WHOLE_KEY_TOKENS",
     "validate_envelope",
 ]
