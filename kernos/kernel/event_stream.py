@@ -155,9 +155,57 @@ RETENTION_DAYS = 90
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Event envelope (STS C0)
+#
+# The envelope is a substrate-set bundle of authority metadata that lives
+# alongside every event but is NEVER constructable from caller-supplied
+# payload. Three fields:
+#
+#   - source_module: identity of the emitter, set by the substrate from
+#     the registered EmitterRegistry entry. Caller cannot override.
+#   - emitted_at:    timestamp set by the substrate at emit time.
+#   - event_id:      uuid set by the substrate at emit time.
+#
+# Downstream consumers (notably STS's approval-binding gate) read source
+# authority from `event.envelope.source_module`, NEVER from the payload.
+# This is the trust boundary that makes approval source authority
+# structurally enforceable.
+#
+# Legacy callers using the module-level :func:`emit` continue to work;
+# their events get a default envelope with source_module="unregistered",
+# which downstream gates can treat as a fail-closed signal.
+# ---------------------------------------------------------------------------
+
+
+UNREGISTERED_SOURCE_MODULE = "unregistered"
+"""Sentinel envelope source for events emitted via the legacy module-level
+:func:`emit` path (no registered emitter). Source-authority gates MUST
+treat this as fail-closed."""
+
+
+@dataclass(frozen=True)
+class EventEnvelope:
+    """Substrate-set authority metadata bundled with every event.
+
+    Distinct from caller-supplied payload. ``source_module`` is set by
+    the substrate from the registered emitter's identity at emit time.
+    Caller cannot construct an envelope with an arbitrary ``source_module``
+    — registration through :class:`EmitterRegistry` is the only path."""
+
+    source_module: str
+    emitted_at: str
+    event_id: str
+
+
 @dataclass
 class Event:
-    """A single event on the stream."""
+    """A single event on the stream.
+
+    The fields ``event_id``, ``timestamp``, and ``source_module`` are
+    substrate-set; together they form :attr:`envelope`. ``payload`` is
+    caller-supplied. Source-authority gates MUST read ``envelope.source_module``,
+    never ``payload.source_module``."""
 
     event_id: str
     instance_id: str
@@ -167,12 +215,21 @@ class Event:
     member_id: str | None = None
     space_id: str | None = None
     correlation_id: str | None = None
+    source_module: str = UNREGISTERED_SOURCE_MODULE
+
+    @property
+    def envelope(self) -> EventEnvelope:
+        return EventEnvelope(
+            source_module=self.source_module,
+            emitted_at=self.timestamp,
+            event_id=self.event_id,
+        )
 
     def to_row(self) -> tuple:
         return (
             self.event_id, self.instance_id, self.member_id, self.space_id,
             self.timestamp, self.event_type, json.dumps(self.payload),
-            self.correlation_id,
+            self.correlation_id, self.source_module,
         )
 
     @classmethod
@@ -189,6 +246,15 @@ class Event:
         # Row-access: aiosqlite.Row supports both __getitem__ by name and
         # positional index. Use names for clarity.
         try:
+            source_module = row["source_module"]
+        except (KeyError, IndexError, TypeError):
+            try:
+                source_module = row[8]
+            except (IndexError, TypeError):
+                source_module = None
+        if source_module is None:
+            source_module = UNREGISTERED_SOURCE_MODULE
+        try:
             return cls(
                 event_id=row["event_id"],
                 instance_id=row["instance_id"],
@@ -198,6 +264,7 @@ class Event:
                 event_type=row["event_type"],
                 payload=payload,
                 correlation_id=row["correlation_id"],
+                source_module=source_module,
             )
         except Exception:
             # Positional fallback
@@ -205,6 +272,7 @@ class Event:
                 event_id=row[0], instance_id=row[1], member_id=row[2],
                 space_id=row[3], timestamp=row[4], event_type=row[5],
                 payload=payload, correlation_id=row[7],
+                source_module=source_module,
             )
 
 
@@ -309,8 +377,8 @@ class _EventWriter:
             await self._db.executemany(
                 "INSERT INTO events "
                 "(event_id, instance_id, member_id, space_id, timestamp, "
-                " event_type, payload, correlation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " event_type, payload, correlation_id, source_module) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             await self._db.commit()
@@ -340,7 +408,12 @@ _WRITER = _EventWriter()
 
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
-    """Create the events table + indices if absent."""
+    """Create the events table + indices if absent.
+
+    Lazy migration: pre-STS instance.db files have no ``source_module``
+    column. Detect via PRAGMA and add it if missing. Existing rows get
+    NULL, which :meth:`Event.from_row` materialises as
+    :data:`UNREGISTERED_SOURCE_MODULE`."""
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS events (
@@ -351,10 +424,16 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
             timestamp       TEXT NOT NULL,
             event_type      TEXT NOT NULL,
             payload         TEXT NOT NULL,
-            correlation_id  TEXT
+            correlation_id  TEXT,
+            source_module   TEXT
         )
         """
     )
+    # Lazy migration for existing databases.
+    async with db.execute("PRAGMA table_info(events)") as cur:
+        cols = [row[1] for row in await cur.fetchall()]
+    if "source_module" not in cols:
+        await db.execute("ALTER TABLE events ADD COLUMN source_module TEXT")
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_events_instance_ts "
         "ON events(instance_id, timestamp)"
@@ -419,14 +498,41 @@ async def emit(
 ) -> None:
     """Enqueue an event for write. Returns immediately; actual write is batched.
 
-    This is the canonical emission entry point. Callers do not await disk
-    I/O. An ungraceful crash may lose up to ``flush_interval_s`` seconds
-    of in-flight events — this tradeoff is documented in the architecture
-    page and intentional for write-path performance.
+    This is the canonical emission entry point for legacy / unregistered
+    callers. Events emitted through this path get
+    ``envelope.source_module == UNREGISTERED_SOURCE_MODULE``; downstream
+    source-authority gates treat that as fail-closed. Production code that
+    needs to claim authority (e.g. CRB emitting ``routine.proposed`` /
+    ``routine.approved``) MUST go through :class:`EmitterRegistry`.
 
     Over-threshold enqueue triggers an opportunistic background flush
     without blocking the caller.
     """
+    _enqueue_with_envelope(
+        instance_id=instance_id,
+        event_type=event_type,
+        payload=payload,
+        member_id=member_id,
+        space_id=space_id,
+        correlation_id=correlation_id,
+        source_module=UNREGISTERED_SOURCE_MODULE,
+    )
+
+
+def _enqueue_with_envelope(
+    *,
+    instance_id: str,
+    event_type: str,
+    payload: dict | None,
+    member_id: str | None,
+    space_id: str | None,
+    correlation_id: str | None,
+    source_module: str,
+) -> None:
+    """Substrate-internal enqueue that sets the envelope's ``source_module``
+    from a substrate-controlled identity. Callers do not pass ``source_module``
+    directly; only :class:`EventEmitter` (registered via :class:`EmitterRegistry`)
+    and the legacy :func:`emit` shim invoke this."""
     event = Event(
         event_id=str(uuid.uuid4()),
         instance_id=instance_id,
@@ -436,12 +542,130 @@ async def emit(
         member_id=member_id,
         space_id=space_id,
         correlation_id=correlation_id,
+        source_module=source_module,
     )
     _WRITER.enqueue(event)
-    # Opportunistic threshold flush — don't block the caller but do
-    # schedule a flush so queue doesn't linger over the threshold.
     if _WRITER.queue_depth >= _WRITER._flush_threshold:
         asyncio.create_task(_WRITER._flush_once())
+
+
+# ---------------------------------------------------------------------------
+# EmitterRegistry (STS C0)
+#
+# Each subsystem that needs to claim source authority on its events
+# registers an :class:`EventEmitter` once at engine bring-up. The registry
+# enforces source_module uniqueness — only one emitter may claim
+# ``source_module="crb"`` for a given lifecycle. Modules emit through
+# their registered emitter; the emitter is the only path that can set
+# ``envelope.source_module`` to a registered identity.
+#
+# The legacy module-level :func:`emit` writes events with
+# ``envelope.source_module == UNREGISTERED_SOURCE_MODULE`` regardless of
+# payload contents, so a caller cannot smuggle ``source_module="crb"``
+# in via the payload.
+# ---------------------------------------------------------------------------
+
+
+class EmitterAlreadyRegistered(Exception):
+    """Raised when a second :class:`EventEmitter` registration attempts to
+    claim a ``source_module`` already held by another emitter."""
+
+
+class EmitterRegistry:
+    """Substrate-side registry mapping ``source_module`` -> :class:`EventEmitter`.
+
+    Uniqueness is enforced at registration time. ``register`` raises
+    :class:`EmitterAlreadyRegistered` if the source_module is taken.
+
+    The registry is a process-level singleton; a fresh process starts
+    empty, and :func:`_reset_for_tests` clears it for test isolation."""
+
+    def __init__(self) -> None:
+        self._emitters: dict[str, "EventEmitter"] = {}
+
+    def register(self, source_module: str) -> "EventEmitter":
+        """Register an emitter for ``source_module`` and return it.
+
+        Raises:
+            ValueError: if ``source_module`` is empty or equal to
+                :data:`UNREGISTERED_SOURCE_MODULE` (reserved sentinel).
+            EmitterAlreadyRegistered: if a different emitter has already
+                registered with this ``source_module``.
+        """
+        if not source_module:
+            raise ValueError("source_module is required")
+        if source_module == UNREGISTERED_SOURCE_MODULE:
+            raise ValueError(
+                f"source_module={source_module!r} is reserved as the "
+                "unregistered sentinel and cannot be registered"
+            )
+        if source_module in self._emitters:
+            raise EmitterAlreadyRegistered(
+                f"source_module={source_module!r} is already registered"
+            )
+        emitter = EventEmitter(source_module=source_module)
+        self._emitters[source_module] = emitter
+        return emitter
+
+    def get(self, source_module: str) -> "EventEmitter | None":
+        return self._emitters.get(source_module)
+
+    def is_registered(self, source_module: str) -> bool:
+        return source_module in self._emitters
+
+    def _clear(self) -> None:
+        """Test-only reset hook."""
+        self._emitters.clear()
+
+
+_EMITTER_REGISTRY = EmitterRegistry()
+
+
+def emitter_registry() -> EmitterRegistry:
+    """Return the process-level :class:`EmitterRegistry` singleton."""
+    return _EMITTER_REGISTRY
+
+
+class EventEmitter:
+    """A bound emitter that always stamps events with its registered
+    ``source_module``. Constructed only by :class:`EmitterRegistry`.
+
+    Caller-supplied payloads are ignored for source authority; the
+    envelope's ``source_module`` is set from this emitter's frozen
+    identity, never from payload contents."""
+
+    def __init__(self, *, source_module: str) -> None:
+        # Not strictly frozen at the dataclass level (we want a clean
+        # async-friendly object), but the attribute is treated as
+        # immutable by contract. EmitterRegistry never re-registers.
+        self._source_module = source_module
+
+    @property
+    def source_module(self) -> str:
+        return self._source_module
+
+    async def emit(
+        self,
+        instance_id: str,
+        event_type: str,
+        payload: dict | None = None,
+        *,
+        member_id: str | None = None,
+        space_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Enqueue an event with ``envelope.source_module`` set from this
+        emitter's registered identity. Payload contents do NOT influence
+        the envelope's source authority."""
+        _enqueue_with_envelope(
+            instance_id=instance_id,
+            event_type=event_type,
+            payload=payload,
+            member_id=member_id,
+            space_id=space_id,
+            correlation_id=correlation_id,
+            source_module=self._source_module,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -543,13 +767,22 @@ async def _reset_for_tests() -> None:
     # an earlier test would otherwise fire on subsequent test flushes
     # and silently mutate state across tests.
     _POST_FLUSH_HOOKS.clear()
+    # Clear the EmitterRegistry — a registration left over from an
+    # earlier test would otherwise collide with re-registration.
+    _EMITTER_REGISTRY._clear()
 
 
 __all__ = [
+    "EmitterAlreadyRegistered",
+    "EmitterRegistry",
     "Event",
+    "EventEmitter",
+    "EventEnvelope",
     "PostFlushHook",
     "RETENTION_DAYS",
+    "UNREGISTERED_SOURCE_MODULE",
     "emit",
+    "emitter_registry",
     "events_by_correlation",
     "events_for_member",
     "events_in_window",
