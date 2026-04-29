@@ -35,6 +35,79 @@ class AgentInboxUnavailable(RuntimeError):
     failure mode, not a silent fallback."""
 
 
+# ---------------------------------------------------------------------------
+# Approval-request payload block (WLP-GATE-SCOPING C2)
+#
+# When a workflow's gate_ref action is a ``route_to_agent`` posting an
+# approval-shape message, the action's payload includes a documented
+# ``approval_request`` block. Receiving agents (founder UI, architect
+# agent, future agents) read this block to know what response to
+# compose; the response event MUST carry ``execution_id`` and
+# ``gate_nonce`` in its payload so the engine's match logic resumes
+# the right paused execution.
+#
+# This is **documented schema, not enforced wire format**. The
+# engine's `_on_post_flush_for_gates` match logic enforces the
+# ``execution_id`` + ``gate_nonce`` binding; the AgentInbox just
+# carries the request data verbatim. Any concrete inbox provider
+# is free in how it serialises the block, as long as receivers
+# can read it back.
+#
+# A descriptor authoring an approval gate via route_to_agent uses
+# template interpolation (`{workflow.execution_id}`,
+# `{workflow.gate_nonce}`) so the engine fills in the runtime values
+# before dispatching the verb.
+# ---------------------------------------------------------------------------
+
+
+APPROVAL_REQUEST_KEY = "approval_request"
+"""Key inside an AgentInbox payload that carries the approval-request
+block. Receivers look up `payload[APPROVAL_REQUEST_KEY]` to read it."""
+
+
+APPROVAL_REQUEST_FIELDS = (
+    "execution_id",
+    "gate_nonce",
+    "gate_name",
+    "pause_reason",
+    "response_event_type",
+    "response_predicate",
+)
+"""The six fields a complete approval_request block carries.
+
+Authoring example (descriptor `route_to_agent.parameters.payload`)::
+
+    payload:
+      approval_request:
+        execution_id: "{workflow.execution_id}"
+        gate_nonce:   "{workflow.gate_nonce}"
+        gate_name:    "approve_deploy"
+        pause_reason: "founder must confirm before publishing"
+        response_event_type: "user.approval"
+        response_predicate:
+          op: actor_eq
+          value: founder
+
+The engine substitutes ``{workflow.execution_id}`` /
+``{workflow.gate_nonce}`` before dispatching the action. The receiver
+echoes both back in its response event payload to satisfy the
+engine's match logic.
+"""
+
+
+def is_approval_request_payload(payload: dict) -> bool:
+    """Return True if the payload carries a complete approval_request
+    block. Useful for inbox implementations that route differently
+    based on payload shape (e.g. surfacing approvals in a dedicated
+    UI lane)."""
+    if not isinstance(payload, dict):
+        return False
+    block = payload.get(APPROVAL_REQUEST_KEY)
+    if not isinstance(block, dict):
+        return False
+    return all(field in block for field in APPROVAL_REQUEST_FIELDS)
+
+
 @dataclass
 class InboxPostResult:
     """Receipt returned from ``AgentInbox.post``. Verifier reads the
@@ -186,10 +259,13 @@ class NotionAgentInbox:
 
 
 __all__ = [
+    "APPROVAL_REQUEST_FIELDS",
+    "APPROVAL_REQUEST_KEY",
     "AgentInbox",
     "AgentInboxUnavailable",
     "InboxItem",
     "InboxPostResult",
     "InMemoryAgentInbox",
     "NotionAgentInbox",
+    "is_approval_request_payload",
 ]
