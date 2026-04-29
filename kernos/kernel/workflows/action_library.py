@@ -46,6 +46,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Protocol
 
+from kernos.kernel.agents.providers import (
+    ProviderKeyUnknown,
+    ProviderRegistry,
+)
+from kernos.kernel.agents.registry import (
+    AgentInboxProviderUnavailable,
+    AgentNotRegistered,
+    AgentPaused,
+    AgentRegistry,
+    AgentRetired,
+)
 from kernos.kernel.workflows.agent_inbox import (
     AgentInbox,
     AgentInboxUnavailable,
@@ -224,23 +235,122 @@ class WriteCanvasAction:
 
 
 class RouteToAgentAction:
-    """Posts a payload to a configured AgentInbox. Provider
-    containment: if no inbox is bound, raises
-    ``AgentInboxUnavailable`` rather than silently routing
-    elsewhere."""
+    """Posts a payload to an AgentInbox resolved through the
+    AgentRegistry.
+
+    DOMAIN-AGENT-REGISTRY refactor: the verb takes an
+    ``AgentRegistry`` at construction (instead of a single bound
+    inbox). At dispatch, ``execute()`` calls
+    ``registry.get_by_id(agent_id, instance_id)`` to resolve the
+    record, looks up the agent's ``provider_key`` in the
+    registry's bound ProviderRegistry, constructs the concrete
+    inbox via the factory, and posts the payload. Typed errors
+    flow up per AC #10:
+
+      - agent_id not in registry → ``AgentNotRegistered``
+      - record.status == "paused" → ``AgentPaused``
+      - record.status == "retired" → ``AgentRetired``
+      - provider_key not in ProviderRegistry →
+        ``AgentInboxProviderUnavailable``
+      - registry not bound at construction → ``AgentInboxUnavailable``
+        (legacy WLP error preserved for the "engine not configured
+        with the registry" case)
+
+    Verifier reads the receipt SNAPSHOT (provider_key,
+    provider_config_ref, persisted_id), reconstructs the same
+    inbox via the ProviderRegistry factory, and re-reads to
+    confirm the post landed. Does NOT consult the registry —
+    immune to mid-flight registry mutations and lifecycle
+    transitions (AC #11).
+
+    Legacy ``inbox=`` constructor parameter is preserved for the
+    pre-DAR code path (a few unit tests still use it directly);
+    new code passes ``registry=``. Mutually exclusive — passing
+    both raises ValueError.
+    """
 
     action_type = "route_to_agent"
 
     def __init__(
         self,
-        inbox: AgentInbox | None,
+        inbox: AgentInbox | None = None,
         *,
+        registry: AgentRegistry | None = None,
         covenant_gate: CovenantGate | None = None,
     ) -> None:
+        if inbox is not None and registry is not None:
+            raise ValueError(
+                "RouteToAgentAction takes either inbox= (legacy) or "
+                "registry= (DAR) — not both"
+            )
         self._inbox = inbox
+        self._registry = registry
         self._covenant_gate = covenant_gate
 
     async def execute(self, context: Any, params: dict) -> ActionResult:
+        # Legacy path: single-inbox constructor.
+        if self._inbox is not None:
+            return await self._execute_legacy_inbox(context, params)
+        # DAR path: registry-resolved inbox.
+        if self._registry is None:
+            raise AgentInboxUnavailable(
+                "route_to_agent invoked but neither inbox= nor "
+                "registry= was bound at construction"
+            )
+        if not await _resolve_covenant(
+            self._covenant_gate, context, self.action_type, params,
+        ):
+            return ActionResult(success=False, error="covenant_denied")
+        instance_id = getattr(context, "instance_id", "")
+        agent_id = params["agent_id"]
+        record = await self._registry.get_by_id(agent_id, instance_id)
+        if record is None:
+            raise AgentNotRegistered(agent_id, instance_id)
+        if record.status == "paused":
+            raise AgentPaused(agent_id)
+        if record.status == "retired":
+            raise AgentRetired(agent_id)
+        provider_registry = self._registry.provider_registry
+        if provider_registry is None:
+            raise AgentInboxProviderUnavailable(agent_id, record.provider_key)
+        try:
+            inbox = provider_registry.construct(
+                record.provider_key, record.provider_config_ref,
+            )
+        except ProviderKeyUnknown as exc:
+            raise AgentInboxProviderUnavailable(
+                agent_id, record.provider_key,
+            ) from exc
+        try:
+            receipt = await inbox.post(
+                agent_id=agent_id,
+                payload=params["payload"],
+                instance_id=instance_id,
+            )
+        except Exception as exc:
+            return ActionResult(
+                success=False, error=f"inbox_post_failed:{exc}",
+            )
+        # AC #11: snapshot the resolved provider data into the
+        # receipt so verify() can reconstruct the inbox without
+        # touching the registry.
+        return ActionResult(
+            success=True,
+            value=receipt,
+            receipt={
+                "agent_id": agent_id,
+                "provider_key": record.provider_key,
+                "provider_config_ref": record.provider_config_ref,
+                "persisted_id": receipt.persisted_id,
+            },
+        )
+
+    async def _execute_legacy_inbox(
+        self, context: Any, params: dict,
+    ) -> ActionResult:
+        """Pre-DAR code path. Kept so existing WLP tests that bind
+        a single inbox at construction continue to work without
+        churn. New code uses registry= instead."""
         if self._inbox is None:
             raise AgentInboxUnavailable(
                 "route_to_agent invoked but no AgentInbox provider is "
@@ -268,7 +378,42 @@ class RouteToAgentAction:
     async def verify(
         self, context: Any, params: dict, result: ActionResult,
     ) -> bool:
-        if not result.success or self._inbox is None:
+        if not result.success:
+            return False
+        # Legacy path preserved.
+        if self._inbox is not None:
+            return await self._verify_legacy_inbox(context, params, result)
+        # DAR path: receipt-snapshot insulated verify (AC #11).
+        if self._registry is None:
+            return False
+        provider_registry = self._registry.provider_registry
+        if provider_registry is None:
+            return False
+        provider_key = result.receipt.get("provider_key")
+        provider_config_ref = result.receipt.get("provider_config_ref", "")
+        persisted_id = result.receipt.get("persisted_id")
+        agent_id = result.receipt.get("agent_id") or params.get("agent_id")
+        if not provider_key or not persisted_id or not agent_id:
+            return False
+        try:
+            inbox = provider_registry.construct(
+                provider_key, provider_config_ref,
+            )
+        except ProviderKeyUnknown:
+            return False
+        try:
+            items = await inbox.read(
+                agent_id=agent_id,
+                instance_id=getattr(context, "instance_id", ""),
+            )
+        except Exception:
+            return False
+        return any(i.persisted_id == persisted_id for i in items)
+
+    async def _verify_legacy_inbox(
+        self, context: Any, params: dict, result: ActionResult,
+    ) -> bool:
+        if self._inbox is None:
             return False
         try:
             items = await self._inbox.read(

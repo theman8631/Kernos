@@ -428,9 +428,22 @@ class WorkflowRegistry:
 
     def __init__(self) -> None:
         self._trigger_registry: TriggerRegistry | None = None
+        self._agent_registry: Any | None = None  # AgentRegistry — set via wire_agent_registry
         self._db: aiosqlite.Connection | None = None
         self._db_path: Path | None = None
         self._lock = asyncio.Lock()
+
+    def wire_agent_registry(self, agent_registry: Any) -> None:
+        """Bind an ``AgentRegistry`` so ``register_workflow`` can
+        validate ``route_to_agent`` action descriptors against the
+        registered agents. Optional — without this binding,
+        agent_id references in workflow descriptors are NOT
+        validated at registration time (they'll surface at dispatch
+        instead). Per AC #8: with the registry bound, descriptors
+        referencing unregistered / paused / retired agents fail
+        registration loudly.
+        """
+        self._agent_registry = agent_registry
 
     async def start(self, data_dir: str, trigger_registry: TriggerRegistry) -> None:
         """Open our own connection to instance.db, ensure schema, and
@@ -485,6 +498,13 @@ class WorkflowRegistry:
         # Validate before any I/O. Predicates inside (workflow trigger,
         # gate predicates) are also validated here.
         validate_workflow(wf)
+        # DAR C4: validate route_to_agent agent_id references against
+        # the agent registry if one is wired in. Per AC #8 + AC #9:
+        # unregistered / paused / retired targets fail registration
+        # loudly, and `@default:` references are rejected (defaults
+        # are conversational-only, not workflow-authorable).
+        if self._agent_registry is not None:
+            await self._validate_agent_references(wf)
         # Build the corresponding Trigger row.
         trigger: Trigger | None = None
         if wf.trigger is not None:
@@ -588,6 +608,53 @@ class WorkflowRegistry:
         async with self._db.execute(query, args) as cur:
             rows = await cur.fetchall()
         return [_workflow_from_row(r) for r in rows]
+
+    async def _validate_agent_references(self, wf: Workflow) -> None:
+        """Walk action_sequence; for every ``route_to_agent``
+        action, look up ``agent_id`` in the bound agent registry.
+        Reject unregistered / paused / retired references AND any
+        ``@default:`` reference (defaults are conversational-only
+        per AC #9)."""
+        if self._agent_registry is None:
+            return
+        for idx, action in enumerate(wf.action_sequence):
+            if action.action_type != "route_to_agent":
+                continue
+            agent_id = action.parameters.get("agent_id", "")
+            if not isinstance(agent_id, str) or not agent_id:
+                raise WorkflowError(
+                    f"action_sequence[{idx}].parameters.agent_id is "
+                    f"required for route_to_agent and must be a non-"
+                    f"empty string"
+                )
+            if agent_id.startswith("@default:"):
+                raise WorkflowError(
+                    f"action_sequence[{idx}].parameters.agent_id "
+                    f"{agent_id!r} uses '@default:' syntax — defaults "
+                    f"are conversational-only, not workflow-authorable. "
+                    f"Reference a stable agent_id instead."
+                )
+            record = await self._agent_registry.get_by_id(
+                agent_id, wf.instance_id,
+            )
+            if record is None:
+                raise WorkflowError(
+                    f"action_sequence[{idx}].parameters.agent_id "
+                    f"{agent_id!r} is not registered in instance "
+                    f"{wf.instance_id!r}"
+                )
+            if record.status == "paused":
+                raise WorkflowError(
+                    f"action_sequence[{idx}].parameters.agent_id "
+                    f"{agent_id!r} is paused; new workflows cannot "
+                    f"register against paused agents"
+                )
+            if record.status == "retired":
+                raise WorkflowError(
+                    f"action_sequence[{idx}].parameters.agent_id "
+                    f"{agent_id!r} is retired; new workflows cannot "
+                    f"register against retired agents"
+                )
 
     async def update_status(self, workflow_id: str, status: str) -> bool:
         if self._db is None:
