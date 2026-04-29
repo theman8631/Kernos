@@ -510,10 +510,17 @@ class ExecutionEngine:
             try:
                 result = await verb.execute(context, interpolated_params)
             except Exception as exc:
+                # Codex C3 review: include the exception class name so
+                # founders / debug tools can diagnose the failure
+                # mode (e.g. AgentInboxUnavailable) without having to
+                # parse the message string.
                 await self._record_step_failed(
-                    execution, idx, action, error=f"execute_raised:{exc}",
+                    execution, idx, action,
+                    error=f"execute_raised:{type(exc).__name__}:{exc}",
                 )
-                await self._abort(execution, f"step_{idx}_raised")
+                await self._abort(
+                    execution, f"step_{idx}_raised:{type(exc).__name__}",
+                )
                 return
             verified = False
             try:

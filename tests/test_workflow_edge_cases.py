@@ -397,6 +397,54 @@ class TestScenario4GateHappy:
 # ===========================================================================
 
 
+class TestScenario5bGateAutoProceed:
+    """The third timeout mode (Codex C3 review): a gate with
+    bound_behavior_on_timeout=auto_proceed_with_default emits the
+    auto-proceed event and continues with the next action when no
+    approval arrives. Workflow-registry safe-deny ensures all
+    downstream actions until the next gate are reversible."""
+
+    async def test_timeout_continues_with_default_value(self, stack):
+        wf = _basic_wf("ed-gate-auto", instance_local=True, action_sequence=[
+            _action("mark_state", gate_ref="g1",
+                    key="pre", value=1, scope="instance"),
+            _action("mark_state", key="post", value=2, scope="instance"),
+        ], gates=[ApprovalGate(
+            gate_name="g1", pause_reason="confirm",
+            approval_event_type="user.approval",
+            approval_event_predicate={"op": "actor_eq", "value": "founder"},
+            timeout_seconds=1,
+            bound_behavior_on_timeout="auto_proceed_with_default",
+            default_value="ok",
+        )])
+        await stack["wfr"].register_workflow(wf)
+        await event_stream.emit("inst_a", "cc.batch.report", {})
+        await event_stream.flush_now()
+        # 8-second wait gives plenty of headroom over the 1s gate
+        # timeout for slow CI runners; the test was flaking at 4s
+        # under full-suite load.
+        ok = await _wait_for(
+            lambda: ("instance", "inst_a", "post") in stack["state"],
+            timeout=8.0,
+        )
+        assert ok
+        # gate_auto_proceeded event flushed with the default_value.
+        events = await event_stream.events_in_window(
+            "inst_a",
+            datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+            datetime.fromisoformat("2099-01-01T00:00:00+00:00"),
+        )
+        auto = [e for e in events
+                if e.event_type == "workflow.gate_auto_proceeded"]
+        assert len(auto) == 1
+        assert auto[0].payload["default_value"] == "ok"
+        # Execution completed (no abort).
+        execs = await stack["engine"].list_executions(
+            "inst_a", state="completed",
+        )
+        assert any(e.workflow_id == "ed-gate-auto" for e in execs)
+
+
 class TestScenario5GateEscalate:
     async def test_no_approval_triggers_owner_escalation(self, stack):
         wf = _basic_wf("ed-gate-escalate", instance_local=True, action_sequence=[
@@ -439,8 +487,11 @@ class TestScenario5GateEscalate:
 
 
 class TestScenario6BypassAttempt:
-    async def test_approval_without_nonce_does_not_wake(self, stack):
-        wf = _basic_wf("ed-bypass", instance_local=True, action_sequence=[
+    """Three bypass attack shapes — every one must keep the
+    execution paused."""
+
+    async def _setup_paused(self, stack, workflow_id):
+        wf = _basic_wf(workflow_id, instance_local=True, action_sequence=[
             _action("mark_state", gate_ref="g1",
                     key="pre", value=1, scope="instance"),
             _action("mark_state", key="post", value=2, scope="instance"),
@@ -448,23 +499,79 @@ class TestScenario6BypassAttempt:
             gate_name="g1", pause_reason="confirm",
             approval_event_type="user.approval",
             approval_event_predicate={"op": "actor_eq", "value": "founder"},
-            timeout_seconds=2,
+            timeout_seconds=10,
             bound_behavior_on_timeout="abort_workflow",
         )])
         await stack["wfr"].register_workflow(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
-        await _wait_for(
+        ok = await _wait_for(
             lambda: ("instance", "inst_a", "pre") in stack["state"],
         )
-        # Bypass attempt: descriptor predicate matches but no nonce.
+        assert ok
+        execs = await stack["engine"].list_executions("inst_a")
+        return next(e for e in execs if e.workflow_id == workflow_id and e.gate_nonce)
+
+    async def test_missing_nonce_does_not_wake(self, stack):
+        await self._setup_paused(stack, "ed-bypass-missing")
         await event_stream.emit(
             "inst_a", "user.approval", {}, member_id="founder",
         )
         await event_stream.flush_now()
         await asyncio.sleep(0.3)
-        # Execution still paused.
         assert ("instance", "inst_a", "post") not in stack["state"]
+
+    async def test_wrong_nonce_does_not_wake(self, stack):
+        gated = await self._setup_paused(stack, "ed-bypass-wrong")
+        await event_stream.emit(
+            "inst_a", "user.approval",
+            {"execution_id": gated.execution_id,
+             "gate_nonce": "00000000-0000-0000-0000-deadbeefdead"},
+            member_id="founder",
+        )
+        await event_stream.flush_now()
+        await asyncio.sleep(0.3)
+        assert ("instance", "inst_a", "post") not in stack["state"]
+
+    async def test_wrong_execution_id_does_not_wake(self, stack):
+        gated = await self._setup_paused(stack, "ed-bypass-execid")
+        await event_stream.emit(
+            "inst_a", "user.approval",
+            {"execution_id": "different-execution-id",
+             "gate_nonce": gated.gate_nonce},
+            member_id="founder",
+        )
+        await event_stream.flush_now()
+        await asyncio.sleep(0.3)
+        assert ("instance", "inst_a", "post") not in stack["state"]
+
+    async def test_replayed_approval_after_resume_no_op(self, stack):
+        """Resume the execution with a real approval; replay the same
+        approval event; verify no second resume / re-fire."""
+        gated = await self._setup_paused(stack, "ed-bypass-replay")
+        approval = {
+            "execution_id": gated.execution_id,
+            "gate_nonce": gated.gate_nonce,
+        }
+        await event_stream.emit(
+            "inst_a", "user.approval", approval, member_id="founder",
+        )
+        await event_stream.flush_now()
+        ok = await _wait_for(
+            lambda: ("instance", "inst_a", "post") in stack["state"],
+        )
+        assert ok
+        # Replay identical approval. Should be a no-op.
+        await event_stream.emit(
+            "inst_a", "user.approval", approval, member_id="founder",
+        )
+        await event_stream.flush_now()
+        await asyncio.sleep(0.2)
+        # Same execution_id, no re-pause / re-resume.
+        execs = await stack["engine"].list_executions("inst_a")
+        target = next(e for e in execs if e.execution_id == gated.execution_id)
+        assert target.state == "completed"
+        assert target.gate_nonce == ""
 
 
 # ===========================================================================
@@ -538,11 +645,13 @@ class TestScenario8VariableTools:
 
 
 class TestScenario9ConfigGap:
-    async def test_route_to_agent_without_provider_aborts_cleanly(
+    async def test_route_to_agent_without_provider_aborts_loudly(
         self, stack, tmp_path,
     ):
-        # Replace the action library's route_to_agent verb with one
-        # that has no inbox bound.
+        """Loud-failure assertions (Codex C3 review): not just
+        "execution aborted" but also that the abort_reason names the
+        raise step AND a workflow.execution_step_failed event flushed
+        carrying the AgentInboxUnavailable error class."""
         from kernos.kernel.workflows.action_library import (
             ActionLibrary, RouteToAgentAction, MarkStateAction,
         )
@@ -566,16 +675,45 @@ class TestScenario9ConfigGap:
         await stack["wfr"].register_workflow(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
-        await asyncio.sleep(0.3)
-        # Execution aborted at the route_to_agent step (verb raises
-        # AgentInboxUnavailable; engine treats as step_X_raised).
+        # Poll for the execution_step_failed event rather than fixed sleep.
+        async def step_failed_seen():
+            events = await event_stream.events_in_window(
+                "inst_a",
+                datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+                datetime.fromisoformat("2099-01-01T00:00:00+00:00"),
+            )
+            return any(
+                e.event_type == "workflow.execution_step_failed"
+                and "AgentInboxUnavailable" in str(e.payload.get("error", ""))
+                for e in events
+            )
+        for _ in range(150):
+            if await step_failed_seen():
+                break
+            await asyncio.sleep(0.02)
+        # Loud-failure assertions:
+        # 1. step_failed event payload carries the inner exception class.
+        events = await event_stream.events_in_window(
+            "inst_a",
+            datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+            datetime.fromisoformat("2099-01-01T00:00:00+00:00"),
+        )
+        step_failed_events = [
+            e for e in events
+            if e.event_type == "workflow.execution_step_failed"
+        ]
+        assert any(
+            "AgentInboxUnavailable" in str(e.payload.get("error", ""))
+            and e.payload.get("action_type") == "route_to_agent"
+            for e in step_failed_events
+        )
+        # 2. Execution aborted with the matching step-raised reason.
         execs = await stack["engine"].list_executions(
             "inst_a", state="aborted",
         )
-        assert any(
-            e.workflow_id == "ed-config-gap" for e in execs
-        )
-        # Post-gap action did NOT run.
+        target = next(e for e in execs if e.workflow_id == "ed-config-gap")
+        assert "raised" in target.aborted_reason
+        # 3. Post-gap action did NOT run.
         assert ("instance", "inst_a", "never") not in stack["state"]
 
 
