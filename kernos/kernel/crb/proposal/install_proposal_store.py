@@ -53,6 +53,17 @@ class InvalidStateTransition(InstallProposalStoreError):
     """Requested transition not in :data:`PermittedTransitions`."""
 
 
+class StaleStateError(InstallProposalStoreError):
+    """A concurrent transition has moved the proposal away from the
+    state observed at the start of ``transition_state``. The caller
+    must re-read and decide whether the new state is acceptable.
+
+    Codex mid-batch fix (REAL #1): closes the race where a stale
+    in-memory snapshot could overwrite a newer transition. The
+    UPDATE is conditional on the prior state via the composite
+    WHERE; a rowcount of 0 means another path got there first."""
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -96,6 +107,14 @@ CREATE INDEX IF NOT EXISTS idx_install_proposals_state
     ON install_proposals (instance_id, state)
 """
 
+# Cross-instance state index (Codex mid-batch hardening). The engine-
+# startup recovery sweep walks pending rows across all instances; the
+# instance-scoped index above doesn't cover that scan path.
+_INSTALL_PROPOSALS_STATE_GLOBAL_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_install_proposals_state_global
+    ON install_proposals (state, authored_at)
+"""
+
 _INSTALL_PROPOSALS_DRAFT_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_install_proposals_draft
     ON install_proposals (instance_id, draft_id, state)
@@ -106,6 +125,7 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
     await db.execute(_INSTALL_PROPOSALS_DDL)
     await db.execute(_INSTALL_PROPOSALS_CORRELATION_INDEX)
     await db.execute(_INSTALL_PROPOSALS_STATE_INDEX)
+    await db.execute(_INSTALL_PROPOSALS_STATE_GLOBAL_INDEX)
     await db.execute(_INSTALL_PROPOSALS_DRAFT_INDEX)
     await db.commit()
 
@@ -335,45 +355,73 @@ class InstallProposalStore:
         response_kind: ResponseKind | None = None,
         approval_event_id: str | None = None,
     ) -> InstallProposal:
-        """Atomic state transition. Validates against
-        :data:`PermittedTransitions`."""
+        """Race-safe atomic state transition. Validates against
+        :data:`PermittedTransitions`.
+
+        Codex mid-batch fix (REAL #1): the UPDATE is conditional on
+        the prior state via composite WHERE; rowcount of 0 means a
+        concurrent path moved the proposal first and we raise
+        :class:`StaleStateError` without overwriting. The whole
+        read-validate-update runs under ``BEGIN IMMEDIATE`` so a
+        second connection / process cannot interleave.
+        """
         if self._db is None:
             raise RuntimeError("InstallProposalStore not started")
 
         async with self._lock:
-            current = await self.get_proposal(proposal_id=proposal_id)
-            if current is None:
-                raise UnknownProposal(
-                    f"no proposal with proposal_id={proposal_id!r}"
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                current = await self.get_proposal(proposal_id=proposal_id)
+                if current is None:
+                    raise UnknownProposal(
+                        f"no proposal with proposal_id={proposal_id!r}"
+                    )
+                permitted = PermittedTransitions.get(current.state, frozenset())
+                if new_state not in permitted:
+                    raise InvalidStateTransition(
+                        f"cannot transition from {current.state!r} to "
+                        f"{new_state!r}; permitted from "
+                        f"{current.state!r}: {sorted(permitted)}"
+                    )
+                now = _now()
+                # Set responded_at when entering a terminal-or-pending
+                # state via a user response. The recovery-sweep
+                # transition from pending to registered is NOT a user
+                # response, so leave responded_at alone in that path.
+                assignments = ["state = ?"]
+                params: list = [new_state]
+                if response_kind is not None:
+                    assignments.append("response_kind = ?")
+                    params.append(response_kind)
+                    assignments.append("responded_at = ?")
+                    params.append(now)
+                if approval_event_id is not None:
+                    assignments.append("approval_event_id = ?")
+                    params.append(approval_event_id)
+                # Conditional UPDATE: composite WHERE on prior state
+                # closes the lost-update race. rowcount=0 means
+                # someone moved us in the meantime.
+                params.extend([proposal_id, current.state])
+                cursor = await self._db.execute(
+                    f"UPDATE install_proposals "
+                    f"SET {', '.join(assignments)} "
+                    f"WHERE proposal_id = ? AND state = ?",
+                    tuple(params),
                 )
-            permitted = PermittedTransitions.get(current.state, frozenset())
-            if new_state not in permitted:
-                raise InvalidStateTransition(
-                    f"cannot transition from {current.state!r} to "
-                    f"{new_state!r}; permitted from {current.state!r}: "
-                    f"{sorted(permitted)}"
-                )
-            now = _now()
-            # Set responded_at when entering a terminal-or-pending state
-            # via a user response. The recovery-sweep transition from
-            # pending to registered is NOT a user response, so leave
-            # responded_at alone in that path.
-            assignments = ["state = ?"]
-            params: list = [new_state]
-            if response_kind is not None:
-                assignments.append("response_kind = ?")
-                params.append(response_kind)
-                assignments.append("responded_at = ?")
-                params.append(now)
-            if approval_event_id is not None:
-                assignments.append("approval_event_id = ?")
-                params.append(approval_event_id)
-            params.append(proposal_id)
-            await self._db.execute(
-                f"UPDATE install_proposals SET {', '.join(assignments)} "
-                f"WHERE proposal_id = ?",
-                tuple(params),
-            )
+                if cursor.rowcount != 1:
+                    raise StaleStateError(
+                        f"proposal {proposal_id!r} state changed "
+                        f"concurrently; expected {current.state!r} but "
+                        f"row was already updated by another path "
+                        f"(rowcount={cursor.rowcount})"
+                    )
+                await self._db.execute("COMMIT")
+            except Exception:
+                try:
+                    await self._db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
             updated = await self.get_proposal(proposal_id=proposal_id)
             assert updated is not None
             return updated
@@ -404,5 +452,6 @@ __all__ = [
     "InstallProposalStore",
     "InstallProposalStoreError",
     "InvalidStateTransition",
+    "StaleStateError",
     "UnknownProposal",
 ]

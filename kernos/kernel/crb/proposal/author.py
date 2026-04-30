@@ -154,6 +154,42 @@ _CLOSING_QUESTION_MARKERS: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
+# Descriptor-leak guard (Codex mid-batch hardening)
+# ---------------------------------------------------------------------------
+
+
+# Raw descriptor keys that should NEVER appear in ProposalAuthor
+# prompts. AC #31 pin: ProposalAuthor does NOT produce descriptors;
+# the Compiler module is the descriptor producer.
+_DESCRIPTOR_LEAK_TOKENS: tuple[str, ...] = (
+    '"action_sequence"',
+    "'action_sequence'",
+    '"predicate"',
+    "'predicate'",
+    '"verifier"',
+    "'verifier'",
+    '"partial_spec_json"',
+    "'partial_spec_json'",
+)
+
+
+class DescriptorLeakDetected(CRBError):
+    """ProposalAuthor prompt contained raw descriptor JSON.
+    Indicates a logic-bug regression — ProposalAuthor should NEVER
+    pass full descriptor candidates through the LLM."""
+
+
+def _assert_no_descriptor_leak(prompt: str) -> None:
+    for token in _DESCRIPTOR_LEAK_TOKENS:
+        if token in prompt:
+            raise DescriptorLeakDetected(
+                f"ProposalAuthor prompt contains raw descriptor token "
+                f"{token!r}; descriptor production belongs to the "
+                f"Compiler module, not ProposalAuthor (AC #31)"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Author
 # ---------------------------------------------------------------------------
 
@@ -183,6 +219,22 @@ class CRBProposalAuthor:
     def llm_client(self) -> LLMClient:
         return self._llm
 
+    async def _complete_low_temp(self, prompt: str) -> str:
+        """Re-check temperature on every call (Codex mid-batch
+        hardening). Construction-time guard alone is insufficient
+        because some LLMClient implementations expose ``temperature``
+        as a mutable attribute. Also runs the descriptor-leak guard
+        across all four authoring methods uniformly (AC #31)."""
+        if self._llm.temperature > MAX_TEMPERATURE:
+            raise LLMTemperatureTooHigh(
+                f"ProposalAuthor LLM client temperature mutated to "
+                f"{self._llm.temperature}; must be <= "
+                f"{MAX_TEMPERATURE} for low-temperature authoring "
+                f"(AC #6 pin)"
+            )
+        _assert_no_descriptor_leak(prompt)
+        return await self._llm.complete(prompt)
+
     # -- author_proposal -----------------------------------------------
 
     async def author_proposal(
@@ -210,7 +262,7 @@ class CRBProposalAuthor:
             f"- action_summary: {action}\n\n"
             f"Return only the filled-in text."
         )
-        text = await self._llm.complete(prompt)
+        text = await self._complete_low_temp(prompt)
         return self._verify_closing_question(text, fallback_template=_PROPOSAL_TEMPLATE.format(
             intent_summary=intent, trigger_summary=trigger, action_summary=action,
         ))
@@ -239,7 +291,7 @@ class CRBProposalAuthor:
             f"- capability_tag: {capability_gap.required_tag}\n\n"
             f"Return only the filled-in text."
         )
-        text = await self._llm.complete(prompt)
+        text = await self._complete_low_temp(prompt)
         return self._verify_closing_question(text, fallback_template=_GAP_TEMPLATE.format(
             provider_name=provider, intent_summary=intent,
             capability_tag=capability_gap.required_tag,
@@ -283,7 +335,7 @@ class CRBProposalAuthor:
             f"- candidate_summaries: {candidate_summaries}\n\n"
             f"Return only the filled-in text."
         )
-        text = await self._llm.complete(prompt)
+        text = await self._complete_low_temp(prompt)
         return self._verify_closing_question(text, fallback_template=template.format(
             candidate_summaries=candidate_summaries,
         ))
@@ -314,7 +366,7 @@ class CRBProposalAuthor:
             f"- diff_summary: {diff}\n\n"
             f"Return only the filled-in text."
         )
-        text = await self._llm.complete(prompt)
+        text = await self._complete_low_temp(prompt)
         return self._verify_closing_question(text, fallback_template=_MODIFICATION_TEMPLATE.format(
             routine_name=routine_name, diff_summary=diff,
         ))
@@ -413,6 +465,7 @@ __all__ = [
     "AmbiguityKind",
     "CRBProposalAuthor",
     "CapabilityStateSummary",
+    "DescriptorLeakDetected",
     "LLMClient",
     "LLMResponseMalformed",
     "LLMTemperatureTooHigh",

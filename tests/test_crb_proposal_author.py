@@ -355,6 +355,63 @@ class TestProviderMapping:
 # ===========================================================================
 
 
+class TestTemperatureRecheckPerCall:
+    """Codex mid-batch hardening: construction-time guard is
+    insufficient because LLMClient.temperature can be mutated. The
+    author re-checks on every complete() call."""
+
+    async def test_post_construction_temperature_mutation_caught(self):
+        from kernos.kernel.crb.proposal.author import LLMTemperatureTooHigh
+
+        class MutableLLM(StubLLMClient):
+            def __init__(self):
+                super().__init__(temperature=0.2)
+
+            def bump_temperature(self, new_temp: float) -> None:
+                self._temperature = new_temp
+
+        llm = MutableLLM()
+        author = CRBProposalAuthor(llm_client=llm)
+        # First call works.
+        await author.author_proposal(
+            draft=_draft(),
+            capability_state=CapabilityStateSummary(),
+        )
+        # Mutate.
+        llm.bump_temperature(0.9)
+        # Next call detects the mutation and raises.
+        with pytest.raises(LLMTemperatureTooHigh):
+            await author.author_proposal(
+                draft=_draft(),
+                capability_state=CapabilityStateSummary(),
+            )
+
+
+class TestDescriptorLeakGuard:
+    """Codex mid-batch hardening: shared descriptor-leak guard runs
+    on every authoring method's prompt path."""
+
+    def test_clean_prompt_passes(self):
+        from kernos.kernel.crb.proposal.author import (
+            _assert_no_descriptor_leak,
+        )
+        _assert_no_descriptor_leak("Compose a brief gap message about email")
+
+    @pytest.mark.parametrize("token", [
+        '"action_sequence"', "'action_sequence'",
+        '"predicate"', "'predicate'",
+        '"verifier"', "'verifier'",
+        '"partial_spec_json"', "'partial_spec_json'",
+    ])
+    def test_descriptor_token_in_prompt_raises(self, token):
+        from kernos.kernel.crb.proposal.author import (
+            DescriptorLeakDetected,
+            _assert_no_descriptor_leak,
+        )
+        with pytest.raises(DescriptorLeakDetected):
+            _assert_no_descriptor_leak(f"some prompt containing {token}")
+
+
 class TestReproducibility:
     """Low-temperature LLM should produce structurally similar output
     for the same inputs. Test pin: same draft -> same prompt, so an

@@ -242,6 +242,64 @@ class TestMarkSurfaced:
         assert second.surfaced_at is not None
 
 
+class TestRaceSafeTransitionState:
+    """Codex mid-batch fix REAL #1: transition_state is race-safe via
+    BEGIN IMMEDIATE + conditional UPDATE + rowcount check. Lost-update
+    window closed.
+
+    Simulating a true race in tests requires careful interleaving;
+    here we verify the conditional-WHERE invariant by patching
+    get_proposal to return a stale view of state=proposed while the
+    DB row is actually 'declined'. The conditional UPDATE then finds
+    no row matching the prior state and raises StaleStateError."""
+
+    async def test_conditional_where_catches_stale_view(self, store, monkeypatch):
+        from kernos.kernel.crb.proposal.install_proposal_store import (
+            StaleStateError,
+        )
+        from dataclasses import replace
+
+        p = await _create(store)
+        # Move the row to 'declined' on disk.
+        await store._db.execute(
+            "UPDATE install_proposals SET state = 'declined' "
+            "WHERE proposal_id = ?",
+            (p.proposal_id,),
+        )
+        # Patch get_proposal to return a stale snapshot showing state
+        # as 'proposed' (the view a racing caller would have observed
+        # before another path pre-empted the transition).
+        original_get = store.get_proposal
+        stale_proposal = replace(p, state="proposed")
+
+        async def stale_get(*, proposal_id: str):
+            if proposal_id == p.proposal_id:
+                return stale_proposal
+            return await original_get(proposal_id=proposal_id)
+
+        monkeypatch.setattr(store, "get_proposal", stale_get)
+        with pytest.raises(StaleStateError):
+            await store.transition_state(
+                proposal_id=p.proposal_id,
+                new_state="approved_pending_registration",
+                response_kind="approve",
+                approval_event_id="evt-x",
+            )
+
+
+class TestCrossInstanceStateIndex:
+    """Codex mid-batch hardening: idx_install_proposals_state_global
+    covers cross-instance recovery sweep query path."""
+
+    async def test_state_global_index_exists(self, store):
+        async with store._db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_install_proposals_state_global'"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+
+
 # ===========================================================================
 # Find-by-state (recovery sweep precursor)
 # ===========================================================================

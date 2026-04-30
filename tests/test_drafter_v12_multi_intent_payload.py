@@ -170,3 +170,77 @@ class TestBackwardCompat:
                 candidate_intents=["bogus_string", {"summary": "B", "confidence": 0.5}],
                 source_event_id="evt-1",
             )
+
+
+class TestLegacyDictNormalization:
+    """Codex mid-batch fix REAL #2: legacy v2 dicts always get a
+    deterministic candidate_id so CRB can map a user disambiguation
+    choice back to the candidate."""
+
+    def test_legacy_dict_gets_candidate_id(self):
+        cands = [
+            {"summary": "A", "confidence": 0.85},
+            {"summary": "B", "confidence": 0.8},
+        ]
+        payload = build_multi_intent_payload(
+            instance_id="inst_a", candidate_intents=cands,
+            source_event_id="evt-legacy",
+        )
+        for c in payload["candidate_intents"]:
+            assert c.get("candidate_id"), (
+                "legacy dict candidates must be normalized with a "
+                "deterministic candidate_id (Codex mid-batch REAL #2)"
+            )
+
+    def test_deterministic_candidate_id_per_position(self):
+        cands = [
+            {"summary": "A", "confidence": 0.85},
+            {"summary": "B", "confidence": 0.8},
+        ]
+        first = build_multi_intent_payload(
+            instance_id="inst_a", candidate_intents=cands,
+            source_event_id="evt-1",
+        )
+        second = build_multi_intent_payload(
+            instance_id="inst_a", candidate_intents=list(cands),
+            source_event_id="evt-1",
+        )
+        # Same inputs -> same generated ids.
+        assert (
+            first["candidate_intents"][0]["candidate_id"]
+            == second["candidate_intents"][0]["candidate_id"]
+        )
+
+    def test_explicit_candidate_id_in_dict_preserved(self):
+        cands = [
+            {"summary": "A", "confidence": 0.85, "candidate_id": "c-explicit-1"},
+            {"summary": "B", "confidence": 0.8, "candidate_id": "c-explicit-2"},
+        ]
+        payload = build_multi_intent_payload(
+            instance_id="inst_a", candidate_intents=cands,
+            source_event_id="evt-1",
+        )
+        ids = {c["candidate_id"] for c in payload["candidate_intents"]}
+        assert ids == {"c-explicit-1", "c-explicit-2"}
+
+    def test_legacy_dict_missing_summary_rejected(self):
+        with pytest.raises(ValueError, match="summary"):
+            build_multi_intent_payload(
+                instance_id="inst_a",
+                candidate_intents=[
+                    {"confidence": 0.5},
+                    {"summary": "B", "confidence": 0.5},
+                ],
+                source_event_id="evt-1",
+            )
+
+    def test_legacy_dict_missing_confidence_rejected(self):
+        with pytest.raises(ValueError, match="confidence"):
+            build_multi_intent_payload(
+                instance_id="inst_a",
+                candidate_intents=[
+                    {"summary": "A"},
+                    {"summary": "B", "confidence": 0.5},
+                ],
+                source_event_id="evt-1",
+            )

@@ -27,6 +27,7 @@ bugs and are NOT user-facing.
 """
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING
 
 from kernos.kernel.crb.compiler.shape_assertions import (
@@ -63,6 +64,12 @@ def draft_to_descriptor_candidate(draft: "WorkflowDraft") -> dict:
     # only included when present in the draft body — assert_required_
     # fields_present below reports a clean DraftSchemaIncomplete
     # rather than a deeper DraftShapeMalformed.
+    #
+    # Codex mid-batch hardening: spec-derived fields are deepcopied
+    # so a downstream consumer mutating the returned candidate (e.g.
+    # STS dry-run / hash helper) cannot contaminate the draft's
+    # partial_spec_json. Determinism would otherwise depend on the
+    # caller's discipline; deepcopy makes it structural.
     candidate: dict = {
         "name": draft.display_name or "untitled-draft",
         "instance_id": draft.instance_id,
@@ -70,22 +77,25 @@ def draft_to_descriptor_candidate(draft: "WorkflowDraft") -> dict:
     }
     for key in ("triggers", "action_sequence", "predicate"):
         if key in spec:
-            candidate[key] = spec[key]
+            candidate[key] = copy.deepcopy(spec[key])
 
-    # Optional pass-through fields.
+    # Optional pass-through fields (deepcopy applies to nested-mutable
+    # values; primitives are no-op copies).
     if "verifier" in spec:
-        candidate["verifier"] = spec["verifier"]
+        candidate["verifier"] = copy.deepcopy(spec["verifier"])
     if "bounds" in spec:
-        candidate["bounds"] = spec["bounds"]
+        candidate["bounds"] = copy.deepcopy(spec["bounds"])
     if "prev_version_id" in spec and spec["prev_version_id"]:
         candidate["prev_version_id"] = spec["prev_version_id"]
     if draft.aliases:
         candidate["aliases"] = list(draft.aliases)
 
-    # Carry intent_summary in metadata for downstream consumers that
-    # read metadata uniformly (e.g. STS's ContextBriefRegistry).
-    metadata = dict(spec.get("metadata") or {})
-    metadata.setdefault("intent_summary", draft.intent_summary)
+    # Metadata: carry intent_summary deterministically for downstream
+    # consumers that read metadata uniformly. Force-set rather than
+    # setdefault so a stale partial_spec_json metadata.intent_summary
+    # cannot diverge from the draft's authoritative intent_summary.
+    metadata = copy.deepcopy(spec.get("metadata") or {})
+    metadata["intent_summary"] = draft.intent_summary
     if metadata:
         candidate["metadata"] = metadata
 

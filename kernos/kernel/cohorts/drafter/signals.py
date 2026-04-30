@@ -170,9 +170,15 @@ def build_multi_intent_payload(
     """Payload for :data:`SIGNAL_MULTI_INTENT_DETECTED`.
 
     v1.2 (CRB main batch) accepts :class:`CandidateIntent` instances
-    (preferred) OR plain dicts (Drafter v2 backward-compat). Dicts
-    are passed through verbatim; CandidateIntent instances are
-    serialized via :meth:`CandidateIntent.to_dict`.
+    (preferred) OR plain dicts (Drafter v2 backward-compat). All
+    candidates are normalized through :func:`_normalize_candidate`
+    so the resulting payload ALWAYS has ``candidate_id`` populated —
+    even legacy Drafter v2 dicts that pre-date the v1.2 schema.
+
+    Codex mid-batch fix (REAL #2): without normalization a Drafter
+    v2 dict ``{"summary": ..., "confidence": ...}`` would produce a
+    v1.2 payload missing ``candidate_id``, breaking CRB's
+    disambiguation user-choice mapping.
 
     Pin (Kit pin v1->v2 cleanup): :class:`CandidateIntent` is the
     single source of truth for the candidate shape. The payload
@@ -185,23 +191,45 @@ def build_multi_intent_payload(
             "multi_intent requires at least 2 candidates; use a single-"
             "intent signal otherwise"
         )
-    serialized = []
-    for c in candidate_intents:
-        if isinstance(c, CandidateIntent):
-            serialized.append(c.to_dict())
-        elif isinstance(c, dict):
-            # Backward-compat: Drafter v2 callers passing plain dicts.
-            serialized.append(dict(c))
-        else:
-            raise TypeError(
-                f"candidate must be CandidateIntent or dict, got "
-                f"{type(c).__name__}"
-            )
+    serialized = [
+        _normalize_candidate(c, position=idx, source_event_id=source_event_id)
+        for idx, c in enumerate(candidate_intents)
+    ]
     return {
         "instance_id": instance_id,
         "candidate_intents": serialized,
         "source_event_id": source_event_id,
     }
+
+
+def _normalize_candidate(
+    candidate: "CandidateIntent | dict",
+    *,
+    position: int,
+    source_event_id: str,
+) -> dict:
+    """Normalize a candidate into the v1.2 dict shape with required
+    ``candidate_id``. Legacy v2 dicts get a deterministic
+    ``candidate_id`` derived from ``(source_event_id, position)`` so
+    replays and downstream lookups produce stable keys.
+    """
+    if isinstance(candidate, CandidateIntent):
+        return candidate.to_dict()
+    if not isinstance(candidate, dict):
+        raise TypeError(
+            f"candidate must be CandidateIntent or dict, got "
+            f"{type(candidate).__name__}"
+        )
+    # Legacy v2 dict shape: {"summary": str, "confidence": float}
+    # possibly with target_workflow_id. Validate and fill candidate_id.
+    if "summary" not in candidate:
+        raise ValueError("legacy candidate dict missing 'summary'")
+    if "confidence" not in candidate:
+        raise ValueError("legacy candidate dict missing 'confidence'")
+    out = dict(candidate)
+    if not out.get("candidate_id"):
+        out["candidate_id"] = f"{source_event_id}::{position:04d}"
+    return out
 
 
 def build_idle_resurface_payload(

@@ -37,6 +37,7 @@ from kernos.kernel.crb.proposal.install_proposal_store import (
     DuplicateProposalCorrelation,
     InstallProposalStore,
     InvalidStateTransition,
+    StaleStateError,
     UnknownProposal,
 )
 
@@ -61,6 +62,7 @@ __all__ = [
     "ProposalAuthoringError",
     "ProposalState",
     "ResponseKind",
+    "StaleStateError",
     "UnknownProposal",
     "is_terminal_state",
 ]
