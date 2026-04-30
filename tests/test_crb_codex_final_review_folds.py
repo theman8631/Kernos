@@ -686,3 +686,150 @@ class TestClaimSurfaceAndRecord:
                 proposal_id=proposal.proposal_id,
                 proposed_event_id="prop-evt-2",
             )
+
+
+# ===========================================================================
+# C6.1 follow-on: Codex confirmation-pass findings
+# ===========================================================================
+
+
+class TestRecoveryFindBranchAbsorbsInvalidStateTransition:
+    """Codex confirmation-pass REAL #2 partial-fold: the recovery
+    sweep's "STS already registered before crash" branch (the
+    find_workflow path) previously caught only StaleStateError. If a
+    concurrent path moved the row to terminal approved_registered,
+    transition_state raises InvalidStateTransition. The fold absorbs
+    both error types identically."""
+
+    async def test_recovery_succeeds_when_row_already_terminal(self, stack):
+        draft = _draft()
+        stack["drafts"].add(draft)
+        proposal = await _create_proposal(stack["store"], draft)
+        approval_id = "evt-find-recovery"
+        await stack["store"].transition_state(
+            proposal_id=proposal.proposal_id,
+            new_state="approved_pending_registration",
+            response_kind="approve", approval_event_id=approval_id,
+        )
+        # Pre-position the row in terminal approved_registered AND
+        # pre-populate the find table so the recovery sweep takes the
+        # find branch.
+        await stack["store"].transition_state(
+            proposal_id=proposal.proposal_id,
+            new_state="approved_registered",
+        )
+        stack["sts"].find_table[approval_id] = StubWorkflow(
+            workflow_id="wf-found",
+        )
+        # Recovery must not crash on the redundant transition.
+        recovered = await stack["flow"].recover_pending_registrations()
+        # Already terminal so it isn't returned, but no exception.
+        assert recovered == []
+
+
+class TestSurfaceOrphanRecovery:
+    """Codex confirmation-pass HARDENING partial-fold: a crash between
+    ``claim_surface`` and ``record_proposed_event_id`` left the row
+    permanently stuck (surfaced_at set, proposed_event_id NULL).
+    The fold detects the orphan and re-emits."""
+
+    async def test_orphan_claim_is_recovered_on_next_call(self, stack):
+        draft = _draft()
+        stack["drafts"].add(draft)
+        proposal = await _create_proposal(stack["store"], draft)
+        # Simulate the orphan: caller A won the surface claim then
+        # crashed before recording proposed_event_id.
+        await stack["store"].claim_surface(
+            proposal_id=proposal.proposal_id,
+        )
+        latest = await stack["store"].get_proposal(
+            proposal_id=proposal.proposal_id,
+        )
+        assert latest.surfaced_at is not None
+        assert latest.proposed_event_id is None
+        # Caller B invokes surface_and_emit. The orphan is detected;
+        # emission is retried; row gains a recorded id.
+        event_id = await stack["flow"].surface_and_emit(
+            proposal_id=proposal.proposal_id,
+        )
+        assert event_id != ""
+        latest = await stack["store"].get_proposal(
+            proposal_id=proposal.proposal_id,
+        )
+        assert latest.proposed_event_id == event_id
+        emitted = [
+            e for e in stack["events"].events
+            if e["type"] == "routine.proposed"
+        ]
+        assert len(emitted) == 1
+
+
+class TestOrphanApprovalClaimTriage:
+    """Codex confirmation-pass NEW finding: claim-before-emit narrows
+    the concurrent-approve race but introduces a crash window
+    between state claim and approval emit. Recovery refuses such
+    rows (safe: never guess an approval id); the new triage helper
+    exposes them so an operator can act."""
+
+    async def test_recovery_refuses_orphaned_pending_row(self, stack):
+        draft = _draft()
+        stack["drafts"].add(draft)
+        proposal = await _create_proposal(stack["store"], draft)
+        # Orphan the row: pending state, no approval_event_id (the
+        # state claim succeeded but the emit/record path crashed).
+        await stack["store"].transition_state(
+            proposal_id=proposal.proposal_id,
+            new_state="approved_pending_registration",
+            response_kind="approve",
+        )
+        recovered = await stack["flow"].recover_pending_registrations()
+        assert recovered == []
+        assert len(stack["sts"].register_calls) == 0
+
+    async def test_find_orphaned_approval_claims_returns_orphans(
+        self, stack,
+    ):
+        draft = _draft()
+        stack["drafts"].add(draft)
+        # Healthy pending row (with approval_event_id).
+        proposal_ok = await _create_proposal(stack["store"], draft)
+        await stack["store"].transition_state(
+            proposal_id=proposal_ok.proposal_id,
+            new_state="approved_pending_registration",
+            response_kind="approve", approval_event_id="evt-healthy",
+        )
+        # Orphan row.
+        proposal_orphan = await _create_proposal(
+            stack["store"], _draft(draft_id="d-orphan"),
+            correlation_id="corr-orphan",
+        )
+        await stack["store"].transition_state(
+            proposal_id=proposal_orphan.proposal_id,
+            new_state="approved_pending_registration",
+            response_kind="approve",
+        )
+        orphans = await stack["store"].find_orphaned_approval_claims()
+        assert len(orphans) == 1
+        assert orphans[0].proposal_id == proposal_orphan.proposal_id
+
+    async def test_find_orphaned_approval_claims_instance_scoped(
+        self, stack,
+    ):
+        draft = _draft()
+        stack["drafts"].add(draft)
+        proposal_orphan = await _create_proposal(stack["store"], draft)
+        await stack["store"].transition_state(
+            proposal_id=proposal_orphan.proposal_id,
+            new_state="approved_pending_registration",
+            response_kind="approve",
+        )
+        # Same instance scoping returns it.
+        same = await stack["store"].find_orphaned_approval_claims(
+            instance_id="inst_a",
+        )
+        assert len(same) == 1
+        # Different instance: empty.
+        other = await stack["store"].find_orphaned_approval_claims(
+            instance_id="inst_b",
+        )
+        assert other == []

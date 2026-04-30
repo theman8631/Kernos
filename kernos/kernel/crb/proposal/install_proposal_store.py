@@ -379,6 +379,46 @@ class InstallProposalStore:
             rows = await cur.fetchall()
         return [_row_to_proposal(r) for r in rows]
 
+    async def find_orphaned_approval_claims(
+        self, *, instance_id: str | None = None,
+    ) -> list[InstallProposal]:
+        """Rows in ``approved_pending_registration`` with NULL
+        ``approval_event_id``.
+
+        Codex C6.1 follow-on: claim-before-emit closes the
+        concurrent-approve race, but introduces a narrow window
+        where a process crash between the state claim and the
+        approval-event emission leaves the row pending without a
+        recoverable approval id. The recovery sweep correctly
+        refuses to register such rows (see
+        :meth:`CRBApprovalFlow._try_recover_pending_registration`);
+        this method exposes them for operator triage. Operators can
+        decide whether to mark them declined manually or extend the
+        recovery contract in a future spec.
+        """
+        if self._db is None:
+            return []
+        if instance_id is None:
+            query = (
+                "SELECT * FROM install_proposals "
+                "WHERE state = 'approved_pending_registration' "
+                "AND approval_event_id IS NULL "
+                "ORDER BY authored_at"
+            )
+            args: tuple = ()
+        else:
+            query = (
+                "SELECT * FROM install_proposals "
+                "WHERE instance_id = ? "
+                "AND state = 'approved_pending_registration' "
+                "AND approval_event_id IS NULL "
+                "ORDER BY authored_at"
+            )
+            args = (instance_id,)
+        async with self._db.execute(query, args) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_proposal(r) for r in rows]
+
     # -- mutations --------------------------------------------------------
 
     async def transition_state(

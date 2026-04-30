@@ -562,9 +562,18 @@ class CRBApprovalFlow:
             return None
         approval_event_id = proposal.approval_event_id or ""
         if not approval_event_id:
+            # Codex C6.1 follow-on: claim-before-emit can leave the
+            # row in pending with no recorded approval_event_id if
+            # the process crashed between the claim and emission.
+            # Recovery cannot guess the missing id; expose for
+            # operator triage via
+            # ``InstallProposalStore.find_orphaned_approval_claims``.
             logger.warning(
-                "CRB_RECOVERY_MISSING_APPROVAL: proposal=%s in pending "
-                "state but approval_event_id is empty",
+                "CRB_RECOVERY_ORPHAN_CLAIM: proposal=%s in pending "
+                "state but approval_event_id is NULL — likely a "
+                "process crash between state claim and approval "
+                "emit; expose via find_orphaned_approval_claims for "
+                "triage",
                 proposal.proposal_id,
             )
             return None
@@ -580,8 +589,12 @@ class CRBApprovalFlow:
                     proposal_id=proposal.proposal_id,
                     new_state="approved_registered",
                 )
-            except StaleStateError:
-                pass  # already transitioned by a concurrent path
+            except (StaleStateError, InvalidStateTransition):
+                # Concurrent recovery sweep / handle_response already
+                # moved the row to approved_registered (terminal -> no
+                # outgoing transitions). Both errors are idempotent
+                # successes here.
+                pass
             return workflow
 
         # Otherwise: retry STS registration with the SAME approval_event_id
@@ -673,15 +686,21 @@ class CRBApprovalFlow:
             return latest.proposed_event_id
         won = await self._store.claim_surface(proposal_id=proposal_id)
         if not won:
-            # Another path won the claim; re-fetch to discover the
-            # eventually-written event id. If it's still None, the
-            # winner hasn't completed emission yet — the caller can
-            # poll, but for v1 we return empty string and let the
-            # next surface_and_emit invocation pick it up.
+            # Surface was already claimed. Re-fetch and inspect.
             refreshed = await self._store.get_proposal(
                 proposal_id=proposal_id,
             )
-            return (refreshed and refreshed.proposed_event_id) or ""
+            if refreshed and refreshed.proposed_event_id:
+                return refreshed.proposed_event_id
+            # Codex C6.1 follow-on: orphan-claim recovery. The prior
+            # surfacer set surfaced_at then crashed before recording
+            # proposed_event_id. Retry emission now; record_proposed_
+            # event_id is conditional on (NULL OR == new value), so
+            # only one final id ever wins. The substrate may now hold
+            # two routine.proposed events for the same proposal in
+            # this rare crash race; STS approval-binding tolerates
+            # multiple matches and "first match wins."
+            latest = refreshed or latest
         proposed_event_id = await self._event_emitter.emit_routine_proposed(
             correlation_id=latest.correlation_id,
             proposal_id=latest.proposal_id,
@@ -692,10 +711,18 @@ class CRBApprovalFlow:
             source_thread_id=latest.source_thread_id,
             prev_workflow_id=latest.prev_workflow_id,
         )
-        await self._store.record_proposed_event_id(
-            proposal_id=proposal_id,
-            proposed_event_id=proposed_event_id,
-        )
+        try:
+            await self._store.record_proposed_event_id(
+                proposal_id=proposal_id,
+                proposed_event_id=proposed_event_id,
+            )
+        except InvalidStateTransition:
+            # A racing caller recorded a different id first; re-fetch
+            # and return the canonical recorded id.
+            refreshed = await self._store.get_proposal(
+                proposal_id=proposal_id,
+            )
+            return (refreshed and refreshed.proposed_event_id) or proposed_event_id
         return proposed_event_id
 
     # === helpers ===================================================
