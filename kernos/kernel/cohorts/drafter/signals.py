@@ -14,7 +14,10 @@ Signal contract:
 * ``drafter.signal.gap_detected`` — Compiler validation surfaces a
   user-resolvable :class:`CapabilityGap` of error severity.
 * ``drafter.signal.multi_intent_detected`` — single message contains
-  multiple strong routine intents.
+  multiple strong routine intents. v1.2 payload (CRB main batch):
+  ``candidate_intents`` is a list of :class:`CandidateIntent` with
+  ``candidate_id`` + ``target_workflow_id`` for modification-target
+  ambiguity.
 * ``drafter.signal.idle_resurface`` — paused draft re-enters principal
   attention via context re-engagement OR low-frequency cursor wake.
 * ``drafter.signal.draft_paused`` — context shifts move a draft to
@@ -23,6 +26,8 @@ Signal contract:
   abandoned state (user explicit no/stop OR superseded).
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 
 # ---------------------------------------------------------------------------
@@ -113,15 +118,65 @@ def build_gap_detected_payload(
     }
 
 
+@dataclass(frozen=True)
+class CandidateIntent:
+    """One candidate intent in a ``multi_intent_detected`` payload (v1.2).
+
+    Drafter v1.2 (CRB main batch) extended the payload to carry per-
+    candidate ``candidate_id`` + ``target_workflow_id`` so CRB can
+    distinguish modification-target ambiguity from new-intent
+    ambiguity at authoring time.
+
+    Backward compat: the dict form ``{"summary": ..., "confidence": ...}``
+    used by Drafter v2 still serializes the same in JSON when
+    ``candidate_id`` is auto-generated and ``target_workflow_id`` is
+    None. Existing principal cohort consumers that read only
+    ``summary`` / ``confidence`` continue to work; the new fields are
+    additive.
+    """
+
+    candidate_id: str
+    summary: str
+    confidence: float
+    target_workflow_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id:
+            raise ValueError("candidate_id is required")
+        if not self.summary:
+            raise ValueError("summary is required")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError(
+                f"confidence must be in [0.0, 1.0], got {self.confidence}"
+            )
+
+    def to_dict(self) -> dict:
+        d = {
+            "candidate_id": self.candidate_id,
+            "summary": self.summary,
+            "confidence": self.confidence,
+        }
+        if self.target_workflow_id:
+            d["target_workflow_id"] = self.target_workflow_id
+        return d
+
+
 def build_multi_intent_payload(
     *,
     instance_id: str,
-    candidate_intents: list[dict],
+    candidate_intents: "list[CandidateIntent | dict]",
     source_event_id: str,
 ) -> dict:
     """Payload for :data:`SIGNAL_MULTI_INTENT_DETECTED`.
 
-    Each candidate is ``{"summary": str, "confidence": float}``.
+    v1.2 (CRB main batch) accepts :class:`CandidateIntent` instances
+    (preferred) OR plain dicts (Drafter v2 backward-compat). Dicts
+    are passed through verbatim; CandidateIntent instances are
+    serialized via :meth:`CandidateIntent.to_dict`.
+
+    Pin (Kit pin v1->v2 cleanup): :class:`CandidateIntent` is the
+    single source of truth for the candidate shape. The payload
+    references the type directly to avoid divergence.
     """
     if not source_event_id:
         raise ValueError("source_event_id is required")
@@ -130,9 +185,21 @@ def build_multi_intent_payload(
             "multi_intent requires at least 2 candidates; use a single-"
             "intent signal otherwise"
         )
+    serialized = []
+    for c in candidate_intents:
+        if isinstance(c, CandidateIntent):
+            serialized.append(c.to_dict())
+        elif isinstance(c, dict):
+            # Backward-compat: Drafter v2 callers passing plain dicts.
+            serialized.append(dict(c))
+        else:
+            raise TypeError(
+                f"candidate must be CandidateIntent or dict, got "
+                f"{type(c).__name__}"
+            )
     return {
         "instance_id": instance_id,
-        "candidate_intents": list(candidate_intents),
+        "candidate_intents": serialized,
         "source_event_id": source_event_id,
     }
 
@@ -199,6 +266,7 @@ def build_draft_abandoned_payload(
 
 
 __all__ = [
+    "CandidateIntent",
     "SIGNAL_DRAFT_ABANDONED",
     "SIGNAL_DRAFT_PAUSED",
     "SIGNAL_DRAFT_READY",
