@@ -611,11 +611,20 @@ class DrafterCohort:
             "original_proposal_id": original_proposal_id,
         }
         notes = _append_provenance(draft.resolution_notes, provenance)
+        # Codex v1.1 fold: feedback against a ready draft requires
+        # demotion (WDP's ReadyStateMutationRequiresDemotion invariant
+        # rejects substantive content mutation on status="ready"
+        # unless the same call sets status="shaping"). resolution_notes
+        # is substantive content per WDP, so demotion is required when
+        # the draft is in ready state.
+        update_kwargs: dict = {"resolution_notes": notes}
+        if draft.status == "ready":
+            update_kwargs["status"] = "shaping"
         update_summary = await self._draft_port.update_draft(
             source_event_id=event.event_id,
             draft_id=draft_id,
             expected_version=draft.version,
-            resolution_notes=notes,
+            **update_kwargs,
         )
 
         # Step 4: receipt emission via action_log.

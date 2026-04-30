@@ -356,6 +356,55 @@ class TestReceiptFires:
 # ===========================================================================
 
 
+class TestReadyDraftDemotion:
+    """Codex v1.1 catch: WDP's ReadyStateMutationRequiresDemotion
+    rejects substantive content mutation on status='ready' unless the
+    same call sets status='shaping'. resolution_notes is substantive
+    content; the feedback handler must demote when the draft is ready.
+    """
+
+    async def test_ready_draft_demotes_on_feedback(self, stack):
+        # Create a draft and transition it to ready.
+        existing = await stack["drafts"].create_draft(
+            instance_id="inst_a", intent_summary="initial",
+            home_space_id="spc_general",
+        )
+        # Drive draft to 'ready' status.
+        ready_draft = await stack["drafts"].update_draft(
+            instance_id="inst_a", draft_id=existing.draft_id,
+            expected_version=existing.version, status="ready",
+        )
+        assert ready_draft.status == "ready"
+        # Emit feedback.
+        await stack["crb_emitter"].emit(
+            "inst_a", "crb.feedback.modify_request",
+            {
+                "instance_id": "inst_a",
+                "draft_id": existing.draft_id,
+                "original_proposal_id": "prop-1",
+                "feedback_summary": "modify request",
+                "source_turn_id": "turn-1",
+                "member_id": "mem_owner",
+            },
+        )
+        await event_stream.flush_now()
+        result = await stack["cohort"].tick(instance_id="inst_a")
+        assert result.events_processed == 1
+        # Draft was demoted to 'shaping' (the substrate invariant
+        # holds; no exception wedged the tick loop).
+        post = await stack["drafts"].get_draft(
+            instance_id="inst_a", draft_id=existing.draft_id,
+        )
+        assert post.status == "shaping"
+        # And the feedback provenance entry was appended.
+        notes = json.loads(post.resolution_notes or "{}")
+        feedback_entries = [
+            u for u in notes.get("updates", [])
+            if u.get("reason") == "crb_modify_feedback"
+        ]
+        assert len(feedback_entries) == 1
+
+
 class TestReceiptTypeSurface:
     def test_feedback_received_in_receipt_types(self):
         # v1.1: surface gained one receipt type.
