@@ -17,10 +17,31 @@ action type produces a deterministic, non-null ``target_id`` (draft_id,
 signal_id, or receipt_id derived from the source event + action key),
 so the constraint is achievable without sentinel values.
 
-Atomicity: ``record_and_perform`` performs the side effect AND inserts
-the log row in the SAME transaction. A crash between the two does not
-exist — either both happen or neither. Replay finds the log row and
-returns the cached ``result_summary`` instead of re-applying.
+Claim-first protocol (Codex mid-batch fix). The original spec called
+for "side effect + log row in same transaction" — but the side effect
+runs through a different SQLite connection (WDP / event_stream), so a
+single SQL transaction cannot actually wrap both. The implementation
+instead uses a three-phase claim protocol:
+
+1. **Claim:** atomically INSERT the log row with ``status='pending'``.
+   The composite PRIMARY KEY enforces uniqueness; concurrent claimants
+   see :class:`aiosqlite.IntegrityError` and read back the prior row.
+2. **Perform:** invoke the caller's ``perform()`` coroutine. No lock
+   held during the await, so re-entrancy and concurrent unrelated
+   actions are safe.
+3. **Mark:** UPDATE the log row to ``status='performed'`` with the
+   result summary on success, or ``status='failed'`` on raise.
+
+Recovery semantics on restart:
+
+* ``status='performed'`` → return prior summary (already done).
+* ``status='pending'`` → previous process crashed mid-perform. v1
+  conservative behavior: treat as already-done and return the
+  (possibly empty) summary. This means a rare crash may "lose" a
+  signal — a worse failure mode than duplication for a tool-starved
+  cohort whose work product is non-essential.
+* ``status='failed'`` → previous perform raised; safe to retry. The
+  caller observes a fresh perform invocation.
 
 The directory placement (``cohorts/_substrate/action_log.py``) reflects
 reusable intent: future Pattern Observer / Curator cohorts can import
@@ -97,9 +118,11 @@ CREATE TABLE IF NOT EXISTS cohort_action_log (
     source_event_id  TEXT NOT NULL,
     action_type      TEXT NOT NULL,
     target_id        TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
     result_summary   TEXT,
     performed_at     TEXT NOT NULL,
-    PRIMARY KEY (cohort_id, instance_id, source_event_id, action_type, target_id)
+    PRIMARY KEY (cohort_id, instance_id, source_event_id, action_type, target_id),
+    CHECK (status IN ('pending', 'performed', 'failed'))
 )
 """
 
@@ -110,14 +133,38 @@ CREATE INDEX IF NOT EXISTS idx_cohort_action_log_event
 
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
+    """Create the action-log table + index. Lazy migration: pre-Drafter
+    databases (none expected at the time of this batch, but defensive)
+    get the ``status`` column added in place via ALTER TABLE."""
     await db.execute(_ACTION_LOG_DDL)
     await db.execute(_ACTION_LOG_INDEX)
+    # Lazy migration for pre-existing tables that lacked the status
+    # column. SQLite ALTER TABLE ADD COLUMN cannot include CHECK or
+    # NOT NULL with a default in older versions; the application-level
+    # validation in record_and_perform enforces the invariant for new
+    # rows regardless.
+    async with db.execute("PRAGMA table_info(cohort_action_log)") as cur:
+        cols = [row[1] for row in await cur.fetchall()]
+    if "status" not in cols:
+        try:
+            await db.execute(
+                "ALTER TABLE cohort_action_log ADD COLUMN status TEXT "
+                "NOT NULL DEFAULT 'performed'"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
     await db.commit()
 
 
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
+
+
+STATUS_PENDING = "pending"
+STATUS_PERFORMED = "performed"
+STATUS_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -127,6 +174,7 @@ class ActionRecord:
     source_event_id: str
     action_type: str
     target_id: str
+    status: str
     result_summary: dict
     performed_at: str
 
@@ -136,12 +184,17 @@ class ActionRecord:
             summary = json.loads(row["result_summary"]) if row["result_summary"] else {}
         except Exception:
             summary = {}
+        try:
+            status = row["status"]
+        except (KeyError, IndexError):
+            status = STATUS_PERFORMED  # legacy rows lacking status column
         return cls(
             cohort_id=row["cohort_id"],
             instance_id=row["instance_id"],
             source_event_id=row["source_event_id"],
             action_type=row["action_type"],
             target_id=row["target_id"],
+            status=status or STATUS_PERFORMED,
             result_summary=summary,
             performed_at=row["performed_at"],
         )
@@ -226,11 +279,23 @@ class ActionLog:
         perform: Callable[[], Awaitable[T]],
         result_to_summary: Callable[[T], dict] | None = None,
     ) -> T:
-        """Atomic: BEGIN; perform side effect; INSERT log row; COMMIT.
+        """Claim-first crash-idempotent side-effect wrapper.
 
-        On UNIQUE-constraint violation (replay of a previously-committed
-        action), rolls back, looks up the prior record, and returns the
-        cached ``result_summary``.
+        Three phases (see module docstring for full semantics):
+
+        1. INSERT log row with ``status='pending'`` (atomic claim via
+           composite PK).
+        2. ``await perform()`` (no lock held during the await).
+        3. UPDATE log row to ``status='performed'`` + result summary,
+           or ``status='failed'`` on raise.
+
+        On replay (subsequent call with same composite key):
+
+        * ``performed`` → return prior summary, do NOT re-invoke.
+        * ``pending`` → conservative skip (return prior summary).
+          Documented v1 limitation: rare crash mid-perform may "lose"
+          a signal. Acceptable for tool-starved cohorts.
+        * ``failed`` → safe to retry; perform invoked again.
 
         Args:
             instance_id: scope.
@@ -239,28 +304,24 @@ class ActionLog:
                 composite key collides.
             action_type: must be in :data:`ALLOWED_ACTION_TYPES`.
             target_id: deterministic identifier for the side effect's
-                target (draft_id, signal_id, receipt_id). NOT NULL.
+                target. NOT NULL.
             perform: async callable producing the side effect's result.
-                Called exactly once per (composite key) — never twice.
+                Invoked at most once per (composite key) per process
+                lifetime.
             result_to_summary: optional callable converting ``perform``'s
                 return value to a JSON-serializable summary stored in
                 the log row. Default: best-effort dict.
 
         Returns:
-            The result of ``perform`` (or, on replay, a synthesized
-            equivalent reconstructed from ``result_summary``).
-
-        Raises:
-            ActionLogInvalidActionType, ActionLogInvalidTarget: input
-                validation.
-            ActionLogConflict: a record exists but the action could not
-                be skipped — should never happen in production.
+            The result of ``perform`` (or, on replay, the recorded
+            ``result_summary``).
         """
         self._validate_action_type(action_type)
         self._validate_target_id(target_id)
         if self._db is None:
             raise RuntimeError("ActionLog not started")
-        # Fast-path replay check before grabbing the lock.
+
+        # Phase 0: replay check.
         prior = await self.is_already_done(
             instance_id=instance_id,
             source_event_id=source_event_id,
@@ -268,67 +329,117 @@ class ActionLog:
             target_id=target_id,
         )
         if prior is not None:
-            return self._replay_return(prior)
+            if prior.status == STATUS_FAILED:
+                # Safe to retry: prior perform raised; no side effect.
+                # Drop the row so the claim INSERT below succeeds.
+                await self._delete_record(
+                    instance_id=instance_id,
+                    source_event_id=source_event_id,
+                    action_type=action_type,
+                    target_id=target_id,
+                )
+            else:
+                # 'performed' or 'pending' — return cached summary.
+                return self._replay_return(prior)
 
-        async with self._lock:
-            # Re-check inside the lock to close the race.
+        # Phase 1: atomic claim. Race-safe across processes via UNIQUE
+        # constraint on the composite PK.
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            await self._db.execute(
+                "INSERT INTO cohort_action_log "
+                "(cohort_id, instance_id, source_event_id, action_type, "
+                " target_id, status, result_summary, performed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self._cohort_id, instance_id, source_event_id,
+                    action_type, target_id, STATUS_PENDING,
+                    "{}", now,
+                ),
+            )
+        except aiosqlite.IntegrityError:
+            # Concurrent claimant won the race; read back and return.
             prior = await self.is_already_done(
                 instance_id=instance_id,
                 source_event_id=source_event_id,
                 action_type=action_type,
                 target_id=target_id,
             )
-            if prior is not None:
-                return self._replay_return(prior)
-
-            await self._db.execute("BEGIN")
-            try:
-                result = await perform()
-                summary = (
-                    result_to_summary(result)
-                    if result_to_summary is not None
-                    else self._default_summary(result)
+            if prior is None:
+                raise ActionLogConflict(
+                    f"action_log claim violation but prior record "
+                    f"not found: cohort={self._cohort_id!r} "
+                    f"instance={instance_id!r} "
+                    f"source_event={source_event_id!r} "
+                    f"action={action_type!r} target={target_id!r}"
                 )
-                now = datetime.now(timezone.utc).isoformat()
+            return self._replay_return(prior)
+
+        # Phase 2: perform. No lock held; re-entrant and concurrent
+        # unrelated actions are safe.
+        try:
+            result = await perform()
+        except Exception:
+            # Mark failed so a future replay can retry the perform.
+            try:
                 await self._db.execute(
-                    "INSERT INTO cohort_action_log "
-                    "(cohort_id, instance_id, source_event_id, action_type, "
-                    " target_id, result_summary, performed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "UPDATE cohort_action_log SET status = ?, "
+                    "performed_at = ? "
+                    "WHERE cohort_id = ? AND instance_id = ? "
+                    "AND source_event_id = ? AND action_type = ? "
+                    "AND target_id = ?",
                     (
+                        STATUS_FAILED,
+                        datetime.now(timezone.utc).isoformat(),
                         self._cohort_id, instance_id, source_event_id,
-                        action_type, target_id, json.dumps(summary), now,
+                        action_type, target_id,
                     ),
                 )
-                await self._db.execute("COMMIT")
-                return result
-            except aiosqlite.IntegrityError:
-                # Concurrent replay won the race — roll back, return prior.
-                try:
-                    await self._db.execute("ROLLBACK")
-                except Exception:
-                    pass
-                prior = await self.is_already_done(
-                    instance_id=instance_id,
-                    source_event_id=source_event_id,
-                    action_type=action_type,
-                    target_id=target_id,
-                )
-                if prior is None:
-                    raise ActionLogConflict(
-                        f"action_log UNIQUE violation but prior record "
-                        f"not found: cohort={self._cohort_id!r} "
-                        f"instance={instance_id!r} "
-                        f"source_event={source_event_id!r} "
-                        f"action={action_type!r} target={target_id!r}"
-                    )
-                return self._replay_return(prior)
             except Exception:
-                try:
-                    await self._db.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
+                pass
+            raise
+
+        # Phase 3: mark performed with summary.
+        summary = (
+            result_to_summary(result)
+            if result_to_summary is not None
+            else self._default_summary(result)
+        )
+        await self._db.execute(
+            "UPDATE cohort_action_log SET status = ?, result_summary = ?, "
+            "performed_at = ? "
+            "WHERE cohort_id = ? AND instance_id = ? "
+            "AND source_event_id = ? AND action_type = ? "
+            "AND target_id = ?",
+            (
+                STATUS_PERFORMED,
+                json.dumps(summary),
+                datetime.now(timezone.utc).isoformat(),
+                self._cohort_id, instance_id, source_event_id,
+                action_type, target_id,
+            ),
+        )
+        return result
+
+    async def _delete_record(
+        self,
+        *,
+        instance_id: str,
+        source_event_id: str,
+        action_type: str,
+        target_id: str,
+    ) -> None:
+        """Internal: remove a failed-status row so a fresh claim can
+        succeed. Used by the retry-after-failure path."""
+        await self._db.execute(
+            "DELETE FROM cohort_action_log WHERE "
+            "cohort_id = ? AND instance_id = ? AND source_event_id = ? "
+            "AND action_type = ? AND target_id = ?",
+            (
+                self._cohort_id, instance_id, source_event_id,
+                action_type, target_id,
+            ),
+        )
 
     @staticmethod
     def _validate_action_type(action_type: str) -> None:
@@ -372,4 +483,7 @@ __all__ = [
     "ActionLogInvalidTarget",
     "ActionRecord",
     "ALLOWED_ACTION_TYPES",
+    "STATUS_FAILED",
+    "STATUS_PENDING",
+    "STATUS_PERFORMED",
 ]

@@ -55,9 +55,13 @@ _WEAK_SIGNAL_PATTERNS = [
 
 def has_weak_signal(event: "Event") -> bool:
     """Pure regex match against the event payload's text fields.
-    Returns True if any weak-signal pattern fires."""
-    payload = event.payload or {}
-    # Common text fields in subscribed event types.
+    Returns True if any weak-signal pattern fires.
+
+    Defensive against malformed payloads (Codex mid-batch fix): if the
+    payload is anything other than a mapping, treat as no signal."""
+    payload = event.payload
+    if not isinstance(payload, dict):
+        return False
     candidate_strings = []
     for key in ("text", "content", "message", "summary", "body"):
         value = payload.get(key)

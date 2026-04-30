@@ -192,6 +192,12 @@ class DurableEventCursor:
     """Sentinel representing no events yet seen — read returns events from
     the dawn of time on first start."""
 
+    POSITION_SEPARATOR = "::"
+    """Separator between timestamp and event_id in the persisted cursor
+    position. The composite form (``timestamp::event_id``) breaks
+    same-timestamp ties — strict ``>`` on timestamp alone skips
+    legitimate later events at the same timestamp."""
+
     def __init__(
         self,
         *,
@@ -238,63 +244,81 @@ class DurableEventCursor:
 
     async def read_next_batch(self, *, max_events: int = 10) -> "list[Event]":
         """Read the next batch of events from the current cursor position
-        matching the configured event-type filter. Does NOT advance the
-        cursor — ``commit_position`` does that after successful processing.
+        matching the configured event-type filter.
+
+        SQL-level filter pushdown (Codex mid-batch fix): the type filter
+        and the after-cursor exclusion run inside the event_stream
+        query itself, so non-matching events do not consume the
+        ``max_events`` budget and can never starve the cursor.
+        Same-timestamp ties are broken via the (timestamp, event_id)
+        composite encoded in the cursor position.
+
+        Does NOT advance the cursor — ``commit_position`` does that
+        after successful processing.
         """
-        # Lazy import to avoid circular dependency: event_stream imports
-        # nothing from this module, but the substrate is loaded by the
-        # cohort layer that the event_stream's writer also touches.
+        # Lazy import to avoid circular dependency.
         from kernos.kernel import event_stream
 
         position = await self.current_position()
-        since = self._position_to_datetime(position)
+        since_ts, since_event_id = self._parse_position(position)
+        since_dt = self._timestamp_to_datetime(since_ts)
         until = datetime.now(timezone.utc)
         events = await event_stream.events_in_window(
-            self._instance_id, since=since, until=until,
+            self._instance_id,
+            since=since_dt,
+            until=until,
+            event_types=tuple(self._event_types),
+            after_event_id=since_event_id or None,
             limit=max_events,
         )
-        # Filter by type AND by strict-greater-than position so the
-        # last-committed event is not redelivered.
-        matching = [
-            e for e in events
-            if e.event_type in self._event_types and e.timestamp > position
-        ]
-        return matching[:max_events]
+        return events
 
     async def commit_position(self, *, event_id: str, timestamp: str) -> None:
         """Advance the cursor to the named event. Atomic write to the
         ``CursorStore``. Caller MUST have completed processing the named
         event before invoking this — a crash before commit will replay
-        the event on restart."""
+        the event on restart.
+
+        Position is encoded as ``"timestamp::event_id"`` so two events
+        at the same timestamp can be distinguished — the SQL query
+        excludes the named event_id explicitly to prevent replay."""
         if not event_id or not timestamp:
             raise ValueError("event_id and timestamp are required")
-        # Position is the event timestamp; use the event_id-suffixed form
-        # so two events at the same timestamp can be distinguished if
-        # the substrate ever allows that (currently SQLite ROWID gives
-        # us strict ordering anyway).
+        composite = f"{timestamp}{self.POSITION_SEPARATOR}{event_id}"
         await self._cursor_store.write_position(
             cohort_id=self._cohort_id,
             instance_id=self._instance_id,
-            cursor_position=timestamp,
+            cursor_position=composite,
             event_types_filter=tuple(self._event_types),
         )
-        self._position = timestamp
+        self._position = composite
 
-    def _position_to_datetime(self, position: str) -> datetime:
-        """Parse the cursor position back to a UTC datetime for
-        ``events_in_window``. The sentinel ``"0"`` maps to epoch."""
+    def _parse_position(self, position: str) -> tuple[str, str]:
+        """Decode a stored cursor position into (timestamp, event_id).
+        Sentinel ``"0"`` maps to ("0", ""). Legacy positions without
+        the separator are treated as timestamp-only."""
         if position == self.INITIAL_POSITION or not position:
+            return self.INITIAL_POSITION, ""
+        if self.POSITION_SEPARATOR in position:
+            ts, _, eid = position.partition(self.POSITION_SEPARATOR)
+            return ts, eid
+        return position, ""
+
+    def _timestamp_to_datetime(self, timestamp: str) -> datetime:
+        """Parse a timestamp (possibly the ``"0"`` sentinel) back to a
+        UTC datetime suitable for ``events_in_window``."""
+        if timestamp == self.INITIAL_POSITION or not timestamp:
             return datetime.fromtimestamp(0, tz=timezone.utc)
         try:
-            dt = datetime.fromisoformat(position)
+            dt = datetime.fromisoformat(timestamp)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except ValueError:
             logger.warning(
-                "DurableEventCursor: malformed cursor position %r for "
+                "DurableEventCursor: malformed cursor timestamp %r for "
                 "cohort=%s instance=%s; resetting to epoch",
-                position, self._cohort_id, self._instance_id,
+                timestamp, self._cohort_id, self._instance_id,
             )
             return datetime.fromtimestamp(0, tz=timezone.utc)
 

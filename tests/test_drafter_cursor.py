@@ -227,6 +227,75 @@ class TestCrossInstanceIsolation:
 # ===========================================================================
 
 
+class TestSqlFilterPushdown:
+    """Codex mid-batch fix: cursor type filtering MUST push into the
+    SQL query, not Python-filter after fetching N raw events.
+    Otherwise non-matching events can starve the cursor."""
+
+    async def test_non_matching_events_do_not_starve(self, stack):
+        cursor = DurableEventCursor(
+            cursor_store=stack["store"],
+            cohort_id="drafter",
+            instance_id="inst_a",
+            event_types=frozenset({"conversation.message.posted"}),
+        )
+        # Emit a long stream of non-matching events first, then one matching.
+        for i in range(15):
+            await event_stream.emit("inst_a", "tool.called", {"i": i})
+        await event_stream.emit(
+            "inst_a", "conversation.message.posted", {"i": "match"},
+        )
+        await event_stream.flush_now()
+        # max_events=10, but the matching event is 16th overall. Pushdown
+        # filtering means we get the matching event without starvation.
+        events = await cursor.read_next_batch(max_events=10)
+        assert len(events) == 1
+        assert events[0].event_type == "conversation.message.posted"
+
+
+class TestSameTimestampTies:
+    """Codex mid-batch fix: cursor position must include event_id for
+    same-timestamp tie-breaking. Two events at the same timestamp would
+    otherwise both replay or both skip under strict timestamp ordering."""
+
+    async def test_commit_does_not_skip_same_timestamp_sibling(self, stack):
+        # Force two events to have the exact same timestamp by
+        # constructing them manually and writing through the writer.
+        from kernos.kernel.event_stream import Event, _WRITER
+
+        ts = "2026-04-30T01:00:00+00:00"
+        e1 = Event(
+            event_id="evt-A", instance_id="inst_a", timestamp=ts,
+            event_type="conversation.message.posted",
+            payload={"i": 1}, source_module="drafter",
+        )
+        e2 = Event(
+            event_id="evt-B", instance_id="inst_a", timestamp=ts,
+            event_type="conversation.message.posted",
+            payload={"i": 2}, source_module="drafter",
+        )
+        _WRITER.enqueue(e1)
+        _WRITER.enqueue(e2)
+        await event_stream.flush_now()
+
+        cursor = DurableEventCursor(
+            cursor_store=stack["store"],
+            cohort_id="drafter",
+            instance_id="inst_a",
+            event_types=frozenset({"conversation.message.posted"}),
+        )
+        events = await cursor.read_next_batch(max_events=10)
+        assert len(events) == 2
+        # Commit only the first.
+        await cursor.commit_position(
+            event_id=events[0].event_id, timestamp=events[0].timestamp,
+        )
+        # Re-read: the second sibling MUST still be returned.
+        remaining = await cursor.read_next_batch(max_events=10)
+        assert len(remaining) == 1
+        assert remaining[0].event_id == events[1].event_id
+
+
 class TestModulePlacement:
     def test_cursor_module_lives_in_substrate(self):
         """AC #30: cursor + action_log live in cohorts/_substrate/ for

@@ -172,8 +172,15 @@ class TestRecordAndPerform:
         assert called == 1, "perform must run exactly once across replays"
         assert result["draft_id"] == "d-1"
 
-    async def test_perform_exception_does_not_record(self, action_log):
+    async def test_perform_exception_marks_failed_and_allows_retry(self, action_log):
+        """Codex mid-batch fix: claim-first protocol leaves a row with
+        status='failed' so the next call can detect and retry. The
+        original "no record" semantic is replaced; the new contract is
+        "retry-safe via the status field"."""
+        attempts = []
+
         async def perform():
+            attempts.append("called")
             raise RuntimeError("simulated crash mid-perform")
 
         with pytest.raises(RuntimeError, match="simulated crash"):
@@ -184,14 +191,39 @@ class TestRecordAndPerform:
                 target_id="d-1",
                 perform=perform,
             )
-        # Record was NOT inserted — retry should run perform again.
+        # Record exists with status='failed'.
         prior = await action_log.is_already_done(
             instance_id="inst_a",
             source_event_id="evt_1",
             action_type="create_draft",
             target_id="d-1",
         )
-        assert prior is None
+        assert prior is not None
+        assert prior.status == "failed"
+
+        # Retry runs perform again (the row is removed before re-claim).
+        async def perform_success():
+            attempts.append("retry")
+            return {"draft_id": "d-1"}
+
+        result = await action_log.record_and_perform(
+            instance_id="inst_a",
+            source_event_id="evt_1",
+            action_type="create_draft",
+            target_id="d-1",
+            perform=perform_success,
+        )
+        assert attempts == ["called", "retry"]
+        assert result == {"draft_id": "d-1"}
+        # And now status is 'performed'.
+        latest = await action_log.is_already_done(
+            instance_id="inst_a",
+            source_event_id="evt_1",
+            action_type="create_draft",
+            target_id="d-1",
+        )
+        assert latest is not None
+        assert latest.status == "performed"
 
     async def test_distinct_keys_run_independently(self, action_log):
         runs = []
@@ -223,6 +255,71 @@ class TestRecordAndPerform:
 # ===========================================================================
 # Cross-instance isolation
 # ===========================================================================
+
+
+class TestClaimFirstProtocol:
+    """Codex mid-batch fix: claim-first protocol — INSERT pending,
+    perform, UPDATE performed/failed. Verifies the three phases."""
+
+    async def test_pending_row_visible_during_perform(self, action_log):
+        from kernos.kernel.cohorts._substrate.action_log import STATUS_PENDING
+        observed_during = []
+
+        async def perform():
+            # While we're in here, the row should already be 'pending'.
+            mid = await action_log.is_already_done(
+                instance_id="inst_a", source_event_id="evt_1",
+                action_type="create_draft", target_id="d-1",
+            )
+            observed_during.append(mid)
+            return {"draft_id": "d-1"}
+
+        await action_log.record_and_perform(
+            instance_id="inst_a", source_event_id="evt_1",
+            action_type="create_draft", target_id="d-1",
+            perform=perform,
+        )
+        assert len(observed_during) == 1
+        assert observed_during[0] is not None
+        assert observed_during[0].status == STATUS_PENDING
+
+    async def test_performed_status_after_success(self, action_log):
+        from kernos.kernel.cohorts._substrate.action_log import STATUS_PERFORMED
+
+        async def perform():
+            return {"draft_id": "d-1"}
+
+        await action_log.record_and_perform(
+            instance_id="inst_a", source_event_id="evt_1",
+            action_type="create_draft", target_id="d-1",
+            perform=perform,
+            result_to_summary=lambda r: r,
+        )
+        record = await action_log.is_already_done(
+            instance_id="inst_a", source_event_id="evt_1",
+            action_type="create_draft", target_id="d-1",
+        )
+        assert record.status == STATUS_PERFORMED
+        assert record.result_summary == {"draft_id": "d-1"}
+
+
+class TestSchemaConstraints:
+    """Codex mid-batch hardening: DDL-level CHECK constraint on status."""
+
+    async def test_status_check_constraint_in_schema(self, action_log):
+        # Direct INSERT of an invalid status value should fail at the
+        # SQL layer.
+        with pytest.raises(aiosqlite.IntegrityError):
+            await action_log._db.execute(
+                "INSERT INTO cohort_action_log "
+                "(cohort_id, instance_id, source_event_id, action_type, "
+                " target_id, status, result_summary, performed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "drafter", "inst_a", "evt_x", "create_draft",
+                    "d-x", "bogus_status", "{}", "2026-04-30T00:00:00+00:00",
+                ),
+            )
 
 
 class TestCrossInstanceIsolation:

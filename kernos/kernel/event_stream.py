@@ -755,19 +755,45 @@ async def events_in_window(
     since: datetime,
     until: datetime,
     *,
+    event_types: list[str] | tuple[str, ...] | frozenset[str] | None = None,
+    after_event_id: str | None = None,
     limit: int = 1000,
 ) -> list[Event]:
-    """All events for an instance in a time window, ascending."""
+    """All events for an instance in a time window, ascending.
+
+    Optional ``event_types`` filter is pushed into the SQL query so
+    callers (e.g. cohort cursors) don't read raw events and Python-
+    filter — that pattern starves when the next N raw events are all
+    non-matching.
+
+    Optional ``after_event_id`` breaks same-timestamp ties: when the
+    caller has already consumed the event whose timestamp equals
+    ``since``, passing its ``event_id`` excludes it from the result
+    and avoids the strict ``>`` ordering skipping legitimate later
+    events at the same timestamp.
+    """
     db = await _WRITER.read_db()
     if db is None:
         return []
     await _WRITER._flush_once()
-    async with db.execute(
-        "SELECT * FROM events WHERE instance_id = ? "
-        "AND timestamp >= ? AND timestamp <= ? "
-        "ORDER BY timestamp ASC LIMIT ?",
-        (instance_id, since.isoformat(), until.isoformat(), limit),
-    ) as cur:
+    clauses = ["instance_id = ?", "timestamp >= ?", "timestamp <= ?"]
+    args: list[Any] = [instance_id, since.isoformat(), until.isoformat()]
+    if event_types:
+        types_list = list(event_types)
+        placeholders = ",".join("?" * len(types_list))
+        clauses.append(f"event_type IN ({placeholders})")
+        args.extend(types_list)
+    if after_event_id:
+        # Exclude the named event so same-timestamp ties don't replay.
+        clauses.append("event_id != ?")
+        args.append(after_event_id)
+    args.append(limit)
+    query = (
+        "SELECT * FROM events WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY timestamp ASC, event_id ASC LIMIT ?"
+    )
+    async with db.execute(query, args) as cur:
         rows = await cur.fetchall()
     return [Event.from_row(r) for r in rows]
 
