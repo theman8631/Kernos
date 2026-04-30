@@ -175,3 +175,55 @@ class TestCRBSurfaceLanded:
 
     def test_crb_source_module_pinned(self):
         assert CRB_SOURCE_MODULE == "crb"
+
+    def test_no_production_code_emits_crb_event_types_directly(self):
+        """Codex final-review hardening (secondary): non-CRB production
+        code must not call ``event_stream.emit`` with a CRB event
+        type. The substrate enforces source_module via the
+        EmitterRegistry and STS rejects approvals where
+        envelope.source_module != 'crb', so a bypass would be
+        rejected at the gate — but a static pin gives belt-and-braces
+        and helps reviewers spot drift.
+
+        The check walks production ``.py`` files under ``kernos/`` and
+        asserts none outside the approved CRB seams contain a string
+        literal CRB event type immediately following an
+        ``event_stream.emit`` / ``emitter.emit`` call.
+        """
+        import pathlib
+        import re
+
+        approved_paths: tuple[str, ...] = (
+            "kernos/kernel/crb/events.py",
+            # principal_integration owns the typed receipt-ack emitter
+            # and routes everything through Drafter port — listed
+            # defensively even though it doesn't emit CRB types.
+            "kernos/kernel/crb/principal_integration/",
+        )
+        crb_event_literals = (
+            '"routine.proposed"', "'routine.proposed'",
+            '"routine.approved"', "'routine.approved'",
+            '"routine.modification.approved"',
+            "'routine.modification.approved'",
+            '"routine.declined"', "'routine.declined'",
+            '"crb.feedback.modify_request"',
+            "'crb.feedback.modify_request'",
+        )
+        emit_call_pattern = re.compile(
+            r"\.emit\s*\([^)]*?(" + "|".join(
+                re.escape(lit) for lit in crb_event_literals
+            ) + r")", re.DOTALL,
+        )
+        repo_root = pathlib.Path(__file__).parent.parent
+        offenders: list[str] = []
+        for py in (repo_root / "kernos").rglob("*.py"):
+            rel = py.relative_to(repo_root).as_posix()
+            if any(rel.startswith(a) for a in approved_paths):
+                continue
+            text = py.read_text()
+            if emit_call_pattern.search(text):
+                offenders.append(rel)
+        assert offenders == [], (
+            f"production code outside CRB seams emits CRB event types "
+            f"directly: {offenders}"
+        )
