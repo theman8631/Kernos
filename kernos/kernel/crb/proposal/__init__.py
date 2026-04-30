@@ -12,6 +12,15 @@
 """
 from __future__ import annotations
 
+from kernos.kernel.crb.proposal.author import (
+    CRBProposalAuthor,
+    CapabilityStateSummary,
+    LLMClient,
+    LLMResponseMalformed,
+    LLMTemperatureTooHigh,
+    MAX_TEMPERATURE,
+    ProposalAuthoringError,
+)
 from kernos.kernel.crb.proposal.install_proposal import (
     AmbiguityKind,
     DisambiguationOutcome,
@@ -34,6 +43,8 @@ from kernos.kernel.crb.proposal.install_proposal_store import (
 
 __all__ = [
     "AmbiguityKind",
+    "CRBProposalAuthor",
+    "CapabilityStateSummary",
     "DisambiguationOutcome",
     "DuplicateProposalCorrelation",
     "ExplicitModificationOutcome",
@@ -42,7 +53,12 @@ __all__ = [
     "InstallProposal",
     "InstallProposalStore",
     "InvalidStateTransition",
+    "LLMClient",
+    "LLMResponseMalformed",
+    "LLMTemperatureTooHigh",
+    "MAX_TEMPERATURE",
     "PermittedTransitions",
+    "ProposalAuthoringError",
     "ProposalState",
     "ResponseKind",
     "UnknownProposal",
