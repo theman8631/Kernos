@@ -153,6 +153,47 @@ class TestCrashAfterSignal:
         assert record.status == STATUS_PERFORMED
 
 
+class TestPendingReplayDoesNotWedgeTickLoop:
+    """Codex final-pass REAL #1: a pending action_log row from a
+    previous crashed perform must NOT KeyError the cohort's tick
+    loop. Conservative-skip behavior: empty summary → cohort bails
+    cleanly so cursor advances."""
+
+    async def test_pending_summary_does_not_keyerror(self, stack):
+        from kernos.kernel.cohorts._substrate.action_log import (
+            STATUS_PENDING,
+        )
+        from kernos.kernel.cohorts.drafter.ports import DrafterDraftPort
+
+        port = DrafterDraftPort(
+            registry=stack["drafts"], action_log=stack["action_log"],
+            instance_id="inst_a",
+        )
+        # Manually insert a pending row simulating a crashed perform.
+        await stack["action_log"]._db.execute(
+            "INSERT INTO cohort_action_log "
+            "(cohort_id, instance_id, source_event_id, action_type, "
+            " target_id, status, result_summary, performed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "drafter", "inst_a", "evt-crashed", "create_draft",
+                "det-target-x", STATUS_PENDING, "{}",
+                "2026-04-30T00:00:00+00:00",
+            ),
+        )
+        # Replay: cohort sees empty summary instead of {"draft_id": ...}.
+        summary = await port.create_draft(
+            source_event_id="evt-crashed",
+            intent_summary="any",
+            target_draft_id="det-target-x",
+        )
+        # The summary is the cached {} — caller MUST handle empty.
+        assert summary == {}
+        # No new draft was created (action_log claim already exists).
+        all_drafts = await stack["drafts"].list_drafts(instance_id="inst_a")
+        assert all_drafts == []
+
+
 class TestActionLogPerformedSkipsReplay:
     """Catch-all: every action_log-routed write skips on replay
     regardless of which port emitted it. The substrate is the trust

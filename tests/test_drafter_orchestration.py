@@ -286,6 +286,67 @@ class TestReadySignalDedupe:
         ), "ready signal should not refire on unchanged content"
 
 
+class TestDraftUpdatedReceipt:
+    """Codex final-pass REAL #2: drafter.receipt.draft_updated is
+    emitted after a successful update_draft (AC #19 receipt pattern)."""
+
+    async def test_update_path_emits_draft_updated_receipt(self, stack):
+        # Pre-populate a draft so the recognition path reaches the
+        # update branch.
+        existing = await stack["drafts"].create_draft(
+            instance_id="inst_a",
+            intent_summary="seed",
+            home_space_id="spc_general",
+        )
+        # Custom Tier 2 evaluator returns recognition pointing at the
+        # existing draft.
+        def _evaluator(evt):
+            return RecognitionEvaluation(
+                detected_shape=True, recurring=True, triggered=True,
+                automatable=True, permission_to_make_durable=True,
+                confidence=0.95, candidate_intent="updated intent",
+                candidate_target_workflow_id=existing.draft_id,
+            )
+
+        cohort = DrafterCohort(
+            draft_port=stack["draft_port"],
+            substrate_tools_port=stack["sts_port"],
+            event_port=stack["event_port"],
+            cursor=stack["cursor"],
+            action_log=stack["action_log"],
+            compiler_helper=draft_to_descriptor_candidate,
+            tier2_evaluator=_evaluator,
+        )
+        cohort.start(instance_id="inst_a")
+        # Trigger recognition with weak signal so Tier 2 fires.
+        await event_stream.emit(
+            "inst_a", "conversation.message.posted",
+            {"text": "set up a routine", "home_space_id": "spc_general"},
+        )
+        await event_stream.flush_now()
+        result = await cohort.tick(instance_id="inst_a")
+        # An update fired → at least one receipt emitted.
+        assert result.receipts_emitted >= 1
+        # And the draft_updated receipt should be observable in the
+        # action_log under the deterministic target_id.
+        log = stack["action_log"]
+        rec = await log.is_already_done(
+            instance_id="inst_a",
+            source_event_id=(
+                # Look up the most recent message event_id.
+                (await event_stream.events_in_window(
+                    "inst_a",
+                    since=__import__("datetime").datetime.fromtimestamp(0, tz=__import__("datetime").timezone.utc),
+                    until=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                    event_types=("conversation.message.posted",),
+                ))[0].event_id
+            ),
+            action_type="emit_receipt",
+            target_id=f"draft_updated::{existing.draft_id}",
+        )
+        assert rec is not None
+
+
 class TestIdleResurfaceTrigger:
     """AC #17: idle re-surface fires on context.shifted re-engagement."""
 

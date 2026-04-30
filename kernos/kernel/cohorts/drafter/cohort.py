@@ -384,6 +384,7 @@ class DrafterCohort:
         # an existing relevant draft.
         target_draft_id = recognition.candidate_target_workflow_id
         draft_record_summary: dict | None = None
+        was_update = False
         if target_draft_id and any(d.draft_id == target_draft_id for d in relevant):
             # Update existing draft. Action_log handles dedupe on
             # source_event_id.
@@ -393,6 +394,7 @@ class DrafterCohort:
             draft_record_summary = await self._update_existing_draft(
                 target, event=event, recognition=recognition,
             )
+            was_update = True
         elif should_create_persistent_draft(recognition):
             draft_record_summary = await self._create_new_draft(
                 event=event, recognition=recognition,
@@ -403,9 +405,32 @@ class DrafterCohort:
 
         if draft_record_summary is None:
             return signals, receipts
+        # Codex final-pass REAL #1: a pending action_log row from a
+        # previous crashed perform replays as an empty {} summary.
+        # Bail out of the orchestration cleanly so the cursor can
+        # advance — the conservative-skip behavior documented in the
+        # action_log claim-first protocol.
+        draft_id = draft_record_summary.get("draft_id")
+        if not draft_id:
+            return signals, receipts
+
+        # Codex final-pass REAL #2: emit drafter.receipt.draft_updated
+        # after a successful update (AC #19 receipt pattern). The
+        # receipt routes through action_log so replay-skips are clean.
+        if was_update:
+            await self._event_port.emit_receipt(
+                source_event_id=event.event_id,
+                receipt_type=RECEIPT_DRAFT_UPDATED,
+                payload=build_draft_updated_payload(
+                    draft_id=draft_id,
+                    instance_id=instance_id,
+                    version_after=draft_record_summary.get("version", 0),
+                ),
+                target_id=f"draft_updated::{draft_id}",
+            )
+            receipts += 1
 
         # STS dry-run + ready signal.
-        draft_id = draft_record_summary["draft_id"]
         draft = await self._draft_port.get_draft(draft_id=draft_id)
         if draft is None:
             return signals, receipts  # Race / replay edge case.
@@ -497,14 +522,11 @@ class DrafterCohort:
         provenance = self._build_provenance(event=event, reason="shape_signal")
         notes = _append_provenance(target.resolution_notes, provenance)
         try:
-            return await self._draft_port.update_draft(
+            summary = await self._draft_port.update_draft(
                 source_event_id=event.event_id,
                 draft_id=target.draft_id,
                 expected_version=target.version,
                 resolution_notes=notes,
-                # If draft is in 'ready' status and we're touching
-                # substantive content, demote (AC #24). For provenance-
-                # only updates, status stays put.
             )
         except Exception:
             # Retry-once after re-read (AC #23). The action_log will
@@ -514,12 +536,13 @@ class DrafterCohort:
             if fresh is None:
                 raise
             notes = _append_provenance(fresh.resolution_notes, provenance)
-            return await self._draft_port.update_draft(
+            summary = await self._draft_port.update_draft(
                 source_event_id=event.event_id,
                 draft_id=target.draft_id,
                 expected_version=fresh.version,
                 resolution_notes=notes,
             )
+        return summary
 
     async def _emit_signal_receipt(
         self, *, event: Any, signal_type: str, signal_id: str,
