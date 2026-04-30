@@ -29,6 +29,7 @@ async def _create(store, **overrides):
         draft_id="d-1", descriptor_hash="h" * 64,
         proposal_text="text", member_id="mem-1",
         source_thread_id="thr-1",
+        descriptor_snapshot={"name": "test-snapshot"},
     )
     base.update(overrides)
     return await store.create_proposal(**base)
@@ -54,12 +55,26 @@ class TestCreate:
                 instance_id="", correlation_id="c", draft_id="d",
                 descriptor_hash="h", proposal_text="t",
                 member_id="m", source_thread_id="thr",
+                descriptor_snapshot={"name": "x"},
             )
         with pytest.raises(ValueError):
             await store.create_proposal(
                 instance_id="i", correlation_id="", draft_id="d",
                 descriptor_hash="h", proposal_text="t",
                 member_id="m", source_thread_id="thr",
+                descriptor_snapshot={"name": "x"},
+            )
+
+    async def test_descriptor_snapshot_required(self, store):
+        """Codex final-review fold (REAL #3): create_proposal requires
+        a descriptor_snapshot dict; recovery sweep registers the
+        snapshot rather than the live draft."""
+        with pytest.raises(ValueError, match="descriptor_snapshot"):
+            await store.create_proposal(
+                instance_id="i", correlation_id="c-snap-required",
+                draft_id="d", descriptor_hash="h" * 64,
+                proposal_text="t", member_id="m", source_thread_id="thr",
+                descriptor_snapshot=None,  # type: ignore[arg-type]
             )
 
 

@@ -112,6 +112,17 @@ class InstallProposal:
     approval_event_id: str | None = None
     expires_at: str | None = None
     metadata: dict = field(default_factory=dict)
+    # Codex final-review fold (REAL #3): the descriptor as authored at
+    # proposal creation time. Recovery sweep registers this snapshot
+    # rather than re-deriving from the current draft, so a draft that
+    # drifts after approval but before crash recovery cannot register
+    # an unapproved descriptor. Required at create_proposal time.
+    descriptor_snapshot: dict | None = None
+    # Codex final-review hardening: the substrate event_id of the
+    # routine.proposed event emitted at surface time. Persisted so
+    # surface_and_emit is idempotent across crashes / duplicate
+    # surfacing calls.
+    proposed_event_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

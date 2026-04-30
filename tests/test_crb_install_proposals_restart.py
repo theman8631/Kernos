@@ -22,6 +22,7 @@ async def _create_then_close(tmp_path, **proposal_kwargs):
         draft_id="d-1", descriptor_hash="h" * 64,
         proposal_text="text", member_id="mem-1",
         source_thread_id="thr-1",
+        descriptor_snapshot={"name": "test-snapshot"},
     )
     base.update(proposal_kwargs)
     p = await store.create_proposal(**base)
@@ -107,6 +108,7 @@ class TestRestartDurability:
                     draft_id="d-2", descriptor_hash="h" * 64,
                     proposal_text="dup", member_id="mem-1",
                     source_thread_id="thr-1",
+                    descriptor_snapshot={"name": "test-snapshot"},
                 )
         finally:
             await store.stop()

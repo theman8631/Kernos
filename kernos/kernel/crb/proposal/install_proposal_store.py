@@ -71,24 +71,26 @@ class StaleStateError(InstallProposalStoreError):
 
 _INSTALL_PROPOSALS_DDL = """
 CREATE TABLE IF NOT EXISTS install_proposals (
-    proposal_id        TEXT NOT NULL PRIMARY KEY,
-    correlation_id     TEXT NOT NULL,
-    instance_id        TEXT NOT NULL,
-    draft_id           TEXT NOT NULL,
-    descriptor_hash    TEXT NOT NULL,
-    state              TEXT NOT NULL,
-    proposal_text      TEXT NOT NULL,
-    member_id          TEXT NOT NULL,
-    source_thread_id   TEXT NOT NULL,
-    prev_workflow_id   TEXT,
-    prev_proposal_id   TEXT,
-    authored_at        TEXT NOT NULL,
-    surfaced_at        TEXT,
-    responded_at       TEXT,
-    response_kind      TEXT,
-    approval_event_id  TEXT,
-    expires_at         TEXT,
-    metadata           TEXT,
+    proposal_id         TEXT NOT NULL PRIMARY KEY,
+    correlation_id      TEXT NOT NULL,
+    instance_id         TEXT NOT NULL,
+    draft_id            TEXT NOT NULL,
+    descriptor_hash     TEXT NOT NULL,
+    state               TEXT NOT NULL,
+    proposal_text       TEXT NOT NULL,
+    member_id           TEXT NOT NULL,
+    source_thread_id    TEXT NOT NULL,
+    prev_workflow_id    TEXT,
+    prev_proposal_id    TEXT,
+    authored_at         TEXT NOT NULL,
+    surfaced_at         TEXT,
+    responded_at        TEXT,
+    response_kind       TEXT,
+    approval_event_id   TEXT,
+    expires_at          TEXT,
+    metadata            TEXT,
+    descriptor_snapshot TEXT NOT NULL,
+    proposed_event_id   TEXT,
     CHECK (state IN (
         'proposed', 'approved_pending_registration',
         'approved_registered', 'modify_requested', 'declined'
@@ -145,6 +147,15 @@ def _row_to_proposal(row) -> InstallProposal:
         metadata = json.loads(row["metadata"]) if row["metadata"] else {}
     except Exception:
         metadata = {}
+    snapshot: dict | None
+    try:
+        snapshot = (
+            json.loads(row["descriptor_snapshot"])
+            if row["descriptor_snapshot"]
+            else None
+        )
+    except Exception:
+        snapshot = None
     return InstallProposal(
         proposal_id=row["proposal_id"],
         correlation_id=row["correlation_id"],
@@ -164,6 +175,8 @@ def _row_to_proposal(row) -> InstallProposal:
         approval_event_id=row["approval_event_id"],
         expires_at=row["expires_at"],
         metadata=metadata,
+        descriptor_snapshot=snapshot,
+        proposed_event_id=row["proposed_event_id"],
     )
 
 
@@ -213,11 +226,22 @@ class InstallProposalStore:
         proposal_text: str,
         member_id: str,
         source_thread_id: str,
+        descriptor_snapshot: dict,
         prev_workflow_id: str | None = None,
         prev_proposal_id: str | None = None,
         expires_at: str | None = None,
         metadata: dict | None = None,
     ) -> InstallProposal:
+        """Persist a fresh proposal in state ``proposed``.
+
+        Codex final-review fold (REAL #3): ``descriptor_snapshot`` is
+        required. The recovery sweep registers this snapshot rather
+        than re-deriving from the current draft, so a draft that
+        drifts after approval but before recovery cannot register an
+        unapproved descriptor. The caller is expected to invoke
+        :func:`draft_to_descriptor_candidate` once and pass the result
+        as both the basis for ``descriptor_hash`` and the snapshot.
+        """
         if self._db is None:
             raise RuntimeError("InstallProposalStore not started")
         if not instance_id:
@@ -230,6 +254,14 @@ class InstallProposalStore:
             raise ValueError("descriptor_hash is required")
         if not proposal_text:
             raise ValueError("proposal_text is required")
+        if descriptor_snapshot is None or not isinstance(
+            descriptor_snapshot, dict
+        ):
+            raise ValueError(
+                "descriptor_snapshot is required and must be a dict "
+                "(REAL #3: recovery registers the snapshot, not the "
+                "live draft)"
+            )
 
         proposal_id = f"prop-{uuid.uuid4().hex[:12]}"
         authored_at = _now()
@@ -239,14 +271,15 @@ class InstallProposalStore:
                 "(proposal_id, correlation_id, instance_id, draft_id, "
                 " descriptor_hash, state, proposal_text, member_id, "
                 " source_thread_id, prev_workflow_id, prev_proposal_id, "
-                " authored_at, expires_at, metadata) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " authored_at, expires_at, metadata, descriptor_snapshot) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     proposal_id, correlation_id, instance_id, draft_id,
                     descriptor_hash, "proposed", proposal_text, member_id,
                     source_thread_id, prev_workflow_id, prev_proposal_id,
                     authored_at, expires_at,
                     json.dumps(metadata or {}),
+                    json.dumps(descriptor_snapshot),
                 ),
             )
         except aiosqlite.IntegrityError as exc:
@@ -277,6 +310,7 @@ class InstallProposalStore:
             authored_at=authored_at,
             expires_at=expires_at,
             metadata=metadata or {},
+            descriptor_snapshot=descriptor_snapshot,
         )
 
     # -- reads ------------------------------------------------------------
@@ -444,6 +478,156 @@ class InstallProposalStore:
             raise UnknownProposal(
                 f"no proposal with proposal_id={proposal_id!r}"
             )
+        return updated
+
+    # -- approval claim / event id -----------------------------------------
+
+    async def set_approval_event_id_for_pending(
+        self, *, proposal_id: str, approval_event_id: str,
+    ) -> InstallProposal:
+        """Idempotently bind ``approval_event_id`` to a proposal already
+        in ``approved_pending_registration``.
+
+        Codex final-review fold (REAL #1): the approve flow now claims
+        the proposal via ``transition_state`` BEFORE the approval
+        event is emitted, so only the claim winner reaches this method.
+        It writes the approval event id onto the row.
+
+        Conditional UPDATE: the row must be in
+        ``approved_pending_registration`` and either have no
+        ``approval_event_id`` yet, or have the same value already
+        (replay). Any other value indicates a serious invariant
+        breach and raises :class:`InvalidStateTransition`.
+        """
+        if self._db is None:
+            raise RuntimeError("InstallProposalStore not started")
+        if not approval_event_id:
+            raise ValueError("approval_event_id is required")
+        async with self._lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self._db.execute(
+                    "UPDATE install_proposals "
+                    "SET approval_event_id = ? "
+                    "WHERE proposal_id = ? "
+                    "AND state = 'approved_pending_registration' "
+                    "AND (approval_event_id IS NULL "
+                    "     OR approval_event_id = ?)",
+                    (approval_event_id, proposal_id, approval_event_id),
+                )
+                if cursor.rowcount != 1:
+                    current = await self.get_proposal(proposal_id=proposal_id)
+                    if current is None:
+                        raise UnknownProposal(
+                            f"no proposal with proposal_id={proposal_id!r}"
+                        )
+                    raise InvalidStateTransition(
+                        f"cannot bind approval_event_id={approval_event_id!r} "
+                        f"to proposal {proposal_id!r} in state "
+                        f"{current.state!r} with stored "
+                        f"approval_event_id={current.approval_event_id!r}"
+                    )
+                await self._db.execute("COMMIT")
+            except Exception:
+                try:
+                    await self._db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        updated = await self.get_proposal(proposal_id=proposal_id)
+        assert updated is not None
+        return updated
+
+    # -- surfacing claim / proposed event id -------------------------------
+
+    async def claim_surface(self, *, proposal_id: str) -> bool:
+        """Atomically claim the right to emit ``routine.proposed`` for
+        this proposal.
+
+        Codex final-review hardening: returns ``True`` if this caller
+        won the claim (``surfaced_at`` was previously NULL and is now
+        set), ``False`` if another path already claimed.
+
+        The flow's :meth:`CRBApprovalFlow.surface_and_emit` only emits
+        when the claim is won, so duplicate surfacing calls produce
+        exactly one ``routine.proposed`` event.
+        """
+        if self._db is None:
+            raise RuntimeError("InstallProposalStore not started")
+        ts = _now()
+        async with self._lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self._db.execute(
+                    "UPDATE install_proposals SET surfaced_at = ? "
+                    "WHERE proposal_id = ? AND surfaced_at IS NULL",
+                    (ts, proposal_id),
+                )
+                won = cursor.rowcount == 1
+                await self._db.execute("COMMIT")
+            except Exception:
+                try:
+                    await self._db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        if not won:
+            # Verify the proposal exists; surface_and_emit handles a
+            # known proposal that was already surfaced as a no-op.
+            current = await self.get_proposal(proposal_id=proposal_id)
+            if current is None:
+                raise UnknownProposal(
+                    f"no proposal with proposal_id={proposal_id!r}"
+                )
+        return won
+
+    async def record_proposed_event_id(
+        self, *, proposal_id: str, proposed_event_id: str,
+    ) -> InstallProposal:
+        """Idempotently bind ``proposed_event_id`` to a proposal whose
+        surface has already been claimed.
+
+        Mirror of :meth:`set_approval_event_id_for_pending` for the
+        ``routine.proposed`` event. Conditional UPDATE: only writes
+        when the column is NULL or already equals the supplied value
+        (idempotent replay). Otherwise raises
+        :class:`InvalidStateTransition`."""
+        if self._db is None:
+            raise RuntimeError("InstallProposalStore not started")
+        if not proposed_event_id:
+            raise ValueError("proposed_event_id is required")
+        async with self._lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await self._db.execute(
+                    "UPDATE install_proposals "
+                    "SET proposed_event_id = ? "
+                    "WHERE proposal_id = ? "
+                    "AND (proposed_event_id IS NULL "
+                    "     OR proposed_event_id = ?)",
+                    (proposed_event_id, proposal_id, proposed_event_id),
+                )
+                if cursor.rowcount != 1:
+                    current = await self.get_proposal(proposal_id=proposal_id)
+                    if current is None:
+                        raise UnknownProposal(
+                            f"no proposal with proposal_id={proposal_id!r}"
+                        )
+                    raise InvalidStateTransition(
+                        f"cannot bind proposed_event_id="
+                        f"{proposed_event_id!r} to proposal {proposal_id!r}"
+                        f" with stored proposed_event_id="
+                        f"{current.proposed_event_id!r}"
+                    )
+                await self._db.execute("COMMIT")
+            except Exception:
+                try:
+                    await self._db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        updated = await self.get_proposal(proposal_id=proposal_id)
+        assert updated is not None
         return updated
 
 

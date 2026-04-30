@@ -156,13 +156,15 @@ async def stack(tmp_path):
 
 
 async def _create_proposal(store, draft, **overrides):
-    desc_hash = compute_descriptor_hash(draft_to_descriptor_candidate(draft))
+    candidate = draft_to_descriptor_candidate(draft)
+    desc_hash = compute_descriptor_hash(candidate)
     base = dict(
         instance_id="inst_a",
         correlation_id=f"corr-{uuid.uuid4().hex[:8]}",
         draft_id=draft.draft_id, descriptor_hash=desc_hash,
         proposal_text="text", member_id="mem_owner",
         source_thread_id="thr-1",
+        descriptor_snapshot=candidate,
     )
     base.update(overrides)
     return await store.create_proposal(**base)
@@ -278,6 +280,7 @@ async def test_scenario_08_durable_across_restart(tmp_path):
         instance_id="inst_a", correlation_id="c-restart",
         draft_id="d-1", descriptor_hash="h" * 64,
         proposal_text="t", member_id="m", source_thread_id="thr",
+        descriptor_snapshot={"name": "test-snapshot"},
     )
     await store.stop()
     # Restart.

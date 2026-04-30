@@ -35,7 +35,7 @@ class TestSchemaColumns:
             "source_thread_id", "prev_workflow_id", "prev_proposal_id",
             "authored_at", "surfaced_at", "responded_at",
             "response_kind", "approval_event_id", "expires_at",
-            "metadata",
+            "metadata", "descriptor_snapshot", "proposed_event_id",
         ):
             assert required in cols, f"missing column: {required}"
 
@@ -50,12 +50,13 @@ class TestStateCheckConstraint:
                 "INSERT INTO install_proposals "
                 "(proposal_id, correlation_id, instance_id, draft_id, "
                 " descriptor_hash, state, proposal_text, member_id, "
-                " source_thread_id, authored_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " source_thread_id, authored_at, descriptor_snapshot) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "p-1", "corr-1", "inst_a", "d-1", "h" * 64,
                     bogus_state, "text", "mem-1", "thr-1",
                     "2026-04-30T00:00:00+00:00",
+                    "{}",
                 ),
             )
 

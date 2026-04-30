@@ -58,6 +58,7 @@ from kernos.kernel.crb.proposal.install_proposal import (
 )
 from kernos.kernel.crb.proposal.install_proposal_store import (
     InstallProposalStore,
+    InvalidStateTransition,
     StaleStateError,
     UnknownProposal,
 )
@@ -231,9 +232,39 @@ class CRBApprovalFlow:
                     new_proposal_id=None,
                 )
 
-            # Crash-safe handoff (Kit pin v1->v2 must-fix #1):
-            # Step 1: emit appropriate approval event durably.
-            # (Modification branch per Kit pin v1->v2 must-fix #2.)
+            # Crash-safe handoff (Kit pin v1->v2 must-fix #1, hardened
+            # by Codex final review REAL #1 + #4):
+            #
+            # Step 1: CLAIM via state transition BEFORE the approval
+            # event is emitted. The transition is conditional on
+            # state='proposed'; only one concurrent approve can
+            # succeed. Losers fall through to the actual stored
+            # state and return a FlowOutcome that matches the
+            # row, never overwriting and never orphaning an emitted
+            # event.
+            try:
+                proposal = await self._store.transition_state(
+                    proposal_id=proposal.proposal_id,
+                    new_state="approved_pending_registration",
+                    response_kind="approve",
+                )
+            except (StaleStateError, InvalidStateTransition):
+                # StaleStateError: another path won the conditional
+                # UPDATE inside transition_state. InvalidStateTransition:
+                # the row is already in a non-`proposed` state when
+                # transition_state read it (e.g. modify_requested,
+                # declined, approved_registered). Both cases mean the
+                # claim is unavailable; re-fetch and map to the actual
+                # stored state's outcome.
+                latest = (
+                    await self._store.get_proposal(
+                        proposal_id=proposal.proposal_id,
+                    )
+                ) or proposal
+                return await self._outcome_for_concurrent_state(latest)
+
+            # Step 2: we won the claim — emit the appropriate approval
+            # event. Modification branch per Kit pin v1->v2 must-fix #2.
             if proposal.prev_workflow_id:
                 approval_event_id = await self._event_emitter.emit_routine_modification_approved(
                     correlation_id=proposal.correlation_id,
@@ -257,67 +288,29 @@ class CRBApprovalFlow:
                     source_turn_id=source_turn_id,
                 )
 
-            # Step 2: transition state to approved_pending_registration
-            # BEFORE STS attempt.
-            try:
-                proposal = await self._store.transition_state(
-                    proposal_id=proposal.proposal_id,
-                    new_state="approved_pending_registration",
-                    response_kind="approve",
-                    approval_event_id=approval_event_id,
-                )
-            except StaleStateError:
-                # Concurrent transition; re-fetch and recompute outcome.
-                proposal = (
-                    await self._store.get_proposal(
-                        proposal_id=proposal.proposal_id,
-                    )
-                ) or proposal
-                # Fall through to Case 1b-equivalent handling.
-                if proposal.state == "approved_pending_registration":
-                    return FlowOutcome(
-                        kind="registration_pending",
-                        proposal=proposal,
-                        approval_event_id=approval_event_id,
-                    )
-                if proposal.state == "approved_registered":
-                    workflow = await self._sts_port.find_workflow_by_approval_event_id(
-                        instance_id=proposal.instance_id,
-                        approval_event_id=proposal.approval_event_id or "",
-                    )
-                    return FlowOutcome(
-                        kind="already_approved",
-                        proposal=proposal,
-                        workflow_id=workflow.workflow_id if workflow else None,
-                    )
-                # Unexpected concurrent state; surface as pending.
-                return FlowOutcome(
-                    kind="registration_pending",
-                    proposal=proposal,
-                    approval_event_id=approval_event_id,
-                )
+            # Step 3: idempotently bind approval_event_id to the row.
+            proposal = await self._store.set_approval_event_id_for_pending(
+                proposal_id=proposal.proposal_id,
+                approval_event_id=approval_event_id,
+            )
 
-            # Step 3: attempt STS registration.
-            descriptor = draft_to_descriptor_candidate(current_draft)
+            # Step 4: attempt STS registration. Codex REAL #3 fold:
+            # use the persisted descriptor snapshot rather than
+            # re-deriving from the current draft, so a draft mutation
+            # between proposal creation and approval cannot register
+            # an unapproved descriptor.
+            descriptor = self._descriptor_for_registration(
+                proposal, current_draft,
+            )
             try:
                 workflow = await self._sts_port.register_workflow(
                     instance_id=proposal.instance_id,
                     descriptor=descriptor,
                     approval_event_id=approval_event_id,
                 )
-                # Success: transition to approved_registered.
-                try:
-                    proposal = await self._store.transition_state(
-                        proposal_id=proposal.proposal_id,
-                        new_state="approved_registered",
-                    )
-                except StaleStateError:
-                    # Race recovery sweep got there first; re-fetch.
-                    proposal = (
-                        await self._store.get_proposal(
-                            proposal_id=proposal.proposal_id,
-                        )
-                    ) or proposal
+                proposal = await self._idempotent_transition_to_registered(
+                    proposal,
+                )
                 return FlowOutcome(
                     kind="approved",
                     proposal=proposal,
@@ -331,17 +324,9 @@ class CRBApprovalFlow:
                     approval_event_id=approval_event_id,
                 )
                 if workflow is not None:
-                    try:
-                        proposal = await self._store.transition_state(
-                            proposal_id=proposal.proposal_id,
-                            new_state="approved_registered",
-                        )
-                    except StaleStateError:
-                        proposal = (
-                            await self._store.get_proposal(
-                                proposal_id=proposal.proposal_id,
-                            )
-                        ) or proposal
+                    proposal = await self._idempotent_transition_to_registered(
+                        proposal,
+                    )
                     return FlowOutcome(
                         kind="approved",
                         proposal=proposal,
@@ -353,7 +338,6 @@ class CRBApprovalFlow:
                     proposal=proposal,
                 )
             except STSTransientError:
-                # Recovery sweep retries; state stays pending.
                 logger.warning(
                     "CRB_PENDING_REGISTRATION: proposal=%s "
                     "approval_event_id=%s left pending after STS "
@@ -600,19 +584,35 @@ class CRBApprovalFlow:
                 pass  # already transitioned by a concurrent path
             return workflow
 
-        # Otherwise: retry STS registration with same approval_event_id.
+        # Otherwise: retry STS registration with the SAME approval_event_id
+        # AND the persisted descriptor snapshot. Codex final-review fold
+        # (REAL #3): never re-derive the descriptor from the live draft
+        # at recovery time — a draft mutation after approval would
+        # otherwise register an unapproved routine.
+        if proposal.descriptor_snapshot is None:
+            logger.warning(
+                "CRB_RECOVERY_NO_SNAPSHOT: proposal=%s missing "
+                "descriptor_snapshot; refusing recovery — pending for "
+                "triage",
+                proposal.proposal_id,
+            )
+            return None
+        # Defensive: still consult the draft to detect explicit user
+        # abandon. Abandon-after-approval is rare but informative; we
+        # leave the row pending for triage rather than registering a
+        # routine the user actively abandoned.
         current_draft = await self._draft_port.get_draft(
             instance_id=proposal.instance_id, draft_id=proposal.draft_id,
         )
-        if current_draft is None or current_draft.status == "abandoned":
+        if current_draft is not None and current_draft.status == "abandoned":
             logger.warning(
-                "CRB_RECOVERY_ORPHANED_APPROVAL: proposal=%s draft=%s "
-                "is missing or abandoned; leaving pending for triage",
+                "CRB_RECOVERY_DRAFT_ABANDONED: proposal=%s draft=%s "
+                "abandoned after approval; leaving pending for triage",
                 proposal.proposal_id, proposal.draft_id,
             )
             return None
 
-        descriptor = draft_to_descriptor_candidate(current_draft)
+        descriptor = proposal.descriptor_snapshot
         try:
             workflow = await self._sts_port.register_workflow(
                 instance_id=proposal.instance_id,
@@ -624,7 +624,7 @@ class CRBApprovalFlow:
                     proposal_id=proposal.proposal_id,
                     new_state="approved_registered",
                 )
-            except StaleStateError:
+            except (StaleStateError, InvalidStateTransition):
                 pass
             return workflow
         except ApprovalAlreadyConsumed:
@@ -638,14 +638,157 @@ class CRBApprovalFlow:
                         proposal_id=proposal.proposal_id,
                         new_state="approved_registered",
                     )
-                except StaleStateError:
+                except (StaleStateError, InvalidStateTransition):
                     pass
                 return workflow
             return None
         except STSTransientError:
             return None
 
+    # === surface_and_emit =========================================
+
+    async def surface_and_emit(
+        self,
+        *,
+        proposal_id: str,
+    ) -> str:
+        """Idempotently surface a proposal and emit
+        ``routine.proposed`` exactly once.
+
+        Codex final-review hardening: ``routine.proposed`` emission
+        was previously decoupled from surfacing — a caller could mark
+        the proposal surfaced via ``mark_surfaced`` while a separate
+        path emitted ``routine.proposed`` directly, with no joint
+        idempotency. This unifies them: the store's ``claim_surface``
+        atomically claims the right to emit; the resulting
+        ``proposed_event_id`` is bound to the row via
+        ``record_proposed_event_id``. Replays return the existing id.
+        """
+        latest = await self._store.get_proposal(proposal_id=proposal_id)
+        if latest is None:
+            raise UnknownProposal(
+                f"no proposal with proposal_id={proposal_id!r}"
+            )
+        if latest.proposed_event_id:
+            return latest.proposed_event_id
+        won = await self._store.claim_surface(proposal_id=proposal_id)
+        if not won:
+            # Another path won the claim; re-fetch to discover the
+            # eventually-written event id. If it's still None, the
+            # winner hasn't completed emission yet — the caller can
+            # poll, but for v1 we return empty string and let the
+            # next surface_and_emit invocation pick it up.
+            refreshed = await self._store.get_proposal(
+                proposal_id=proposal_id,
+            )
+            return (refreshed and refreshed.proposed_event_id) or ""
+        proposed_event_id = await self._event_emitter.emit_routine_proposed(
+            correlation_id=latest.correlation_id,
+            proposal_id=latest.proposal_id,
+            instance_id=latest.instance_id,
+            draft_id=latest.draft_id,
+            descriptor_hash=latest.descriptor_hash,
+            member_id=latest.member_id,
+            source_thread_id=latest.source_thread_id,
+            prev_workflow_id=latest.prev_workflow_id,
+        )
+        await self._store.record_proposed_event_id(
+            proposal_id=proposal_id,
+            proposed_event_id=proposed_event_id,
+        )
+        return proposed_event_id
+
     # === helpers ===================================================
+
+    async def _idempotent_transition_to_registered(
+        self, proposal: InstallProposal,
+    ) -> InstallProposal:
+        """Transition to ``approved_registered``, treating same-state
+        and stale-state observations as idempotent success.
+
+        Codex final-review fold (REAL #2): when the recovery sweep has
+        already moved the row, ``transition_state`` raises
+        ``InvalidStateTransition`` (terminal state has no outgoing
+        transitions) rather than ``StaleStateError``. Both must be
+        absorbed here so a successful STS registration that races a
+        sweep-triggered transition does not bubble up as a crash.
+        """
+        if proposal.state == "approved_registered":
+            return proposal
+        try:
+            return await self._store.transition_state(
+                proposal_id=proposal.proposal_id,
+                new_state="approved_registered",
+            )
+        except (StaleStateError, InvalidStateTransition):
+            latest = await self._store.get_proposal(
+                proposal_id=proposal.proposal_id,
+            )
+            return latest or proposal
+
+    async def _outcome_for_concurrent_state(
+        self, proposal: InstallProposal,
+    ) -> FlowOutcome:
+        """Map a non-``proposed`` state observed after a stale claim
+        to the correct :class:`FlowOutcome`.
+
+        Codex final-review fold (REAL #4): the previous fallthrough
+        reported ``registration_pending`` for any non-pending stored
+        state, including ``modify_requested`` and ``declined``. With
+        claim-before-emit the loser of an approve race re-fetches and
+        is routed here; the outcome matches the row, never the
+        loser's intent.
+        """
+        if proposal.state == "approved_pending_registration":
+            return FlowOutcome(
+                kind="registration_pending",
+                proposal=proposal,
+                approval_event_id=proposal.approval_event_id,
+            )
+        if proposal.state == "approved_registered":
+            workflow = None
+            if proposal.approval_event_id:
+                workflow = await self._sts_port.find_workflow_by_approval_event_id(
+                    instance_id=proposal.instance_id,
+                    approval_event_id=proposal.approval_event_id,
+                )
+            return FlowOutcome(
+                kind="already_approved",
+                proposal=proposal,
+                workflow_id=workflow.workflow_id if workflow else None,
+            )
+        if proposal.state == "modify_requested":
+            return FlowOutcome(kind="modify_dispatched", proposal=proposal)
+        if proposal.state == "declined":
+            kind = (
+                "declined_abandon"
+                if proposal.response_kind == "abandon"
+                else "declined_pause"
+            )
+            return FlowOutcome(kind=kind, proposal=proposal)
+        # Defensive fallback for an unexpected concurrent state.
+        return FlowOutcome(
+            kind="registration_pending",
+            proposal=proposal,
+            approval_event_id=proposal.approval_event_id,
+        )
+
+    @staticmethod
+    def _descriptor_for_registration(
+        proposal: InstallProposal, current_draft: Any,
+    ) -> dict:
+        """Pick the descriptor STS will register against.
+
+        Codex final-review fold (REAL #3): prefer the snapshot
+        captured at proposal creation. Falling back to the live
+        draft is only safe when the descriptor hash matches (verified
+        upstream by the descriptor-drift Case 2 gate); the snapshot
+        is the durable source of truth and what the recovery sweep
+        also uses, so happy-path and recovery-path are uniform.
+        """
+        if proposal.descriptor_snapshot is not None:
+            return proposal.descriptor_snapshot
+        return draft_to_descriptor_candidate(current_draft)
 
     @staticmethod
     def _compute_descriptor_hash(draft: Any) -> str:

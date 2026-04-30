@@ -208,15 +208,17 @@ async def stack(tmp_path):
 
 async def _create_proposal(store, draft, **overrides):
     """Create + return a proposal anchored to the draft. Hash matches
-    the draft so descriptor-drift Case 2 doesn't fire by default."""
-    desc_hash = compute_descriptor_hash(
-        draft_to_descriptor_candidate(draft)
-    )
+    the draft so descriptor-drift Case 2 doesn't fire by default.
+    Snapshot is the same descriptor candidate the hash is computed
+    over, mirroring the production flow."""
+    candidate = draft_to_descriptor_candidate(draft)
+    desc_hash = compute_descriptor_hash(candidate)
     base = dict(
         instance_id="inst_a", correlation_id=f"corr-{draft.draft_id}",
         draft_id=draft.draft_id, descriptor_hash=desc_hash,
         proposal_text="test proposal text",
         member_id="mem_owner", source_thread_id="thr-1",
+        descriptor_snapshot=candidate,
     )
     base.update(overrides)
     return await store.create_proposal(**base)
@@ -378,6 +380,7 @@ class TestCase2DescriptorDrift:
             descriptor_hash="stale-hash-from-earlier",
             proposal_text="text", member_id="mem_owner",
             source_thread_id="thr-1",
+            descriptor_snapshot={"name": "stale-snapshot"},
         )
         outcome = await stack["flow"].handle_response(
             proposal_id=proposal.proposal_id,
@@ -422,6 +425,7 @@ class TestCase3DraftAbandoned:
             draft_id="d-missing", descriptor_hash="h" * 64,
             proposal_text="text", member_id="mem_owner",
             source_thread_id="thr-1",
+            descriptor_snapshot={"name": "orphan-snapshot"},
         )
         outcome = await stack["flow"].handle_response(
             proposal_id=proposal.proposal_id,
