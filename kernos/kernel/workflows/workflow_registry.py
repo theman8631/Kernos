@@ -675,6 +675,43 @@ class WorkflowRegistry:
             row = await cur.fetchone()
         return _workflow_from_row(row) if row else None
 
+    async def find_workflow_by_approval_event_id(
+        self,
+        *,
+        instance_id: str,
+        approval_event_id: str,
+    ) -> Workflow | None:
+        """Read-only lookup by ``(instance_id, approval_event_id)``.
+
+        Used by CRB's crash-recovery sweep to determine whether STS has
+        already registered a workflow against a given approval event,
+        and to recover gracefully from ``ApprovalAlreadyConsumed`` race
+        conditions where a concurrent path beat us to registration.
+
+        The partial UNIQUE index ``idx_workflows_approval_unique ON
+        (instance_id, approval_event_id) WHERE approval_event_id IS
+        NOT NULL`` (added in STS C2) covers this lookup directly; no
+        additional index needed.
+
+        Returns ``None`` when no row matches — both for "approval not
+        yet consumed" and for cross-instance queries (queries scoped
+        to ``instance_id`` so instance B never sees instance A's
+        registration).
+        """
+        if self._db is None:
+            return None
+        if not instance_id:
+            raise ValueError("instance_id is required")
+        if not approval_event_id:
+            raise ValueError("approval_event_id is required")
+        async with self._db.execute(
+            "SELECT * FROM workflows WHERE instance_id = ? "
+            "AND approval_event_id = ?",
+            (instance_id, approval_event_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return _workflow_from_row(row) if row else None
+
     async def list_workflows(
         self, instance_id: str, *, status: str | None = None,
     ) -> list[Workflow]:

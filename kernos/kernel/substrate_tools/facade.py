@@ -139,6 +139,28 @@ class SubstrateTools:
             instance_id=instance_id, ref=ref,
         )
 
+    async def find_workflow_by_approval_event_id(
+        self,
+        *,
+        instance_id: str,
+        approval_event_id: str,
+    ) -> "Workflow | None":
+        """Read-only lookup by ``(instance_id, approval_event_id)``.
+
+        Used by CRB's crash-recovery sweep (CRB main spec) to determine
+        whether STS has already registered a workflow against a given
+        approval event, and to recover gracefully from
+        :class:`ApprovalAlreadyConsumed` race conditions where a
+        concurrent path beat us to registration.
+
+        Returns ``None`` if no row matches — both for "approval not
+        yet consumed" and for cross-instance queries.
+        """
+        return await self._workflow_registry.find_workflow_by_approval_event_id(
+            instance_id=instance_id,
+            approval_event_id=approval_event_id,
+        )
+
     # === Registration gate ===
 
     async def register_workflow(
