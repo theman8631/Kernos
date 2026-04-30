@@ -156,7 +156,7 @@ async def _wait_for(predicate, timeout=2.0, step=0.02):
 
 class TestEndToEnd:
     async def test_trigger_match_runs_workflow(self, stack):
-        await stack["wfr"].register_workflow(_make_workflow())
+        await stack["wfr"]._register_workflow_unbound(_make_workflow())
         await event_stream.emit(
             "inst_a", "cc.batch.report", {"k": "v"}, member_id="mem_a",
         )
@@ -176,7 +176,7 @@ class TestEndToEnd:
 
 class TestAuditEvents:
     async def test_started_and_terminated_emitted(self, stack):
-        await stack["wfr"].register_workflow(_make_workflow())
+        await stack["wfr"]._register_workflow_unbound(_make_workflow())
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -233,7 +233,7 @@ class TestApprovalGates:
         engine-minted gate_nonce + execution_id to wake the paused
         execution. The engine persists the nonce after the gated
         action completes; tests query it to compose a valid approval."""
-        await stack["wfr"].register_workflow(
+        await stack["wfr"]._register_workflow_unbound(
             self._gated_workflow(gate_behavior="abort_workflow"),
         )
         await event_stream.emit("inst_a", "cc.batch.report", {})
@@ -259,7 +259,7 @@ class TestApprovalGates:
         assert stack["store"][("instance", "inst_a", "y")] == 2
 
     async def test_gate_timeout_aborts(self, stack):
-        await stack["wfr"].register_workflow(
+        await stack["wfr"]._register_workflow_unbound(
             self._gated_workflow(gate_behavior="abort_workflow"),
         )
         await event_stream.emit("inst_a", "cc.batch.report", {})
@@ -282,7 +282,7 @@ class TestApprovalGates:
         assert "gate_timeout" in executions[0].aborted_reason
 
     async def test_gate_auto_proceed_with_default(self, stack):
-        await stack["wfr"].register_workflow(
+        await stack["wfr"]._register_workflow_unbound(
             self._gated_workflow(
                 gate_behavior="auto_proceed_with_default",
                 default_value="ok",
@@ -317,8 +317,8 @@ class TestMultiTenancy:
                 predicate={"op": "exists", "path": "event_id"},
             ),
         )
-        await stack["wfr"].register_workflow(wf_a)
-        await stack["wfr"].register_workflow(wf_b)
+        await stack["wfr"]._register_workflow_unbound(wf_a)
+        await stack["wfr"]._register_workflow_unbound(wf_b)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         ok_a = await _wait_for(
@@ -358,7 +358,7 @@ class TestRestartResume:
                     ),
                 ],
             )
-            await wfr.register_workflow(wf)
+            await wfr._register_workflow_unbound(wf)
             # Manually seed a "running" execution with action_index_completed=0
             # (i.e. the engine had completed the first action and is about to
             # run the second, which is resume_safe).
@@ -417,7 +417,7 @@ class TestRestartResume:
                     ),
                 ],
             )
-            await wfr.register_workflow(wf)
+            await wfr._register_workflow_unbound(wf)
             engine = ExecutionEngine()
             await engine.start(str(tmp_path), trig, wfr, lib, ledger)
             await engine._db.execute(
@@ -490,7 +490,7 @@ class TestBoundsEnforcement:
             workflow_id="wf-bounds",
             bounds=Bounds(iteration_count=1, wall_time_seconds=1),
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # Wait long enough for the bound to bite.
@@ -510,7 +510,7 @@ class TestBackgroundExecution:
         """Acceptance criterion 11: workflows run BACKGROUND. emit
         latency stays within noise even with executions firing
         concurrently."""
-        await stack["wfr"].register_workflow(_make_workflow())
+        await stack["wfr"]._register_workflow_unbound(_make_workflow())
         # Kick off a few executions.
         for _ in range(5):
             await event_stream.emit("inst_a", "cc.batch.report", {})

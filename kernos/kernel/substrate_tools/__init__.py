@@ -21,6 +21,22 @@ Module shape:
 """
 from __future__ import annotations
 
+from kernos.kernel.substrate_tools.errors import (
+    ApprovalAlreadyConsumed,
+    ApprovalAuthorityIncomplete,
+    ApprovalAuthoritySpoofed,
+    ApprovalBindingMissing,
+    ApprovalDescriptorMismatch,
+    ApprovalEventNotFound,
+    ApprovalEventTypeInvalid,
+    ApprovalInstanceMismatch,
+    ApprovalModificationTargetMismatch,
+    ApprovalModificationTargetMissing,
+    ApprovalProposalMismatch,
+    ApprovalProvenanceUnverifiable,
+    RegistrationValidationFailed,
+    SubstrateToolsError,
+)
 from kernos.kernel.substrate_tools.facade import SubstrateTools
 from kernos.kernel.substrate_tools.query.context_brief import (
     ContextBrief,
@@ -35,18 +51,42 @@ from kernos.kernel.substrate_tools.query.list_providers import (
     ProviderRegistry,
     validate_capability_tag,
 )
-from kernos.kernel.substrate_tools.errors import SubstrateToolsError
+from kernos.kernel.substrate_tools.registration.descriptor_hash import (
+    DESCRIPTOR_VOLATILE_FIELDS,
+    compute_descriptor_hash,
+)
+from kernos.kernel.substrate_tools.registration.validation import (
+    DryRunResult,
+    run_full_validation,
+)
 
 __all__ = [
+    "ApprovalAlreadyConsumed",
+    "ApprovalAuthorityIncomplete",
+    "ApprovalAuthoritySpoofed",
+    "ApprovalBindingMissing",
+    "ApprovalDescriptorMismatch",
+    "ApprovalEventNotFound",
+    "ApprovalEventTypeInvalid",
+    "ApprovalInstanceMismatch",
+    "ApprovalModificationTargetMismatch",
+    "ApprovalModificationTargetMissing",
+    "ApprovalProposalMismatch",
+    "ApprovalProvenanceUnverifiable",
     "CapabilityGap",
     "ContextBrief",
     "ContextBriefRegistry",
     "ContextRef",
+    "DESCRIPTOR_VOLATILE_FIELDS",
+    "DryRunResult",
     "InvalidCapabilityTagFormat",
     "Issue",
     "ProviderRecord",
     "ProviderRegistry",
+    "RegistrationValidationFailed",
     "SubstrateTools",
     "SubstrateToolsError",
+    "compute_descriptor_hash",
+    "run_full_validation",
     "validate_capability_tag",
 ]

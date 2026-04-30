@@ -37,6 +37,10 @@ from kernos.kernel.substrate_tools.query.list_providers import (
 from kernos.kernel.substrate_tools.query.list_workflows import (
     list_workflows as _list_workflows,
 )
+from kernos.kernel.substrate_tools.registration.register import (
+    register_workflow as _register_workflow,
+)
+from kernos.kernel.substrate_tools.registration.validation import DryRunResult
 
 if TYPE_CHECKING:  # pragma: no cover
     from kernos.kernel.agents.registry import AgentRecord, AgentRegistry
@@ -133,6 +137,41 @@ class SubstrateTools:
     ) -> ContextBrief | None:
         return await self._context_brief_registry.resolve(
             instance_id=instance_id, ref=ref,
+        )
+
+    # === Registration gate ===
+
+    async def register_workflow(
+        self,
+        *,
+        instance_id: str,
+        descriptor: dict,
+        dry_run: bool = False,
+        approval_event_id: str | None = None,
+    ) -> "Workflow | DryRunResult":
+        """Approval-bound workflow registration. See
+        :func:`kernos.kernel.substrate_tools.registration.register.register_workflow`
+        for the full 9-step validation flow.
+
+        ``dry_run=True``: validates descriptor and returns
+        :class:`DryRunResult`. No persistence, no event emission, no
+        mutation. ``approval_event_id`` is ignored. Used by the
+        Compiler at proposal time.
+
+        ``dry_run=False``: REQUIRES ``approval_event_id``. Resolves the
+        approval, validates envelope source authority + provenance +
+        instance match + (for modifications) target binding, re-runs
+        full descriptor validation, verifies hash match, then atomically
+        persists the workflow + consumes the approval via the partial
+        UNIQUE constraint on ``(instance_id, approval_event_id)``.
+        """
+        return await _register_workflow(
+            instance_id=instance_id,
+            descriptor=descriptor,
+            workflow_registry=self._workflow_registry,
+            agent_registry=self._agent_registry,
+            dry_run=dry_run,
+            approval_event_id=approval_event_id,
         )
 
 

@@ -110,6 +110,24 @@ class TestSubstrateSetSourceModule:
         assert events[0].payload.get("source_module") == "crb"
 
 
+class TestSpoofGuards:
+    """In-process spoof attempts that the substrate must fail closed on."""
+
+    def test_event_emitter_direct_construction_raises(self):
+        """Direct construction must fail — only EmitterRegistry can
+        produce an emitter with a claimed source_module."""
+        with pytest.raises(RuntimeError, match="cannot be constructed directly"):
+            event_stream.EventEmitter(source_module="crb")
+
+    def test_event_emitter_token_required(self):
+        """A bogus token does not unlock construction."""
+        with pytest.raises(RuntimeError):
+            event_stream.EventEmitter(
+                source_module="crb",
+                _registry_token=object(),
+            )
+
+
 class TestEmitterRegistryUniqueness:
     """Substrate enforces that only one emitter may claim a given source_module."""
 

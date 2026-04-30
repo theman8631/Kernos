@@ -31,6 +31,7 @@ import asyncio
 import inspect
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -430,10 +431,22 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         """
     )
     # Lazy migration for existing databases.
+    #
+    # Race safety: under WAL with multiple connections, two startup
+    # paths could both observe the missing column via PRAGMA. The
+    # first ALTER wins; the second raises ``OperationalError: duplicate
+    # column``. Catch that specific error and treat as success — the
+    # net effect is the column exists, which is what we wanted.
     async with db.execute("PRAGMA table_info(events)") as cur:
         cols = [row[1] for row in await cur.fetchall()]
     if "source_module" not in cols:
-        await db.execute("ALTER TABLE events ADD COLUMN source_module TEXT")
+        try:
+            await db.execute(
+                "ALTER TABLE events ADD COLUMN source_module TEXT"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_events_instance_ts "
         "ON events(instance_id, timestamp)"
@@ -582,6 +595,10 @@ class EmitterRegistry:
 
     def __init__(self) -> None:
         self._emitters: dict[str, "EventEmitter"] = {}
+        # Threading lock — defends the check-then-register sequence
+        # against a race if engine bring-up ever fans out across
+        # threads. Single-loop callers see no contention.
+        self._lock = threading.Lock()
 
     def register(self, source_module: str) -> "EventEmitter":
         """Register an emitter for ``source_module`` and return it.
@@ -599,13 +616,17 @@ class EmitterRegistry:
                 f"source_module={source_module!r} is reserved as the "
                 "unregistered sentinel and cannot be registered"
             )
-        if source_module in self._emitters:
-            raise EmitterAlreadyRegistered(
-                f"source_module={source_module!r} is already registered"
+        with self._lock:
+            if source_module in self._emitters:
+                raise EmitterAlreadyRegistered(
+                    f"source_module={source_module!r} is already registered"
+                )
+            emitter = EventEmitter(
+                source_module=source_module,
+                _registry_token=_EMITTER_REGISTRY_TOKEN,
             )
-        emitter = EventEmitter(source_module=source_module)
-        self._emitters[source_module] = emitter
-        return emitter
+            self._emitters[source_module] = emitter
+            return emitter
 
     def get(self, source_module: str) -> "EventEmitter | None":
         return self._emitters.get(source_module)
@@ -615,7 +636,17 @@ class EmitterRegistry:
 
     def _clear(self) -> None:
         """Test-only reset hook."""
-        self._emitters.clear()
+        with self._lock:
+            self._emitters.clear()
+
+
+# Opaque token used to gate :class:`EventEmitter` construction. Only
+# :class:`EmitterRegistry` holds a reference to this object; direct
+# callers that try ``EventEmitter(source_module="crb")`` raise
+# :class:`RuntimeError`. This is defense-in-depth on top of the
+# bypass-grep test (C3): a runtime fail-loud check for the in-process
+# spoof vector.
+_EMITTER_REGISTRY_TOKEN = object()
 
 
 _EMITTER_REGISTRY = EmitterRegistry()
@@ -628,16 +659,24 @@ def emitter_registry() -> EmitterRegistry:
 
 class EventEmitter:
     """A bound emitter that always stamps events with its registered
-    ``source_module``. Constructed only by :class:`EmitterRegistry`.
+    ``source_module``. Constructed ONLY by :class:`EmitterRegistry`.
+
+    Direct construction (``EventEmitter(source_module="crb")``) raises
+    :class:`RuntimeError` — the constructor checks for a registry-issued
+    token. This closes the in-process spoof vector where any caller
+    could otherwise instantiate an emitter claiming arbitrary
+    ``source_module`` authority.
 
     Caller-supplied payloads are ignored for source authority; the
     envelope's ``source_module`` is set from this emitter's frozen
     identity, never from payload contents."""
 
-    def __init__(self, *, source_module: str) -> None:
-        # Not strictly frozen at the dataclass level (we want a clean
-        # async-friendly object), but the attribute is treated as
-        # immutable by contract. EmitterRegistry never re-registers.
+    def __init__(self, *, source_module: str, _registry_token: object = None) -> None:
+        if _registry_token is not _EMITTER_REGISTRY_TOKEN:
+            raise RuntimeError(
+                "EventEmitter cannot be constructed directly; use "
+                "EmitterRegistry.register(source_module) to obtain an emitter"
+            )
         self._source_module = source_module
 
     @property
@@ -751,6 +790,28 @@ async def events_by_correlation(
     return [Event.from_row(r) for r in rows]
 
 
+async def event_by_id(
+    instance_id: str,
+    event_id: str,
+) -> Event | None:
+    """Look up a single event by its event_id, scoped to an instance.
+
+    Returns None if no event matches. The instance scope is part of the
+    lookup so cross-instance approval events cannot be referenced from
+    another instance — STS's approval validation depends on this.
+    """
+    db = await _WRITER.read_db()
+    if db is None:
+        return None
+    await _WRITER._flush_once()
+    async with db.execute(
+        "SELECT * FROM events WHERE instance_id = ? AND event_id = ?",
+        (instance_id, event_id),
+    ) as cur:
+        row = await cur.fetchone()
+    return Event.from_row(row) if row is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Test helpers — explicit reset for isolation in the test suite
 # ---------------------------------------------------------------------------
@@ -783,6 +844,7 @@ __all__ = [
     "UNREGISTERED_SOURCE_MODULE",
     "emit",
     "emitter_registry",
+    "event_by_id",
     "events_by_correlation",
     "events_for_member",
     "events_in_window",

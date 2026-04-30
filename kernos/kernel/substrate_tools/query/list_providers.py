@@ -13,6 +13,7 @@ aggregated results.
 """
 from __future__ import annotations
 
+import inspect
 import re
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -32,8 +33,11 @@ class InvalidCapabilityTagFormat(SubstrateToolsError):
 
 def validate_capability_tag(tag: str) -> None:
     """Raise :class:`InvalidCapabilityTagFormat` if ``tag`` does not
-    match ``^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$``."""
-    if not isinstance(tag, str) or not _CAPABILITY_TAG_REGEX.match(tag):
+    match ``^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$``.
+
+    Uses ``fullmatch`` so a trailing newline cannot smuggle past the
+    regex — ``re.match`` would otherwise accept ``"email.send\\n"``."""
+    if not isinstance(tag, str) or not _CAPABILITY_TAG_REGEX.fullmatch(tag):
         raise InvalidCapabilityTagFormat(
             f"capability tag {tag!r} does not match domain.action format "
             f"(lowercase, alphanumeric+underscore, exactly one dot)"
@@ -143,7 +147,7 @@ class ProviderRegistry:
         out: list[ProviderRecord] = []
         for provider_type, fn in self._listers.items():
             result = fn(instance_id)
-            if hasattr(result, "__await__"):
+            if inspect.isawaitable(result):
                 result = await result  # type: ignore[assignment]
             for rec in result:  # type: ignore[union-attr]
                 if rec.provider_type != provider_type:

@@ -287,7 +287,7 @@ class TestActionTypeValidation:
 class TestRegistration:
     async def test_register_round_trip(self, registries):
         _, wf_registry = registries
-        wf = await wf_registry.register_workflow(_basic_workflow())
+        wf = await wf_registry._register_workflow_unbound(_basic_workflow())
         assert wf.workflow_id == "wf-test"
         loaded = await wf_registry.get_workflow("wf-test")
         assert loaded is not None
@@ -300,7 +300,7 @@ class TestRegistration:
 
     async def test_register_persists_trigger_atomically(self, registries):
         trig_registry, wf_registry = registries
-        await wf_registry.register_workflow(_basic_workflow())
+        await wf_registry._register_workflow_unbound(_basic_workflow())
         triggers = await trig_registry.list_triggers("inst_a", status="active")
         assert len(triggers) == 1
         assert triggers[0].workflow_id == "wf-test"
@@ -314,7 +314,7 @@ class TestRegistration:
         )
         wf = _basic_workflow(workflow_id="wf-bad", trigger=bad_trigger)
         with pytest.raises(Exception):
-            await wf_registry.register_workflow(wf)
+            await wf_registry._register_workflow_unbound(wf)
         # No workflow row, no trigger row.
         wfs = await wf_registry.list_workflows("inst_a")
         trigs = await trig_registry.list_triggers("inst_a")
@@ -325,7 +325,7 @@ class TestRegistration:
         trig_registry, wf_registry = registries
         wf = _basic_workflow(workflow_id="wf-bad", verifier=None)  # type: ignore[arg-type]
         with pytest.raises(Exception):
-            await wf_registry.register_workflow(wf)
+            await wf_registry._register_workflow_unbound(wf)
         wfs = await wf_registry.list_workflows("inst_a")
         trigs = await trig_registry.list_triggers("inst_a")
         assert all(w.workflow_id != "wf-bad" for w in wfs)
@@ -355,7 +355,7 @@ class TestRegistration:
         # constraint and raise IntegrityError.
         monkeypatch.setattr(wr_mod.uuid, "uuid4", lambda: "collide-me")
         with pytest.raises(Exception):
-            await wf_registry.register_workflow(
+            await wf_registry._register_workflow_unbound(
                 _basic_workflow(workflow_id="wf-rollback"),
             )
         # Workflow row rolled back.
@@ -370,10 +370,10 @@ class TestRegistration:
         IntegrityError; the existing row stays intact and no orphan
         trigger is left from the failed second attempt."""
         trig_registry, wf_registry = registries
-        await wf_registry.register_workflow(_basic_workflow())
+        await wf_registry._register_workflow_unbound(_basic_workflow())
         # Second register with the same workflow_id
         with pytest.raises(Exception):
-            await wf_registry.register_workflow(_basic_workflow())
+            await wf_registry._register_workflow_unbound(_basic_workflow())
         # Original workflow + trigger still there; no second trigger row.
         wfs = await wf_registry.list_workflows("inst_a")
         trigs = await trig_registry.list_triggers("inst_a")
@@ -392,8 +392,8 @@ class TestQueryAndStatus:
                 predicate={"op": "exists", "path": "event_id"},
             ),
         )
-        await wf_registry.register_workflow(wf_a)
-        await wf_registry.register_workflow(wf_b)
+        await wf_registry._register_workflow_unbound(wf_a)
+        await wf_registry._register_workflow_unbound(wf_b)
         await wf_registry.update_status("wf-a", "paused")
         active = await wf_registry.list_workflows("inst_a", status="active")
         paused = await wf_registry.list_workflows("inst_a", status="paused")
@@ -413,8 +413,8 @@ class TestMultiTenancy:
                 predicate={"op": "exists", "path": "event_id"},
             ),
         )
-        await wf_registry.register_workflow(a)
-        await wf_registry.register_workflow(b)
+        await wf_registry._register_workflow_unbound(a)
+        await wf_registry._register_workflow_unbound(b)
         only_a = await wf_registry.list_workflows("inst_a")
         only_b = await wf_registry.list_workflows("inst_b")
         assert {w.workflow_id for w in only_a} == {"wf-a"}
@@ -431,7 +431,7 @@ class TestEndToEndTriggerFire:
         trig_registry.add_match_listener(
             lambda t, e: captured.append((t.workflow_id, e.event_type)),
         )
-        await wf_registry.register_workflow(_basic_workflow())
+        await wf_registry._register_workflow_unbound(_basic_workflow())
         await event_stream.emit("inst_a", "cc.batch.report", {"kind": "report"})
         await event_stream.flush_now()
         assert captured == [("wf-test", "cc.batch.report")]

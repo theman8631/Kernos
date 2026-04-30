@@ -293,28 +293,59 @@ def validate_workflow(wf: Workflow) -> None:
 # ---------------------------------------------------------------------------
 
 
-_WORKFLOWS_SCHEMA = """
+_WORKFLOWS_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS workflows (
-    workflow_id     TEXT PRIMARY KEY,
-    instance_id     TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    description     TEXT DEFAULT '',
-    owner           TEXT DEFAULT '',
-    version         TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'active',
-    descriptor_json TEXT NOT NULL,
-    created_at      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_workflows_active
-    ON workflows(instance_id, status);
+    workflow_id        TEXT PRIMARY KEY,
+    instance_id        TEXT NOT NULL,
+    name               TEXT NOT NULL,
+    description        TEXT DEFAULT '',
+    owner              TEXT DEFAULT '',
+    version            TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'active',
+    descriptor_json    TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    approval_event_id  TEXT
+)
 """
 
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
-    for stmt in _WORKFLOWS_SCHEMA.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            await db.execute(stmt)
+    """Create the workflows table + indices.
+
+    Lazy migration (STS C2): existing databases that predate STS lack
+    the ``approval_event_id`` column. CREATE TABLE IF NOT EXISTS is a
+    no-op on the legacy shape, so we follow it with a PRAGMA check and
+    ALTER TABLE before any index that references ``approval_event_id``
+    runs. Existing rows get NULL; the partial UNIQUE index excludes
+    them so the migration is non-destructive.
+    """
+    await db.execute(_WORKFLOWS_TABLE_DDL)
+    # Lazy column add for pre-STS databases. Must run BEFORE any index
+    # that references approval_event_id.
+    #
+    # Race safety: under WAL with multiple connections, two startup
+    # paths could both observe the missing column via PRAGMA. The
+    # first ALTER wins; the second raises ``OperationalError: duplicate
+    # column``. Catch that specific error and treat as success.
+    async with db.execute("PRAGMA table_info(workflows)") as cur:
+        cols = [row[1] for row in await cur.fetchall()]
+    if "approval_event_id" not in cols:
+        try:
+            await db.execute(
+                "ALTER TABLE workflows ADD COLUMN approval_event_id TEXT"
+            )
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_workflows_active "
+        "ON workflows(instance_id, status)"
+    )
+    await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_approval_unique "
+        "ON workflows(instance_id, approval_event_id) "
+        "WHERE approval_event_id IS NOT NULL"
+    )
     # Connection runs with isolation_level=None; explicit transactions
     # only when register_workflow needs them. Schema DDL above is in
     # autocommit so no explicit commit is required here.
@@ -470,19 +501,55 @@ class WorkflowRegistry:
     # -- registration ---------------------------------------------------
 
     async def register_workflow_from_file(self, file_path: str) -> Workflow:
-        """Parse a portable descriptor file (.workflow.yaml/.json/.md)
-        and atomically register it. Operator-facing entry point per
-        the spec; tests can use ``register_workflow`` directly with a
-        constructed :class:`Workflow`."""
+        """Bootstrap-only: parse a portable descriptor file and register
+        it WITHOUT going through STS approval binding.
+
+        This path predates STS and is preserved for operator bootstrap
+        (e.g. seeding initial workflows from a packaged install). It
+        does NOT consume an approval event — production workflow
+        registration MUST go through
+        :meth:`SubstrateTools.register_workflow` instead.
+
+        Logs a warning at every call so operator usage is auditable;
+        a future spec may gate this behind an explicit bootstrap flag
+        or remove it entirely once all initial-workflow loading goes
+        through approved channels.
+        """
+        logger.warning(
+            "WORKFLOW_BOOTSTRAP_REGISTER: register_workflow_from_file(%s) "
+            "is a pre-STS bootstrap path that bypasses approval binding. "
+            "Production registration must go through "
+            "SubstrateTools.register_workflow.",
+            file_path,
+        )
         # Imported lazily to avoid a circular import: the parser module
         # imports the dataclasses defined here.
         from kernos.kernel.workflows.descriptor_parser import parse_descriptor
 
         wf = parse_descriptor(file_path)
-        return await self.register_workflow(wf)
+        return await self._register_workflow_unbound(wf)
 
-    async def register_workflow(self, wf: Workflow) -> Workflow:
+    async def _register_workflow_unbound(
+        self,
+        wf: Workflow,
+        *,
+        approval_event_id: str | None = None,
+    ) -> Workflow:
         """Validate + atomically persist the workflow + its trigger.
+
+        Underscore-prefixed (STS C2): production callers go through
+        :class:`kernos.kernel.substrate_tools.SubstrateTools.register_workflow`
+        which binds an approval event before reaching this entry point.
+        Direct callers are tests, internal fixtures, and
+        ``register_workflow_from_file``. The C3 bypass-grep test scans
+        cohort/CRB code paths to ensure production code does not import
+        this method directly.
+
+        ``approval_event_id`` is written to the workflows row. The partial
+        UNIQUE index ``idx_workflows_approval_unique`` enforces single-use:
+        a second registration with the same ``(instance_id, approval_event_id)``
+        raises ``aiosqlite.IntegrityError`` which STS translates to
+        :class:`kernos.kernel.substrate_tools.errors.ApprovalAlreadyConsumed`.
 
         Both rows are written inside a single SQLite transaction. If
         any step raises (validation, persistence, trigger compilation,
@@ -555,12 +622,14 @@ class WorkflowRegistry:
                     await self._db.execute(
                         "INSERT INTO workflows ("
                         " workflow_id, instance_id, name, description, owner,"
-                        " version, status, descriptor_json, created_at"
-                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        " version, status, descriptor_json, created_at,"
+                        " approval_event_id"
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             wf.workflow_id, wf.instance_id, wf.name, wf.description,
                             wf.owner, wf.version, wf.status,
                             _workflow_descriptor_blob(wf), wf.created_at,
+                            approval_event_id,
                         ),
                     )
                     if trigger is not None:

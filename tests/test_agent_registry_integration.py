@@ -317,7 +317,7 @@ class TestWorkflowAgentValidation:
             )],
         )
         with pytest.raises(WorkflowError, match="not registered"):
-            await stack["wfr"].register_workflow(wf)
+            await stack["wfr"]._register_workflow_unbound(wf)
         # No partial state — workflow row not persisted.
         wfs = await stack["wfr"].list_workflows("inst_a")
         assert all(w.workflow_id != "wf-bad" for w in wfs)
@@ -336,7 +336,7 @@ class TestWorkflowAgentValidation:
             )],
         )
         with pytest.raises(WorkflowError, match="paused"):
-            await stack["wfr"].register_workflow(wf)
+            await stack["wfr"]._register_workflow_unbound(wf)
 
     async def test_retired_agent_id_fails_workflow_registration(self, stack):
         await stack["agents"].register_agent(_agent_record())
@@ -352,7 +352,7 @@ class TestWorkflowAgentValidation:
             )],
         )
         with pytest.raises(WorkflowError, match="retired"):
-            await stack["wfr"].register_workflow(wf)
+            await stack["wfr"]._register_workflow_unbound(wf)
 
     async def test_default_reference_syntax_rejected(self, stack):
         await stack["agents"].register_agent(_agent_record())
@@ -365,7 +365,7 @@ class TestWorkflowAgentValidation:
             )],
         )
         with pytest.raises(WorkflowError, match="@default:"):
-            await stack["wfr"].register_workflow(wf)
+            await stack["wfr"]._register_workflow_unbound(wf)
 
     async def test_active_agent_id_succeeds(self, stack):
         await stack["agents"].register_agent(_agent_record())
@@ -377,7 +377,7 @@ class TestWorkflowAgentValidation:
                             "payload": {"x": 1}},
             )],
         )
-        registered = await stack["wfr"].register_workflow(wf)
+        registered = await stack["wfr"]._register_workflow_unbound(wf)
         assert registered.workflow_id == "wf-good"
 
     async def test_route_to_agent_workflow_without_registry_wired_fails(
@@ -404,7 +404,7 @@ class TestWorkflowAgentValidation:
                 )],
             )
             with pytest.raises(WorkflowError, match="agent registry"):
-                await wfr.register_workflow(wf)
+                await wfr._register_workflow_unbound(wf)
             # No partial state.
             wfs = await wfr.list_workflows("inst_a")
             assert all(w.workflow_id != "wf-no-registry" for w in wfs)
@@ -435,7 +435,7 @@ class TestWorkflowAgentValidation:
                 )],
             )
             # Succeeds without any registry binding.
-            registered = await wfr.register_workflow(wf)
+            registered = await wfr._register_workflow_unbound(wf)
             assert registered.workflow_id == "wf-state-only"
             await wfr.stop()
             await _reset_trigger_registry(trig)
@@ -544,7 +544,7 @@ class TestEndToEndApprovalFlow:
                 ),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # Inbox receives the approval_request.

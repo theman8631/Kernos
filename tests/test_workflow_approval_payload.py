@@ -215,7 +215,7 @@ def _approval_workflow():
 
 class TestApprovalRequestEndToEnd:
     async def test_inbox_payload_carries_complete_block(self, stack):
-        await stack["wfr"].register_workflow(_approval_workflow())
+        await stack["wfr"]._register_workflow_unbound(_approval_workflow())
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -254,7 +254,7 @@ async def _read_all_events(instance_id: str):
 
 class TestPausedAtGateEvent:
     async def test_event_payload_has_full_field_set(self, stack):
-        await stack["wfr"].register_workflow(_approval_workflow())
+        await stack["wfr"]._register_workflow_unbound(_approval_workflow())
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
 
@@ -296,7 +296,7 @@ class TestPausedAtGateEvent:
         ``workflow.execution_paused_at_gate``, NOT the old
         ``workflow.execution_paused``. There are no other pause causes
         in shipped WLP code — clean rename, not coexistence."""
-        await stack["wfr"].register_workflow(_approval_workflow())
+        await stack["wfr"]._register_workflow_unbound(_approval_workflow())
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         for _ in range(100):

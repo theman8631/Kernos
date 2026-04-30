@@ -272,7 +272,7 @@ class TestNonceAvailabilityDuringAction:
                 _make_action("mark_state", key="post", value=1, scope="instance"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # Wait until inbox has the approval_request payload posted.
@@ -305,7 +305,7 @@ class TestNonceAvailabilityDuringAction:
                 _make_action("mark_state", key="post", value=2, scope="instance"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -365,7 +365,7 @@ class TestGatedActionFailure:
                              message="continued", urgency="low"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(lambda: write_count["n"] >= 1, timeout=2.0)
@@ -419,7 +419,7 @@ class TestGatedActionFailure:
                 _make_action("mark_state", key="never", value=2, scope="instance"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # Wait for execution to abort.
@@ -452,7 +452,7 @@ class TestMatchLogic:
                 _make_action("mark_state", key="post", value=2, scope="instance"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -546,7 +546,7 @@ class TestStaleNonceRejection:
                 _make_action("mark_state", key="post", value=2, scope="instance"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -635,7 +635,7 @@ class TestCrossExecutionIsolation:
                 _make_action("mark_state", key="post", value=2, scope="instance"),
             ],
         )
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(

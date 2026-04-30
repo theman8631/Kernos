@@ -140,13 +140,11 @@ class TestModuleShape:
         ):
             assert callable(getattr(sts, name)), f"missing query surface: {name}"
 
-    def test_facade_exposes_register_workflow_placeholder(self, stack):
-        # C2 will add the approval-bound register_workflow gate. C1
-        # leaves the attribute absent so callers fail loudly rather
-        # than silently reach an unimplemented stub.
+    def test_facade_exposes_register_workflow(self, stack):
+        # C2 added the approval-bound register_workflow gate.
         sts = stack["sts"]
-        assert not hasattr(sts, "register_workflow"), (
-            "register_workflow ships in C2; C1 must not expose a stub"
+        assert callable(getattr(sts, "register_workflow", None)), (
+            "AC #1: SubstrateTools must expose register_workflow"
         )
 
 
@@ -197,6 +195,11 @@ class TestCapabilityTagFormat:
         "email send",        # space
         "email-send",        # dash
         "",                  # empty
+        "email.send\n",      # trailing newline (re.match quirk)
+        "email.send\r",      # carriage return
+        "\nemail.send",      # leading newline
+        "email.send ",       # trailing space
+        "email​.send",  # zero-width space (unicode)
     ])
     def test_invalid_tags_rejected(self, tag):
         with pytest.raises(InvalidCapabilityTagFormat):
@@ -428,10 +431,10 @@ class TestQuerySurfaceIsolation:
     async def test_list_workflows_scoped_to_instance(self, stack):
         wfr = stack["wfr"]
         sts = stack["sts"]
-        await wfr.register_workflow(_make_workflow(
+        await wfr._register_workflow_unbound(_make_workflow(
             workflow_id="wf-inst-a", instance_id="inst_a",
         ))
-        await wfr.register_workflow(_make_workflow(
+        await wfr._register_workflow_unbound(_make_workflow(
             workflow_id="wf-inst-b", instance_id="inst_b",
         ))
         a_only = await sts.list_workflows(instance_id="inst_a")
@@ -442,15 +445,15 @@ class TestQuerySurfaceIsolation:
     async def test_list_workflows_home_space_id_filter(self, stack):
         wfr = stack["wfr"]
         sts = stack["sts"]
-        await wfr.register_workflow(_make_workflow(
+        await wfr._register_workflow_unbound(_make_workflow(
             workflow_id="wf-spc-1", instance_id="inst_a",
             metadata={"home_space_id": "spc_general"},
         ))
-        await wfr.register_workflow(_make_workflow(
+        await wfr._register_workflow_unbound(_make_workflow(
             workflow_id="wf-spc-2", instance_id="inst_a",
             metadata={"home_space_id": "spc_work"},
         ))
-        await wfr.register_workflow(_make_workflow(
+        await wfr._register_workflow_unbound(_make_workflow(
             workflow_id="wf-no-space", instance_id="inst_a",
             metadata={},
         ))

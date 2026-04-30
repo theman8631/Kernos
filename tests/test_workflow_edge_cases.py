@@ -257,7 +257,7 @@ class TestScenario1WaitThenAct:
             predicate={"op": "eq", "path": "payload.canvas_id",
                        "value": "spec-canvas"},
         ))
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit(
             "inst_a", "canvas.written", {"canvas_id": "spec-canvas"},
         )
@@ -290,7 +290,7 @@ class TestScenario2Periodic:
                 {"op": "eq", "path": "payload.local_time", "value": "08:00"},
             ]},
         ))
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         # Two ticks at different times; only the 08:00 daily fires.
         await event_stream.emit(
             "inst_a", "time.tick",
@@ -336,7 +336,7 @@ class TestScenario3ConditionalCascade:
             _action("call_tool", tool_id="ok"),
             _action("mark_state", key="reached_end", value=True, scope="instance"),
         ])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         ok_run = await _wait_for(
@@ -384,7 +384,7 @@ class TestScenario4GateHappy:
             timeout_seconds=5,
             bound_behavior_on_timeout="abort_workflow",
         )])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # Wait for inbox to receive the approval request.
@@ -432,7 +432,7 @@ class TestScenario5bGateAutoProceed:
             bound_behavior_on_timeout="auto_proceed_with_default",
             default_value="ok",
         )])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # 8-second wait gives plenty of headroom over the 1s gate
@@ -473,7 +473,7 @@ class TestScenario5GateEscalate:
             timeout_seconds=1,
             bound_behavior_on_timeout="escalate_to_owner",
         )])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await asyncio.sleep(2.0)
@@ -517,7 +517,7 @@ class TestScenario6BypassAttempt:
             timeout_seconds=10,
             bound_behavior_on_timeout="abort_workflow",
         )])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         ok = await _wait_for(
@@ -602,7 +602,7 @@ class TestScenario7VariableAgents:
             _action("route_to_agent", agent_id="code-agent",
                     payload={"task": "implement spec"}),
         ])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -644,7 +644,7 @@ class TestScenario8VariableTools:
             _action("call_tool", tool_id="write_canvas",
                     args={"canvas_id": "result"}),
         ])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         await _wait_for(
@@ -687,7 +687,7 @@ class TestScenario9ConfigGap:
                     agent_id="x", payload={"task": "y"}),
             _action("mark_state", key="never", value=1, scope="instance"),
         ])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         await event_stream.emit("inst_a", "cc.batch.report", {})
         await event_stream.flush_now()
         # Poll for the execution_step_failed event rather than fixed sleep.
@@ -752,7 +752,7 @@ class TestScenario10RestartResume:
                 continuation_rules=ContinuationRules(on_failure="abort"),
             ),
         ])
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         # Seed a row mid-execution.
         await stack["engine"]._db.execute(
             "INSERT INTO workflow_executions ("
@@ -799,7 +799,7 @@ class TestScenario11Idempotency:
             predicate={"op": "exists", "path": "event_id"},
             idempotency_key_template="{payload[task_id]}",
         ))
-        await stack["wfr"].register_workflow(wf)
+        await stack["wfr"]._register_workflow_unbound(wf)
         # Two events with the same task_id.
         await event_stream.emit(
             "inst_a", "external.webhook", {"task_id": "T-1"},

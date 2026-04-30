@@ -9,6 +9,7 @@ without modifying STS.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -89,7 +90,7 @@ class ContextBriefRegistry:
         if resolver is None:
             return None
         result = resolver(instance_id, ref.id)
-        if hasattr(result, "__await__"):
+        if inspect.isawaitable(result):
             result = await result  # type: ignore[assignment]
         return result  # type: ignore[return-value]
 
