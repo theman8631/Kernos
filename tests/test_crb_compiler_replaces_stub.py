@@ -67,14 +67,20 @@ class TestModuleDocstringInvariants:
 
 
 class TestNoCohortPatterns:
-    """AC #30: CRB is a service, not a cohort. Static check that CRB
-    modules don't import or instantiate cursor/action_log patterns
-    (those are cohort substrate)."""
+    """AC #30: CRB is a service, not a cohort. Static check that CRB's
+    OWN modules don't import or instantiate cursor/budget patterns
+    (those are cohort substrate). The ``principal_integration/``
+    subdirectory is exempt because it wires the **principal cohort's**
+    subscription per Seam C8 Path B, not CRB itself."""
 
     def test_no_durable_event_cursor_in_crb_modules(self):
         offenders = []
         for path in CRB_ROOT.rglob("*.py"):
             if "__pycache__" in path.parts:
+                continue
+            # Exempt principal_integration/ — Path B intentionally
+            # adopts the cursor substrate for the principal cohort.
+            if "principal_integration" in path.parts:
                 continue
             text = path.read_text()
             for lineno, line in enumerate(text.splitlines(), start=1):
@@ -87,8 +93,10 @@ class TestNoCohortPatterns:
                 if "BudgetTracker" in line:
                     offenders.append((path, lineno, line.strip()))
         assert not offenders, (
-            "CRB must NOT use DurableEventCursor or BudgetTracker — "
-            "those are cohort substrate. CRB is a service module.\n"
+            "CRB must NOT use DurableEventCursor or BudgetTracker in its "
+            "own modules — those are cohort substrate. CRB is a service "
+            "module. (principal_integration/ is exempt; it wires the "
+            "principal cohort's subscription per Seam C8 Path B.)\n"
             + "\n".join(
                 f"  {p.relative_to(CRB_ROOT)}:{ln}  {body}"
                 for p, ln, body in offenders

@@ -508,8 +508,9 @@ async def emit(
     member_id: str | None = None,
     space_id: str | None = None,
     correlation_id: str | None = None,
-) -> None:
-    """Enqueue an event for write. Returns immediately; actual write is batched.
+) -> str:
+    """Enqueue an event for write. Returns the substrate-set ``event_id``
+    immediately (write is batched).
 
     This is the canonical emission entry point for legacy / unregistered
     callers. Events emitted through this path get
@@ -520,8 +521,12 @@ async def emit(
 
     Over-threshold enqueue triggers an opportunistic background flush
     without blocking the caller.
+
+    Returns the substrate-generated ``event_id`` so callers (e.g. CRB
+    using the approval_event_id for STS register_workflow) have eager
+    visibility into the durable identifier without a round-trip read.
     """
-    _enqueue_with_envelope(
+    return _enqueue_with_envelope(
         instance_id=instance_id,
         event_type=event_type,
         payload=payload,
@@ -541,11 +546,16 @@ def _enqueue_with_envelope(
     space_id: str | None,
     correlation_id: str | None,
     source_module: str,
-) -> None:
+) -> str:
     """Substrate-internal enqueue that sets the envelope's ``source_module``
     from a substrate-controlled identity. Callers do not pass ``source_module``
     directly; only :class:`EventEmitter` (registered via :class:`EmitterRegistry`)
-    and the legacy :func:`emit` shim invoke this."""
+    and the legacy :func:`emit` shim invoke this.
+
+    Returns the substrate-generated ``event_id`` so callers can correlate
+    the emission with a durable identifier (CRB: approval_event_id for
+    STS register_workflow).
+    """
     event = Event(
         event_id=str(uuid.uuid4()),
         instance_id=instance_id,
@@ -560,6 +570,7 @@ def _enqueue_with_envelope(
     _WRITER.enqueue(event)
     if _WRITER.queue_depth >= _WRITER._flush_threshold:
         asyncio.create_task(_WRITER._flush_once())
+    return event.event_id
 
 
 # ---------------------------------------------------------------------------
@@ -692,11 +703,13 @@ class EventEmitter:
         member_id: str | None = None,
         space_id: str | None = None,
         correlation_id: str | None = None,
-    ) -> None:
+    ) -> str:
         """Enqueue an event with ``envelope.source_module`` set from this
         emitter's registered identity. Payload contents do NOT influence
-        the envelope's source authority."""
-        _enqueue_with_envelope(
+        the envelope's source authority.
+
+        Returns the substrate-generated ``event_id`` for caller correlation."""
+        return _enqueue_with_envelope(
             instance_id=instance_id,
             event_type=event_type,
             payload=payload,
