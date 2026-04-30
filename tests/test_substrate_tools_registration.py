@@ -1009,6 +1009,56 @@ class TestPostCodexHardening:
                 approval_event_id=approval_b,
             )
 
+    # HARDENING #2 — taxonomy fallback pin (optional Codex suggestion)
+    async def test_no_matching_candidate_preserves_error_taxonomy(self, stack):
+        """When no full candidate matches the (CRB + hash + instance)
+        filter, the fallback path preserves the legacy error class
+        taxonomy: a wrong-source proposal raises
+        ApprovalProvenanceUnverifiable; a hash-mismatch raises
+        ApprovalProposalMismatch. Pins the fallback behavior so a
+        future refactor can't quietly collapse the error classes."""
+        descriptor = _basic_descriptor()
+        desc_hash = compute_descriptor_hash(descriptor)
+        correlation_id = "corr-fallback-taxonomy"
+        # Emit a stale proposed with a different hash (CRB-sourced).
+        await stack["crb"].emit(
+            "inst_a", "routine.proposed",
+            {
+                "correlation_id": correlation_id,
+                "descriptor_hash": "stale-hash",
+                "instance_id": "inst_a",
+                "proposed_by": "drafter",
+                "member_id": "mem_owner",
+                "source_thread_id": "thr_x",
+            },
+            correlation_id=correlation_id,
+        )
+        # Approve with the correct hash — but no proposed event matches
+        # the candidate filter (none has the correct hash).
+        await stack["crb"].emit(
+            "inst_a", "routine.approved",
+            {
+                "correlation_id": correlation_id,
+                "descriptor_hash": desc_hash,
+                "instance_id": "inst_a",
+                "approved_by": "founder",
+                "member_id": "mem_owner",
+                "source_turn_id": "turn_x",
+            },
+            correlation_id=correlation_id,
+        )
+        await event_stream.flush_now()
+        correlated = await event_stream.events_by_correlation("inst_a", correlation_id)
+        approval = next(e for e in correlated if e.event_type == "routine.approved")
+        # The fallback should preserve ApprovalProposalMismatch (the
+        # only reason no candidate matched is hash mismatch in this
+        # setup).
+        with pytest.raises(ApprovalProposalMismatch):
+            await stack["sts"].register_workflow(
+                instance_id="inst_a", descriptor=descriptor,
+                approval_event_id=approval.event_id,
+            )
+
     # HARDENING #2
     async def test_proposal_lookup_filters_by_descriptor_hash(self, stack):
         """A correlation_id that contains multiple ``routine.proposed``
