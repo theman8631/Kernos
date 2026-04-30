@@ -106,11 +106,13 @@ class TestCohortRegistration:
         assert stack["cohort"].cohort_id == "drafter"
         assert COHORT_ID == "drafter"
 
-    def test_cohort_subscribes_to_three_event_types(self, stack):
+    def test_cohort_subscribes_to_four_event_types(self, stack):
+        # v1.1 added crb.feedback.modify_request to the subscription set.
         assert SUBSCRIBED_EVENT_TYPES == frozenset({
             "conversation.message.posted",
             "conversation.context.shifted",
             "friction.signal.surfaced",
+            "crb.feedback.modify_request",
         })
 
     def test_cohort_not_started_until_start_called(self, stack):
@@ -189,10 +191,14 @@ class TestTypeFilter:
         await event_stream.emit("inst_a", "friction.signal.surfaced", {"i": 3})
         await event_stream.emit("inst_a", "compaction.completed", {"i": 4})
         await event_stream.emit("inst_a", "conversation.context.shifted", {"i": 5})
+        # v1.1: crb.feedback.modify_request is also subscribed (a CRB
+        # emitter would normally produce it; raw emit suffices for the
+        # type-filter check).
+        await event_stream.emit("inst_a", "crb.feedback.modify_request", {"i": 6})
         await event_stream.flush_now()
         result = await stack["cohort"].tick(instance_id="inst_a")
-        # Three subscribed events processed; two filtered out.
-        assert result.events_processed == 3
+        # Four subscribed events processed; two filtered out.
+        assert result.events_processed == 4
 
 
 # ===========================================================================

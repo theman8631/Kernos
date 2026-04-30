@@ -36,6 +36,10 @@ RECEIPT_SIGNAL_EMITTED = "drafter.receipt.signal_emitted"
 RECEIPT_SIGNAL_ACKNOWLEDGED = "drafter.receipt.signal_acknowledged"
 RECEIPT_DRAFT_UPDATED = "drafter.receipt.draft_updated"
 RECEIPT_DRY_RUN_COMPLETED = "drafter.receipt.dry_run_completed"
+# v1.1: emitted on successful handling of a crb.feedback.modify_request
+# event. Confirms to CRB that the feedback was ingested + bound to the
+# named draft for re-shaping in the next semantic evaluation pass.
+RECEIPT_FEEDBACK_RECEIVED = "drafter.receipt.feedback_received"
 
 
 RECEIPT_TYPES: frozenset[str] = frozenset({
@@ -43,6 +47,7 @@ RECEIPT_TYPES: frozenset[str] = frozenset({
     RECEIPT_SIGNAL_ACKNOWLEDGED,
     RECEIPT_DRAFT_UPDATED,
     RECEIPT_DRY_RUN_COMPLETED,
+    RECEIPT_FEEDBACK_RECEIVED,
 })
 """The exact set. Adding a receipt type is a deliberate substrate
 change; tests assert this exact set."""
@@ -150,6 +155,33 @@ def build_draft_updated_payload(
     }
 
 
+def build_feedback_received_payload(
+    *,
+    draft_id: str,
+    instance_id: str,
+    original_proposal_id: str,
+    source_event_id: str,
+) -> dict:
+    """Payload for :data:`RECEIPT_FEEDBACK_RECEIVED` (v1.1).
+
+    Confirms CRB's modification request was ingested + bound to the
+    named draft for re-shaping. ``original_proposal_id`` provides
+    provenance back to the InstallProposal that triggered the
+    feedback flow."""
+    if not draft_id:
+        raise ValueError("draft_id is required")
+    if not original_proposal_id:
+        raise ValueError("original_proposal_id is required")
+    if not source_event_id:
+        raise ValueError("source_event_id is required")
+    return {
+        "draft_id": draft_id,
+        "instance_id": instance_id,
+        "original_proposal_id": original_proposal_id,
+        "source_event_id": source_event_id,
+    }
+
+
 def build_dry_run_completed_payload(
     *,
     draft_id: str,
@@ -186,12 +218,14 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "RECEIPT_DRAFT_UPDATED",
     "RECEIPT_DRY_RUN_COMPLETED",
+    "RECEIPT_FEEDBACK_RECEIVED",
     "RECEIPT_SIGNAL_ACKNOWLEDGED",
     "RECEIPT_SIGNAL_EMITTED",
     "RECEIPT_TYPES",
     "ReceiptTimeoutConfig",
     "build_draft_updated_payload",
     "build_dry_run_completed_payload",
+    "build_feedback_received_payload",
     "build_signal_acknowledged_payload",
     "build_signal_emitted_payload",
 ]

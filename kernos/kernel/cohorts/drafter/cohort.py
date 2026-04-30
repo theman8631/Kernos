@@ -50,10 +50,12 @@ from kernos.kernel.cohorts.drafter.ports import (
 from kernos.kernel.cohorts.drafter.receipts import (
     RECEIPT_DRAFT_UPDATED,
     RECEIPT_DRY_RUN_COMPLETED,
+    RECEIPT_FEEDBACK_RECEIVED,
     RECEIPT_SIGNAL_EMITTED,
     ReceiptTimeoutConfig,
     build_draft_updated_payload,
     build_dry_run_completed_payload,
+    build_feedback_received_payload,
     build_signal_emitted_payload,
 )
 from kernos.kernel.cohorts.drafter.recognition import (
@@ -319,6 +321,13 @@ class DrafterCohort:
         signals: list[str] = []
         receipts = 0
 
+        # v1.1: CRB feedback dispatch. Substrate-set envelope source is
+        # the trust boundary; payload-claimed source ignored.
+        if event.event_type == "crb.feedback.modify_request":
+            return await self._handle_feedback_event(
+                event, instance_id=instance_id,
+            )
+
         # Select context-relevant drafts.
         home_space_id = (event.payload or {}).get("home_space_id") or event.space_id
         source_thread_id = (event.payload or {}).get("source_thread_id")
@@ -556,6 +565,74 @@ class DrafterCohort:
             ),
             target_id=f"signal_emitted::{signal_id}",
         )
+
+    async def _handle_feedback_event(
+        self, event: Any, *, instance_id: str,
+    ) -> tuple[list[str], int]:
+        """Handler for ``crb.feedback.modify_request`` events (v1.1).
+
+        Validates envelope source (must be CRB), looks up the named
+        draft, appends a provenance entry to ``resolution_notes`` with
+        the feedback summary + original_proposal_id, and emits
+        ``drafter.receipt.feedback_received`` so CRB knows the
+        feedback was ingested.
+
+        Source authority is the substrate-set envelope; payload-claimed
+        source is ignored. A draft that does not exist or has shifted
+        to terminal state is a graceful no-op (cursor still advances).
+        """
+        signals: list[str] = []
+        receipts = 0
+
+        # Step 1: envelope source authority. Reject payload-claimed
+        # source (mirrors the STS approval-gate pattern).
+        if event.envelope.source_module != "crb":
+            return signals, receipts
+
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        draft_id = payload.get("draft_id") or ""
+        original_proposal_id = payload.get("original_proposal_id") or ""
+        feedback_summary = payload.get("feedback_summary") or ""
+        if not draft_id or not original_proposal_id:
+            return signals, receipts  # malformed; skip cleanly
+
+        # Step 2: look up the draft via the port (instance-scoped).
+        draft = await self._draft_port.get_draft(draft_id=draft_id)
+        if draft is None or draft.status in ("committed", "abandoned"):
+            return signals, receipts  # graceful no-op
+
+        # Step 3: append provenance entry to resolution_notes.
+        provenance = {
+            "timestamp": self._clock().isoformat(),
+            "source_event_ids": [event.event_id],
+            "source_turn_id": payload.get("source_turn_id", ""),
+            "reason": "crb_modify_feedback",
+            "feedback_summary": feedback_summary,
+            "original_proposal_id": original_proposal_id,
+        }
+        notes = _append_provenance(draft.resolution_notes, provenance)
+        update_summary = await self._draft_port.update_draft(
+            source_event_id=event.event_id,
+            draft_id=draft_id,
+            expected_version=draft.version,
+            resolution_notes=notes,
+        )
+
+        # Step 4: receipt emission via action_log.
+        if update_summary.get("draft_id"):
+            await self._event_port.emit_receipt(
+                source_event_id=event.event_id,
+                receipt_type=RECEIPT_FEEDBACK_RECEIVED,
+                payload=build_feedback_received_payload(
+                    draft_id=draft_id,
+                    instance_id=instance_id,
+                    original_proposal_id=original_proposal_id,
+                    source_event_id=event.event_id,
+                ),
+                target_id=f"feedback_received::{draft_id}::{event.event_id}",
+            )
+            receipts += 1
+        return signals, receipts
 
     async def _scan_idle_resurface(
         self, event: Any, *, instance_id: str,

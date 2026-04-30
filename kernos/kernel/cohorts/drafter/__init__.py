@@ -58,6 +58,10 @@ SUBSCRIBED_EVENT_TYPES: frozenset[str] = frozenset({
     "conversation.message.posted",
     "conversation.context.shifted",
     "friction.signal.surfaced",
+    # v1.1: inbound CRB feedback for draft re-shaping during proposal
+    # review. Substrate-set envelope.source_module="crb" is the trust
+    # boundary; payload-claimed source ignored.
+    "crb.feedback.modify_request",
 })
 """Event types Drafter pulls via the durable cursor. Other event types
 are not delivered (cursor advances past them without invoking the

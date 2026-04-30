@@ -20,12 +20,14 @@ from kernos.kernel.cohorts.drafter.receipts import (
 
 
 class TestReceiptSurface:
-    def test_four_receipt_types_pinned(self):
+    def test_five_receipt_types_pinned(self):
+        # v1.1: gained drafter.receipt.feedback_received.
         assert RECEIPT_TYPES == frozenset({
             "drafter.receipt.signal_emitted",
             "drafter.receipt.signal_acknowledged",
             "drafter.receipt.draft_updated",
             "drafter.receipt.dry_run_completed",
+            "drafter.receipt.feedback_received",
         })
 
 
