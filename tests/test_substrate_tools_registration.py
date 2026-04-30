@@ -536,14 +536,13 @@ class TestProposalAnchor:
 
 class TestInstanceMatch:
     async def test_caller_instance_mismatch_raises(self, stack):
-        """The approval event's instance_id is inst_a but caller passes
-        inst_b."""
-        # Bring up an inst_b context: just a different instance_id in
-        # the same DB (events are instance-scoped via WHERE).
+        """The descriptor's instance_id is inst_a but caller passes
+        inst_b. Post-Codex C4: the descriptor-instance-mismatch guard
+        fires BEFORE the approval-event lookup, so the failure is
+        ApprovalInstanceMismatch (not ApprovalEventNotFound)."""
         descriptor = _basic_descriptor(instance_id="inst_a")
         approval_id = await _propose_and_approve(stack["crb"], descriptor, instance_id="inst_a")
-        with pytest.raises(ApprovalEventNotFound):
-            # event_by_id is instance-scoped; lookup misses for inst_b.
+        with pytest.raises(ApprovalInstanceMismatch):
             await stack["sts"].register_workflow(
                 instance_id="inst_b",
                 descriptor=descriptor,
@@ -917,6 +916,136 @@ class TestEventShape:
 # ===========================================================================
 # Happy path
 # ===========================================================================
+
+
+class TestPostCodexHardening:
+    """Codex final-pass findings (3 REAL + 2 HARDENING) — pinned in C4."""
+
+    # REAL #1
+    async def test_descriptor_instance_id_must_match_caller(self, stack):
+        """A descriptor whose ``instance_id`` field disagrees with the
+        caller's ``instance_id`` MUST be rejected before the approval
+        event is consumed. Closes the multi-tenancy boundary bypass."""
+        descriptor = _basic_descriptor(instance_id="inst_b")  # mismatched
+        # Provide a working approval to prove the fail-fast is the
+        # rejection cause, not approval-resolution noise.
+        approval_id = await _propose_and_approve(
+            stack["crb"], descriptor, instance_id="inst_b",
+        )
+        with pytest.raises(ApprovalInstanceMismatch):
+            await stack["sts"].register_workflow(
+                instance_id="inst_a",  # caller's instance
+                descriptor=descriptor,
+                approval_event_id=approval_id,
+            )
+
+    async def test_descriptor_without_instance_id_does_not_raise_early(self, stack):
+        """If the descriptor omits ``instance_id``, the early guard is a
+        no-op (downstream ``_build_workflow`` then enforces it). This
+        preserves the existing parse-error path."""
+        descriptor = _basic_descriptor()
+        del descriptor["instance_id"]
+        # No early raise; the descriptor parser fails later.
+        with pytest.raises(ApprovalBindingMissing):
+            # No approval supplied → ApprovalBindingMissing fires before
+            # any descriptor parsing.
+            await stack["sts"].register_workflow(
+                instance_id="inst_a", descriptor=descriptor,
+            )
+
+    # REAL #2
+    async def test_descriptor_with_prev_version_requires_modification_event(self, stack):
+        """A descriptor declaring itself a modification (carries
+        ``prev_version_id``) paired with a plain ``routine.approved``
+        event MUST be rejected — the bidirectional consistency
+        requirement that mirrors the existing
+        modification-approved-needs-prev_workflow_id check."""
+        descriptor = _basic_descriptor(prev_version_id="wf-some-target")
+        # Use the regular (non-modification) approval pipeline.
+        approval_id = await _propose_and_approve(stack["crb"], descriptor)
+        with pytest.raises(ApprovalEventTypeInvalid):
+            await stack["sts"].register_workflow(
+                instance_id="inst_a", descriptor=descriptor,
+                approval_event_id=approval_id,
+            )
+
+    async def test_descriptor_without_prev_version_accepts_plain_approval(self, stack):
+        """Sanity: a descriptor without ``prev_version_id`` continues to
+        register via plain ``routine.approved``. The bidirectional
+        check is asymmetric — only the modification side triggers."""
+        descriptor = _basic_descriptor()  # no prev_version_id
+        approval_id = await _propose_and_approve(stack["crb"], descriptor)
+        wf = await stack["sts"].register_workflow(
+            instance_id="inst_a", descriptor=descriptor,
+            approval_event_id=approval_id,
+        )
+        assert wf.workflow_id == descriptor["workflow_id"]
+
+    # HARDENING #1
+    async def test_workflow_id_collision_does_not_consume_approval(self, stack):
+        """A duplicate ``workflow_id`` raises IntegrityError but the
+        approval was rolled back — translating to
+        ``ApprovalAlreadyConsumed`` would incorrectly mark a recoverable
+        failure as terminal. The translation MUST only fire on the
+        approval-binding index."""
+        # Register a workflow with a known id.
+        descriptor_a = _basic_descriptor(workflow_id="wf-shared-id")
+        approval_a = await _propose_and_approve(stack["crb"], descriptor_a)
+        await stack["sts"].register_workflow(
+            instance_id="inst_a", descriptor=descriptor_a,
+            approval_event_id=approval_a,
+        )
+        # New approval, same workflow_id — collision is on the PK,
+        # not the approval-binding index.
+        descriptor_b = _basic_descriptor(workflow_id="wf-shared-id", display_name="B")
+        approval_b = await _propose_and_approve(stack["crb"], descriptor_b)
+        # Should NOT raise ApprovalAlreadyConsumed (which is terminal).
+        # The underlying IntegrityError surfaces because workflow_id
+        # PK collides — but the approval is recoverable.
+        import aiosqlite
+        with pytest.raises(aiosqlite.IntegrityError):
+            await stack["sts"].register_workflow(
+                instance_id="inst_a", descriptor=descriptor_b,
+                approval_event_id=approval_b,
+            )
+
+    # HARDENING #2
+    async def test_proposal_lookup_filters_by_descriptor_hash(self, stack):
+        """A correlation_id that contains multiple ``routine.proposed``
+        events should select the one whose descriptor_hash matches the
+        approval, even if it is not the first."""
+        descriptor = _basic_descriptor()
+        desc_hash = compute_descriptor_hash(descriptor)
+        correlation_id = "corr-multi-proposed"
+        # Emit a stale proposed first with a DIFFERENT descriptor_hash.
+        await stack["crb"].emit(
+            "inst_a", "routine.proposed",
+            {
+                "correlation_id": correlation_id,
+                "descriptor_hash": "stale-hash-from-earlier-iteration",
+                "instance_id": "inst_a",
+                "proposed_by": "drafter",
+                "member_id": "mem_owner",
+                "source_thread_id": "thr_x",
+            },
+            correlation_id=correlation_id,
+        )
+        # Then emit the real proposed with the correct hash.
+        await _emit_proposed(
+            stack["crb"], instance_id="inst_a",
+            descriptor_hash=desc_hash, correlation_id=correlation_id,
+        )
+        approval_id = await _emit_approved(
+            stack["crb"], instance_id="inst_a",
+            descriptor_hash=desc_hash, correlation_id=correlation_id,
+        )
+        # Should succeed — the lookup filters proposed candidates by
+        # hash + instance + envelope source, not by "first wins."
+        wf = await stack["sts"].register_workflow(
+            instance_id="inst_a", descriptor=descriptor,
+            approval_event_id=approval_id,
+        )
+        assert wf.workflow_id == descriptor["workflow_id"]
 
 
 class TestHappyPath:

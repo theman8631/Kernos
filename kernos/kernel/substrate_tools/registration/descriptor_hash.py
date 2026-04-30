@@ -25,10 +25,14 @@ Included fields (NOT excluded):
 
 Algorithm (deterministic):
 
-1. Drop every key listed in :data:`DESCRIPTOR_VOLATILE_FIELDS`,
-   recursively at every nesting level (``id`` inside an action's
-   parameters is also dropped).
-2. Recursively sort all dict keys.
+1. Drop every key listed in :data:`DESCRIPTOR_VOLATILE_FIELDS` at the
+   **top level only**. Nested ``id`` / ``version`` fields (e.g. inside
+   an action's ``parameters``, a trigger, a verifier, or future
+   provider payloads) are part of the executable descriptor and MUST
+   contribute to the hash — otherwise two semantically distinct
+   descriptors could collide.
+2. Recursively sort all dict keys at every nesting level. Lists keep
+   their order — list position is part of the executable shape.
 3. Serialize to compact UTF-8 JSON with ``separators=(',', ':')``,
    no whitespace, no surrogateescape, ``sort_keys=False`` (we already
    sorted).
@@ -66,6 +70,11 @@ def compute_descriptor_hash(descriptor: dict) -> str:
     Pure function — no I/O. Equivalent descriptors hash identically;
     descriptors that differ in any non-volatile field hash differently.
 
+    Top-level volatile-key drop: only the descriptor's outermost dict
+    has :data:`DESCRIPTOR_VOLATILE_FIELDS` excluded. Nested keys with
+    the same name (e.g. ``action_sequence[0].parameters.id``) are
+    preserved — they are part of the executable shape.
+
     Raises:
         TypeError: if ``descriptor`` is not a dict.
     """
@@ -73,27 +82,28 @@ def compute_descriptor_hash(descriptor: dict) -> str:
         raise TypeError(
             f"compute_descriptor_hash expects a dict, got {type(descriptor).__name__}"
         )
-    canonical = _canonicalize(descriptor)
+    # Step 1: drop volatile keys at the TOP level only.
+    top_level = {
+        key: _sort_recursive(value)
+        for key, value in sorted(descriptor.items())
+        if key not in DESCRIPTOR_VOLATILE_FIELDS
+    }
+    # Step 3-4: canonical JSON serialise + SHA-256.
     blob = json.dumps(
-        canonical, separators=(",", ":"), ensure_ascii=False, sort_keys=False,
+        top_level, separators=(",", ":"), ensure_ascii=False, sort_keys=False,
     ).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
 
 
-def _canonicalize(node: Any) -> Any:
-    """Walk the descriptor recursively: strip volatile keys, sort dict
-    keys, leave list order intact (lists are part of the executable
-    shape and order matters)."""
+def _sort_recursive(node: Any) -> Any:
+    """Recursively sort dict keys at every nesting level. Does NOT
+    strip any keys — that is the top-level pass's job. Lists keep
+    their original order (list position is part of the executable
+    shape)."""
     if isinstance(node, dict):
-        return {
-            key: _canonicalize(value)
-            for key, value in sorted(node.items())
-            if key not in DESCRIPTOR_VOLATILE_FIELDS
-        }
-    if isinstance(node, list):
-        return [_canonicalize(item) for item in node]
-    if isinstance(node, tuple):
-        return [_canonicalize(item) for item in node]
+        return {key: _sort_recursive(value) for key, value in sorted(node.items())}
+    if isinstance(node, (list, tuple)):
+        return [_sort_recursive(item) for item in node]
     return node
 
 

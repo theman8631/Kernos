@@ -31,6 +31,7 @@ from kernos.kernel.substrate_tools.errors import (
     ApprovalAlreadyConsumed,
     ApprovalBindingMissing,
     ApprovalDescriptorMismatch,
+    ApprovalInstanceMismatch,
     RegistrationValidationFailed,
 )
 from kernos.kernel.substrate_tools.registration.approval import (
@@ -97,6 +98,18 @@ async def register_workflow(
         raise TypeError(
             f"descriptor must be a dict, got {type(descriptor).__name__}"
         )
+    # Cross-check the descriptor's own instance_id against the caller.
+    # Without this guard, a caller in instance A could approve a
+    # descriptor whose instance_id field is B and consume the approval
+    # under B's (instance_id, approval_event_id) unique key. The
+    # approval-event lookup is already instance-scoped (Step 2); this
+    # closes the symmetric gap on the descriptor side.
+    descriptor_instance = descriptor.get("instance_id", "")
+    if descriptor_instance and descriptor_instance != instance_id:
+        raise ApprovalInstanceMismatch(
+            f"descriptor.instance_id={descriptor_instance!r} does not "
+            f"match caller instance_id={instance_id!r}"
+        )
 
     if dry_run:
         return await run_full_validation(
@@ -154,7 +167,30 @@ async def register_workflow(
     except aiosqlite.IntegrityError as exc:
         # The partial UNIQUE on (instance_id, approval_event_id) fired —
         # this approval has already been consumed.
-        if "idx_workflows_approval_unique" in str(exc) or "UNIQUE" in str(exc).upper():
+        #
+        # Hardening (Codex final-pass): match ONLY the approval-binding
+        # index name. A duplicate workflow_id would also surface as
+        # IntegrityError but is recoverable (the approval was rolled
+        # back); translating that to ApprovalAlreadyConsumed would
+        # incorrectly mark a recoverable failure as terminal. Re-raise
+        # any other IntegrityError so the caller sees the underlying
+        # constraint violation.
+        # SQLite's IntegrityError message names the conflicting columns
+        # rather than the index name, e.g. "UNIQUE constraint failed:
+        # workflows.instance_id, workflows.approval_event_id". Match on
+        # the column-pair signature so a duplicate workflow_id PK
+        # (different shape) re-raises as the underlying IntegrityError
+        # rather than mis-translating to terminal ApprovalAlreadyConsumed.
+        msg = str(exc)
+        is_approval_index_violation = (
+            "idx_workflows_approval_unique" in msg
+            or (
+                "approval_event_id" in msg
+                and "instance_id" in msg
+                and "UNIQUE" in msg.upper()
+            )
+        )
+        if is_approval_index_violation:
             raise ApprovalAlreadyConsumed(
                 f"approval_event_id={approval_event_id!r} has already been "
                 f"consumed in instance={instance_id!r}; this is a TERMINAL "

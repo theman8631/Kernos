@@ -81,6 +81,21 @@ async def resolve_and_validate_approval(
             f"{approval_event.event_type!r}; expected one of "
             f"{sorted(APPROVAL_EVENT_TYPES)}"
         )
+    # Bidirectional consistency: a descriptor that declares itself a
+    # modification (carries prev_version_id) MUST be paired with a
+    # routine.modification.approved event. Otherwise Step 5b's
+    # target-exists check is bypassed because Step 5b only fires for
+    # the modification event type. Symmetric to the existing check
+    # that requires prev_workflow_id when the event IS modification-
+    # approved.
+    descriptor_prev = (descriptor.get("prev_version_id") or "").strip()
+    if descriptor_prev and approval_event.event_type != "routine.modification.approved":
+        raise ApprovalEventTypeInvalid(
+            f"descriptor declares prev_version_id={descriptor_prev!r} "
+            f"(modification) but approval event type is "
+            f"{approval_event.event_type!r}; expected "
+            f"'routine.modification.approved'"
+        )
 
     # Step 3: envelope source authority. Read from substrate envelope,
     # NEVER payload — this is the spec's load-bearing trust boundary.
@@ -101,37 +116,65 @@ async def resolve_and_validate_approval(
         )
 
     # Step 4: proposal anchor resolution.
+    #
+    # Hardening (Codex final-pass): if a correlation contains multiple
+    # routine.proposed events, the legacy "first match wins" approach
+    # could reject a valid later proposal whose hash matches the
+    # approval. Filter candidates by CRB envelope + matching
+    # descriptor_hash + matching instance_id BEFORE picking. The
+    # downstream hash and instance checks then become guaranteed-pass
+    # for the selected proposed event, but we keep them as defence in
+    # depth in case the lookup logic is refactored.
     correlation_id = payload["correlation_id"]
     correlated = await event_stream.events_by_correlation(
         instance_id, correlation_id,
     )
-    proposed = next(
-        (e for e in correlated if e.event_type == PROPOSAL_EVENT_TYPE), None,
-    )
+    proposed_candidates = [
+        e for e in correlated
+        if e.event_type == PROPOSAL_EVENT_TYPE
+        and e.envelope.source_module == CRB_SOURCE_MODULE
+        and (e.payload or {}).get("descriptor_hash") == payload.get("descriptor_hash")
+        and (e.payload or {}).get("instance_id") == payload.get("instance_id")
+    ]
+    proposed = proposed_candidates[0] if proposed_candidates else None
     if proposed is None:
+        # Distinguish "no CRB-sourced proposed at all" from "proposal
+        # exists but mismatches" — the legacy error class hierarchy is
+        # observable surface, so we preserve the original taxonomy.
+        any_proposed = next(
+            (e for e in correlated if e.event_type == PROPOSAL_EVENT_TYPE),
+            None,
+        )
+        if any_proposed is None:
+            raise ApprovalProvenanceUnverifiable(
+                f"correlation_id={correlation_id!r} from approval "
+                f"{approval_event_id!r} does not resolve to a "
+                f"{PROPOSAL_EVENT_TYPE!r} event in instance {instance_id!r}"
+            )
+        if any_proposed.envelope.source_module != CRB_SOURCE_MODULE:
+            raise ApprovalProvenanceUnverifiable(
+                f"proposed event {any_proposed.event_id!r} envelope.source_module="
+                f"{any_proposed.envelope.source_module!r}; "
+                f"expected {CRB_SOURCE_MODULE!r}"
+            )
+        any_payload = any_proposed.payload or {}
+        if any_payload.get("descriptor_hash") != payload.get("descriptor_hash"):
+            raise ApprovalProposalMismatch(
+                f"proposed.descriptor_hash="
+                f"{any_payload.get('descriptor_hash')!r} != "
+                f"approved.descriptor_hash={payload.get('descriptor_hash')!r}"
+            )
+        if any_payload.get("instance_id") != payload.get("instance_id"):
+            raise ApprovalInstanceMismatch(
+                f"proposed.instance_id={any_payload.get('instance_id')!r} "
+                f"!= approved.instance_id={payload.get('instance_id')!r}"
+            )
+        # Should be unreachable — the candidates filter would have
+        # accepted a proposed event matching all three criteria.
         raise ApprovalProvenanceUnverifiable(
-            f"correlation_id={correlation_id!r} from approval "
-            f"{approval_event_id!r} does not resolve to a "
-            f"{PROPOSAL_EVENT_TYPE!r} event in instance {instance_id!r}"
-        )
-    if proposed.envelope.source_module != CRB_SOURCE_MODULE:
-        raise ApprovalProvenanceUnverifiable(
-            f"proposed event {proposed.event_id!r} envelope.source_module="
-            f"{proposed.envelope.source_module!r}; expected {CRB_SOURCE_MODULE!r}"
-        )
-
-    # Step 4b: descriptor_hash and instance_id must agree across the chain.
-    proposed_payload = proposed.payload or {}
-    if proposed_payload.get("descriptor_hash") != payload.get("descriptor_hash"):
-        raise ApprovalProposalMismatch(
-            f"proposed.descriptor_hash="
-            f"{proposed_payload.get('descriptor_hash')!r} != "
-            f"approved.descriptor_hash={payload.get('descriptor_hash')!r}"
-        )
-    if proposed_payload.get("instance_id") != payload.get("instance_id"):
-        raise ApprovalInstanceMismatch(
-            f"proposed.instance_id={proposed_payload.get('instance_id')!r} "
-            f"!= approved.instance_id={payload.get('instance_id')!r}"
+            f"no CRB-sourced routine.proposed event with matching "
+            f"descriptor_hash and instance_id found for "
+            f"correlation_id={correlation_id!r}"
         )
 
     # Step 5: approval's instance_id must match the calling instance.

@@ -122,13 +122,31 @@ class TestVolatileExclusion:
         b[field] = "should-not-affect-hash"
         assert compute_descriptor_hash(a) == compute_descriptor_hash(b)
 
-    def test_volatile_dropped_from_nested_objects(self):
-        """An ``id`` inside an action's parameters must also drop —
-        otherwise per-action ids would leak into the hash."""
+    def test_volatile_keys_preserved_at_nested_levels(self):
+        """Codex final-pass fix (REAL #3): ``id`` and ``version`` keys
+        nested inside the descriptor (action parameters, triggers,
+        verifiers, future provider payloads) are part of the executable
+        shape and MUST contribute to the hash. Two descriptors that
+        differ only in a nested ``id`` MUST hash differently — otherwise
+        semantically distinct descriptors collide."""
         a = _canonical_descriptor()
         b = _canonical_descriptor()
-        b["action_sequence"][0]["id"] = "should-not-affect-hash"
+        b["action_sequence"][0]["id"] = "nested-id-must-affect-hash"
+        assert compute_descriptor_hash(a) != compute_descriptor_hash(b)
+
+    def test_volatile_keys_only_drop_at_top_level(self):
+        """Belt-and-suspenders pin: a nested ``version`` field is
+        preserved even though top-level ``version`` drops."""
+        a = _canonical_descriptor(version="1")
+        b = _canonical_descriptor(version="999")
+        # Top-level version drops → identical hashes.
         assert compute_descriptor_hash(a) == compute_descriptor_hash(b)
+        # Nested version is preserved.
+        c = _canonical_descriptor()
+        d = _canonical_descriptor()
+        c["trigger"]["version"] = "v1"
+        d["trigger"]["version"] = "v2"
+        assert compute_descriptor_hash(c) != compute_descriptor_hash(d)
 
 
 # ===========================================================================
