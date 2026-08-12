@@ -1,7 +1,7 @@
 # GOVERNANCE-STATE-DOCUMENT-V1 — collapse the governance lifecycle to one document
 
-**Status:** rev 9 — spec GREEN at rev 6; implementation reviewed by kreview
-(RED at `33306bd`, RED at `c9f58ee`); this revision carries rounds 2 and 3.
+**Status:** rev 10 — spec GREEN at rev 6; implementation reviewed by kreview
+(RED at `33306bd`, `c9f58ee`, `01626a1`); this revision carries rounds 2–4.
 **Supersedes:** the three-artifact governance lifecycle shipped across
 `b1db4b6..f38b31f`.
 **Authority:** `docs/reference/governance-lifecycle-failure-state-enumeration.md`
@@ -384,6 +384,27 @@ a shape check is enough to make the next run report `ALREADY_MIGRATED` and
 suppress a live legacy source forever. The note bound is enforced on read as
 well as on write.
 
+**A malformed final audit row is a torn append only if its terminating newline
+is missing too** (kreview round 4). The parent always wrote each row followed by
+a newline, so a malformed final record that IS newline-terminated was fully
+written — it is corrupt committed history. Position alone cannot separate the
+two, and treating the complete-but-corrupt case as torn converts corrupt closure
+evidence into a false claim that the closure never committed, which **reopens a
+resolved finding as a live one.** The reader must inspect the raw text before
+splitting, because `splitlines` discards exactly that framing evidence.
+
+**Required strings are non-empty, including `condition` and
+`resolving_condition`.** Presence avoids a `KeyError`; it does not satisfy the
+schema. An open item with no condition carries no statement of what would
+resolve it — which is the whole content of the recovery surface — and a closure
+with no resolving condition records that something was closed without recording
+why. Enforced on the read *and* the write surfaces, so `upsert_item` and
+`close_item` cannot introduce either.
+
+**The schema version must be an exact `int`.** In Python `True == 1` and
+`1.0 == 1`, so an equality check alone accepts a JSON `true` or `1.0` and makes
+a foreign or malformed version marker authoritative instead of failing closed.
+
 **A decode failure is corruption like any other.** `read_document` catches
 `UnicodeDecodeError` as `StateError`; letting it escape means it is *not* a
 `StateError`, so `health`, `open_items`, `closed_items` and `close_item` all
@@ -493,6 +514,21 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
     non-string decision, and more notes than the bound all fail closed — and the
     live legacy source they would have suppressed still aborts loudly instead of
     being declared already-migrated.
+
+### Added by kreview round 4 (implementation review of `01626a1`)
+
+41. **Torn-append classification uses the framing, not the position.** A
+    malformed final row **with** its terminating newline aborts as corrupt
+    committed history — asserted both alone and following a valid row — while a
+    malformed final row **without** one is still dropped as a torn append and
+    the surrounding closure still imports.
+42. **`condition` and `resolving_condition` are non-empty everywhere.**
+    `upsert_item(condition="")` raises and writes nothing;
+    `close_item(resolving_condition="")` returns `STATE_ERROR`, replaces
+    nothing, and leaves the item open; documents carrying either empty value
+    fail closed on `read_document`, `health`, `open_items` and `closed_items`.
+43. **Only an exact integer schema version is accepted.** `true`, `1.0`, `"1"`
+    and `2` each fail closed.
 
 ## Implementation notes — AC 20 disposition, per family
 

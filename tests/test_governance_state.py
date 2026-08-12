@@ -810,3 +810,106 @@ def test_enumeration_is_not_surfacing(tmp_path):
         gs.closed_items(d)
         gs.health(d)
     assert gs.state_path(d).read_bytes() == before
+
+
+# --- kreview round 4 ---------------------------------------------------------
+
+def test_a_newline_terminated_corrupt_row_is_corruption_not_a_torn_append(tmp_path):
+    """Position alone cannot tell a torn append from a complete corrupt record.
+
+    The parent always wrote each row followed by a newline, so a malformed FINAL
+    record that IS newline-terminated was fully written. Dropping it converts
+    corrupt closure evidence into a false claim that the closure never
+    committed — which reopens a resolved finding as a live one.
+    """
+    F.write_archive(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).write_text("not-json\n")
+
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert "corrupt committed history" in " ".join(notes)
+    assert not gs.state_path(str(tmp_path)).exists()
+    assert gs.open_items(str(tmp_path)) == [], "the archive must not be reopened"
+
+
+def test_a_newline_terminated_corrupt_row_after_a_valid_one_aborts(tmp_path):
+    F.write_archive(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    F.append_manifest(tmp_path, F.manifest_row(occurrence=OCC_A, payload=["a.py"]))
+    with (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).open("a") as fh:
+        fh.write('{"governance_txn": "occ-torn", "arch\n')      # NEWLINE-terminated
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+def test_an_unterminated_corrupt_row_is_still_a_torn_append(tmp_path):
+    """The genuine torn-append case must keep working: no terminating newline
+    means the append never completed, so the audit was never durable."""
+    F.write_archive(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    F.append_manifest(tmp_path, F.manifest_row(occurrence=OCC_A, payload=["a.py"]))
+    with (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).open("a") as fh:
+        fh.write('{"governance_txn": "occ-torn", "arch')        # no newline
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    assert any(n.get("decision") == "dropped_torn_tail" for n in notes)
+    assert len(gs.closed_items(str(tmp_path))) == 1
+
+
+@pytest.mark.parametrize("version,label", [
+    (True, "JSON true equals 1 in Python"),
+    (1.0, "1.0 equals 1 in Python"),
+    ("1", "a string version"),
+    (2, "a future version"),
+])
+def test_only_an_exact_integer_schema_version_is_accepted(tmp_path, version, label):
+    """`True == 1` and `1.0 == 1`, so an equality check alone makes a foreign or
+    malformed version marker authoritative instead of failing closed."""
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": version, "migration_notes": [],
+                             "open": {}, "closed": []}))
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label
+    assert gs.open_items(d) == []
+
+
+def test_an_empty_condition_is_refused_at_the_write_surface(tmp_path):
+    """Presence avoids KeyError; it does not satisfy the schema. An item with no
+    condition has no statement of what would resolve it, which is exactly what
+    the recovery surface exists to show."""
+    d = str(tmp_path)
+    with pytest.raises(gs.StateError, match="condition"):
+        gs.upsert_item(d, signature=SIG, title="Coverage gap", condition="",
+                       payload=["a.py"], now_iso=NOW)
+    assert not gs.state_path(d).exists(), "nothing may be written"
+
+
+def test_an_empty_resolving_condition_is_refused_at_the_write_surface(tmp_path):
+    """A closure with no resolving condition records that something was closed
+    without recording why — closed history with no audit value."""
+    d = str(tmp_path)
+    occ = _open(d, ["a.py"])
+    before = gs.state_path(d).read_bytes()
+    assert gs.close_item(d, signature=SIG, expected_occurrence=occ, now_iso=NOW,
+                         resolving_condition="") is gs.CloseResult.STATE_ERROR
+    assert gs.state_path(d).read_bytes() == before, "nothing may be replaced"
+    assert [i.occurrence for i in gs.open_items(d)] == [occ], "still open"
+
+
+@pytest.mark.parametrize("doc,label", [
+    ({"open": {SIG: _entry(condition="")}, "closed": []}, "empty condition"),
+    ({"open": {}, "closed": [_closed(resolving_condition="")]},
+     "empty resolving condition"),
+])
+def test_empty_lifecycle_conditions_fail_closed_on_read(tmp_path, doc, label):
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": 1, "migration_notes": [], **doc}))
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label
+    assert gs.open_items(d) == []
+    assert gs.closed_items(d) == []

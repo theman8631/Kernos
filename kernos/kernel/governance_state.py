@@ -187,7 +187,11 @@ def read_document(data_dir: str) -> dict:
     if not isinstance(doc, dict):
         raise StateError("governance state is not an object")
     version = doc.get("schema_version")
-    if version != SCHEMA_VERSION:
+    # `type(...) is int`, not `isinstance` and not bare equality: in Python
+    # `True == 1` and `1.0 == 1`, so a JSON `true` or `1.0` would pass an
+    # equality check and make a foreign or malformed version marker
+    # authoritative instead of failing closed.
+    if type(version) is not int or version != SCHEMA_VERSION:
         raise StateError(
             f"unknown governance schema_version {version!r} "
             f"(this build understands {SCHEMA_VERSION})")
@@ -227,10 +231,11 @@ def _validate_entries(doc: dict) -> None:
         if not isinstance(entry, dict):
             raise StateError(f"open entry {key!r} is not an object")
         for field in _OPEN_REQUIRED:
-            if not isinstance(entry.get(field), str):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                # Non-empty, not merely present. An item with no condition has
+                # no statement of what would resolve it, which is exactly what
+                # the recovery surface exists to show.
                 raise StateError(f"open entry {key!r} has no usable {field!r}")
-            if field != "condition" and not entry[field]:
-                raise StateError(f"open entry {key!r} has an empty {field!r}")
         if entry["signature"] != key:
             raise StateError(
                 f"open entry {key!r} disagrees with its signature "
@@ -244,10 +249,11 @@ def _validate_entries(doc: dict) -> None:
         if not isinstance(entry, dict):
             raise StateError(f"closed entry {i} is not an object")
         for field in _CLOSED_REQUIRED:
-            if not isinstance(entry.get(field), str):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                # A closure with no resolving condition records that something
+                # was closed without recording why — closed history with no
+                # audit value.
                 raise StateError(f"closed entry {i} has no usable {field!r}")
-            if field != "resolving_condition" and not entry[field]:
-                raise StateError(f"closed entry {i} has an empty {field!r}")
         _validate_common(entry, f"closed entry {i}")
         if entry["occurrence"] in seen:
             raise StateError(f"duplicate occurrence {entry['occurrence']!r}")
@@ -699,10 +705,16 @@ _MANIFEST_NAMES = ("_governance_manifest.jsonl", "_manifest.jsonl")
 def _strict_read_manifests(rdir: Path) -> tuple:
     """``(rows, torn_tail, error)`` across both manifest eras.
 
-    A malformed TRAILING row is a torn append — the write never completed, so
-    the audit it described was never durable and dropping it is correct. A
-    malformed INTERIOR row is corruption of committed history and must never be
-    reinterpreted as "no audit exists".
+    A malformed TRAILING row is a torn append **only if its terminating newline
+    is also missing.** The parent always wrote each row followed by a newline,
+    so a malformed final record that IS newline-terminated was fully written —
+    it is corrupt committed history, not an incomplete append. Position alone
+    cannot tell those apart, and getting it wrong converts corrupt closure
+    evidence into a false claim that the closure never committed, which reopens
+    a resolved finding as a live one.
+
+    A malformed INTERIOR row is always corruption of committed history and must
+    never be reinterpreted as "no audit exists".
     """
     rows: list = []
     torn = False
@@ -716,16 +728,18 @@ def _strict_read_manifests(rdir: Path) -> tuple:
             # otherwise-valid JSON string into U+FFFD, so a corrupt audit
             # parses cleanly and its damage is persisted into the document as
             # if it were the committed text.
-            lines = [ln for ln in path.read_text(encoding="utf-8",
-                                                 errors="strict").splitlines()
-                     if ln.strip()]
+            raw = path.read_text(encoding="utf-8", errors="strict")
         except (OSError, UnicodeDecodeError) as exc:
             return [], False, f"{name} is unreadable: {exc}"
+        # Read the RAW text before splitting: `splitlines` discards the framing
+        # evidence that distinguishes a torn append from a complete corrupt one.
+        last_record_complete = raw.endswith(("\n", "\r"))
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
         for i, line in enumerate(lines):
             try:
                 row = json.loads(line)
             except ValueError:
-                if i == len(lines) - 1:
+                if i == len(lines) - 1 and not last_record_complete:
                     torn = True
                     break
                 return [], False, f"{name} row {i} is corrupt committed history"
