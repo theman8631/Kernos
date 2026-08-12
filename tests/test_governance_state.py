@@ -12,10 +12,22 @@ import json
 
 import pytest
 
-from kernos.kernel import friction_response as fr
 from kernos.kernel import governance_state as gs
 
 SIG = "self-review:coverage-gap"
+
+# FROZEN PARENT-FORMAT CONSTANTS.
+#
+# The writer that produced these was deleted once nothing in production called
+# it (kreview round 2). Deriving fixtures from a live writer would have been
+# wrong anyway: it makes the tests agree with whatever the writer currently
+# does, when what migration must handle is what the writer did AT f38b31f.
+# These are captured from that writer and are now literals on purpose.
+LEGACY_FILENAME = "GOVERNANCE_self_review_coverage_gap_04ade3df6e6b.md"
+LEGACY_MANIFEST = "_governance_manifest.jsonl"
+#: sha256("self-review:coverage-gap|2026-07-01T00:00:00+00:00")[:16] — the id the
+#: parent itself derived before occurrence ids were persisted.
+LEGACY_DERIVED_OCC = "c380addc84ef8f52"
 
 
 def _open(d, payload, now="2026-08-01T00:00:00+00:00"):
@@ -203,7 +215,7 @@ def _legacy_source(tmp_path, payload, occ="occ-A", opened="2026-07-01T00:00:00+0
              f"Opened: {opened}", f"Last-seen: {last_seen or opened}", "",
              "## Condition", "modules unowned", "", "## Payload"]
     lines += [f"- {x}" for x in payload]
-    (fdir / fr.governance_filename(SIG)).write_text("\n".join(lines) + "\n")
+    (fdir / LEGACY_FILENAME).write_text("\n".join(lines) + "\n")
 
 
 def _legacy_archive(tmp_path, payload, occ="occ-A", opened="2026-07-01T00:00:00+00:00",
@@ -220,7 +232,7 @@ def _legacy_archive(tmp_path, payload, occ="occ-A", opened="2026-07-01T00:00:00+
 def _legacy_manifest(tmp_path, occ="occ-A", closed="2026-07-05T00:00:00+00:00"):
     rdir = tmp_path / "diagnostics" / "friction_resolved"
     rdir.mkdir(parents=True, exist_ok=True)
-    (rdir / "_governance_manifest.jsonl").write_text(json.dumps({
+    (rdir / LEGACY_MANIFEST).write_text(json.dumps({
         "governance_txn": occ, "governance_signature": SIG,
         "opened_iso": "2026-07-01T00:00:00+00:00", "closed_iso": closed,
         "resolving_condition": "cleared", "final_payload": ["a.py"]}) + "\n")
@@ -320,34 +332,36 @@ def test_case8_identical_aborts_because_sameness_is_not_proof(tmp_path):
 
 
 def test_recurrence_is_decided_by_occurrence_not_by_field_comparison(tmp_path):
-    """AC 23b's schedule, at the predicate.
+    """AC 23b, at the decision.
 
-    Legacy upsert PRESERVES the occurrence when it re-observes a live
-    condition, so "payload differs" is equally explained by a recurrence and by
-    the same occurrence being touched while its retirement was pending. Only a
-    distinct occurrence proves a recurrence.
+    An earlier revision compared lifecycle FIELDS between the legacy source (S)
+    and the archived snapshot (A). Legacy upsert PRESERVES the occurrence when
+    it re-observes a live condition, so "payload differs" is equally explained
+    by a recurrence and by the same occurrence being touched while its
+    retirement was pending — importing that as a recurrence would open an entry
+    carrying an occurrence already committed as closed.
 
-    Field comparison is also unsound at this seam: S and A arrive through two
-    different parsers that normalise `title` differently and neither of which
-    recovers `condition`, so identical records compare unequal.
+    Field comparison was also unsound at the seam: S and A were parsed by two
+    different readers that normalise `title` differently and neither of which
+    recovers `condition`, so identical records compared unequal and this abort
+    was unreachable. The decision is occurrence identity, and nothing else.
     """
-    _legacy_source(tmp_path, ["a.py"], occ="occ-A")
     _legacy_archive(tmp_path, ["a.py"], occ="occ-A")
-    rdir = tmp_path / "diagnostics" / "friction_resolved"
-    S = fr.open_governance_items(str(tmp_path))[0]
-    A = list(gs._read_legacy_archives(rdir).values())[0]
-    assert S["title"] != A["title"], "the raw parser outputs really do differ"
+    _legacy_manifest(tmp_path, occ="occ-A")
+    # S differs from A in payload and last-seen but carries the SAME occurrence
+    _legacy_source(tmp_path, ["a.py", "b.py"], occ="occ-A",
+                   last_seen="2026-07-04T00:00:00+00:00")
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED, \
+        "differing fields must not be read as a recurrence"
+    assert "occurrence" in " ".join(notes).lower()
 
-    assert not gs._is_recurrence(S, A)
-    # same occurrence, later re-detection with a changed payload: still not a
-    # recurrence — importing it would duplicate an occurrence already closed
-    assert not gs._is_recurrence(
-        {**S, "payload": ["b.py"], "last_seen_iso": "2026-07-09T00:00:00+00:00"}, A)
-    # a missing id on either side proves nothing, so it routes to the abort
-    assert not gs._is_recurrence({**S, "occurrence": ""}, A)
-    assert not gs._is_recurrence(S, {**A, "occurrence": ""})
-    # and the predicate still discriminates — it is not vacuously False
-    assert gs._is_recurrence({**S, "occurrence": "occ-B"}, A)
+    # and a genuinely distinct occurrence still imports as a recurrence
+    _legacy_source(tmp_path, ["b.py"], occ="occ-B",
+                   opened="2026-07-06T00:00:00+00:00")
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    assert [i.occurrence for i in gs.open_items(str(tmp_path))] == ["occ-B"]
 
 
 def test_case8_same_occurrence_aborts_even_when_payload_differs(tmp_path):
@@ -376,7 +390,7 @@ def test_case6_aborts_for_every_variant(tmp_path, variant):
         kw["title"] = "Coverage gap (reworded)"
     _legacy_source(tmp_path, ["a.py"], occ="occ-A", **kw)
     if variant == "human_gate_only":
-        p = tmp_path / "diagnostics" / "friction" / fr.governance_filename(SIG)
+        p = tmp_path / "diagnostics" / "friction" / LEGACY_FILENAME
         p.write_text(p.read_text().replace("Human-gated: true", "Human-gated: false"))
 
     rdir = tmp_path / "diagnostics" / "friction_resolved"
@@ -387,25 +401,265 @@ def test_case6_aborts_for_every_variant(tmp_path, variant):
            "resolving_condition": "cleared", "final_payload": ["a.py"]}
     if variant == "manifest_lacks_payload":
         row.pop("final_payload")
-    (rdir / "_governance_manifest.jsonl").write_text(json.dumps(row) + "\n")
+    (rdir / LEGACY_MANIFEST).write_text(json.dumps(row) + "\n")
 
     out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
     assert out is gs.MigrationOutcome.ABORTED, variant
     assert not gs.state_path(str(tmp_path)).exists(), "abort writes nothing"
     # legacy is left authoritative and untouched
     assert (tmp_path / "diagnostics" / "friction"
-            / fr.governance_filename(SIG)).is_file()
-    assert (rdir / "_governance_manifest.jsonl").is_file()
+            / LEGACY_FILENAME).is_file()
+    assert (rdir / LEGACY_MANIFEST).is_file()
 
 
 def test_corrupt_interior_manifest_row_aborts(tmp_path):
     """Committed history is never silently discarded."""
     _legacy_archive(tmp_path, ["a.py"])
     rdir = tmp_path / "diagnostics" / "friction_resolved"
-    (rdir / "_governance_manifest.jsonl").write_text(
+    (rdir / LEGACY_MANIFEST).write_text(
         'not-json\n{"governance_txn":"occ-A","governance_signature":"%s"}\n' % SIG)
     out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
     assert out is gs.MigrationOutcome.ABORTED
+
+
+# --- kreview round 2: states the signature-keyed reconciler could not see ----
+
+def _pair(tmp_path, occ, payload, opened, closed, name=None):
+    """One committed closure: an archive plus the audit row that committed it."""
+    rdir = tmp_path / "diagnostics" / "friction_resolved"
+    rdir.mkdir(parents=True, exist_ok=True)
+    lines = [f"# GOVERNANCE: Coverage gap", "", "Class: governance",
+             f"Signature: {SIG}", f"Occurrence: {occ}", "Human-gated: true",
+             f"Opened: {opened}", f"Last-seen: {opened}", "", "## Payload"]
+    lines += [f"- {x}" for x in payload]
+    (rdir / (name or f"GOVERNANCE_x_closed_{occ}.md")).write_text("\n".join(lines) + "\n")
+    with (rdir / LEGACY_MANIFEST).open("a") as fh:
+        fh.write(json.dumps({
+            "governance_txn": occ, "governance_signature": SIG,
+            "opened_iso": opened, "closed_iso": closed,
+            "resolving_condition": "cleared", "final_payload": payload}) + "\n")
+
+
+def test_every_historical_occurrence_survives_migration(tmp_path):
+    """The parent format allows repeated open/close cycles per signature.
+
+    Reconciling by signature picks ONE archive and ONE row, imports that cycle,
+    and destroys every earlier closure the instant the document becomes
+    authoritative. Reconciliation is by occurrence for exactly this reason.
+    """
+    _pair(tmp_path, "occ-A", ["a.py"], "2026-07-01T00:00:00+00:00",
+          "2026-07-02T00:00:00+00:00")
+    _pair(tmp_path, "occ-B", ["b.py"], "2026-07-03T00:00:00+00:00",
+          "2026-07-04T00:00:00+00:00")
+    _pair(tmp_path, "occ-C", ["c.py"], "2026-07-05T00:00:00+00:00",
+          "2026-07-06T00:00:00+00:00")
+
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    got = sorted(c["occurrence"] for c in gs.closed_items(str(tmp_path)))
+    assert got == ["occ-A", "occ-B", "occ-C"], \
+        "every committed closure must survive; none may be selected away"
+    assert gs.open_items(str(tmp_path)) == []
+
+
+def test_history_plus_a_live_recurrence(tmp_path):
+    """Two committed closures AND a distinct open occurrence, together."""
+    _pair(tmp_path, "occ-A", ["a.py"], "2026-07-01T00:00:00+00:00",
+          "2026-07-02T00:00:00+00:00")
+    _pair(tmp_path, "occ-B", ["b.py"], "2026-07-03T00:00:00+00:00",
+          "2026-07-04T00:00:00+00:00")
+    _legacy_source(tmp_path, ["c.py"], occ="occ-C", opened="2026-07-05T00:00:00+00:00")
+
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    assert len(gs.closed_items(str(tmp_path))) == 2
+    assert [i.occurrence for i in gs.open_items(str(tmp_path))] == ["occ-C"]
+
+
+def test_audit_row_matched_to_an_unrelated_archive_aborts(tmp_path):
+    """The A+M branch must PROVE the relation, not assume it.
+
+    An unvalidated pair fabricates a closure association between records that
+    have nothing to do with each other, and records it as committed history.
+    """
+    _legacy_archive(tmp_path, ["a.py"], occ="occ-A")
+    _legacy_manifest(tmp_path, occ="occ-X")            # row for a different occurrence
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert "no archive" in " ".join(notes)
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+def test_audit_row_whose_archive_carries_another_signature_aborts(tmp_path):
+    rdir = tmp_path / "diagnostics" / "friction_resolved"
+    _legacy_archive(tmp_path, ["a.py"], occ="occ-A")
+    (rdir / LEGACY_MANIFEST).write_text(json.dumps({
+        "governance_txn": "occ-A", "governance_signature": "some:other-condition",
+        "opened_iso": "2026-07-01T00:00:00+00:00",
+        "closed_iso": "2026-07-05T00:00:00+00:00",
+        "resolving_condition": "cleared", "final_payload": ["a.py"]}) + "\n")
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert "unrelated records" in " ".join(notes)
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+def test_two_uncommitted_archives_for_one_signature_abort(tmp_path):
+    """Nothing in the parent state says which orphan is the live item."""
+    _legacy_archive(tmp_path, ["a.py"], occ="occ-A")
+    _legacy_archive(tmp_path, ["b.py"], occ="occ-B")
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+@pytest.mark.parametrize("where", ["friction", "friction_resolved"])
+def test_a_partial_legacy_document_aborts_rather_than_reading_as_fresh(tmp_path, where):
+    """A best-effort reader parses this into empty fields, they get discarded as
+    "no signatures", and FRESH writes a marker that makes the artifact invisible
+    forever. Missing evidence is not an empty world."""
+    d = tmp_path / "diagnostics" / where
+    d.mkdir(parents=True)
+    (d / "GOVERNANCE_partial.md").write_text("# GOVERNANCE: truncated mid-write\n")
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED, "must not read as FRESH"
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+def test_unreadable_legacy_document_aborts(tmp_path):
+    d = tmp_path / "diagnostics" / "friction_resolved"
+    d.mkdir(parents=True)
+    (d / "GOVERNANCE_binary.md").write_bytes(b"\xff\xfe\x00 not utf-8")
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+def test_pre_id_source_gets_the_parents_own_derived_occurrence(tmp_path):
+    """Occurrence ids were not always persisted. An empty occurrence must never
+    be committed — compare-and-close and the closed relation are both keyed on
+    it — so a complete pre-id record derives the id the parent would have minted.
+    """
+    fdir = tmp_path / "diagnostics" / "friction"
+    fdir.mkdir(parents=True)
+    (fdir / LEGACY_FILENAME).write_text(
+        "# GOVERNANCE: Coverage gap\n\nClass: governance\n"
+        f"Signature: {SIG}\nHuman-gated: true\n"
+        "Opened: 2026-07-01T00:00:00+00:00\n"
+        "Last-seen: 2026-07-01T00:00:00+00:00\n\n## Payload\n- a.py\n")
+
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    item = gs.open_items(str(tmp_path))[0]
+    assert item.occurrence, "an empty occurrence must never be committed"
+    assert item.occurrence == LEGACY_DERIVED_OCC, \
+        "must match what the parent itself derived, not merely be non-empty"
+
+
+def test_pre_id_document_without_an_opened_stamp_aborts(tmp_path):
+    """Nothing can prove the identity of a record with neither an id nor the
+    fields the derivation needs."""
+    fdir = tmp_path / "diagnostics" / "friction"
+    fdir.mkdir(parents=True)
+    (fdir / LEGACY_FILENAME).write_text(
+        f"# GOVERNANCE: Coverage gap\n\nSignature: {SIG}\nHuman-gated: true\n"
+        "\n## Payload\n- a.py\n")
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+# --- the older SHARED manifest era -------------------------------------------
+
+def test_shared_manifest_era_closure_is_retained(tmp_path):
+    """The spec requires importing the pre-`f38b31f` shared `_manifest.jsonl`.
+    Reading only the newer file treats a committed closure as uncommitted and
+    REOPENS it — resurrecting a finding that was resolved."""
+    _legacy_archive(tmp_path, ["a.py"], occ="occ-A")
+    rdir = tmp_path / "diagnostics" / "friction_resolved"
+    (rdir / "_manifest.jsonl").write_text("\n".join([
+        json.dumps({"signature": "friction:some-error", "archived_iso": "x"}),
+        json.dumps({"governance_txn": "occ-A", "governance_signature": SIG,
+                    "opened_iso": "2026-07-01T00:00:00+00:00",
+                    "closed_iso": "2026-07-05T00:00:00+00:00",
+                    "resolving_condition": "cleared", "final_payload": ["a.py"]}),
+    ]) + "\n")
+
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    assert gs.open_items(str(tmp_path)) == [], "a committed closure must not reopen"
+    assert [c["occurrence"] for c in gs.closed_items(str(tmp_path))] == ["occ-A"]
+
+
+def test_friction_rows_in_the_shared_manifest_are_never_governance_closures(tmp_path):
+    """Strict row filtering: a friction-resolution row lacks both governance
+    fields and must never be imported as a governance closure."""
+    rdir = tmp_path / "diagnostics" / "friction_resolved"
+    rdir.mkdir(parents=True)
+    (rdir / "_manifest.jsonl").write_text("\n".join([
+        json.dumps({"signature": "friction:a", "archived_iso": "x"}),
+        json.dumps({"governance_txn": "occ-Z"}),          # half a pair: not usable
+    ]) + "\n")
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.FRESH
+    assert gs.closed_items(str(tmp_path)) == []
+
+
+def test_one_occurrence_committed_in_both_manifest_eras_aborts(tmp_path):
+    _legacy_archive(tmp_path, ["a.py"], occ="occ-A")
+    _legacy_manifest(tmp_path, occ="occ-A")
+    rdir = tmp_path / "diagnostics" / "friction_resolved"
+    (rdir / "_manifest.jsonl").write_text(json.dumps({
+        "governance_txn": "occ-A", "governance_signature": SIG,
+        "opened_iso": "2026-07-01T00:00:00+00:00",
+        "closed_iso": "2026-07-09T00:00:00+00:00",
+        "resolving_condition": "different", "final_payload": ["a.py"]}) + "\n")
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+# --- deep document validation ------------------------------------------------
+
+@pytest.mark.parametrize("doc,label", [
+    ({"open": {SIG: {}}, "closed": []}, "open entry with no fields"),
+    ({"open": {SIG: {"occurrence": "o", "signature": "other:sig",
+                     "opened_iso": "t", "last_seen_iso": "t", "payload": []}},
+      "closed": []}, "key disagrees with signature"),
+    ({"open": {SIG: {"occurrence": "", "signature": SIG, "opened_iso": "t",
+                     "last_seen_iso": "t", "payload": []}},
+      "closed": []}, "empty occurrence"),
+    ({"open": {SIG: {"occurrence": "o", "signature": SIG, "opened_iso": "t",
+                     "last_seen_iso": "t", "payload": "a.py"}},
+      "closed": []}, "payload is not a list"),
+    ({"open": {}, "closed": [{"occurrence": "o", "signature": SIG}]},
+     "closed entry missing required fields"),
+    ({"open": {SIG: {"occurrence": "dup", "signature": SIG, "opened_iso": "t",
+                     "last_seen_iso": "t", "payload": []}},
+      "closed": [{"occurrence": "dup", "signature": SIG, "opened_iso": "t",
+                  "closed_iso": "t", "payload": []}]}, "occurrence open AND closed"),
+])
+def test_corrupt_nested_entries_fail_closed_everywhere(tmp_path, doc, label):
+    """Container-only validation lets `open={"sig": {}}` report healthy and then
+    raise KeyError from `open_items` — outside the StateError path every caller
+    handles. Corruption is caught once, in the reader, for every surface.
+    """
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": 1, "migration_notes": [], **doc}))
+
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label
+    assert gs.open_items(d) == [], label            # degrades, never raises
+    assert gs.closed_items(d) == [], label
+    assert gs.close_item(d, signature=SIG, expected_occurrence="o",
+                         now_iso=NOW, resolving_condition="x") \
+        is gs.CloseResult.STATE_ERROR
+    with pytest.raises(gs.StateError):
+        gs.upsert_item(d, signature=SIG, title="t", condition="c",
+                       payload=["a.py"], now_iso=NOW)
 
 
 def test_migration_is_idempotent_and_never_reimports(tmp_path):
@@ -430,3 +684,17 @@ def test_fresh_migration_records_that_it_ran(tmp_path):
     gs.migrate(d, now_iso=NOW)
     assert gs.read_document(d)["migration_notes"], "fresh run must leave a marker"
     assert gs.migrate(d, now_iso=NOW)[0] is gs.MigrationOutcome.ALREADY_MIGRATED
+
+
+def test_enumeration_is_not_surfacing(tmp_path):
+    """Reading the recovery queue must not mutate it — `/dump` is a recovery
+    surface, and a read that re-surfaced or re-stamped would make inspecting the
+    queue indistinguishable from acting on it."""
+    d = str(tmp_path)
+    _open(d, ["a.py"])
+    before = gs.state_path(d).read_bytes()
+    for _ in range(3):
+        gs.open_items(d)
+        gs.closed_items(d)
+        gs.health(d)
+    assert gs.state_path(d).read_bytes() == before

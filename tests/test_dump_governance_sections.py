@@ -12,7 +12,6 @@ import os
 
 import pytest
 
-from kernos.kernel import friction_response as fr
 from kernos.kernel import governance_state as gs
 from kernos.kernel import self_maintenance_review as smr
 from kernos.kernel.governance_lanes import GOVERNANCE_LANES
@@ -88,10 +87,15 @@ def test_unmigrated_legacy_items_are_not_reported_as_an_empty_queue(tmp_path, mo
     """Before migration runs the document is legitimately empty while legacy
     artifacts still hold live items — reporting "(none open)" would hide them."""
     d = str(tmp_path)
-    assert fr.upsert_governance_item(
-        d, signature=smr.COVERAGE_GAP_SIGNATURE, title="Coverage gap",
-        condition="modules unowned", payload=["kernos/legacy.py"],
-        now_iso="2026-08-04T00:00:00+00:00")
+    # Frozen parent-format fixture; the writer that produced this shape was
+    # removed once nothing in production called it (kreview round 2).
+    fdir = tmp_path / "diagnostics" / "friction"
+    fdir.mkdir(parents=True)
+    (fdir / "GOVERNANCE_self_review_coverage_gap_04ade3df6e6b.md").write_text(
+        "# GOVERNANCE: Coverage gap\n\nClass: governance\n"
+        f"Signature: {smr.COVERAGE_GAP_SIGNATURE}\nOccurrence: occ-legacy\n"
+        "Human-gated: true\nOpened: 2026-08-04T00:00:00+00:00\n"
+        "Last-seen: 2026-08-04T00:00:00+00:00\n\n## Payload\n- kernos/legacy.py\n")
 
     out = _render(monkeypatch, d)
     assert "(none open)" not in out

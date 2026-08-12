@@ -191,7 +191,65 @@ def read_document(data_dir: str) -> dict:
     for key, kind in (("open", dict), ("closed", list), ("migration_notes", list)):
         if not isinstance(doc.get(key), kind):
             raise StateError(f"governance state field {key!r} has the wrong shape")
+    _validate_entries(doc)
     return doc
+
+
+_OPEN_REQUIRED = ("occurrence", "signature", "opened_iso", "last_seen_iso")
+_CLOSED_REQUIRED = ("occurrence", "signature", "opened_iso", "closed_iso")
+
+
+def _validate_entries(doc: dict) -> None:
+    """Deep-validate every entry, not just the top-level container types.
+
+    Container-only validation is not fail-closed: a document with
+    ``open={"sig": {}}`` passes it, reports healthy, and then raises ``KeyError``
+    from ``open_items`` — outside the ``StateError`` path every caller handles.
+    That defeats both the fail-closed contract and `/dump`'s unreadable-vs-empty
+    distinction, so corruption must be caught HERE, once, for every reader.
+    """
+    seen: set = set()
+    for key, entry in doc["open"].items():
+        if not isinstance(entry, dict):
+            raise StateError(f"open entry {key!r} is not an object")
+        for field in _OPEN_REQUIRED:
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise StateError(f"open entry {key!r} has no usable {field!r}")
+        if entry["signature"] != key:
+            raise StateError(
+                f"open entry {key!r} disagrees with its signature "
+                f"{entry['signature']!r}")
+        _validate_common(entry, f"open entry {key!r}")
+        if entry["occurrence"] in seen:
+            raise StateError(f"duplicate occurrence {entry['occurrence']!r}")
+        seen.add(entry["occurrence"])
+
+    for i, entry in enumerate(doc["closed"]):
+        if not isinstance(entry, dict):
+            raise StateError(f"closed entry {i} is not an object")
+        for field in _CLOSED_REQUIRED:
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise StateError(f"closed entry {i} has no usable {field!r}")
+        _validate_common(entry, f"closed entry {i}")
+        if not isinstance(entry.get("resolving_condition", ""), str):
+            raise StateError(f"closed entry {i} has a non-string resolving_condition")
+        if entry["occurrence"] in seen:
+            raise StateError(f"duplicate occurrence {entry['occurrence']!r}")
+        seen.add(entry["occurrence"])
+
+    for i, note in enumerate(doc["migration_notes"]):
+        if not isinstance(note, dict):
+            raise StateError(f"migration note {i} is not an object")
+
+
+def _validate_common(entry: dict, label: str) -> None:
+    payload = entry.get("payload")
+    if not isinstance(payload, list) or any(not isinstance(p, str) for p in payload):
+        raise StateError(f"{label} has a malformed payload")
+    if not isinstance(entry.get("title", ""), str):
+        raise StateError(f"{label} has a non-string title")
+    if not isinstance(entry.get("human_gated", True), bool):
+        raise StateError(f"{label} has a non-boolean human_gated")
 
 
 def _validate_candidate(previous: dict, candidate: dict, *, signature: str) -> None:
@@ -219,6 +277,10 @@ def _validate_candidate(previous: dict, candidate: dict, *, signature: str) -> N
 
     if len(candidate.get("migration_notes", [])) > MAX_MIGRATION_NOTES:
         raise StateError("migration_notes exceeded its bound")
+
+    # The same deep validation the read path applies. A write must not be able
+    # to introduce a document its own reader would reject.
+    _validate_entries(candidate)
 
 
 def _write_document(data_dir: str, doc: dict) -> None:
@@ -434,28 +496,6 @@ def _legacy_paths(data_dir: str) -> tuple:
     return (base / "friction", base / "friction_resolved")
 
 
-def _is_recurrence(source: dict, archived: dict) -> bool:
-    """Whether S is a DISTINCT occurrence from the archived one.
-
-    Only occurrence identity can answer this, and comparing lifecycle FIELDS
-    actively gets it wrong. The legacy upsert preserves the occurrence when it
-    merely re-observes a live condition, so a differing payload or last-seen is
-    equally explained by "the same occurrence was touched while its retirement
-    was pending" — treating that as a recurrence would import a second entry
-    carrying an occurrence id already recorded as closed.
-
-    Field comparison is also unsound at the seam: S arrives through
-    `friction_response` and A through `_parse_legacy_body`, and the two
-    normalise `title` differently and neither recovers `condition` at all, so
-    identical records compare unequal.
-
-    An empty occurrence on either side proves nothing, so it is NOT a
-    recurrence — which routes to the abort rather than to a guess.
-    """
-    s = str(source.get("occurrence") or "")
-    a = str(archived.get("occurrence") or "")
-    return bool(s and a and s != a)
-
 
 def migrate(data_dir: str, *, now_iso: str) -> tuple:
     """Import legacy governance artifacts. Returns ``(outcome, notes)``.
@@ -475,22 +515,24 @@ def migrate(data_dir: str, *, now_iso: str) -> tuple:
             return MigrationOutcome.ALREADY_MIGRATED, []
 
         fdir, rdir = _legacy_paths(data_dir)
-        try:
-            from kernos.kernel import friction_response as fr
-            sources = {i["signature"]: i for i in fr.open_governance_items(data_dir)}
-        except Exception as exc:
-            return MigrationOutcome.ABORTED, [f"legacy source read failed: {exc}"]
 
-        rows, torn = _read_legacy_manifest(rdir)
-        if rows is None:
-            return MigrationOutcome.ABORTED, ["legacy manifest corrupt — refusing to write"]
-        archives = _read_legacy_archives(rdir)
+        # Strict readers, deliberately NOT the chat-path best-effort ones. A
+        # reader that skips an unreadable file or parses a partial one into
+        # empty fields turns missing evidence into "nothing to import" — which
+        # then writes a document that makes the unimported artifact invisible
+        # forever. Every discovered artifact parses and validates, or the whole
+        # migration aborts.
+        sources, err = _strict_read_sources(fdir)
+        if err:
+            return MigrationOutcome.ABORTED, [err]
+        archives, err = _strict_read_archives(rdir)
+        if err:
+            return MigrationOutcome.ABORTED, [err]
+        rows, torn, err = _strict_read_manifests(rdir)
+        if err:
+            return MigrationOutcome.ABORTED, [err]
 
-        signatures = set(sources) | {r.get("governance_signature", "") for r in rows} \
-                                  | {a["signature"] for a in archives.values() if a.get("signature")}
-        signatures.discard("")
-
-        if not signatures:
+        if not (sources or archives or rows):
             # A marker is REQUIRED even with nothing to import: an empty
             # document cannot distinguish "migrated, found nothing" from "never
             # migrated", so without it every run would re-scan legacy files and
@@ -508,91 +550,225 @@ def migrate(data_dir: str, *, now_iso: str) -> tuple:
             notes.append({"from_format": "manifest", "decision": "dropped_torn_tail",
                           "occurrence": "", "note": "incomplete append was never durable"})
 
-        for sig in sorted(signatures):
+        # Reconcile by OCCURRENCE, never by signature. The parent format allows
+        # repeated open/close cycles per signature, each with its own archive and
+        # audit row; selecting "the" A and "the" M per signature imports one
+        # cycle and silently discards every earlier closure the moment the
+        # document becomes authoritative.
+        paired, err = _pair_closures(archives, rows)
+        if err:
+            return MigrationOutcome.ABORTED, [err]
+
+        closed_by_signature: dict = {}
+        for A, M in paired:
+            doc["closed"].append(_closed_from(A, M))
+            closed_by_signature.setdefault(A["signature"], set()).add(A["occurrence"])
+            notes.append({"from_format": "A+M", "decision": "closed",
+                          "occurrence": A["occurrence"], "note": ""})
+
+        committed = {A["occurrence"] for A, _ in paired}
+        orphans: dict = {}
+        for A in archives.values():
+            if A["occurrence"] not in committed:
+                orphans.setdefault(A["signature"], []).append(A)
+
+        for sig in sorted(set(sources) | set(orphans)):
             S = sources.get(sig)
-            M = next((r for r in rows if r.get("governance_signature") == sig), None)
-            A = next((a for a in archives.values() if a.get("signature") == sig), None)
-
-            # case 4 / 6 — abort, no write at all
-            if M is not None and A is None:
+            spare = orphans.get(sig, [])
+            if len(spare) > 1:
                 return MigrationOutcome.ABORTED, [
-                    f"{sig}: audit row without an archive cannot furnish a complete "
-                    f"closed record, and equality cannot prove S is not a recurrence"]
-            if M is not None and A is not None and S is not None \
-                    and not _is_recurrence(S, A):
-                return MigrationOutcome.ABORTED, [
-                    f"{sig}: S carries the archived occurrence — that is equally "
-                    f"consistent with a pending retirement AND with the condition "
-                    f"being re-observed while the close ran; the parent state "
-                    f"cannot distinguish them, so no field comparison may guess"]
+                    f"{sig}: {len(spare)} uncommitted archives share this signature; "
+                    f"nothing in the parent state says which one is live"]
 
-            if M is not None and A is not None:            # cases 7 / 8-divergent
-                doc["closed"].append(_closed_from(A, M))
-                notes.append({"from_format": "A+M", "decision": "closed",
-                              "occurrence": A["occurrence"], "note": ""})
-                if S is not None:                          # case 8-divergent
-                    doc["open"][sig] = _open_from(S)
-                    notes.append({"from_format": "S", "decision": "open_recurrence",
-                                  "occurrence": S["occurrence"],
-                                  "note": "diverges from archived snapshot"})
-            elif S is not None:                            # cases 2 / 5
+            if S is not None:
+                if S["occurrence"] in closed_by_signature.get(sig, set()):
+                    # The central epistemic case. S carrying an occurrence that
+                    # is already committed as closed is equally explained by "the
+                    # retirement never completed" and by "the condition was
+                    # re-observed while the close was in flight".
+                    return MigrationOutcome.ABORTED, [
+                        f"{sig}: the open item carries occurrence "
+                        f"{S['occurrence']!r}, which is already committed as "
+                        f"closed — equally consistent with a pending retirement "
+                        f"AND with a re-observation during close; the parent "
+                        f"state cannot distinguish them"]
                 doc["open"][sig] = _open_from(S)
                 notes.append({"from_format": "S", "decision": "open",
                               "occurrence": S["occurrence"],
-                              "note": "uncommitted archive ignored" if A else ""})
-            elif A is not None:                            # case 3
-                if not _archive_is_complete(A):
-                    return MigrationOutcome.ABORTED, [
-                        f"{sig}: orphan archive is partial or unvalidatable"]
-                doc["open"][sig] = _open_from(A)
+                              "note": "uncommitted archive ignored" if spare else ""})
+            elif spare:
+                # No audit row committed, so the closure never happened and this
+                # archive is the sole surviving copy of a live item.
+                doc["open"][sig] = _open_from(spare[0])
                 notes.append({"from_format": "A", "decision": "open_from_archive",
-                              "occurrence": A["occurrence"],
+                              "occurrence": spare[0]["occurrence"],
                               "note": "closure never committed"})
 
         doc["migration_notes"] = notes[:MAX_MIGRATION_NOTES]
-        _validate_candidate(_empty_document(), doc, signature="")
+        try:
+            _validate_candidate(_empty_document(), doc, signature="")
+        except StateError as exc:
+            return MigrationOutcome.ABORTED, [f"migrated document rejected: {exc}"]
         _write_document(data_dir, doc)
         return MigrationOutcome.IMPORTED, notes
 
 
-def _read_legacy_manifest(rdir: Path) -> tuple:
-    """``(rows, torn_tail)``; ``(None, False)`` when committed history is corrupt.
+def _pair_closures(archives: dict, rows: list) -> tuple:
+    """Match every audit row to the archive it committed. ``(pairs, error)``.
+
+    Every relation is proved, never assumed by list order: an audit row must
+    have an archive with the SAME occurrence and the SAME signature. An
+    unmatched row is a closure with no recoverable payload, and a mismatched
+    pair would fabricate a closure association between unrelated records.
+    """
+    pairs: list = []
+    for m in rows:
+        occ = str(m.get("governance_txn") or "")
+        sig = str(m.get("governance_signature") or "")
+        A = archives.get(occ)
+        if A is None:
+            return [], (
+                f"{sig or '<unsigned>'}: audit row for occurrence {occ!r} has no "
+                f"archive; a row alone has no recoverable payload and must never "
+                f"be synthesised into a closed entry")
+        if A["signature"] != sig:
+            return [], (
+                f"audit row for occurrence {occ!r} claims signature {sig!r} but "
+                f"its archive carries {A['signature']!r}; refusing to fabricate a "
+                f"closure association between unrelated records")
+        pairs.append((A, m))
+    return pairs, ""
+
+
+#: Both audit-manifest eras. The older file is SHARED with friction
+#: resolutions, so rows there are accepted only when they carry both governance
+#: fields — a friction row must never be imported as a governance closure.
+_MANIFEST_NAMES = ("_governance_manifest.jsonl", "_manifest.jsonl")
+
+
+def _strict_read_manifests(rdir: Path) -> tuple:
+    """``(rows, torn_tail, error)`` across both manifest eras.
 
     A malformed TRAILING row is a torn append — the write never completed, so
     the audit it described was never durable and dropping it is correct. A
     malformed INTERIOR row is corruption of committed history and must never be
     reinterpreted as "no audit exists".
     """
-    path = rdir / "_governance_manifest.jsonl"
-    if not path.is_file():
-        return [], False
-    try:
-        lines = [ln for ln in path.read_text(errors="replace").splitlines() if ln.strip()]
-    except OSError:
-        return None, False
     rows: list = []
-    for i, line in enumerate(lines):
+    torn = False
+    seen_txns: set = set()
+    for name in _MANIFEST_NAMES:
+        path = rdir / name
+        if not path.is_file():
+            continue
         try:
-            rows.append(json.loads(line))
-        except ValueError:
-            if i == len(lines) - 1:
-                return rows, True
-            return None, False
-    return rows, False
+            lines = [ln for ln in path.read_text(errors="replace").splitlines()
+                     if ln.strip()]
+        except OSError as exc:
+            return [], False, f"{name} unreadable: {exc}"
+        for i, line in enumerate(lines):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                if i == len(lines) - 1:
+                    torn = True
+                    break
+                return [], False, f"{name} row {i} is corrupt committed history"
+            if not isinstance(row, dict):
+                return [], False, f"{name} row {i} is not an object"
+            txn, sig = row.get("governance_txn"), row.get("governance_signature")
+            if not (isinstance(txn, str) and txn
+                    and isinstance(sig, str) and sig):
+                # In the shared file this is an ordinary friction row.
+                if name == "_manifest.jsonl":
+                    continue
+                return [], False, (
+                    f"{name} row {i} is a governance audit row without a usable "
+                    f"occurrence/signature pair")
+            if txn in seen_txns:
+                return [], False, (
+                    f"occurrence {txn!r} is committed twice across the audit "
+                    f"manifests; nothing says which closure is authoritative")
+            seen_txns.add(txn)
+            rows.append(row)
+    return rows, torn, ""
 
 
-def _read_legacy_archives(rdir: Path) -> dict:
-    """Parse archived governance documents into field maps, keyed by filename."""
+def _strict_read_archives(rdir: Path) -> tuple:
+    """``(by_occurrence, error)``. Every archive parses and validates, or abort.
+
+    Skipping an unreadable archive, or parsing a partial one into empty fields
+    that later get discarded, converts missing evidence into "nothing to
+    import" — and the document written on that basis makes the artifact
+    invisible forever.
+    """
     out: dict = {}
     if not rdir.is_dir():
-        return out
+        return out, ""
     for path in sorted(rdir.glob("GOVERNANCE_*.md")):
         try:
-            body = path.read_text(errors="replace")
-        except OSError:
-            continue
-        out[path.name] = _parse_legacy_body(body)
-    return out
+            body = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError) as exc:
+            return {}, f"archive {path.name} is unreadable: {exc}"
+        rec, err = _validated_legacy_record(body, path.name)
+        if err:
+            return {}, err
+        if rec["occurrence"] in out:
+            return {}, (
+                f"archives {out[rec['occurrence']]['_file']} and {path.name} "
+                f"share occurrence {rec['occurrence']!r}")
+        rec["_file"] = path.name
+        out[rec["occurrence"]] = rec
+    return out, ""
+
+
+def _strict_read_sources(fdir: Path) -> tuple:
+    """``(by_signature, error)`` for open legacy items. Same strictness.
+
+    The parent's own reader was best-effort by design, because it sat on the
+    chat path and a failed read must never break a conversation. Migration
+    inherits the opposite obligation: an unreadable item is missing evidence,
+    not an absent one, so it aborts instead of quietly dropping it.
+    """
+    out: dict = {}
+    if not fdir.is_dir():
+        return out, ""
+    for path in sorted(fdir.glob("GOVERNANCE_*.md")):
+        try:
+            body = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError) as exc:
+            return {}, f"open item {path.name} is unreadable: {exc}"
+        rec, err = _validated_legacy_record(body, path.name)
+        if err:
+            return {}, err
+        if rec["signature"] in out:
+            return {}, f"two open items share signature {rec['signature']!r}"
+        rec["_file"] = path.name
+        out[rec["signature"]] = rec
+    return out, ""
+
+
+def _validated_legacy_record(body: str, name: str) -> tuple:
+    """Parse one legacy document and prove it usable. ``(record, error)``.
+
+    Occurrence ids were not always persisted. For an otherwise complete pre-id
+    record the id is DERIVED with the parent's own derivation —
+    ``sha256(signature|opened_iso)[:16]`` — so it matches what the parent would
+    have minted. An empty occurrence is never committed: compare-and-close and
+    the closed-history relation are both keyed on it.
+    """
+    rec = _parse_legacy_body(body)
+    for field in ("signature", "opened_iso"):
+        if not rec.get(field):
+            return {}, (
+                f"{name} has no {field}; a partial legacy document cannot be "
+                f"proved to be a complete record and must not be imported")
+    if not rec["occurrence"]:
+        rec["occurrence"] = new_occurrence_id(rec["signature"], rec["opened_iso"])
+        rec["_derived_occurrence"] = True
+    if not rec.get("last_seen_iso"):
+        rec["last_seen_iso"] = rec["opened_iso"]
+    return rec, ""
 
 
 def _parse_legacy_body(body: str) -> dict:
@@ -617,10 +793,6 @@ def _parse_legacy_body(body: str) -> dict:
         "human_gated": field("Human-gated").lower() == "true",
     }
 
-
-def _archive_is_complete(a: dict) -> bool:
-    """Whether an orphan archive can be trusted as the sole surviving payload."""
-    return bool(a.get("signature") and a.get("occurrence") and a.get("opened_iso"))
 
 
 def _open_from(src: dict) -> dict:

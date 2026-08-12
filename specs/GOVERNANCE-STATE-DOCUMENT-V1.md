@@ -167,6 +167,20 @@ All **eight** S/A/M combinations, explicitly. Rev 2 said "every combination" and
 listed five; the gaps were not cosmetic — two of them can lose the only
 surviving payload once `state.json` becomes authoritative and legacy is ignored.
 
+**Reconciliation is keyed on OCCURRENCE, never on signature** (kreview round 2,
+P0). The parent format allows repeated open/close cycles per signature, each
+with its own archive and audit row. A reconciler that selects "the" A and "the"
+M for a signature imports one cycle and destroys every earlier closure the
+instant the document becomes authoritative. So the table below describes the
+relation for **one occurrence**; a signature may present several rows of it at
+once, and every committed closure is retained.
+
+**Every relation is proved, never assumed by list or filesystem order.** An
+audit row must have an archive with the *same* occurrence and the *same*
+signature; an unmatched row is case 4 and a mismatched pair would fabricate a
+closure association between unrelated records. Duplicate occurrences across
+archives, or one occurrence committed in both manifest eras, abort.
+
 | # | S | A | M | Outcome |
 |---|---|---|---|---|
 | 1 | – | – | – | fresh empty document |
@@ -176,7 +190,7 @@ surviving payload once `state.json` becomes authoritative and legacy is ignored.
 | 5 | ✓ | ✓ | – | closure never committed → `open` from **S** (A is an uncommitted attempt) |
 | 6 | ✓ | – | ✓ | **always aborts in v1** — see below. M cannot furnish a complete closed record without an archive, and equality cannot prove S is not a raced recurrence |
 | 7 | – | ✓ | ✓ | → `closed`, full final payload and identity recovered from A and **validated** against M |
-| 8 | ✓ | ✓ | ✓ | divergent on any lifecycle field → `closed` (A/M) **+** S as a new `open`. Identical → **abort**. See below |
+| 8 | ✓ | ✓ | ✓ | S carries a **distinct occurrence** → `closed` (A/M) **+** S as a new `open`. S carries the **committed occurrence** → **abort**. See below |
 
 **Cases 6 and 8 are where I kept being wrong, in progressively subtler ways.**
 Rev 2 unconditionally dropped S. Rev 3 dropped S when its occurrence and payload
@@ -200,18 +214,27 @@ equality is **not proof** and must never be treated as such.
 
 Migration is therefore bound to the evidence it actually has:
 
-- **Semantic divergence spans every lifecycle field** — `occurrence`, `payload`,
-  `Last-seen`, `condition`, `title`, and the human-gate marker — not merely
-  occurrence and payload. *Any* divergence → preserve the committed A/M closure
-  **and** carry S as a new **open** occurrence — **but only in case 8, where A
-  supplies the historical snapshot.** Case 6 has no archive and therefore cannot
-  satisfy this rule; it aborts (below). This qualification is load-bearing: the
-  unqualified version of this sentence, left standing in rev 5, still authorized
-  the unsafe outcome the case-6 section was written to forbid.
-- **Identical → ABORT**, no state write, legacy left authoritative — unless a
-  trusted direct-parent phase marker proves S was not rewritten after the
-  archived snapshot. No such marker exists in `f38b31f`, so in practice this
-  aborts.
+- **Recurrence is decided by occurrence identity, and by nothing else** (kreview
+  round 2). Rev 6 said *any* lifecycle-field divergence proves a recurrence.
+  That is wrong twice. Semantically, the parent's `upsert_governance_item`
+  **preserves** the occurrence when it merely re-observes a live condition, so a
+  differing `payload` or `Last-seen` is equally explained by "the same
+  occurrence was touched while its retirement was pending" — importing that as a
+  recurrence opens an entry carrying an occurrence already committed as closed.
+  Mechanically, S and A were compared across two *different* parsers that
+  normalise `title` differently and neither of which recovers `condition`, so
+  genuinely identical records compared unequal and the abort below was
+  **unreachable**. Field comparison is therefore forbidden here.
+- **S with a distinct occurrence** → preserve the committed A/M closure **and**
+  carry S as a new **open** occurrence — **but only in case 8, where A supplies
+  the historical snapshot.** Case 6 has no archive and cannot satisfy this rule;
+  it aborts (below). This qualification is load-bearing: the unqualified version
+  of this sentence, left standing in rev 5, still authorized the unsafe outcome
+  the case-6 section was written to forbid.
+- **S carrying the committed occurrence → ABORT**, no state write, legacy left
+  authoritative — unless a trusted direct-parent phase marker proves S was not
+  rewritten after the archived snapshot. No such marker exists in `f38b31f`, so
+  in practice this aborts.
 - **Case 6 (S+M, no A) takes the same rule.** M's `final_payload` plus an equal S
   can prove the payload is *available*; it cannot prove S is not a raced
   recurrence. Without trusted phase evidence: abort.
@@ -282,9 +305,46 @@ with **strict row filtering** — a row must carry `governance_txn` **and** a
 `governance_signature` to be considered, so friction-resolution rows in that
 shared file can never be imported as governance closures.
 
+**Migration reads strictly; the chat path reads best-effort.** These are
+different jobs and must not share a reader (kreview round 2, P1). The runtime
+readers skip an unreadable artifact and parse a partial one into empty fields,
+because a failed read must never break the chat path. Migration inherits the
+opposite obligation: an artifact it cannot parse is *missing evidence*, and
+discarding it converts missing evidence into "nothing to import" — after which
+the document written on that basis makes the artifact invisible forever. So
+**every discovered governance artifact parses and validates, or the entire
+migration aborts.**
+
+**Pre-identity records derive the parent's own occurrence id.** Occurrence ids
+were not always persisted. An empty occurrence must never be committed —
+compare-and-close and the closed-history relation are both keyed on it — so an
+otherwise complete pre-id record derives `sha256(signature|opened_iso)[:16]`,
+which is exactly what the parent would have minted. If signature or opened
+stamp cannot furnish that derivation, **abort**.
+
+**An ABORTED migration binds the caller, not just `migrate()`.** Abort means the
+legacy artifacts are still authoritative and their ambiguity is unresolved. A
+caller that discards the outcome and upserts anyway creates `state.json`, which
+becomes authoritative and makes the un-migrated occurrence invisible — the exact
+loss the abort exists to prevent. On `ABORTED` the caller performs **no
+governance read, write, or acknowledgement** that pass, logs the recovery state,
+and lets a later run retry.
+
 Verified precondition: no governance artifacts exist in any deployment today, so
 migration correctness is exercised against constructed parent-format states in
 *tests*. That is a fact about deployments, **not** evidence the design is safe.
+
+### Document validation is deep, and lives in one place
+
+Validating only the three top-level container types is not fail-closed: a
+document with `open={"sig": {}}` passes it, reports healthy, and then raises
+`KeyError` from `open_items` — outside the `StateError` path every caller
+handles, defeating both the fail-closed contract and `/dump`'s
+unreadable-vs-empty distinction. `read_document` and `_validate_candidate` share
+one deep validator covering entry shape, key/signature agreement, required
+non-empty strings, payload element types, and occurrence uniqueness across
+`open` ∪ `closed`. A write must not be able to introduce a document its own
+reader would reject.
 
 ## Acceptance criteria
 
@@ -324,6 +384,37 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
     proved by mutation.
 26. **Document size and write/lock latency are observable**, and the over-limit
     path fails closed rather than truncating.
+
+### Added by kreview round 2 (implementation review of `33306bd`)
+
+27. **Every historical occurrence survives migration.** Constructed: three
+    committed open/close cycles for one signature import as three closed
+    entries; the same plus a distinct live occurrence imports as two closed and
+    one open. Reconciliation is keyed on occurrence, not signature.
+28. **Every A/M relation is proved.** A row with no archive at that occurrence,
+    and a row whose archive carries a different signature, both **abort with no
+    state write**. Two uncommitted archives for one signature abort. One
+    occurrence committed in both manifest eras aborts.
+29. **Migration reads strictly.** A partial or non-UTF-8 governance document in
+    either directory **aborts**; it must never read as `FRESH`. Asserted for
+    both `friction/` and `friction_resolved/`.
+30. **No empty occurrence is ever committed.** A complete pre-id record imports
+    with the parent's own derived id — asserted equal to
+    `friction_response._new_occurrence_id(sig, opened, "")`, not merely
+    non-empty. A record that cannot furnish the derivation aborts.
+31. **The shared `_manifest.jsonl` era is actually read.** A complete archive
+    plus its governance row in the shared file imports as `closed`, not as a
+    reopened item; friction rows in that file are never imported as governance
+    closures.
+32. **Deep validation holds on every surface.** Corrupt nested entries — empty
+    fields, key/signature disagreement, empty occurrence, non-list payload,
+    missing closed fields, an occurrence both open and closed — make
+    `read_document` raise, `health()` report `unreadable`, `open_items` and
+    `closed_items` degrade to empty rather than raise, `close_item` return
+    `STATE_ERROR`, and `upsert_item` raise `StateError`.
+33. **An ABORTED migration is asserted through the production caller.**
+    `maybe_run_daily` over an aborting parent state creates no `state.json`,
+    acknowledges nothing, and leaves the legacy artifacts intact.
 
 ## Implementation notes — AC 20 disposition, per family
 

@@ -1185,8 +1185,23 @@ async def maybe_run_daily(
 
         # 1. Durable lifecycle — evaluated on EVERY due scan, live condition.
         #    GOVERNANCE-STATE-DOCUMENT-V1: one atomically-replaced document.
-        governance_state.migrate(data_dir, now_iso=now_iso)
-        if _gaps:
+        #
+        #    An ABORTED migration means the legacy artifacts are still
+        #    AUTHORITATIVE and their ambiguity is unresolved. Ignoring the
+        #    outcome and writing anyway is not a smaller mistake than a bad
+        #    import: the first upsert creates state.json, which then becomes
+        #    authoritative and makes the un-migrated legacy occurrence invisible
+        #    forever. So this pass touches governance state not at all, leaves
+        #    the acknowledgement fingerprint cleared so the finding stays
+        #    unacknowledged, and lets a later run retry the migration.
+        _outcome, _mnotes = governance_state.migrate(data_dir, now_iso=now_iso)
+        if _outcome is governance_state.MigrationOutcome.ABORTED:
+            logger.warning(
+                "GOVERNANCE_MIGRATION_ABORTED — legacy artifacts remain "
+                "authoritative and governance state is untouched this pass: %s",
+                "; ".join(str(n) for n in _mnotes)[:500])
+            state["governance_persisted_fingerprint"] = ""
+        elif _gaps:
             try:
                 governance_state.upsert_item(
                     data_dir,
