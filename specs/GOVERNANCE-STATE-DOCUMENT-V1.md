@@ -1,7 +1,7 @@
 # GOVERNANCE-STATE-DOCUMENT-V1 — collapse the governance lifecycle to one document
 
-**Status:** rev 11 — spec GREEN at rev 6; implementation reviewed by kreview
-(RED at `33306bd`, `c9f58ee`, `01626a1`, `4c1e9a4`); this revision carries rounds 2–5.
+**Status:** rev 12 — spec GREEN at rev 6; implementation reviewed by kreview
+(RED at `33306bd`, `c9f58ee`, `01626a1`, `4c1e9a4`, `10cd51c`); this revision carries rounds 2–6.
 **Supersedes:** the three-artifact governance lifecycle shipped across
 `b1db4b6..f38b31f`.
 **Authority:** `docs/reference/governance-lifecycle-failure-state-enumeration.md`
@@ -393,12 +393,11 @@ evidence into a false claim that the closure never committed, which **reopens a
 resolved finding as a live one.**
 
 **Completion is a property of the last non-blank RECORD, not of the file**
-(kreview round 5). `raw.endswith("
-")` answers a different question: blank
-records are filtered out afterwards, so `not-json
-   ` is a fully-written
-malformed row followed by whitespace — the file looks incomplete while the last
-real record is complete, and the row gets dropped as torn. Terminators must be
+(kreview round 5). `raw.endswith("\n")` answers a different question: blank
+records are filtered out afterwards, so a row written as `not-json\n` followed
+by a whitespace-only line with no final newline is a fully-written malformed
+row — the file looks incomplete while the last real record is complete, and the
+row gets dropped as torn. Terminators must be
 preserved per record (`splitlines(keepends=True)`) and the last non-blank
 record classified by its own.
 
@@ -415,6 +414,16 @@ why. Enforced on the read *and* the write surfaces, so `upsert_item` and
 **The schema version must be an exact `int`.** In Python `True == 1` and
 `1.0 == 1`, so an equality check alone accepts a JSON `true` or `1.0` and makes
 a foreign or malformed version marker authoritative instead of failing closed.
+**The reader and the write validator share one predicate** (kreview round 6):
+using bare equality in only one of them lets a candidate pass validation and
+then be rejected by `read_document`, which breaks the invariant that a validated
+write cannot produce a document its own reader refuses.
+
+**Migration notes carry a closed vocabulary.** `decision` and `from_format` must
+each be one of v1's known values. A note is the authority marker that makes the
+next run report `ALREADY_MIGRATED`, so a blank or invented provenance suppresses
+a live legacy source exactly as `[{}]` did — one layer deeper. `occurrence` and
+`note` may legitimately be empty; those two may not.
 
 **A decode failure is corruption like any other.** `read_document` catches
 `UnicodeDecodeError` as `StateError`; letting it escape means it is *not* a
@@ -544,14 +553,9 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
 ### Added by kreview round 5 (implementation review of `4c1e9a4`)
 
 44. **Torn classification uses the last non-blank record's own terminator.**
-    Parameterized over `not-json
-`, `not-json
-   `, `not-json
-
-
-` (all
-    abort), `not-json` and blank padding before an unterminated tear (both
-    torn). An interior malformed row aborts regardless of the tail.
+    Parameterized over `not-json\n`, `not-json\n<spaces>`, and
+    `not-json\n\n\n` (all abort), plus `not-json` with no terminator and blank
+    padding before an unterminated tear (both torn). An interior malformed row aborts regardless of the tail.
 45. **A discarded torn tail is recorded even when nothing is importable.** The
     fresh marker carries `dropped_torn_tail` and never claims there were no
     legacy artifacts, and the note is durable in the written document.
@@ -559,6 +563,26 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
     `title`, timestamps and `resolving_condition` fail closed on read and are
     refused at both write surfaces; a legacy document with a blank `## Payload`
     entry aborts.
+
+### Added by kreview round 6 (implementation review of `10cd51c`)
+
+47. **A corrupt note provenance cannot suppress a live legacy source.** Blank,
+    empty, and invented `from_format`, and an invented `decision`, each fail
+    closed on read and make `migrate` abort rather than report
+    `ALREADY_MIGRATED` — asserted with a real legacy open item present, so the
+    failure being prevented is visible.
+48. **The producer's vocabulary is a subset of the reader's.** Every decision
+    `migrate` actually emits — across fresh, torn-tail, committed closure,
+    live recurrence and orphan archive — validates, so this build cannot write
+    a document this build refuses to read.
+49. **One version predicate on both paths.** `_validate_candidate` rejects
+    `true`, `1.0`, `"1"`, `2` and `None`, and an accepted candidate round-trips
+    through `_write_document` and `read_document` unchanged.
+50. **Payload elements are usable on every surface.** `upsert_item` refuses a
+    whitespace-only or empty entry, including one beside a real entry, and a
+    document containing one fails closed on read — the same rule the legacy
+    validator applies, so semantic emptiness is not legal depending on how it
+    arrived.
 
 ## Implementation notes — AC 20 disposition, per family
 

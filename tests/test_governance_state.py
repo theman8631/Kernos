@@ -1022,3 +1022,112 @@ def test_blank_padding_before_an_unterminated_tear_is_still_torn(tmp_path):
     assert any(n.get("decision") == "dropped_torn_tail" for n in notes)
     assert len(gs.closed_items(str(tmp_path))) == 1
     assert gs.open_items(str(tmp_path)) == []
+
+
+# --- kreview round 6: one rule, applied on every surface ---------------------
+
+@pytest.mark.parametrize("note,label", [
+    ({"from_format": "   ", "decision": "fresh", "occurrence": "", "note": ""},
+     "blank provenance"),
+    ({"from_format": "", "decision": "fresh", "occurrence": "", "note": ""},
+     "empty provenance"),
+    ({"from_format": "invented", "decision": "fresh", "occurrence": "", "note": ""},
+     "unknown provenance"),
+    ({"from_format": "S", "decision": "invented", "occurrence": "", "note": ""},
+     "unknown decision"),
+])
+def test_a_corrupt_note_provenance_cannot_suppress_a_live_legacy_source(tmp_path,
+                                                                        note, label):
+    """A migration note is the authority marker that makes the next run report
+    ALREADY_MIGRATED. A blank or invented provenance is the same
+    corrupt-authority failure as `[{}]`, one layer deeper: the live legacy item
+    disappears from the recovery surface with no error anywhere.
+    """
+    d = str(tmp_path)
+    F.write_open_item(tmp_path, payload=["kernos/live.py"])
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": 1, "migration_notes": [note],
+                             "open": {}, "closed": []}))
+
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label
+    assert gs.migrate(d, now_iso=NOW)[0] is gs.MigrationOutcome.ABORTED, label
+
+
+def test_the_notes_migration_actually_writes_all_validate(tmp_path):
+    """The closed vocabulary must admit every note the producer emits, or a
+    document this build wrote would be rejected by this build's reader."""
+    seen = set()
+    # fresh
+    d1 = tmp_path / "fresh"
+    gs.migrate(str(d1), now_iso=NOW)
+    seen |= {n["decision"] for n in gs.read_document(str(d1))["migration_notes"]}
+    # torn tail + committed closure + a live recurrence + an orphan archive
+    d2 = tmp_path / "mixed"
+    F.write_closure(d2, occurrence=OCC_A, payload=["a.py"], opened=T1)
+    F.write_open_item(d2, occurrence=OCC_B, payload=["b.py"], opened=T2)
+    with (F.resolved_dir(d2) / F.MANIFEST_FILENAME).open("a") as fh:
+        fh.write('{"governance_txn": "torn')
+    assert gs.migrate(str(d2), now_iso=NOW)[0] is gs.MigrationOutcome.IMPORTED
+    seen |= {n["decision"] for n in gs.read_document(str(d2))["migration_notes"]}
+
+    d3 = tmp_path / "orphan"
+    F.write_archive(d3, occurrence=OCC_C, payload=["c.py"], opened=T3)
+    assert gs.migrate(str(d3), now_iso=NOW)[0] is gs.MigrationOutcome.IMPORTED
+    seen |= {n["decision"] for n in gs.read_document(str(d3))["migration_notes"]}
+
+    assert seen <= gs._NOTE_DECISIONS, f"producer emits decisions the reader rejects: {seen}"
+    assert {"fresh", "dropped_torn_tail", "closed", "open_from_archive"} <= seen, \
+        "this test must actually exercise the vocabulary it claims to check"
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1", 2, None])
+def test_candidate_validation_and_the_reader_agree_on_the_version(tmp_path, version):
+    """A validated candidate must never produce a document its own reader
+    rejects. Bare equality in the write validator accepts True and 1.0, which
+    read_document then refuses — the trust boundary disagreeing with itself.
+    """
+    prev = gs._empty_document()
+    candidate = {"schema_version": version, "migration_notes": [],
+                 "open": {}, "closed": []}
+    with pytest.raises(gs.StateError, match="schema_version"):
+        gs._validate_candidate(prev, candidate, signature=SIG)
+
+
+def test_every_accepted_candidate_round_trips_through_the_reader(tmp_path):
+    """The invariant behind the case above, stated directly."""
+    d = str(tmp_path)
+    occ = _open(d, ["a.py"])
+    gs.close_item(d, signature=SIG, expected_occurrence=occ, now_iso=NOW,
+                  resolving_condition="cleared")
+    _open(d, ["b.py"], "2026-08-06T00:00:00+00:00")
+    doc = gs.read_document(d)
+    gs._validate_candidate(doc, doc, signature=SIG)      # accepted...
+    gs._write_document(d, doc)
+    assert gs.read_document(d) == doc                    # ...and readable back
+
+
+@pytest.mark.parametrize("payload,label", [
+    (["   "], "whitespace-only entry"),
+    (["kernos/a.py", ""], "an empty entry beside a real one"),
+    (["kernos/a.py", "\t\n"], "a blank entry beside a real one"),
+])
+def test_blank_payload_entries_are_refused_on_both_surfaces(tmp_path, payload, label):
+    """The legacy validator already rejects this; the shared validator must
+    agree, or the same semantic emptiness is legal depending on how it arrived.
+    """
+    d = str(tmp_path)
+    with pytest.raises(gs.StateError, match="payload"):
+        gs.upsert_item(d, signature=SIG, title="Coverage gap",
+                       condition="modules unowned", payload=payload, now_iso=NOW)
+    assert not gs.state_path(d).exists(), label
+
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": 1, "migration_notes": [],
+                             "open": {SIG: _entry(payload=payload)}, "closed": []}))
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label

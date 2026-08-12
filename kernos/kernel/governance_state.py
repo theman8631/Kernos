@@ -187,11 +187,7 @@ def read_document(data_dir: str) -> dict:
     if not isinstance(doc, dict):
         raise StateError("governance state is not an object")
     version = doc.get("schema_version")
-    # `type(...) is int`, not `isinstance` and not bare equality: in Python
-    # `True == 1` and `1.0 == 1`, so a JSON `true` or `1.0` would pass an
-    # equality check and make a foreign or malformed version marker
-    # authoritative instead of failing closed.
-    if type(version) is not int or version != SCHEMA_VERSION:
+    if not _valid_version(version):
         raise StateError(
             f"unknown governance schema_version {version!r} "
             f"(this build understands {SCHEMA_VERSION})")
@@ -210,6 +206,16 @@ _OPEN_REQUIRED = ("occurrence", "signature", "opened_iso", "last_seen_iso",
                   "title", "condition")
 _CLOSED_REQUIRED = ("occurrence", "signature", "opened_iso", "closed_iso",
                     "title", "resolving_condition")
+def _valid_version(value: Any) -> bool:
+    """`type(...) is int`, not `isinstance` and not bare equality.
+
+    In Python `True == 1` and `1.0 == 1`, so an equality check accepts a JSON
+    `true` or `1.0` and makes a foreign or malformed version marker
+    authoritative instead of failing closed.
+    """
+    return type(value) is int and value == SCHEMA_VERSION
+
+
 def _usable(value: Any) -> bool:
     """A required string must carry content, not just satisfy a key lookup.
 
@@ -225,6 +231,12 @@ def _usable(value: Any) -> bool:
 #: — which suppresses a live legacy source forever. So notes are validated, not
 #: merely counted.
 _NOTE_REQUIRED = ("from_format", "decision", "occurrence", "note")
+#: v1 is a closed vocabulary. An unrecognised decision or provenance is either
+#: corruption or a document from a build this one does not understand; both must
+#: fail closed rather than be trusted as proof that migration ran.
+_NOTE_DECISIONS = frozenset({"fresh", "dropped_torn_tail", "closed", "open",
+                             "open_recurrence", "open_from_archive"})
+_NOTE_FORMATS = frozenset({"none", "manifest", "A+M", "S", "A"})
 
 
 def _validate_entries(doc: dict) -> None:
@@ -277,13 +289,26 @@ def _validate_entries(doc: dict) -> None:
         for field in _NOTE_REQUIRED:
             if not isinstance(note.get(field), str):
                 raise StateError(f"migration note {i} has no usable {field!r}")
-        if not _usable(note["decision"]):
-            raise StateError(f"migration note {i} records no decision")
+        # `occurrence` and `note` may legitimately be empty; provenance and
+        # decision may not. A note is the authority marker that makes the next
+        # run report ALREADY_MIGRATED, so a blank one suppresses a live legacy
+        # source exactly as `[{}]` did — one layer deeper.
+        if note["decision"] not in _NOTE_DECISIONS:
+            raise StateError(
+                f"migration note {i} records an unknown decision "
+                f"{note['decision']!r}")
+        if note["from_format"] not in _NOTE_FORMATS:
+            raise StateError(
+                f"migration note {i} records an unknown provenance "
+                f"{note['from_format']!r}")
 
 
 def _validate_common(entry: dict, label: str) -> None:
     payload = entry.get("payload")
-    if not isinstance(payload, list) or any(not isinstance(p, str) for p in payload):
+    if not isinstance(payload, list) or any(not _usable(p) for p in payload):
+        # Same rule the legacy validator applies. A whitespace-only entry is a
+        # surfaced item that displays as nothing, and read and write surfaces
+        # must not disagree about that.
         raise StateError(f"{label} has a malformed payload")
     if not isinstance(entry.get("human_gated"), bool):
         raise StateError(f"{label} has no usable human_gated marker")
@@ -296,7 +321,11 @@ def _validate_candidate(previous: dict, candidate: dict, *, signature: str) -> N
     signature's open entry — the write path must not be able to lose work it was
     never asked to touch.
     """
-    if candidate.get("schema_version") != SCHEMA_VERSION:
+    if not _valid_version(candidate.get("schema_version")):
+        # The SAME predicate the reader uses. A bare equality here accepts
+        # `True` and `1.0`, so a candidate could pass validation and then be
+        # rejected by read_document — breaking the invariant that a validated
+        # write cannot produce a document its own reader refuses.
         raise StateError("candidate has the wrong schema_version")
 
     prior_closed = {c["occurrence"] for c in previous.get("closed", [])}
