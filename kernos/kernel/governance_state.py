@@ -210,6 +210,16 @@ _OPEN_REQUIRED = ("occurrence", "signature", "opened_iso", "last_seen_iso",
                   "title", "condition")
 _CLOSED_REQUIRED = ("occurrence", "signature", "opened_iso", "closed_iso",
                     "title", "resolving_condition")
+def _usable(value: Any) -> bool:
+    """A required string must carry content, not just satisfy a key lookup.
+
+    Whitespace is semantically empty: `condition="   "` persists an open item
+    whose recovery surface displays no condition at all, and an all-blank title
+    or timestamp is no more usable than a missing one.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
 #: A migration note is the only evidence that migration ran. `[{}]` satisfies a
 #: shape check, and its mere presence makes the next run report ALREADY_MIGRATED
 #: — which suppresses a live legacy source forever. So notes are validated, not
@@ -231,10 +241,10 @@ def _validate_entries(doc: dict) -> None:
         if not isinstance(entry, dict):
             raise StateError(f"open entry {key!r} is not an object")
         for field in _OPEN_REQUIRED:
-            if not isinstance(entry.get(field), str) or not entry[field]:
-                # Non-empty, not merely present. An item with no condition has
-                # no statement of what would resolve it, which is exactly what
-                # the recovery surface exists to show.
+            if not _usable(entry.get(field)):
+                # Usable, not merely present. An item with no condition has no
+                # statement of what would resolve it, which is exactly what the
+                # recovery surface exists to show.
                 raise StateError(f"open entry {key!r} has no usable {field!r}")
         if entry["signature"] != key:
             raise StateError(
@@ -249,7 +259,7 @@ def _validate_entries(doc: dict) -> None:
         if not isinstance(entry, dict):
             raise StateError(f"closed entry {i} is not an object")
         for field in _CLOSED_REQUIRED:
-            if not isinstance(entry.get(field), str) or not entry[field]:
+            if not _usable(entry.get(field)):
                 # A closure with no resolving condition records that something
                 # was closed without recording why — closed history with no
                 # audit value.
@@ -267,7 +277,7 @@ def _validate_entries(doc: dict) -> None:
         for field in _NOTE_REQUIRED:
             if not isinstance(note.get(field), str):
                 raise StateError(f"migration note {i} has no usable {field!r}")
-        if not note["decision"]:
+        if not _usable(note["decision"]):
             raise StateError(f"migration note {i} records no decision")
 
 
@@ -559,23 +569,29 @@ def migrate(data_dir: str, *, now_iso: str) -> tuple:
         if err:
             return MigrationOutcome.ABORTED, [err]
 
+        notes: list = []
+        if torn:
+            notes.append({"from_format": "manifest", "decision": "dropped_torn_tail",
+                          "occurrence": "", "note": "incomplete append was never durable"})
+
         if not (sources or archives or rows):
             # A marker is REQUIRED even with nothing to import: an empty
             # document cannot distinguish "migrated, found nothing" from "never
             # migrated", so without it every run would re-scan legacy files and
             # could resurrect artifacts a later close had removed.
+            #
+            # The torn note comes FIRST and is never dropped here: a document
+            # that says only "no legacy governance artifacts" when a torn append
+            # was in fact discarded is a false statement about what migration
+            # saw, permanently, on the one surface that records it.
             fresh = _empty_document()
-            fresh["migration_notes"] = [{
+            fresh["migration_notes"] = notes + [{
                 "from_format": "none", "decision": "fresh", "occurrence": "",
-                "note": f"no legacy governance artifacts at {now_iso}"}]
+                "note": f"nothing importable at {now_iso}"}]
             _write_document(data_dir, fresh)
             return MigrationOutcome.FRESH, fresh["migration_notes"]
 
         doc = _empty_document()
-        notes: list = []
-        if torn:
-            notes.append({"from_format": "manifest", "decision": "dropped_torn_tail",
-                          "occurrence": "", "note": "incomplete append was never durable"})
 
         # Reconcile by OCCURRENCE, never by signature. The parent format allows
         # repeated open/close cycles per signature, each with its own archive and
@@ -731,15 +747,22 @@ def _strict_read_manifests(rdir: Path) -> tuple:
             raw = path.read_text(encoding="utf-8", errors="strict")
         except (OSError, UnicodeDecodeError) as exc:
             return [], False, f"{name} is unreadable: {exc}"
-        # Read the RAW text before splitting: `splitlines` discards the framing
-        # evidence that distinguishes a torn append from a complete corrupt one.
-        last_record_complete = raw.endswith(("\n", "\r"))
-        lines = [ln for ln in raw.splitlines() if ln.strip()]
-        for i, line in enumerate(lines):
+        # Keep each record's OWN terminator. Testing `raw.endswith("\n")` is
+        # not the same question: blank records are filtered out afterwards, so
+        # `not-json\n   ` has a fully-written malformed row followed by
+        # whitespace with no final newline — the file looks incomplete while
+        # the last real record is complete, and the row gets dropped as torn.
+        records = []
+        for chunk in raw.splitlines(keepends=True):
+            text = chunk.strip()
+            if text:
+                records.append((text, chunk.endswith(("\n", "\r"))))
+
+        for i, (line, terminated) in enumerate(records):
             try:
                 row = json.loads(line)
             except ValueError:
-                if i == len(lines) - 1 and not last_record_complete:
+                if i == len(records) - 1 and not terminated:
                     torn = True
                     break
                 return [], False, f"{name} row {i} is corrupt committed history"
@@ -840,10 +863,12 @@ def _validated_legacy_record(body: str, name: str) -> tuple:
             f"{name} declares class {rec['class']!r}, not 'governance'; only a "
             f"governance document may become a governance item")
     for field in ("signature", "opened_iso", "last_seen_iso", "title"):
-        if not rec.get(field):
+        if not _usable(rec.get(field)):
             return {}, (
                 f"{name} has no {field}; a partial legacy document cannot be "
                 f"proved to be a complete record and must not be imported")
+    if any(not _usable(p) for p in rec["payload"]):
+        return {}, f"{name} has a blank entry in its '## Payload' section"
     if rec["human_gated"] is not True:
         # Absent parses the same as "false", and silently importing that would
         # strip the gate from a finding whose whole point is the gate.

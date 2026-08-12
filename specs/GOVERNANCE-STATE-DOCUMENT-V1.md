@@ -1,7 +1,7 @@
 # GOVERNANCE-STATE-DOCUMENT-V1 — collapse the governance lifecycle to one document
 
-**Status:** rev 10 — spec GREEN at rev 6; implementation reviewed by kreview
-(RED at `33306bd`, `c9f58ee`, `01626a1`); this revision carries rounds 2–4.
+**Status:** rev 11 — spec GREEN at rev 6; implementation reviewed by kreview
+(RED at `33306bd`, `c9f58ee`, `01626a1`, `4c1e9a4`); this revision carries rounds 2–5.
 **Supersedes:** the three-artifact governance lifecycle shipped across
 `b1db4b6..f38b31f`.
 **Authority:** `docs/reference/governance-lifecycle-failure-state-enumeration.md`
@@ -390,11 +390,22 @@ a newline, so a malformed final record that IS newline-terminated was fully
 written — it is corrupt committed history. Position alone cannot separate the
 two, and treating the complete-but-corrupt case as torn converts corrupt closure
 evidence into a false claim that the closure never committed, which **reopens a
-resolved finding as a live one.** The reader must inspect the raw text before
-splitting, because `splitlines` discards exactly that framing evidence.
+resolved finding as a live one.**
 
-**Required strings are non-empty, including `condition` and
-`resolving_condition`.** Presence avoids a `KeyError`; it does not satisfy the
+**Completion is a property of the last non-blank RECORD, not of the file**
+(kreview round 5). `raw.endswith("
+")` answers a different question: blank
+records are filtered out afterwards, so `not-json
+   ` is a fully-written
+malformed row followed by whitespace — the file looks incomplete while the last
+real record is complete, and the row gets dropped as torn. Terminators must be
+preserved per record (`splitlines(keepends=True)`) and the last non-blank
+record classified by its own.
+
+**Required strings must be USABLE — non-blank after `strip()` — including
+`condition` and `resolving_condition`.** Whitespace is semantically empty:
+`condition="   "` persists an item whose recovery surface displays no condition
+at all. Presence avoids a `KeyError`; it does not satisfy the
 schema. An open item with no condition carries no statement of what would
 resolve it — which is the whole content of the recovery surface — and a closure
 with no resolving condition records that something was closed without recording
@@ -530,6 +541,25 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
 43. **Only an exact integer schema version is accepted.** `true`, `1.0`, `"1"`
     and `2` each fail closed.
 
+### Added by kreview round 5 (implementation review of `4c1e9a4`)
+
+44. **Torn classification uses the last non-blank record's own terminator.**
+    Parameterized over `not-json
+`, `not-json
+   `, `not-json
+
+
+` (all
+    abort), `not-json` and blank padding before an unterminated tear (both
+    torn). An interior malformed row aborts regardless of the tail.
+45. **A discarded torn tail is recorded even when nothing is importable.** The
+    fresh marker carries `dropped_torn_tail` and never claims there were no
+    legacy artifacts, and the note is durable in the written document.
+46. **Whitespace-only required strings are not usable.** Blank `condition`,
+    `title`, timestamps and `resolving_condition` fail closed on read and are
+    refused at both write surfaces; a legacy document with a blank `## Payload`
+    entry aborts.
+
 ## Implementation notes — AC 20 disposition, per family
 
 AC 20 forbids a blanket "unrepresentable" claim. Each family is dispositioned
@@ -573,7 +603,11 @@ before a test constructed them:
    document cannot distinguish "migrated, found nothing" from "never migrated",
    so without a `migration_notes` entry every run would re-scan legacy files and
    could resurrect artifacts a later close had removed
-   (`test_fresh_migration_records_that_it_ran`).
+   (`test_fresh_migration_records_that_it_ran`). **A discarded torn tail is
+   recorded in that marker too** (round 5): a document saying only "no legacy
+   governance artifacts" when an incomplete append was in fact dropped is a
+   false statement about what migration saw, made permanent on the one surface
+   that records it.
 
 The `/dump` reader carries a third: `open_items` degrades a corrupt document to
 an empty list so a failed read can never break the chat path, but on the

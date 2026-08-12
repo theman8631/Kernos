@@ -913,3 +913,112 @@ def test_empty_lifecycle_conditions_fail_closed_on_read(tmp_path, doc, label):
     assert gs.health(d)[0] == "unreadable", label
     assert gs.open_items(d) == []
     assert gs.closed_items(d) == []
+
+
+# --- kreview round 5 ---------------------------------------------------------
+
+@pytest.mark.parametrize("tail,outcome,label", [
+    ("not-json\n", "abort", "terminated, then nothing"),
+    ("not-json\n   ", "abort", "terminated, then blank whitespace with no newline"),
+    ("not-json\n\n\n", "abort", "terminated, then blank lines"),
+    ("not-json", "torn", "no terminator at all"),
+    ("not-json\n   \nstill-not-json", "abort",
+     "an INTERIOR malformed row aborts regardless of the tail"),
+])
+def test_torn_classification_uses_the_last_RECORDs_terminator(tmp_path, tail,
+                                                              outcome, label):
+    """Completion is a property of the last non-blank RECORD, not of the file.
+
+    Testing `raw.endswith("\\n")` asks a different question: blank records are
+    filtered out afterwards, so a fully-written malformed row followed by
+    whitespace looks incomplete and gets dropped as torn — resurrecting the
+    archive beside it as a live item, which is the resolved-item resurrection
+    the framing rule exists to prevent.
+    """
+    F.write_archive(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).write_text(tail)
+
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    if outcome == "abort":
+        assert out is gs.MigrationOutcome.ABORTED, label
+        assert not gs.state_path(str(tmp_path)).exists(), label
+        assert gs.open_items(str(tmp_path)) == [], "the archive must not be reopened"
+    else:
+        assert out is gs.MigrationOutcome.IMPORTED, label
+        assert any(n.get("decision") == "dropped_torn_tail" for n in notes), label
+        # no committed audit, so the orphan archive is the sole surviving copy
+        assert len(gs.open_items(str(tmp_path))) == 1, label
+
+
+def test_a_torn_tail_is_recorded_even_when_nothing_is_importable(tmp_path):
+    """The fresh marker must not claim there were no legacy artifacts when a
+    torn append was in fact discarded. That is a false statement about what
+    migration saw, made permanent on the one surface that records it."""
+    F.resolved_dir(tmp_path)
+    (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).write_text('{"governance_txn": "occ')
+
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.FRESH
+    decisions = [n["decision"] for n in notes]
+    assert "dropped_torn_tail" in decisions
+    assert "no legacy governance artifacts" not in " ".join(n["note"] for n in notes)
+    # and it is durable, not just returned
+    assert "dropped_torn_tail" in [
+        n["decision"] for n in gs.read_document(str(tmp_path))["migration_notes"]]
+
+
+@pytest.mark.parametrize("doc,label", [
+    ({"open": {SIG: _entry(condition="   ")}, "closed": []}, "blank condition"),
+    ({"open": {SIG: _entry(title="  \t ")}, "closed": []}, "blank title"),
+    ({"open": {SIG: _entry(opened_iso=" ")}, "closed": []}, "blank timestamp"),
+    ({"open": {}, "closed": [_closed(resolving_condition="  ")]},
+     "blank resolving condition"),
+])
+def test_whitespace_only_required_strings_are_not_usable(tmp_path, doc, label):
+    """Whitespace is semantically empty: `condition="   "` persists an item
+    whose recovery surface displays no condition at all."""
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": 1, "migration_notes": [], **doc}))
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label
+    assert gs.open_items(d) == []
+    assert gs.closed_items(d) == []
+
+
+def test_whitespace_only_conditions_are_refused_at_the_write_surface(tmp_path):
+    d = str(tmp_path)
+    with pytest.raises(gs.StateError, match="condition"):
+        gs.upsert_item(d, signature=SIG, title="Coverage gap", condition="   ",
+                       payload=["a.py"], now_iso=NOW)
+    assert not gs.state_path(d).exists()
+
+    occ = _open(d, ["a.py"])
+    before = gs.state_path(d).read_bytes()
+    assert gs.close_item(d, signature=SIG, expected_occurrence=occ, now_iso=NOW,
+                         resolving_condition=" \t ") is gs.CloseResult.STATE_ERROR
+    assert gs.state_path(d).read_bytes() == before
+
+
+def test_a_legacy_document_with_a_blank_payload_entry_aborts(tmp_path):
+    body = F.OPEN_ITEM.replace("- kernos/a.py", "- ")
+    F.write_open_item(tmp_path, body=body)
+    out, _ = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED
+    assert not gs.state_path(str(tmp_path)).exists()
+
+
+def test_blank_padding_before_an_unterminated_tear_is_still_torn(tmp_path):
+    """The torn case must survive the stricter framing rule, including when the
+    incomplete append is separated from the committed rows by blank lines."""
+    F.write_closure(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    with (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).open("a") as fh:
+        fh.write('   \n\n{"governance_txn": "occ-torn", "arch')
+
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    assert any(n.get("decision") == "dropped_torn_tail" for n in notes)
+    assert len(gs.closed_items(str(tmp_path))) == 1
+    assert gs.open_items(str(tmp_path)) == []
