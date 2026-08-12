@@ -113,6 +113,37 @@ class StateError(RuntimeError):
     """Unreadable, corrupt, or unknown-version state. Always fails closed."""
 
 
+class _DuplicateKey(ValueError):
+    """A JSON object carried the same key twice.
+
+    Subclasses ``ValueError`` deliberately: every existing ``json.loads`` guard
+    already treats a decode failure as corruption, and an UNTERMINATED row with
+    a duplicate key is still an incomplete append, so the torn-tail rule keeps
+    working unchanged.
+    """
+
+
+def _reject_duplicate_keys(pairs: list) -> dict:
+    out: dict = {}
+    for key, value in pairs:
+        if key in out:
+            raise _DuplicateKey(f"duplicate object key {key!r}")
+        out[key] = value
+    return out
+
+
+def strict_json(text: str) -> Any:
+    """Parse JSON, refusing any object that repeats a key, at any depth.
+
+    Ordinary ``json.loads`` silently keeps the LAST member, so two `closed`
+    arrays collapse to whichever came second and the conflicting history is
+    gone before a single validator runs. Every deep check downstream is then
+    inspecting evidence that has already been discarded — and the next ordinary
+    write persists the collapsed document, making the loss permanent.
+    """
+    return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+
+
 @contextmanager
 def _document_lock(data_dir: str):
     """Serialize the ENTIRE read-decide-write across processes.
@@ -181,7 +212,7 @@ def read_document(data_dir: str) -> dict:
         # raise instead of degrading — every fail-closed surface bypassed at once.
         raise StateError(f"governance state unreadable: {exc}") from exc
     try:
-        doc = json.loads(raw)
+        doc = strict_json(raw)
     except ValueError as exc:
         raise StateError(f"governance state is not valid JSON: {exc}") from exc
     if not isinstance(doc, dict):
@@ -789,7 +820,7 @@ def _strict_read_manifests(rdir: Path) -> tuple:
 
         for i, (line, terminated) in enumerate(records):
             try:
-                row = json.loads(line)
+                row = strict_json(line)
             except ValueError:
                 if i == len(records) - 1 and not terminated:
                     torn = True

@@ -1,7 +1,7 @@
 # GOVERNANCE-STATE-DOCUMENT-V1 — collapse the governance lifecycle to one document
 
-**Status:** rev 12 — spec GREEN at rev 6; implementation reviewed by kreview
-(RED at `33306bd`, `c9f58ee`, `01626a1`, `4c1e9a4`, `10cd51c`); this revision carries rounds 2–6.
+**Status:** rev 13 — spec GREEN at rev 6; implementation reviewed by kreview
+(RED at `33306bd`, `c9f58ee`, `01626a1`, `4c1e9a4`, `10cd51c`, `153377f`); this revision carries rounds 2–7.
 **Supersedes:** the three-artifact governance lifecycle shipped across
 `b1db4b6..f38b31f`.
 **Authority:** `docs/reference/governance-lifecycle-failure-state-enumeration.md`
@@ -425,6 +425,19 @@ next run report `ALREADY_MIGRATED`, so a blank or invented provenance suppresses
 a live legacy source exactly as `[{}]` did — one layer deeper. `occurrence` and
 `note` may legitimately be empty; those two may not.
 
+**Both authoritative readers reject duplicate JSON object keys, at any depth**
+(kreview round 7). Ordinary `json.loads` silently keeps the LAST member, so a
+document carrying two `closed` arrays collapses to whichever came second and
+the conflicting history is gone *before a single validator runs* — every deep
+check downstream then inspects evidence that has already been discarded, and
+the next ordinary write persists the collapsed document and makes the loss
+permanent. The same hazard reaches migration: an audit row with a duplicate
+`governance_txn` or `final_payload` whose last value happens to match the
+archive passes the A/M content proof while the row on disk carries conflicting
+identity. A shared `strict_json` decoder raises on any repeated key. Because it
+raises a `ValueError` subclass, an UNTERMINATED duplicate-key row is still an
+incomplete append: the framing rule outranks the content of a malformed row.
+
 **A decode failure is corruption like any other.** `read_document` catches
 `UnicodeDecodeError` as `StateError`; letting it escape means it is *not* a
 `StateError`, so `health`, `open_items`, `closed_items` and `close_item` all
@@ -583,6 +596,24 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
     document containing one fails closed on read — the same rule the legacy
     validator applies, so semantic emptiness is not legal depending on how it
     arrived.
+
+### Added by kreview round 7 (implementation review of `153377f`)
+
+51. **A duplicate `closed` member cannot hide retained history.** The document
+    fails closed on read AND the write path refuses to overwrite what it could
+    not read — asserted by checking the retained occurrence is still on disk
+    afterwards.
+52. **Duplicate keys fail closed at any depth**: top-level `open`,
+    `schema_version`, and a repeated field inside a nested open entry.
+53. **A duplicate-key audit row aborts migration with no state write**, for
+    conflicting occurrence, signature, and payload evidence, each constructed
+    so the LAST value matches the archive and every downstream check would
+    otherwise pass.
+54. **The framing rule outranks malformed content.** An unterminated
+    duplicate-key row is still a torn append and the surrounding closure still
+    imports.
+55. **`strict_json` is not vacuously strict**: ordinary nested documents parse
+    unchanged; duplicates at top level, nested, and inside arrays all raise.
 
 ## Implementation notes — AC 20 disposition, per family
 

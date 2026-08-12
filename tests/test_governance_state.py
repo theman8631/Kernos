@@ -1131,3 +1131,98 @@ def test_blank_payload_entries_are_refused_on_both_surfaces(tmp_path, payload, l
     with pytest.raises(gs.StateError):
         gs.read_document(d)
     assert gs.health(d)[0] == "unreadable", label
+
+
+# --- kreview round 7: corruption must not collapse before validation ---------
+
+def test_a_duplicate_closed_member_cannot_hide_retained_history(tmp_path):
+    """`json.loads` silently keeps the LAST member, so two `closed` arrays
+    collapse to whichever came second and the conflicting history is gone
+    before a single validator runs — then the next ordinary write persists the
+    collapsed document and the loss is permanent.
+    """
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    history = [_closed(occurrence="occ-history")]
+    p.write_text(
+        '{"schema_version": 1, "migration_notes": [], "open": {}, '
+        f'"closed": {json.dumps(history)}, "closed": []' + "}")
+
+    with pytest.raises(gs.StateError):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable"
+    assert gs.closed_items(d) == []
+    # and the write path must not be able to overwrite what it could not read
+    with pytest.raises(gs.StateError):
+        gs.upsert_item(d, signature=SIG, title="Coverage gap",
+                       condition="modules unowned", payload=["a.py"], now_iso=NOW)
+    assert "occ-history" in p.read_text(), "retained history must survive on disk"
+
+
+@pytest.mark.parametrize("body,label", [
+    ('{"schema_version": 1, "migration_notes": [], "open": {}, "closed": [], '
+     '"open": {}}', "duplicate top-level open"),
+    ('{"schema_version": 1, "schema_version": 1, "migration_notes": [], '
+     '"open": {}, "closed": []}', "duplicate schema_version"),
+    ('{"schema_version": 1, "migration_notes": [], "closed": [], "open": '
+     '{"self-review:coverage-gap": {"occurrence": "o", "occurrence": "o2", '
+     '"signature": "self-review:coverage-gap", "title": "t", "condition": "c", '
+     '"payload": [], "opened_iso": "t1", "last_seen_iso": "t1", '
+     '"human_gated": true}}}', "duplicate field inside a nested open entry"),
+])
+def test_duplicate_keys_fail_closed_at_any_depth(tmp_path, body, label):
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    with pytest.raises(gs.StateError, match="duplicate"):
+        gs.read_document(d)
+    assert gs.health(d)[0] == "unreadable", label
+    assert gs.open_items(d) == []
+    assert gs.closed_items(d) == []
+
+
+@pytest.mark.parametrize("dup,label", [
+    ('"governance_txn": "occ-other", ', "conflicting occurrence identity"),
+    ('"final_payload": ["something-else.py"], ', "conflicting payload evidence"),
+    ('"governance_signature": "some:other-condition", ', "conflicting signature"),
+])
+def test_a_duplicate_key_audit_row_aborts_migration(tmp_path, dup, label):
+    """The last value happens to match the archive, so every downstream check
+    passes — while the row on disk carries conflicting evidence that the A/M
+    content proof never gets to see."""
+    F.write_archive(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    row = json.dumps(F.manifest_row(occurrence=OCC_A, payload=["a.py"]))
+    assert row.startswith("{")
+    (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).write_text(
+        "{" + dup + row[1:] + "\n")
+
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.ABORTED, label
+    assert "corrupt committed history" in " ".join(notes), label
+    assert not gs.state_path(str(tmp_path)).exists(), label
+    assert gs.open_items(str(tmp_path)) == [], "the archive must not be reopened"
+
+
+def test_an_unterminated_duplicate_key_row_is_still_a_torn_append(tmp_path):
+    """The framing rule outranks the content of a malformed row: an incomplete
+    append is incomplete whatever it would have said."""
+    F.write_closure(tmp_path, occurrence=OCC_A, payload=["a.py"])
+    row = json.dumps(F.manifest_row(occurrence="occ-torn", payload=["b.py"]))
+    with (F.resolved_dir(tmp_path) / F.MANIFEST_FILENAME).open("a") as fh:
+        fh.write('{"governance_txn": "dup", ' + row[1:])       # no terminator
+    out, notes = gs.migrate(str(tmp_path), now_iso=NOW)
+    assert out is gs.MigrationOutcome.IMPORTED
+    assert any(n.get("decision") == "dropped_torn_tail" for n in notes)
+    assert len(gs.closed_items(str(tmp_path))) == 1
+
+
+def test_strict_json_rejects_duplicates_but_accepts_ordinary_documents(tmp_path):
+    """The decoder must not become vacuously strict."""
+    assert gs.strict_json('{"a": 1, "b": {"c": [1, 2, {"d": 3}]}}') == \
+        {"a": 1, "b": {"c": [1, 2, {"d": 3}]}}
+    for bad in ('{"a": 1, "a": 2}', '{"b": {"c": 1, "c": 2}}',
+                '[{"x": 1, "x": 2}]'):
+        with pytest.raises(ValueError, match="duplicate"):
+            gs.strict_json(bad)
