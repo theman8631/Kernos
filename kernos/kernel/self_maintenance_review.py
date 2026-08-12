@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kernos.kernel import friction_response
+from kernos.kernel import governance_state
 
 #: Stable condition identity for the durable coverage-gap governance item. The
 #: CONDITION is the signature; the unassigned-module set is the payload, so a
@@ -386,6 +387,7 @@ REVIEW_SLICES: tuple[ReviewSlice, ...] = (
         "whole? Nothing is exempt — the methodology audits itself.",
         ("kernos/kernel/self_maintenance_review.py",
          "kernos/kernel/governance_lanes.py",
+         "kernos/kernel/governance_state.py",
          "kernos/kernel/improvement_review_protocol.py",
          "specs/SELF-MAINTENANCE-REVIEW-V1.md",
          "specs/SELF-MAINTENANCE-REVIEW-V2.md",
@@ -1182,32 +1184,50 @@ async def maybe_run_daily(
         _payload_fp = hashlib.sha256("\n".join(_gaps).encode()).hexdigest()[:16]
 
         # 1. Durable lifecycle — evaluated on EVERY due scan, live condition.
+        #    GOVERNANCE-STATE-DOCUMENT-V1: one atomically-replaced document.
+        governance_state.migrate(data_dir, now_iso=now_iso)
         if _gaps:
-            _ok = friction_response.upsert_governance_item(
-                data_dir,
-                signature=COVERAGE_GAP_SIGNATURE,
-                title="Self-review functional map coverage gap",
-                condition=(
-                    "`unassigned_modules(REVIEW_SLICES)` is non-empty: these "
-                    "modules belong to no element of the functional map and are "
-                    "therefore structurally ineligible for daily self-review. "
-                    "Resolves when every module below is owned by an element."
-                ),
-                payload=_gaps,
-                now_iso=now_iso,
-            )
-            # Acknowledge persistence separately from surfacing.
-            state["governance_persisted_fingerprint"] = _payload_fp if _ok else ""
-        else:
-            # Condition genuinely cleared → close + shadow-archive.
-            if state.get("governance_persisted_fingerprint") or \
-                    friction_response.open_governance_items(data_dir):
-                friction_response.close_governance_item(
+            try:
+                governance_state.upsert_item(
                     data_dir,
                     signature=COVERAGE_GAP_SIGNATURE,
+                    title="Self-review functional map coverage gap",
+                    condition=(
+                        "`unassigned_modules(REVIEW_SLICES)` is non-empty: these "
+                        "modules belong to no element of the functional map and "
+                        "are therefore structurally ineligible for daily "
+                        "self-review. Resolves when every module below is owned "
+                        "by an element."
+                    ),
+                    payload=_gaps,
+                    now_iso=now_iso,
+                )
+                _ok = True
+            except governance_state.StateError:
+                logger.warning("GOVERNANCE_UPSERT_FAILED", exc_info=True)
+                _ok = False
+            # Acknowledge persistence separately from surfacing: a landed
+            # whisper must never imply the finding was recorded.
+            state["governance_persisted_fingerprint"] = _payload_fp if _ok else ""
+        else:
+            # Condition genuinely cleared. COMPARE-AND-CLOSE: close only the
+            # occurrence we actually observed, so an ambiguous retry cannot
+            # absorb a recurrence opened in the meantime.
+            for _item in governance_state.open_items(data_dir):
+                if _item.signature != COVERAGE_GAP_SIGNATURE:
+                    continue
+                _res = governance_state.close_item(
+                    data_dir,
+                    signature=COVERAGE_GAP_SIGNATURE,
+                    expected_occurrence=_item.occurrence,
                     now_iso=now_iso,
                     resolving_condition="unassigned_modules(REVIEW_SLICES) is empty",
                 )
+                if _res is governance_state.CloseResult.OCCURRENCE_MISMATCH:
+                    # Something newer is open; do nothing clever this pass.
+                    # The next scan re-evaluates the real condition.
+                    logger.info("GOVERNANCE_CLOSE_SUPERSEDED signature=%s",
+                                COVERAGE_GAP_SIGNATURE)
             state["governance_persisted_fingerprint"] = ""
 
         # 2. Surfacing — anti-nag, still once per structural shape change.

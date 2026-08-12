@@ -3950,16 +3950,34 @@ class MessageHandler:
         out.append("\n=== OPEN GOVERNANCE ITEMS ===\n")
         out.append("(human-gated; persist until the condition clears)\n\n")
         try:
-            from kernos.kernel.friction_response import open_governance_items
-            items = open_governance_items(data_dir)
-            if not items:
+            from kernos.kernel import governance_state
+            # An empty queue and an unreadable one must never render alike:
+            # this listing IS the recovery path for a missed one-shot whisper.
+            status, detail = governance_state.health(data_dir)
+            if status == "unreadable":
+                out.append(f"!! QUEUE UNREADABLE — items may be open: {detail}\n")
+            elif status == "unmigrated":
+                out.append("!! legacy governance artifacts not yet imported "
+                           f"(runs on the next self-review): {detail}\n")
+
+            items = governance_state.open_items(data_dir)
+            if not items and status == "ok":
                 out.append("(none open)\n")
             for it in items:
-                out.append(f"- {it['signature']} (opened {it['opened_iso']}, "
-                           f"last seen {it['last_seen_iso']}, "
-                           f"human-gated={it['human_gated']})\n")
-                for p in it["payload"][:25]:
+                out.append(f"- {it.signature} [{it.occurrence}] "
+                           f"(opened {it.opened_iso}, "
+                           f"last seen {it.last_seen_iso}, "
+                           f"human-gated={it.human_gated})\n")
+                for p in it.payload[:25]:
                     out.append(f"    · {p}\n")
+
+            closed = governance_state.closed_items(data_dir)
+            if closed:
+                out.append(f"\nclosed history ({len(closed)} retained):\n")
+                for c in closed[-5:]:
+                    out.append(f"- {c['signature']} [{c['occurrence']}] "
+                               f"closed {c.get('closed_iso', '')} — "
+                               f"{c.get('resolving_condition', '')}\n")
         except Exception as exc:
             out.append(f"(governance items unavailable: {exc})\n")
 

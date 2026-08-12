@@ -13,6 +13,7 @@ import os
 import pytest
 
 from kernos.kernel import friction_response as fr
+from kernos.kernel import governance_state as gs
 from kernos.kernel import self_maintenance_review as smr
 from kernos.kernel.governance_lanes import GOVERNANCE_LANES
 from kernos.messages.handler import MessageHandler
@@ -52,18 +53,70 @@ def test_reflects_a_live_flip_not_a_static_echo(tmp_path, monkeypatch):
     assert state(on) == "ON"
 
 
+def _open(d, payload=("kernos/x.py",), now="2026-08-04T00:00:00+00:00"):
+    return gs.upsert_item(
+        d, signature=smr.COVERAGE_GAP_SIGNATURE, title="Coverage gap",
+        condition="modules unowned", payload=list(payload), now_iso=now)
+
+
 def test_open_governance_queue_renders_with_gate_intact(tmp_path, monkeypatch):
     d = str(tmp_path)
-    assert fr.upsert_governance_item(
-        d, signature=smr.COVERAGE_GAP_SIGNATURE, title="Coverage gap",
-        condition="modules unowned", payload=["kernos/x.py"],
-        now_iso="2026-08-04T00:00:00+00:00")
+    occ = _open(d)
 
     out = _render(monkeypatch, d)
     assert "=== OPEN GOVERNANCE ITEMS ===" in out
     assert smr.COVERAGE_GAP_SIGNATURE in out
+    assert occ in out, "the occurrence is what a compare-and-close is quoted against"
     assert "human-gated=True" in out, "the gate must survive to the operator surface"
     assert "kernos/x.py" in out
+
+
+def test_unreadable_queue_never_renders_as_empty(tmp_path, monkeypatch):
+    """This listing is the recovery path for a missed one-shot whisper, so
+    "(none open)" and "the queue cannot be read" must be distinguishable."""
+    d = str(tmp_path)
+    p = gs.state_path(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{not json")
+
+    out = _render(monkeypatch, d)
+    assert "(none open)" not in out
+    assert "QUEUE UNREADABLE" in out
+
+
+def test_unmigrated_legacy_items_are_not_reported_as_an_empty_queue(tmp_path, monkeypatch):
+    """Before migration runs the document is legitimately empty while legacy
+    artifacts still hold live items — reporting "(none open)" would hide them."""
+    d = str(tmp_path)
+    assert fr.upsert_governance_item(
+        d, signature=smr.COVERAGE_GAP_SIGNATURE, title="Coverage gap",
+        condition="modules unowned", payload=["kernos/legacy.py"],
+        now_iso="2026-08-04T00:00:00+00:00")
+
+    out = _render(monkeypatch, d)
+    assert "(none open)" not in out
+    assert "not yet imported" in out
+
+    # and once migrated the warning clears and the item renders normally
+    gs.migrate(d, now_iso="2026-08-12T00:00:00+00:00")
+    after = _render(monkeypatch, d)
+    assert "not yet imported" not in after
+    assert "kernos/legacy.py" in after
+
+
+def test_closed_history_is_visible_on_the_operator_surface(tmp_path, monkeypatch):
+    """Closure is the answer to "did the thing I was told about get fixed?"."""
+    d = str(tmp_path)
+    occ = _open(d)
+    assert gs.close_item(
+        d, signature=smr.COVERAGE_GAP_SIGNATURE, expected_occurrence=occ,
+        now_iso="2026-08-05T00:00:00+00:00",
+        resolving_condition="unassigned_modules is empty") is gs.CloseResult.CLOSED
+
+    out = _render(monkeypatch, d)
+    assert "(none open)" in out
+    assert "closed history (1 retained)" in out
+    assert "unassigned_modules is empty" in out
 
 
 def test_empty_queue_renders_cleanly(tmp_path, monkeypatch):

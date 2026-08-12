@@ -325,6 +325,61 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
 26. **Document size and write/lock latency are observable**, and the over-limit
     path fails closed rather than truncating.
 
+## Implementation notes — AC 20 disposition, per family
+
+AC 20 forbids a blanket "unrepresentable" claim. Each family is dispositioned
+individually below, with the test that carries the claim. Families marked
+*unrepresentable* all rest on one physical fact — closure no longer spans a
+source file, a derived archive path and an append-only audit log — and that
+fact is asserted directly by
+`test_no_governance_operation_creates_a_second_artifact`, which enumerates every
+file the module writes across two open/close cycles and requires it to be
+exactly `{state.json, state.json.lock}`. Without that test the word
+"unrepresentable" would be prose.
+
+| # | Family | Disposition | Carried by |
+|---|--------|-------------|-----------|
+| 1 | Move-first closure loses the recovery surface | **Unrepresentable** — nothing is moved and no path is derived from state; the item and its closure are two fields of one replaced document | `test_no_governance_operation_creates_a_second_artifact` |
+| 2 | Audit-first closure records an effect that never happened | **Unrepresentable** — the closure and its audit are the *same* write, so no ordering between them exists to get wrong | as above; plus `test_over_limit_write_refuses_and_keeps_prior_state` (a refused write records nothing) |
+| 3 | A compensating move is not a transaction | **Unrepresentable** — there is no partial state to compensate. A failed replace leaves the previous document byte-identical | `test_over_limit_write_refuses_and_keeps_prior_state` asserts the prior bytes survive |
+| 4 | Loss-free copy is not idempotent recovery | **Guarded** — compare-and-close. Constructed, not assumed | `test_ambiguous_retry_acknowledges_A_and_leaves_recurrence_B` |
+| 5 | Filename existence and boolean audit lookup are not phase evidence | **Unrepresentable** — no filename encodes state and no lookup is boolean; the result is a five-valued `CloseResult` over persisted occurrence identity | `test_close_result_precedence` |
+| 6 | Persisting occurrence identity does not remove ambiguous completion | **Guarded** — ambiguity survives only in the *migration* window, where it aborts rather than guessing | `test_case6_aborts_for_every_variant` (4 variants), `test_case8_identical_aborts_because_sameness_is_not_proof`, `test_case8_same_occurrence_aborts_even_when_payload_differs` |
+| 7 | Fail-closed can become permanently stuck, and references must resolve | **Addressed** — every fail-closed state has a recovery transition: `STATE_ERROR` is retryable, an over-limit refusal succeeds once the limit is right, and an aborted migration leaves legacy authoritative for the next run | `test_over_limit_write_refuses_and_keeps_prior_state` (refuse → succeed), `test_case6_aborts_for_every_variant` (legacy left intact) |
+| 8 | Atomic replacement is not a shared transaction or a trust boundary | **Guarded** — the document lock spans the whole read-decide-write, and candidate validation is the trust boundary on the replacing value | `test_candidate_validation_refuses_to_drop_unrelated_open`, `test_candidate_validation_refuses_to_drop_closed_history` |
+| 9 | Locking the audit does not lock the lifecycle | **Unrepresentable** — there is no second lifecycle. One lock, one document, one write | `test_no_governance_operation_creates_a_second_artifact` |
+
+Two implementation findings worth recording, because both were mis-specified
+before a test constructed them:
+
+1. **Recurrence is decided by occurrence identity, never by field comparison.**
+   A rev-6 draft compared lifecycle fields between the legacy source (S) and the
+   archived snapshot (A). That is wrong twice over. Semantically, the legacy
+   upsert *preserves* the occurrence when it merely re-observes a live
+   condition, so a differing payload or last-seen is equally explained by "the
+   same occurrence was touched while its retirement was pending" — importing
+   that as a recurrence would create a second entry carrying an occurrence id
+   already recorded as closed. Mechanically, S and A arrive through two
+   *different* parsers that normalise `title` differently and neither of which
+   recovers `condition`, so genuinely identical records compared unequal and the
+   case 8-identical abort was unreachable. Both are pinned by
+   `test_recurrence_is_decided_by_occurrence_not_by_field_comparison`.
+2. **A migration that finds nothing must still leave a marker.** An empty
+   document cannot distinguish "migrated, found nothing" from "never migrated",
+   so without a `migration_notes` entry every run would re-scan legacy files and
+   could resurrect artifacts a later close had removed
+   (`test_fresh_migration_records_that_it_ran`).
+
+The `/dump` reader carries a third: `open_items` degrades a corrupt document to
+an empty list so a failed read can never break the chat path, but on the
+*recovery* surface that degradation is the defect — "(none open)" and "the queue
+is unreadable" must not render identically. `governance_state.health()` gives
+the operator surface the distinction, including the un-migrated case where the
+document is legitimately empty while legacy artifacts still hold live items
+(`test_unreadable_queue_never_renders_as_empty`,
+`test_unmigrated_legacy_items_are_not_reported_as_an_empty_queue`, both proved
+by mutation).
+
 ## Settled by kreview round 1
 
 - **Single document is the right primitive.** Closure is genuinely one atomic

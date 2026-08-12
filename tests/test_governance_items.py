@@ -11,6 +11,7 @@ import json
 import pytest
 
 from kernos.kernel import friction_response as fr
+from kernos.kernel import governance_state as gs
 from kernos.kernel import self_maintenance_review as smr
 
 
@@ -825,8 +826,8 @@ async def test_map_repair_closes_the_item_despite_unchanged_shape(
     monkeypatch.setattr(smr, "unassigned_modules", lambda *a, **k: ["kernos/x.py"])
     await smr.maybe_run_daily(data_dir=d, now_iso="2026-08-01T00:00:00+00:00",
                               consult_fn=_consult, whisper_fn=_ok)
-    items = fr.open_governance_items(d)
-    assert len(items) == 1 and items[0]["payload"] == ["kernos/x.py"]
+    items = gs.open_items(d)
+    assert len(items) == 1 and list(items[0].payload) == ["kernos/x.py"]
     fp_before = smr.load_state(d)["shape_fingerprint"]
 
     # 2. the map is repaired — ownership changes, module paths do NOT
@@ -837,7 +838,7 @@ async def test_map_repair_closes_the_item_despite_unchanged_shape(
 
     assert smr.load_state(d)["shape_fingerprint"] == fp_before, \
         "precondition: the repair must NOT change the shape fingerprint"
-    assert fr.open_governance_items(d) == [], \
+    assert gs.open_items(d) == [], \
         "item must close on the live condition, not on the shape fingerprint"
 
 
@@ -853,7 +854,9 @@ async def test_failed_durable_write_stays_retryable(tmp_path, monkeypatch):
     async def _ok(_t, _r): pass
 
     monkeypatch.setattr(smr, "unassigned_modules", lambda *a, **k: ["kernos/x.py"])
-    monkeypatch.setattr(fr, "upsert_governance_item", lambda *a, **k: False)
+    def _boom(*a, **k):
+        raise gs.StateError("injected durable-write failure")
+    monkeypatch.setattr(gs, "upsert_item", _boom)
     await smr.maybe_run_daily(data_dir=d, now_iso="2026-08-01T00:00:00+00:00",
                               consult_fn=_consult, whisper_fn=_ok)
     # the whisper succeeded, but persistence did NOT — so persistence state is
