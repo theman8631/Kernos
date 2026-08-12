@@ -13,6 +13,7 @@ import os
 import pytest
 
 from kernos.kernel import governance_state as gs
+from tests import _legacy_governance_fixtures as F
 from kernos.kernel import self_maintenance_review as smr
 from kernos.kernel.governance_lanes import GOVERNANCE_LANES
 from kernos.messages.handler import MessageHandler
@@ -87,22 +88,16 @@ def test_unmigrated_legacy_items_are_not_reported_as_an_empty_queue(tmp_path, mo
     """Before migration runs the document is legitimately empty while legacy
     artifacts still hold live items — reporting "(none open)" would hide them."""
     d = str(tmp_path)
-    # Frozen parent-format fixture; the writer that produced this shape was
-    # removed once nothing in production called it (kreview round 2).
-    fdir = tmp_path / "diagnostics" / "friction"
-    fdir.mkdir(parents=True)
-    (fdir / "GOVERNANCE_self_review_coverage_gap_04ade3df6e6b.md").write_text(
-        "# GOVERNANCE: Coverage gap\n\nClass: governance\n"
-        f"Signature: {smr.COVERAGE_GAP_SIGNATURE}\nOccurrence: occ-legacy\n"
-        "Human-gated: true\nOpened: 2026-08-04T00:00:00+00:00\n"
-        "Last-seen: 2026-08-04T00:00:00+00:00\n\n## Payload\n- kernos/legacy.py\n")
+    # A byte-exact parent artifact, not an approximation of one.
+    F.write_open_item(tmp_path, payload=["kernos/legacy.py"])
 
     out = _render(monkeypatch, d)
     assert "(none open)" not in out
     assert "not yet imported" in out
 
     # and once migrated the warning clears and the item renders normally
-    gs.migrate(d, now_iso="2026-08-12T00:00:00+00:00")
+    assert gs.migrate(d, now_iso="2026-08-12T00:00:00+00:00")[0] \
+        is gs.MigrationOutcome.IMPORTED
     after = _render(monkeypatch, d)
     assert "not yet imported" not in after
     assert "kernos/legacy.py" in after

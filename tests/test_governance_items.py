@@ -22,6 +22,7 @@ import pytest
 from kernos.kernel import friction_response as fr
 from kernos.kernel import governance_state as gs
 from kernos.kernel import self_maintenance_review as smr
+from tests import _legacy_governance_fixtures as F
 
 
 # --- classification boundary: fails CLOSED -----------------------------------
@@ -126,12 +127,6 @@ async def test_failed_durable_write_stays_retryable(tmp_path, monkeypatch):
 
 # --- an aborted migration binds the CALLER, not just migrate() ---------------
 
-#: Frozen parent-format names; see test_governance_state.py for why these are
-#: literals rather than calls into a writer that no longer exists.
-LEGACY_FILENAME = "GOVERNANCE_self_review_coverage_gap_04ade3df6e6b.md"
-LEGACY_MANIFEST = "_governance_manifest.jsonl"
-
-
 @pytest.mark.asyncio
 async def test_aborted_migration_leaves_governance_state_untouched(tmp_path, monkeypatch):
     """kreview round 2, P0-1 — asserted through the production caller.
@@ -145,22 +140,10 @@ async def test_aborted_migration_leaves_governance_state_untouched(tmp_path, mon
     monkeypatch.setenv("KERNOS_SELF_MAINTENANCE_REVIEW", "1")
     d = str(tmp_path)
 
-    # case 6: an open item plus an audit row with no archive — always aborts
-    fdir = tmp_path / "diagnostics" / "friction"
-    fdir.mkdir(parents=True)
-    (fdir / LEGACY_FILENAME).write_text(
-        "# GOVERNANCE: Coverage gap\n\nClass: governance\n"
-        f"Signature: {smr.COVERAGE_GAP_SIGNATURE}\nOccurrence: occ-legacy\n"
-        "Human-gated: true\nOpened: 2026-07-01T00:00:00+00:00\n"
-        "Last-seen: 2026-07-01T00:00:00+00:00\n\n## Payload\n- legacy.py\n")
-    rdir = tmp_path / "diagnostics" / "friction_resolved"
-    rdir.mkdir(parents=True)
-    (rdir / LEGACY_MANIFEST).write_text(json.dumps({
-        "governance_txn": "occ-legacy",
-        "governance_signature": smr.COVERAGE_GAP_SIGNATURE,
-        "opened_iso": "2026-07-01T00:00:00+00:00",
-        "closed_iso": "2026-07-05T00:00:00+00:00",
-        "resolving_condition": "cleared", "final_payload": ["legacy.py"]}) + "\n")
+    # case 6: an open item plus an audit row with no archive — always aborts.
+    # Byte-exact parent artifacts, not approximations of them.
+    F.write_open_item(tmp_path, payload=["legacy.py"])
+    F.append_manifest(tmp_path, F.manifest_row(payload=["legacy.py"]))
 
     assert gs.migrate(d, now_iso="2026-08-01T00:00:00+00:00")[0] \
         is gs.MigrationOutcome.ABORTED, "precondition: this state aborts"
@@ -179,4 +162,5 @@ async def test_aborted_migration_leaves_governance_state_untouched(tmp_path, mon
         "no governance document may be created while migration is unresolved"
     assert smr.load_state(d)["governance_persisted_fingerprint"] == "", \
         "nothing was persisted, so nothing may be acknowledged"
-    assert (fdir / LEGACY_FILENAME).is_file(), "legacy stays authoritative"
+    assert (F.friction_dir(tmp_path) / F.SOURCE_FILENAME).is_file(), \
+        "legacy stays authoritative"

@@ -1,14 +1,18 @@
 # GOVERNANCE-STATE-DOCUMENT-V1 — collapse the governance lifecycle to one document
 
-**Status:** Draft rev 6 (kreview rounds 1–5; case 6 aborts in v1 — one outcome, no 'either')
+**Status:** rev 9 — spec GREEN at rev 6; implementation reviewed by kreview
+(RED at `33306bd`, RED at `c9f58ee`); this revision carries rounds 2 and 3.
 **Supersedes:** the three-artifact governance lifecycle shipped across
 `b1db4b6..f38b31f`.
 **Authority:** `docs/reference/governance-lifecycle-failure-state-enumeration.md`
 — its 19 acceptance criteria are this spec's acceptance criteria, not a
 restatement of my own assumptions.
-**Modules:** `kernos/kernel/friction_response.py`,
+**Modules:** `kernos/kernel/governance_state.py` (new),
 `kernos/kernel/self_maintenance_review.py`, `kernos/messages/handler.py`
-(`_handle_dump`), `tests/test_governance_items.py`, `tests/test_handler.py`.
+(`_handle_dump`), `kernos/kernel/friction_response.py` (the three-artifact
+governance writer removed from it), `tests/test_governance_state.py`,
+`tests/test_governance_items.py`, `tests/test_dump_governance_sections.py`,
+`tests/_legacy_governance_fixtures.py` + `tests/fixtures/legacy_governance/`.
 
 ## Why
 
@@ -315,6 +319,30 @@ the document written on that basis makes the artifact invisible forever. So
 **every discovered governance artifact parses and validates, or the entire
 migration aborts.**
 
+**Completeness is proved, not inferred from two fields.** "Has a signature and
+an opened stamp" is not completeness (kreview round 3). A truncated document
+that retains those two imports with an empty payload, an empty condition, and —
+worse — `human_gated=False`, because the absent marker parses the same as a
+negative one. That makes a partial artifact authoritative *and* silently strips
+the gate from the finding the gate exists to protect. So every field the parent
+always wrote is required: the `Class: governance` line, the title, an
+**affirmative** `Human-gated: true`, both timestamps, and both `## Condition`
+and `## Payload` sections with content. Parsing is by section: the earlier
+reader collected every `- ` line in the document as payload and hard-coded
+`condition` to empty, so a complete parent source always lost its condition on
+import.
+
+**An archive and its audit row must agree on CONTENT, not merely on identity.**
+The parent read the payload, copied the source, then wrote the row — with no
+lock on the source across those steps. A re-detection landing mid-close
+therefore yields an archive holding the *new* payload and a row holding the
+pre-close one. Matching occurrence and signature cannot see that: the pair is
+internally inconsistent, and committing it records the re-detected finding as
+closed and leaves nothing open — the lost-recurrence race, encoded in the
+artifacts themselves. The row must carry a complete closure (`opened_iso`,
+`closed_iso`, `resolving_condition`, `final_payload`) and agree with its archive
+on the opened stamp and the payload, or **abort**.
+
 **Pre-identity records derive the parent's own occurrence id.** Occurrence ids
 were not always persisted. An empty occurrence must never be committed —
 compare-and-close and the closed-history relation are both keyed on it — so an
@@ -345,6 +373,24 @@ one deep validator covering entry shape, key/signature agreement, required
 non-empty strings, payload element types, and occurrence uniqueness across
 `open` ∪ `closed`. A write must not be able to introduce a document its own
 reader would reject.
+
+Every field a reader dereferences without a default is required, including
+`title`, `condition`, `resolving_condition` and the `human_gated` marker
+(kreview round 3) — defaulting them in the validator and then requiring them at
+the read is precisely how a "valid" document still raised `KeyError` from
+outside the `StateError` path. **Migration notes are validated, not merely
+counted**: a note is the only evidence that migration ran, and `[{}]` satisfying
+a shape check is enough to make the next run report `ALREADY_MIGRATED` and
+suppress a live legacy source forever. The note bound is enforced on read as
+well as on write.
+
+**A decode failure is corruption like any other.** `read_document` catches
+`UnicodeDecodeError` as `StateError`; letting it escape means it is *not* a
+`StateError`, so `health`, `open_items`, `closed_items` and `close_item` all
+raise instead of degrading — every fail-closed surface bypassed at once. The
+same holds for the migration readers, including the audit manifests, where
+`errors="replace"` would turn an invalid byte inside a valid JSON string into
+U+FFFD and persist the damage as if it were the committed text.
 
 ## Acceptance criteria
 
@@ -416,6 +462,38 @@ acceptance criteria" are adopted verbatim and in full. Additionally:
     `maybe_run_daily` over an aborting parent state creates no `state.json`,
     acknowledges nothing, and leaves the legacy artifacts intact.
 
+### Added by kreview round 3 (implementation review of `c9f58ee`)
+
+34. **Fixtures are byte-exact parent artifacts.** `tests/fixtures/legacy_governance/`
+    holds an open item, an archive, and an audit row copied verbatim from the
+    parent writer at `f38b31f`; every constructed state varies one field off
+    those goldens. `test_the_golden_artifacts_are_accepted_unmodified` pins the
+    base case, without which every "this state aborts" assertion could pass for
+    the wrong reason. Each hand-rolled fixture the goldens replaced was missing
+    something real artifacts always carry, which is how rounds 1 and 2 shipped
+    defects past a green suite.
+35. **An archive and its row must agree on content.** Constructed: archive
+    payload `[redetected.py]` with a same-occurrence, same-signature row
+    carrying `[pre-close.py]` **aborts**. So does disagreement on the opened
+    stamp, and a row missing `closed_iso`, `resolving_condition`, or
+    `final_payload`.
+36. **Truncated legacy documents abort.** A document that RETAINS signature and
+    opened stamp but lost a later section aborts, asserted for truncation after
+    `Last-seen:`, after `## Condition`, and after `## Payload` (heading present,
+    section empty), in both directories. A non-`governance` class aborts.
+37. **The human gate is affirmative or absent-means-abort.** `Human-gated: false`
+    and a missing marker both abort at the reader; neither may import.
+38. **The condition survives import.** A complete parent source imports with its
+    `## Condition` text intact, parsed by section.
+39. **Lossy decoding is not repair.** A non-UTF-8 audit manifest aborts rather
+    than persisting U+FFFD into `resolving_condition`; a non-UTF-8 `state.json`
+    fails closed on `read_document`, `health`, `open_items`, `closed_items` and
+    `close_item`.
+40. **Migration notes are validated.** `[{}]`, a note with no decision, a
+    non-string decision, and more notes than the bound all fail closed — and the
+    live legacy source they would have suppressed still aborts loudly instead of
+    being declared already-migrated.
+
 ## Implementation notes — AC 20 disposition, per family
 
 AC 20 forbids a blanket "unrepresentable" claim. Each family is dispositioned
@@ -435,7 +513,7 @@ exactly `{state.json, state.json.lock}`. Without that test the word
 | 3 | A compensating move is not a transaction | **Unrepresentable** — there is no partial state to compensate. A failed replace leaves the previous document byte-identical | `test_over_limit_write_refuses_and_keeps_prior_state` asserts the prior bytes survive |
 | 4 | Loss-free copy is not idempotent recovery | **Guarded** — compare-and-close. Constructed, not assumed | `test_ambiguous_retry_acknowledges_A_and_leaves_recurrence_B` |
 | 5 | Filename existence and boolean audit lookup are not phase evidence | **Unrepresentable** — no filename encodes state and no lookup is boolean; the result is a five-valued `CloseResult` over persisted occurrence identity | `test_close_result_precedence` |
-| 6 | Persisting occurrence identity does not remove ambiguous completion | **Guarded** — ambiguity survives only in the *migration* window, where it aborts rather than guessing | `test_case6_aborts_for_every_variant` (4 variants), `test_case8_identical_aborts_because_sameness_is_not_proof`, `test_case8_same_occurrence_aborts_even_when_payload_differs` |
+| 6 | Persisting occurrence identity does not remove ambiguous completion | **Guarded** — ambiguity survives only in the *migration* window, where it aborts rather than guessing | `test_case6_aborts_for_every_variant` (4 variants), `test_case8_identical_aborts_because_sameness_is_not_proof`, `test_recurrence_is_decided_by_occurrence_not_by_field_comparison` (which carries the differing-payload schedule) |
 | 7 | Fail-closed can become permanently stuck, and references must resolve | **Addressed** — every fail-closed state has a recovery transition: `STATE_ERROR` is retryable, an over-limit refusal succeeds once the limit is right, and an aborted migration leaves legacy authoritative for the next run | `test_over_limit_write_refuses_and_keeps_prior_state` (refuse → succeed), `test_case6_aborts_for_every_variant` (legacy left intact) |
 | 8 | Atomic replacement is not a shared transaction or a trust boundary | **Guarded** — the document lock spans the whole read-decide-write, and candidate validation is the trust boundary on the replacing value | `test_candidate_validation_refuses_to_drop_unrelated_open`, `test_candidate_validation_refuses_to_drop_closed_history` |
 | 9 | Locking the audit does not lock the lifecycle | **Unrepresentable** — there is no second lifecycle. One lock, one document, one write | `test_no_governance_operation_creates_a_second_artifact` |

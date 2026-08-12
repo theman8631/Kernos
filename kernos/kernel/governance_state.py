@@ -175,7 +175,10 @@ def read_document(data_dir: str) -> dict:
         return _empty_document()
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # A decode failure is corruption like any other. Letting UnicodeDecodeError
+        # escape means it is NOT a StateError, so health/open_items/close_item all
+        # raise instead of degrading — every fail-closed surface bypassed at once.
         raise StateError(f"governance state unreadable: {exc}") from exc
     try:
         doc = json.loads(raw)
@@ -195,8 +198,19 @@ def read_document(data_dir: str) -> dict:
     return doc
 
 
-_OPEN_REQUIRED = ("occurrence", "signature", "opened_iso", "last_seen_iso")
-_CLOSED_REQUIRED = ("occurrence", "signature", "opened_iso", "closed_iso")
+#: Every field a reader dereferences without a default. `title` and `condition`
+#: are here because `open_items` reads them positionally: defaulting them in the
+#: validator and then requiring them at the read is how a "valid" document still
+#: raised KeyError from outside the StateError path.
+_OPEN_REQUIRED = ("occurrence", "signature", "opened_iso", "last_seen_iso",
+                  "title", "condition")
+_CLOSED_REQUIRED = ("occurrence", "signature", "opened_iso", "closed_iso",
+                    "title", "resolving_condition")
+#: A migration note is the only evidence that migration ran. `[{}]` satisfies a
+#: shape check, and its mere presence makes the next run report ALREADY_MIGRATED
+#: — which suppresses a live legacy source forever. So notes are validated, not
+#: merely counted.
+_NOTE_REQUIRED = ("from_format", "decision", "occurrence", "note")
 
 
 def _validate_entries(doc: dict) -> None:
@@ -213,8 +227,10 @@ def _validate_entries(doc: dict) -> None:
         if not isinstance(entry, dict):
             raise StateError(f"open entry {key!r} is not an object")
         for field in _OPEN_REQUIRED:
-            if not isinstance(entry.get(field), str) or not entry[field]:
+            if not isinstance(entry.get(field), str):
                 raise StateError(f"open entry {key!r} has no usable {field!r}")
+            if field != "condition" and not entry[field]:
+                raise StateError(f"open entry {key!r} has an empty {field!r}")
         if entry["signature"] != key:
             raise StateError(
                 f"open entry {key!r} disagrees with its signature "
@@ -228,28 +244,33 @@ def _validate_entries(doc: dict) -> None:
         if not isinstance(entry, dict):
             raise StateError(f"closed entry {i} is not an object")
         for field in _CLOSED_REQUIRED:
-            if not isinstance(entry.get(field), str) or not entry[field]:
+            if not isinstance(entry.get(field), str):
                 raise StateError(f"closed entry {i} has no usable {field!r}")
+            if field != "resolving_condition" and not entry[field]:
+                raise StateError(f"closed entry {i} has an empty {field!r}")
         _validate_common(entry, f"closed entry {i}")
-        if not isinstance(entry.get("resolving_condition", ""), str):
-            raise StateError(f"closed entry {i} has a non-string resolving_condition")
         if entry["occurrence"] in seen:
             raise StateError(f"duplicate occurrence {entry['occurrence']!r}")
         seen.add(entry["occurrence"])
 
+    if len(doc["migration_notes"]) > MAX_MIGRATION_NOTES:
+        raise StateError("migration_notes exceeds its bound")
     for i, note in enumerate(doc["migration_notes"]):
         if not isinstance(note, dict):
             raise StateError(f"migration note {i} is not an object")
+        for field in _NOTE_REQUIRED:
+            if not isinstance(note.get(field), str):
+                raise StateError(f"migration note {i} has no usable {field!r}")
+        if not note["decision"]:
+            raise StateError(f"migration note {i} records no decision")
 
 
 def _validate_common(entry: dict, label: str) -> None:
     payload = entry.get("payload")
     if not isinstance(payload, list) or any(not isinstance(p, str) for p in payload):
         raise StateError(f"{label} has a malformed payload")
-    if not isinstance(entry.get("title", ""), str):
-        raise StateError(f"{label} has a non-string title")
-    if not isinstance(entry.get("human_gated", True), bool):
-        raise StateError(f"{label} has a non-boolean human_gated")
+    if not isinstance(entry.get("human_gated"), bool):
+        raise StateError(f"{label} has no usable human_gated marker")
 
 
 def _validate_candidate(previous: dict, candidate: dict, *, signature: str) -> None:
@@ -636,6 +657,35 @@ def _pair_closures(archives: dict, rows: list) -> tuple:
                 f"audit row for occurrence {occ!r} claims signature {sig!r} but "
                 f"its archive carries {A['signature']!r}; refusing to fabricate a "
                 f"closure association between unrelated records")
+
+        for field in ("opened_iso", "closed_iso", "resolving_condition"):
+            if not isinstance(m.get(field), str) or not m[field]:
+                return [], (
+                    f"audit row for occurrence {occ!r} has no usable {field!r}; "
+                    f"an incomplete row cannot furnish a complete closed record")
+        payload = m.get("final_payload")
+        if not isinstance(payload, list) or any(not isinstance(x, str) for x in payload):
+            return [], (
+                f"audit row for occurrence {occ!r} has no usable final_payload")
+
+        # CONTENT agreement, not merely identity agreement. The parent read the
+        # payload, then copied the source, then wrote the row — with no lock on
+        # the source across those steps. So a re-detection landing mid-close
+        # produces an archive holding the NEW payload and a row holding the
+        # pre-close one. Matching occurrence and signature cannot see that: the
+        # pair is internally inconsistent, and committing it would record the
+        # re-detected finding as closed and leave nothing open. That is the
+        # lost-recurrence race, encoded in the artifacts themselves.
+        if m["opened_iso"] != A["opened_iso"]:
+            return [], (
+                f"occurrence {occ!r}: audit row opened {m['opened_iso']!r} but its "
+                f"archive opened {A['opened_iso']!r}; the pair is inconsistent")
+        if list(payload) != list(A["payload"]):
+            return [], (
+                f"occurrence {occ!r}: audit row committed payload {payload!r} but "
+                f"its archive holds {A['payload']!r} — the archive was rewritten "
+                f"between the read and the commit, so this closure cannot be "
+                f"proved to describe the item it closed")
         pairs.append((A, m))
     return pairs, ""
 
@@ -662,10 +712,15 @@ def _strict_read_manifests(rdir: Path) -> tuple:
         if not path.is_file():
             continue
         try:
-            lines = [ln for ln in path.read_text(errors="replace").splitlines()
+            # STRICT. `errors="replace"` turns an invalid byte inside an
+            # otherwise-valid JSON string into U+FFFD, so a corrupt audit
+            # parses cleanly and its damage is persisted into the document as
+            # if it were the committed text.
+            lines = [ln for ln in path.read_text(encoding="utf-8",
+                                                 errors="strict").splitlines()
                      if ln.strip()]
-        except OSError as exc:
-            return [], False, f"{name} unreadable: {exc}"
+        except (OSError, UnicodeDecodeError) as exc:
+            return [], False, f"{name} is unreadable: {exc}"
         for i, line in enumerate(lines):
             try:
                 row = json.loads(line)
@@ -749,48 +804,104 @@ def _strict_read_sources(fdir: Path) -> tuple:
 
 
 def _validated_legacy_record(body: str, name: str) -> tuple:
-    """Parse one legacy document and prove it usable. ``(record, error)``.
+    """Parse one legacy document and prove it COMPLETE. ``(record, error)``.
+
+    "Has a signature and an opened stamp" is not completeness. A truncated
+    document that happens to retain those two imports with an empty payload, an
+    empty condition, and — worse — ``human_gated=False``, because the absent
+    marker parses as not-true. That makes a partial artifact authoritative AND
+    quietly drops the human gate, so every field the parent always writes is
+    required here: the class line, the title, the gate marker, both timestamps,
+    and both section headings.
 
     Occurrence ids were not always persisted. For an otherwise complete pre-id
     record the id is DERIVED with the parent's own derivation —
-    ``sha256(signature|opened_iso)[:16]`` — so it matches what the parent would
-    have minted. An empty occurrence is never committed: compare-and-close and
-    the closed-history relation are both keyed on it.
+    ``sha256(signature|opened_iso)[:16]``. An empty occurrence is never
+    committed: compare-and-close and the closed relation are both keyed on it.
     """
     rec = _parse_legacy_body(body)
-    for field in ("signature", "opened_iso"):
+
+    if rec["class"] != "governance":
+        return {}, (
+            f"{name} declares class {rec['class']!r}, not 'governance'; only a "
+            f"governance document may become a governance item")
+    for field in ("signature", "opened_iso", "last_seen_iso", "title"):
         if not rec.get(field):
             return {}, (
                 f"{name} has no {field}; a partial legacy document cannot be "
                 f"proved to be a complete record and must not be imported")
+    if rec["human_gated"] is not True:
+        # Absent parses the same as "false", and silently importing that would
+        # strip the gate from a finding whose whole point is the gate.
+        return {}, (
+            f"{name} does not carry an affirmative 'Human-gated: true' marker; "
+            f"refusing to import a governance item with no provable gate")
+    for section in ("condition", "payload"):
+        if not rec[f"_has_{section}_section"]:
+            return {}, (
+                f"{name} has no '## {section.title()}' section; the parent "
+                f"always writes both, so this document is truncated")
+    if not rec["payload"]:
+        # A truncation can land just after the heading, leaving the section
+        # present and empty. For the one producer the parent had, an empty
+        # payload means the condition CLEARED — which contradicts the item
+        # being open at all, so this is a torn document, not a real state.
+        return {}, (
+            f"{name} has an empty '## Payload' section; an open governance item "
+            f"with nothing in it is a truncated document, not a live finding")
+    if not rec["condition"]:
+        return {}, f"{name} has an empty '## Condition' section"
+
     if not rec["occurrence"]:
         rec["occurrence"] = new_occurrence_id(rec["signature"], rec["opened_iso"])
         rec["_derived_occurrence"] = True
-    if not rec.get("last_seen_iso"):
-        rec["last_seen_iso"] = rec["opened_iso"]
     return rec, ""
 
 
 def _parse_legacy_body(body: str) -> dict:
+    """Parse the parent's governance document format, by SECTION.
+
+    The previous version collected every ``- `` line in the file as payload and
+    hard-coded ``condition`` to empty, so a complete parent source always lost
+    its condition on import and any bulleted prose elsewhere in the document
+    would have been read as payload.
+    """
+    lines = body.splitlines()
+
     def field(name: str) -> str:
         want = name.lower() + ":"
-        for line in body.splitlines()[:20]:
+        for line in lines[:20]:
             s = line.strip()
             if s.lower().startswith(want):
                 return s.split(":", 1)[1].strip()
         return ""
 
-    lines = body.splitlines()
+    sections: dict = {}
+    current = None
+    for line in lines:
+        if line.startswith("## "):
+            current = line[3:].strip().lower()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+
+    condition_lines = sections.get("condition", [])
+    payload_lines = sections.get("payload", [])
+    gate = field("Human-gated").lower()
+
     return {
+        "class": field("Class").lower(),
         "occurrence": field("Occurrence"),
         "signature": field("Signature"),
         "title": (lines[0].lstrip("# ").replace("GOVERNANCE: ", "").strip()
                   if lines else ""),
-        "condition": "",
-        "payload": [ln[2:].strip() for ln in lines if ln.startswith("- ")],
+        "condition": "\n".join(condition_lines).strip(),
+        "payload": [ln[2:].strip() for ln in payload_lines if ln.startswith("- ")],
         "opened_iso": field("Opened"),
         "last_seen_iso": field("Last-seen"),
-        "human_gated": field("Human-gated").lower() == "true",
+        "human_gated": True if gate == "true" else (False if gate == "false" else None),
+        "_has_condition_section": "condition" in sections,
+        "_has_payload_section": "payload" in sections,
     }
 
 
