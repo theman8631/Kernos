@@ -220,8 +220,7 @@ Requires Python 3.11+. Node.js for `npx`-run MCP servers.
 ---
 
 ## Engineering proof
-
-- **7,073 test functions across 387 test files** (regenerated from source 2026-07-24; the figure counts test functions *defined* — CI gates the 8-probe substrate-soak subset, the full suite runs locally) — with structural pin tests for invariants (multi-tenancy keying, no-destructive-deletions, gate-bypass resistance, action-loop pattern compliance) and substrate-fidelity tests that assert on receipts and state, not just return values.
+— CI gates the 8-probe substrate-soak subset, the full suite runs locally) — with structural pin tests for invariants (multi-tenancy keying, no-destructive-deletions, gate-bypass resistance, action-loop pattern compliance) and substrate-fidelity tests that assert on receipts and state, not just return values.
 - **Live-verified, not just unit-tested.** The plain-English self-test ([docs/V1-SELF-TEST.md](docs/V1-SELF-TEST.md)) runs against the production agent through its own tool surface; results are verified against the event stream. The dispatch-reliability stack (typed failures, signature presentation, argument repair, step-completion auditing) was built from failures this test surfaced on the running system.
 - **Durable per-instance event stream** backed by SQLite, with `instance_id` / `member_id` / `space_id` / `correlation_id` schema and a post-flush hook contract for trigger registries that doesn't poison event persistence on workflow code failure.
 - **Workflow primitive with approval gates** — per-gate nonce binding so an approval can't wake an unintended execution; restart-resume per workflow descriptor with conservative default; safe-deny on `auto_proceed_with_default` for irreversible post-gate continuations.
