@@ -8,7 +8,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/test%20functions-7%2C073%20defined-brightgreen.svg)](#engineering-proof)
 [![Last Commit](https://img.shields.io/github/last-commit/5000Stadia/Kernos.svg)](https://github.com/5000Stadia/Kernos/commits/main)
 [![Status](https://img.shields.io/badge/status-v1.0%20research%20complete-blueviolet.svg)](#project-status--v10-research-complete)
 [![Research Report](https://img.shields.io/badge/report-novel%20architectures%20(PDF)-8A2BE2.svg)](docs/research/KERNOS-Novel-Architectures-Report.pdf)
