@@ -124,7 +124,7 @@ Kernos's own development runs through this primitive: a design-review workflow c
 
 |  |  |
 | --- | --- |
-| **Multi-channel presence** | Discord, SMS via Twilio, Telegram. One handler, one identity across channels. Adding a new platform is ~150 lines. |
+| **Multi-channel presence** | Discord, SMS via Twilio, Email, Telegram. One handler, one identity across channels. Adding a new platform is ~150 lines. |
 | **Agentic workspace** | The agent writes Python in a subprocess with best-effort isolation (clean env, scoped cwd, restricted PYTHONPATH), exercises it live, and registers it as a first-class tool in the universal catalog. 50-line helpers, not frameworks. |
 | **Self-directed execution** | `manage_plan` creates multi-phase plans with budget ceilings. Three-tier resilience: provider failover, step retries with exponential backoff, hourly slow-poll. Plans survive restarts. |
 | **Event-driven workflows** | Long-running workflow loops triggered by events on the stream, with bounded action sequences, approval gates, per-execution nonce binding, restart-resume, and portable descriptors. |
