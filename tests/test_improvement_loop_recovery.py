@@ -23,6 +23,50 @@ from kernos.messages.handler import TurnContext
 from kernos.messages.models import NormalizedMessage
 
 
+class _WorktreeHolder:
+    """Per-test default worktree path, set by the autouse fixture below.
+
+    A module-level holder rather than a parameter on ~20 call sites: only the
+    DEFAULT value was ever wrong, and threading a fixture through every caller
+    would be a large diff across a high-stakes subsystem for a one-line defect.
+    """
+
+    path = None
+
+
+@pytest.fixture(autouse=True)
+def _recovery_worktree(tmp_path):
+    """Give every test a REAL, isolated, DIRTY git worktree as its default.
+
+    `_create_attempt` used to default `worktree_path` to a hardcoded
+    `/tmp/recovery-worktree` that nothing ever created, so half this module
+    only passed while a stale directory happened to exist on the developer's
+    machine — and died with a bare FileNotFoundError once /tmp was cleaned.
+
+    Dirty on purpose: `_worktree_has_diff` returns True on EXCEPTION, so with
+    the missing directory the green-recovery tests were reaching the
+    "has a diff -> request approval" path through the error fallback, not
+    through a diff. A clean repo flips them onto the no-diff path and they
+    fail for the wrong reason; an uncommitted change makes the probe true by
+    the real mechanism the tests mean to exercise.
+
+    A DISTINCT directory name: several tests build their own
+    `tmp_path / "recovery-worktree"` and initialise it themselves, and sharing
+    the name would initialise it out from under them.
+    """
+    path = tmp_path / "default-recovery-worktree"
+    _init_clean_repo(path)
+    (path / "recovered.py").write_text("# uncommitted recovery change\n")
+    _WorktreeHolder.path = path
+    yield path
+    _WorktreeHolder.path = None
+
+
+def _default_worktree() -> str:
+    assert _WorktreeHolder.path is not None, "the autouse worktree fixture did not run"
+    return str(_WorktreeHolder.path)
+
+
 @pytest.fixture
 async def recovery_env(tmp_path):
     data_dir = tmp_path / "data"
@@ -77,6 +121,13 @@ async def test_real_handler_reasoning_wiring_drives_improve_and_recovery(
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     monkeypatch.setenv("KERNOS_DATA_DIR", str(data_dir))
+    # This test asserts the HUMAN approval path — /approve through the real
+    # handler — so ask for it with the switch that exists for exactly that.
+    # It used to get the human path by accident: the fake workspace was a bare
+    # directory, whose unreadable diff produced an auto-proceed block reason.
+    # With an honest workspace the loop would auto-approve and consume the
+    # receipt before the test's /approve ever ran.
+    monkeypatch.setenv("KERNOS_IMPROVE_REQUIRE_APPROVAL", "1")
     await _approvals.ensure_schema(str(data_dir))
     db = InstanceDB(str(data_dir))
     await db.connect()
@@ -93,6 +144,16 @@ async def test_real_handler_reasoning_wiring_drives_improve_and_recovery(
     class _FakeExternalOrchestrator:
         async def consult(self, **kwargs):
             consult_calls.append(kwargs)
+            # A GREEN claim must come with a real worktree change: the
+            # FALSE_GREEN detector (post-dates this test) downgrades a GREEN
+            # over a pristine worktree and aborts after two in a row, exactly
+            # as it would for a live author that claimed work it never did.
+            # This fake is the author, so it must satisfy the author's
+            # contract, not just say the word.
+            ws = kwargs.get("workspace_dir")
+            if ws:
+                (Path(ws) / "authored_change.py").write_text(
+                    "# change produced by the consult under test\n")
             return SimpleNamespace(
                 response="patched and reviewed\n\nSTATUS: GREEN",
                 harness=kwargs["harness"],
@@ -110,8 +171,13 @@ async def test_real_handler_reasoning_wiring_drives_improve_and_recovery(
     )
 
     async def fake_create(self, attempt_id):
+        # A real repo, not a bare directory: the pristine-worktree probe runs
+        # `git status --porcelain` and treats rc != 0 as "no changes", so a
+        # non-repo workspace reads as pristine no matter what is written into
+        # it and every GREEN becomes a FALSE_GREEN.
         path = Path(self.path_for(attempt_id))
-        path.mkdir(parents=True, exist_ok=False)
+        assert not path.exists()
+        _init_clean_repo(path)
         return str(path)
 
     monkeypatch.setattr(ImprovementWorkspace, "create", fake_create)
@@ -228,10 +294,11 @@ async def _create_attempt(
     attempt_id: str = "att_recovery",
     instance_id: str = "t1",
     final_state: str = "awaiting_post_restart_test",
-    worktree_path: str = "/tmp/recovery-worktree",
+    worktree_path: str | None = None,
     origin_space_id: str = "space_origin",
     origin_member_id: str = "mem_origin",
 ) -> None:
+    worktree_path = worktree_path or _default_worktree()
     db = InstanceDB(data_dir)
     await db.connect()
     try:
@@ -348,7 +415,7 @@ async def test_approval_continuation_records_commit_push_and_restart(
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -432,7 +499,7 @@ async def test_approval_continuation_missing_restart_seam_fails_terminal(
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -494,7 +561,7 @@ async def test_approval_continuation_structured_unconfirmed_push_does_not_restar
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -573,7 +640,7 @@ async def test_post_push_confirmation_failure_retries_until_origin_confirms(
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -697,7 +764,7 @@ async def test_push_unconfirmed_sweep_ignores_stale_initial_receipt_for_recovery
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -824,7 +891,7 @@ async def test_push_unconfirmed_sweep_ignores_stale_initial_receipt_for_recovery
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -893,7 +960,7 @@ async def test_approved_commit_reconciler_resumes_once(recovery_env, monkeypatch
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -978,7 +1045,7 @@ async def test_approved_commit_reconciler_records_already_pushed_commit(
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -1339,7 +1406,7 @@ async def test_approved_commit_reconciler_repairs_commit_recorded_before_push(
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -1971,7 +2038,7 @@ async def test_initial_commit_approval_rejected_marks_terminal(recovery_env):
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -2020,7 +2087,7 @@ async def test_initial_commit_approval_expired_marks_terminal(recovery_env):
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -2209,7 +2276,7 @@ async def test_boot_reconciler_preserves_recovery_receipt_inserted_before_ledger
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -2322,7 +2389,7 @@ async def test_boot_reconciler_preserves_recovery_receipt_after_approval_event_c
         binding_payload={
             "kind": "git_commit_authorization",
             "attempt_id": "att_recovery",
-            "workspace_dir": "/tmp/recovery-worktree",
+            "workspace_dir": _default_worktree(),
             "expected_parent_sha": "parent_sha",
             "expected_diff_hash": "sha256:test",
             "target_branch": "main",
@@ -2516,7 +2583,7 @@ async def test_synthetic_recovery_wake_queues_origin_turn():
         "attempt_id": "att_recovery",
         "failure_summary": "failure summary",
         "failed_test_ids": ["tests/test_demo.py"],
-        "worktree_path": "/tmp/recovery-worktree",
+        "worktree_path": _default_worktree(),
         "recovery_iterations_used": 0,
     })
     import asyncio
