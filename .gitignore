@@ -45,3 +45,6 @@ config/storage_backend.yml
 
 # Cross-instance communication channel (Kernos CC <-> pattern-buffer CC); never committed
 dev_inbox/
+
+# Local checkout marker — must never propagate to the other checkout
+WHICH-KERNOS.txt

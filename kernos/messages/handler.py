@@ -291,6 +291,72 @@ _PLATFORM_CREDENTIALS: dict[str, dict] = {
 }
 
 
+#: Turn counts at which the unnamed-agent nudge is allowed to fire. It is an
+#: ambient thought, not a task, so its cadence must decay: dense while the
+#: question is live, then sparse, then silent.
+NAME_NUDGE_FIRST = 5          # nothing before this — the agent needs footing
+NAME_NUDGE_DENSE_UNTIL = 12   # every turn while the question is genuinely new
+NAME_NUDGE_SPARSE_EVERY = 25  # then occasionally
+NAME_NUDGE_CEILING = 200      # then never: it has been asked and answered by silence
+
+
+def should_nudge_unnamed(interaction_count: int) -> bool:
+    """Whether to surface the "you still have no name" awareness line.
+
+    The original gate was ``interaction_count >= 5`` with no upper bound, so it
+    fired on EVERY turn forever — it had run ~400 consecutive times on the live
+    instance. That is not ambient awareness, it is a fixed cost on every context
+    window for a prompt the agent has demonstrably already considered and
+    declined. Kernos's claim is that context carries what is immediately useful,
+    and a line that has repeated 400 times carries nothing.
+
+    Past the ceiling the agent has effectively answered by not naming itself;
+    the affordance stays reachable (hatching, and the owner can always ask)
+    without spending a slot in every prompt to repeat the question.
+    """
+    if interaction_count < NAME_NUDGE_FIRST or interaction_count > NAME_NUDGE_CEILING:
+        return False
+    if interaction_count <= NAME_NUDGE_DENSE_UNTIL:
+        return True
+    return interaction_count % NAME_NUDGE_SPARSE_EVERY == 0
+
+
+def reload_env_file(path: Path) -> tuple[int, list[str]]:
+    """Re-read ``.env`` into ``os.environ``. Returns ``(count, keys)``.
+
+    Restart is ``os.execv``, so the child inherits this process's environment.
+    ``load_dotenv()`` does not override variables that are already set, and by
+    restart time every key is set — so without this, ``/restart`` silently
+    reuses the old configuration and the operator has to Ctrl+C and re-run
+    ``./start.sh``, which defeats the whole mental model of "restart".
+
+    This deliberately reloads EVERY key, not just ``KERNOS_*``. The prefix
+    filter in ``start.sh`` exists because that script exports into a shell and
+    must not evaluate metacharacters in a token; here the values never touch a
+    shell, so the same restriction only served to make ``/restart`` reload some
+    of the file and quietly ignore the rest. That is worse than not reloading at
+    all: it looks like it worked. (This is how ``OPENAI_CODEX_MODEL`` stayed
+    stale across four restarts while the operator watched the model not change.)
+    """
+    applied: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip().rstrip("\r")
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        # A key with inner whitespace or shell syntax is not a variable
+        # assignment we can trust; skip rather than invent an env var.
+        if not key or not key.replace("_", "").isalnum():
+            continue
+        val = val.strip().rstrip("\r")
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        os.environ[key] = val
+        applied.append(key)
+    return len(applied), applied
+
+
 def _render_chain_exhaustion_message(exc: "LLMChainExhausted") -> str:
     """Pre-rendered user-facing message when an LLM chain exhausts.
 
@@ -3571,8 +3637,9 @@ class MessageHandler:
                 _idb = getattr(self, '_instance_db', None)
                 if _idb:
                     _mp = await _idb.get_member_profile(member_id)
-                    if _mp and not _mp.get("agent_name") and _mp.get("interaction_count", 0) >= 5:
-                        # Fire on every turn after 5+ interactions where unnamed
+                    if _mp and not _mp.get("agent_name") and should_nudge_unnamed(
+                            _mp.get("interaction_count", 0)):
+                        # Decaying cadence, bounded — see should_nudge_unnamed.
                         # The agent decides whether THIS is the right moment to bring it up
                         results_parts.append(
                             "[AWARENESS] You still don't have a name. This isn't urgent — "
@@ -5251,23 +5318,11 @@ class MessageHandler:
                             try:
                                 _env_path = Path.cwd() / ".env"
                                 if _env_path.exists():
-                                    _reloaded = 0
-                                    for _line in _env_path.read_text(encoding="utf-8").splitlines():
-                                        _line = _line.strip().rstrip("\r")
-                                        if not _line or _line.startswith("#") or "=" not in _line:
-                                            continue
-                                        _key, _, _val = _line.partition("=")
-                                        if not _key.startswith("KERNOS_"):
-                                            continue
-                                        _val = _val.strip().rstrip("\r")
-                                        if (_val.startswith('"') and _val.endswith('"')) or \
-                                           (_val.startswith("'") and _val.endswith("'")):
-                                            _val = _val[1:-1]
-                                        os.environ[_key] = _val
-                                        _reloaded += 1
+                                    _reloaded, _keys = reload_env_file(_env_path)
                                     logger.info(
-                                        "RESTART_ENV_RELOAD: %d KERNOS_* vars re-read from %s",
+                                        "RESTART_ENV_RELOAD: %d vars re-read from %s (%s)",
                                         _reloaded, _env_path,
+                                        ", ".join(sorted(_keys)[:20]) or "none",
                                     )
                             except Exception:
                                 logger.exception("RESTART_ENV_RELOAD_FAILED")
